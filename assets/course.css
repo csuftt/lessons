@@ -1,0 +1,307 @@
+/* ============================================================
+   全站统一课程样式（真身）— G:\AI-Agent\lessons\assets\course.css
+   各课程经由自己 assets/*.css 顶部的 @import 引入本文件。
+   设计基准：Tufte 式克制 —— 纸白底、无衬线正文、窄栏(46rem)、
+   单一蓝色主强调、自动深浅色(prefers-color-scheme)、打印友好。
+   变量区保留三门课程的历史变量名（--ink/--text-dim/--bg-card/
+   --rule/--muted/--go...），课程 HTML 内联样式无需改动。
+   ============================================================ */
+
+:root {
+  --bg: #fbfaf7;
+  --paper: #fbfaf7;
+  --ink: #24292f;
+  --text: #24292f;
+  --text-bright: #1b1f24;
+  --ink-soft: #57606a;
+  --muted: #57606a;
+  --text-dim: #57606a;
+  --line: #dcd8cd;
+  --rule: #dcd8cd;
+  --border: #dcd8cd;
+  --card: #ffffff;
+  --bg-card: #ffffff;
+  --bg-accent: #eef2f6;
+  --accent: #0969da;
+  --accent-soft: #e7eef7;
+  --accent-2: #1a7f37;
+  --ok: #1a7f37;
+  --accent-3: #9a6700;
+  --bad: #b23a2e;
+  --go: #00add8;            /* Go 课程品牌色（Java↔Go 对照用） */
+  --code-bg: #f4f2ec;
+  --code-ink: #2f363d;
+  --note-bg: #f7f3e4;
+  --warn-bg: #fbeceb;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Helvetica Neue", sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", Consolas, "Courier New", monospace;
+  --line-height: 1.75;
+  --max-width: 46rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --paper: #0d1117;
+    --ink: #e6edf3;
+    --text: #e6edf3;
+    --text-bright: #f0f6fc;
+    --ink-soft: #8b949e;
+    --muted: #8b949e;
+    --text-dim: #8b949e;
+    --line: #30363d;
+    --rule: #30363d;
+    --border: #30363d;
+    --card: #161b22;
+    --bg-card: #161b22;
+    --bg-accent: #1c2431;
+    --accent: #58a6ff;
+    --accent-soft: #16283c;
+    --accent-2: #3fb950;
+    --ok: #3fb950;
+    --accent-3: #d29922;
+    --bad: #f85149;
+    --go: #39c5cf;
+    --code-bg: #1b2027;
+    --code-ink: #e6edf3;
+    --note-bg: #252317;
+    --warn-bg: #2d1919;
+  }
+}
+
+/* ---------- 基础 ---------- */
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0 auto;
+  max-width: var(--max-width);
+  padding: 2.2rem 1.4rem 4rem;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: var(--line-height);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* tech/go 的容器类在限宽 body 内透传即可 */
+.wrap, .container { max-width: 100%; margin: 0; padding: 0; }
+
+/* ---------- 排版 ---------- */
+h1, h2, h3, h4 { font-weight: 650; line-height: 1.3; color: var(--text-bright); }
+h1 { font-size: 1.7rem; margin: 0 0 .6rem; }
+h2 {
+  font-size: 1.28rem;
+  margin: 2.4rem 0 .8rem;
+  padding-bottom: .3rem;
+  border-bottom: 2px solid var(--accent-soft);
+}
+h3 { font-size: 1.05rem; margin: 1.7rem 0 .5rem; }
+
+p { margin: .7rem 0; }
+ul, ol { margin: .6rem 0 1rem; padding-left: 1.5rem; }
+li { margin: .28rem 0; }
+strong { font-weight: 650; }
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+blockquote {
+  margin: 1rem 0; padding: .6rem 1rem;
+  border-left: 4px solid var(--accent);
+  background: var(--accent-soft);
+  border-radius: 0 6px 6px 0;
+}
+blockquote p { margin: .3rem 0; }
+
+hr { border: none; border-top: 1px solid var(--line); margin: 2.4rem 0; }
+
+/* ---------- 代码 ---------- */
+code {
+  font-family: var(--font-mono);
+  font-size: .88em;
+  background: var(--code-bg);
+  color: var(--code-ink);
+  padding: .12em .4em;
+  border-radius: 4px;
+}
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 1rem 1.2rem;
+  overflow-x: auto;
+  font-size: .85rem;
+  line-height: 1.6;
+}
+pre code { background: none; padding: 0; font-size: inherit; color: inherit; }
+.hl { background: rgba(154, 112, 0, .18); padding: 0 .2em; border-radius: 3px; }
+
+/* ---------- 表格 ---------- */
+table {
+  width: 100%; border-collapse: collapse; margin: 1.2rem 0;
+  font-size: .92rem;
+}
+th, td { text-align: left; padding: .5rem .7rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { background: var(--accent-soft); color: var(--text-bright); font-weight: 650; }
+tr:nth-child(even) td { background: rgba(127, 127, 127, .04); }
+
+/* ---------- 页头 / 导航 ---------- */
+.lesson-head, .doc-head {
+  display: flex; gap: .8rem; align-items: baseline; flex-wrap: wrap;
+  margin-bottom: 1.6rem; padding-bottom: 1rem; border-bottom: 1px solid var(--line);
+  font-size: .85rem; color: var(--ink-soft);
+}
+header.lesson-head { border-bottom: 2px solid var(--ink); }
+header.lesson-head .num {
+  font-family: var(--font-mono); font-size: .78rem; letter-spacing: .15em;
+  color: var(--muted); text-transform: uppercase;
+}
+header.lesson-head .mission { font-size: .85rem; color: var(--muted); font-style: italic; }
+
+.lead { font-size: 1.05rem; color: var(--ink-soft); margin: 0 0 1.6rem; }
+
+.lesson-meta {
+  display: flex; gap: .8rem; align-items: center; flex-wrap: wrap;
+  margin-bottom: 1.5rem; font-size: .85rem; color: var(--text-dim);
+}
+.badge {
+  display: inline-block; padding: .18rem .6rem; border-radius: 4px;
+  font-weight: 600; font-size: .8rem;
+}
+.badge-module { background: var(--accent-soft); color: var(--accent); }
+.badge-time { background: var(--bg-card); color: var(--text-dim); }
+
+/* ---------- 卡片 / 提示块 ---------- */
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1.1rem 1.25rem;
+  margin: 1rem 0;
+}
+.card h4 { margin: 0 0 .4rem; font-size: 1rem; color: var(--accent); }
+.card p, .card ul { font-size: .92rem; }
+.card-highlight { border-left: 3px solid var(--accent); }
+.card-tip { border-left: 3px solid var(--ok); }
+.card-warn { border-left: 3px solid var(--accent-3); }
+
+.note { background: var(--note-bg); border-left: 3px solid var(--accent-3); padding: .7rem 1rem; margin: 1.2rem 0; font-size: .9rem; border-radius: 0 6px 6px 0; }
+.warn { background: var(--warn-bg); border-left: 3px solid var(--bad); padding: .7rem 1rem; margin: 1.2rem 0; font-size: .9rem; border-radius: 0 6px 6px 0; }
+.note .h, .warn .h { font-weight: 700; display: block; margin-bottom: .2rem; }
+
+.callout {
+  background: var(--accent-soft);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  margin: 1.5rem 0;
+  font-size: .95rem;
+}
+.callout-title {
+  font-weight: 700; color: var(--accent-3); margin-bottom: .5rem;
+  font-size: .85rem; text-transform: uppercase; letter-spacing: .05em;
+}
+
+/* ---------- Java↔Go 对照网格（go 课程） ---------- */
+.map { display: grid; grid-template-columns: 1fr 1fr; gap: .6rem; margin: 1rem 0; }
+.map .cell { border: 1px solid var(--line); border-radius: 6px; padding: .6rem .8rem; font-size: .85rem; }
+.map .cell.java { border-top: 3px solid var(--accent); }
+.map .cell.go { border-top: 3px solid var(--go); }
+.map .cell .tag { font-family: var(--font-mono); font-size: .7rem; letter-spacing: .1em; text-transform: uppercase; display: block; margin-bottom: .3rem; }
+.map .cell.java .tag { color: var(--accent); }
+.map .cell.go .tag { color: var(--go); }
+
+.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1rem; }
+
+/* ---------- Quiz（三种实现共用一套观感） ---------- */
+.quiz {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1.2rem 1.4rem;
+  margin: 1.6rem 0;
+  background: var(--card);
+}
+.quiz-score {
+  float: right; font-size: .85rem; color: var(--ink-soft);
+  background: var(--code-bg); padding: .15rem .6rem; border-radius: 999px;
+}
+.quiz .q-tag {
+  font-family: var(--font-mono); font-size: .72rem; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--accent); font-weight: 700;
+}
+.quiz-question { font-weight: 600; color: var(--text-bright); margin-bottom: 1rem; }
+.quiz-q { margin: 1.2rem 0 0; }
+.quiz-q:first-child { margin-top: .4rem; }
+.q-text { font-weight: 600; }
+
+.quiz-options { list-style: none; margin-left: 0; }
+.quiz-option, .quiz-opt {
+  display: block; width: auto; text-align: left;
+  margin: .4rem 0; padding: .55rem .9rem;
+  font: inherit; font-size: .92rem; color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background .12s, border-color .12s;
+}
+.quiz-option:hover, .quiz-opt:hover { background: var(--accent-soft); border-color: var(--accent); }
+.quiz-option.correct, .quiz-opt.correct {
+  background: rgba(26, 127, 55, .1); border-color: var(--ok); color: var(--ok); font-weight: 600;
+}
+.quiz-option.wrong, .quiz-opt.wrong {
+  background: rgba(178, 58, 46, .1); border-color: var(--bad); color: var(--bad);
+}
+.quiz-q.answered .quiz-opt { cursor: default; }
+.quiz-q.answered .quiz-opt:hover { background: var(--bg); }
+
+.quiz-feedback { display: none; margin-top: .75rem; font-size: .9rem; min-height: 0; }
+.quiz-feedback.show { display: block; }
+.quiz-feedback.ok { color: var(--ok); display: block; }
+.quiz-feedback.no { color: var(--bad); display: block; }
+
+.quiz details summary { cursor: pointer; color: var(--muted); font-size: .85rem; font-style: italic; }
+.quiz details p { font-size: .88rem; margin-top: .4rem; }
+
+/* ---------- 页脚 / 课间导航 ---------- */
+footer.lesson-foot, .footer {
+  margin-top: 3rem; padding-top: 1.4rem; border-top: 1px solid var(--line);
+  font-size: .85rem; color: var(--muted);
+}
+footer.lesson-foot .nav, .lesson-nav {
+  display: flex; justify-content: space-between; gap: 1rem; flex-wrap: wrap;
+}
+.footer .ask {
+  background: var(--accent-soft); border-radius: 8px;
+  padding: 1rem; margin-bottom: 1rem;
+}
+.footer .ask strong { color: var(--accent); }
+.next {
+  margin-top: 3rem; padding: 1rem 1.2rem;
+  background: var(--accent-soft); border-radius: 10px;
+}
+.next p { margin: .35rem 0; }
+.disabled { color: var(--muted); opacity: .45; }
+
+/* ---------- 术语表 ---------- */
+.term {
+  color: var(--accent-3); font-weight: 600;
+  border-bottom: 1px dotted var(--accent-3);
+}
+dl { margin-bottom: 1rem; }
+dt { font-weight: 650; color: var(--accent); margin-top: .75rem; }
+dd { margin-left: 1.5rem; color: var(--ink-soft); margin-bottom: .5rem; }
+.toc { font-size: .9rem; }
+.toc ol { padding-left: 1.2rem; }
+
+/* ---------- 打印 ---------- */
+@media print {
+  body { max-width: none; padding: 0; background: white; color: black; font-size: 11pt; }
+  .wrap, .container { max-width: 100%; }
+  .quiz details, .lesson-nav, .next { display: none; }
+  .quiz-opt { border: none; background: none; }
+  a { color: inherit; }
+  h2 { page-break-after: avoid; }
+  pre, table, blockquote, .card { page-break-inside: avoid; }
+}
