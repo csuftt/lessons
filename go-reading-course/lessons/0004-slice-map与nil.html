@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 4 课:slice、map 与 nil —— Go 最高频容器与共享陷阱</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+<header class="lesson-head">
+  <div class="num">Lesson 0004 · 约 12 分钟</div>
+  <h1>slice、map 与 nil:Go 最高频容器与共享陷阱</h1>
+  <div class="mission">目标:读懂并评审 Go 项目 · 实战 = tdengine-replicator</div>
+</header>
+
+<p><strong>本课赢点</strong>:你能看懂 <code>[]string</code> / <code>map[string][2]int64</code> 这类类型,并作为评审者抓住 Go 对 Java 人最隐蔽的陷阱——「slice 切片共享底层数组」。</p>
+
+<p>← 上一课:<a href="0003-struct与指针接收者.html">struct、方法与指针接收者</a></p>
+
+<h2>1. slice = 动态数组,语法是 <code>[]T</code></h2>
+
+<p>看 <code>buildInsert</code>(tdengine.go:109)的开头:</p>
+
+<pre><code>func buildInsert(batch []pendingRow, maxBytes int) []string {   // ← 参数和返回都是 slice
+    var (
+        out   []string
+        b     strings.Builder
+        cur   int
+        ...
+    )
+    b.WriteString("INSERT INTO ")
+    for _, r := range batch {                  // ← 遍历 slice
+        seg := buildSegment(r)
+        ...
+        out = append(out, b.String())          // ← 往 slice 追加元素
+    }
+    return out
+}</code></pre>
+
+<div class="map">
+  <div class="cell go"><span class="tag">Go · slice</span><code>[]string</code> = 元素为 string 的动态数组。类似 Java 的 <code>ArrayList&lt;String&gt;</code>。中括号在前,类型在后。</div>
+  <div class="cell java"><span class="tag">Java · List</span><code>List&lt;String&gt;</code> / <code>ArrayList</code>。</div>
+</div>
+
+<p>三个高频操作,看一眼就够:</p>
+<ul>
+  <li><strong>声明</strong>:<code>var out []string</code>——此时 out 是 nil(零值),长度 0。<strong>nil slice 可以直接 append</strong>(不会 panic)。</li>
+  <li><strong>追加</strong>:<code>out = append(out, x)</code>——注意要<strong>把 append 的结果赋回去</strong>(append 可能返回新底层数组)。这点和 Java <code>list.add(x)</code> 直接改原对象不同!</li>
+  <li><strong>遍历</strong>:<code>for _, r := range batch</code>——<code>_</code> 是丢弃下标,只要值。要下标写 <code>for i, r := range</code>。</li>
+</ul>
+
+<div class="warn">
+  <span class="h">⚠️ Java 人必踩:<code>append</code> 要赋值回去</span>
+  Java 里 <code>list.add(x)</code> 就完事了。Go 的 <code>append(s, x)</code> <strong>不改原 s</strong>,而是返回新 slice——你必须 <code>s = append(s, x)</code>。写成 <code>append(out, x)</code> 不接住,等于什么都没发生。<strong>评审动作:看到裸 <code>append(...)</code> 没被赋值 = bug</strong>。
+</div>
+
+<h2>2. 本课核心陷阱:slice 切片「共享底层数组」</h2>
+
+<p>这是 Go 对 Java 人最反直觉的地方。看真实代码 <code>data_consumer.go:176</code>:</p>
+
+<pre><code>dataVals := append([]driver.Value(nil), row[:d]...)   // ← 为什么不直接 row[:d]?</code></pre>
+
+<p>先拆解这行。这里有两个新东西:</p>
+<ul>
+  <li><code>row[:d]</code> ——「切片表达式」,取 row 的前 d 个元素,类似 Java <code>subList(0, d)</code>。</li>
+  <li><code>...</code> ——「展开」,把一个 slice 展开成 append 的多个参数(类似 Java 的可变参数 <code>addAll</code>)。</li>
+</ul>
+
+<p>那为什么不直接写 <code>dataVals := row[:d]</code>?因为 <strong>row[:d] 不拷贝数据</strong>——它只是给底层数组开了一扇新窗户。dataVals 和 row <strong>指向同一块内存</strong>。之后改 dataVals,会悄悄改到 row!作者为了<strong>彻底断开共享</strong>,用 <code>append([]driver.Value(nil), row[:d]...)</code> 强制拷贝出一份新数组。</p>
+
+<div class="map">
+  <div class="cell go"><span class="tag">Go · 切片共享</span><code>b := a[:n]</code> 不拷贝,b 和 a 共用底层数组。改 b 的元素 = 改 a。append 超过容量时才分配新数组。</div>
+  <div class="cell java"><span class="tag">Java · subList</span><code>subList</code> 也共享——但 Go 这个行为覆盖<strong>所有</strong>切片操作,更普遍、更容易中招。</div>
+</div>
+
+<div class="note">
+  <span class="h">🔑 评审心法:slice 传出去/存起来前,想清楚是否要拷贝</span>
+  当一个 slice 被<strong>切片后长期持有或跨 goroutine 传递</strong>,评审问一句:「它和原数组还共享吗?原数组会被改吗?」若是,显式拷贝:<code>append([]T(nil), src...)</code> 或 <code>copy(dst, src)</code>。本项目 data_consumer.go 这行正是防这个 bug——好代码。
+</div>
+
+<h3>另一个高频:<code>...</code> 展开</h3>
+
+<p>看 resync.go:172:</p>
+<pre><code>tasks = append(tasks, planTableTasks(...)...)   // ← 末尾的 ...</code></pre>
+<p>含义:把 <code>planTableTasks(...)</code> 返回的 slice <strong>整个展开</strong>追加进 tasks。等价 Java 的 <code>tasks.addAll(...)</code>。没有 <code>...</code> 会变成「追加一个 slice 元素」(类型不对,编译报错)。</p>
+
+<h2>3. map = Go 的 HashMap</h2>
+
+<p>map 语法 <code>map[K]V</code>。看三个真实用法:</p>
+
+<pre><code>// meta_consumer.go:17 —— map 字面量(键值对初始化)
+var typeNames = map[int]string{
+    1: "create",
+    2: "alter",
+    3: "drop",
+}
+
+// resync.go:302 —— make 创建空 map,准备往里填
+out := make(map[string][2]int64)      // key=string, value=[2]int64(含2个int64的数组)
+
+// main.go:108 —— 字面量直接传参
+_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})</code></pre>
+
+<div class="map">
+  <div class="cell go"><span class="tag">Go · map</span><code>map[K]V</code>。引用类型。读写:<code>m[k] = v</code> / <code>v := m[k]</code>。零值 nil。</div>
+  <div class="cell java"><span class="tag">Java · HashMap</span><code>Map&lt;K,V&gt;</code> / <code>put/get</code>。</div>
+</div>
+
+<p>map 取值有 Go 特有的「双值」写法,区分「值为零值」和「键不存在」:</p>
+<pre><code>v, ok := m["abc"]   // ok=false 表示这个 key 不存在</code></pre>
+<p>和第 2 课的「带标志位返回值」是同一种设计——Go 喜欢把「是否存在」做成显式的 bool,而不是抛异常或返回 null。</p>
+
+<h2>4. nil:不只是 null,是「零值」</h2>
+
+<p>Go 里每个类型都有<strong>零值</strong>(声明但没赋值时的默认值)。nil 是指针、slice、map、interface 的零值。和 Java null 的关键区别:</p>
+
+<div class="map">
+  <div class="cell go"><span class="tag">Go · nil 行为分类型</span><strong>nil slice 可以 append</strong>(自动分配);<strong>nil map 写入会 panic</strong>;nil 指针调方法/字段会 panic。</div>
+  <div class="cell java"><span class="tag">Java · null</span>对 null 做任何操作都 NPE。Go 的 nil slice 能 append,是少数「更宽松」的点。</div>
+</div>
+
+<div class="warn">
+  <span class="h">⚠️ 评审高发:nil map 写入 panic</span>
+  <code>var m map[string]int; m["a"] = 1</code> —— <strong>panic</strong>(assignment to entry in nil map)。必须先 <code>m = make(map[string]int)</code>。评审时看到 <code>var m map[...]</code> 后直接写,确认中间有没有 <code>make</code>。
+</div>
+
+<h2>5. 自测</h2>
+
+<div class="quiz">
+  <div class="q-tag">检索练习</div>
+  <div class="q-text"><code>append(out, x)</code> 和 <code>out = append(out, x)</code>,哪个是对的?为什么 Go 要这么设计?</div>
+  <details>
+    <summary>点开看答案</summary>
+    <p>后者对。append <strong>返回</strong>新 slice 而非原地修改(因为底层数组可能不够大、要重新分配)。评审规则:append 的结果必须被赋值。</p>
+  </details>
+</div>
+
+<div class="quiz">
+  <div class="q-tag">评审练习</div>
+  <div class="q-text">某函数返回 <code>return row[:d]</code>(一个切片),调用方拿到后长期持有并修改。评审意见?</div>
+  <details>
+    <summary>点开看答案</summary>
+    <p>风险:返回的切片和原 row <strong>共享底层数组</strong>。调用方修改会污染原数据。建议改成返回拷贝:<code>return append([]driver.Value(nil), row[:d]...)</code>。本项目 data_consumer.go:176 正是这么做的。</p>
+  </details>
+</div>
+
+<div class="quiz">
+  <div class="q-tag">辨析题</div>
+  <div class="q-text"><code>var s []int</code> 之后 <code>s = append(s, 1)</code>,会 panic 吗?<code>var m map[int]int</code> 后 <code>m[1] = 1</code> 呢?</div>
+  <details>
+    <summary>点开看答案</summary>
+    <p>第一个<strong>不会</strong> panic——nil slice 可以 append。第二个<strong>会 panic</strong>——nil map 写入是运行时错误,必须先 <code>m = make(map[int]int)</code>。口诀:「nil slice 能 append,nil map 不能写」。</p>
+  </details>
+</div>
+
+<h2>6. 推荐精读</h2>
+<p>👉 <a href="https://go.dev/blog/slices-intro" target="_blank">Go 官方博客:Introduction to slices</a></p>
+<p>👉 <a href="https://gobyexample.com/slices" target="_blank">Go by Example: Slices</a> · <a href="https://gobyexample.com/maps" target="_blank">Maps</a></p>
+
+<hr style="margin:2rem 0;border:none;border-top:1px solid var(--rule)">
+<p>下一课:<strong>第 5 课 —— interface:Go 的鸭子类型</strong>。这是 Java 架构师理解 Go 设计的关键一跃。</p>
+
+<footer class="lesson-foot">
+  <div class="nav">
+    <span>← <a href="0003-struct与指针接收者.html">第 3 课</a></span>
+    <span><a href="0005-interface鸭子类型.html">下一课:interface 鸭子类型 →</a> · 📘 <a href="../reference/go-glossary.html">速查表</a></span>
+  </div>
+</footer>
+</div>
+</body>
+</html>

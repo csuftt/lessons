@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 1 课:从 main.go 入手 —— Go 程序的入口</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+<header class="lesson-head">
+  <div class="num">Lesson 0001 · 约 8 分钟</div>
+  <h1>从 main.go 入手:Go 程序的入口与启动流程</h1>
+  <div class="mission">目标:读懂并评审 Go 项目 · 实战 = tdengine-replicator</div>
+</header>
+
+<p><strong>本课的赢点</strong>:读完这一课,你能用一句话说清 <em>tdengine-replicator 启动时按什么顺序做了什么</em>。这是读懂任何 Go 项目的第一站——找到入口,顺着它往下读。</p>
+
+<h2>1. 找入口:永远是 <code>main.go</code> 里的 <code>func main()</code></h2>
+
+<p>Java 的入口是 <code>public static void main(String[] args)</code>。Go 的入口更朴素:</p>
+
+<pre><code>// 文件:main.go(项目根目录)
+package main          // ① 声明这是「可执行程序」的包
+
+import (              // ② 导入依赖,类似 Java 的 import
+    "encoding/json"
+    "log"
+    "net/http"
+    "os"
+)
+
+func main() {         // ③ 入口。无参数、无返回值。
+    cfg := loadConfig()
+    ...
+}</code></pre>
+
+<p>三件事就够你起步:</p>
+<ul>
+  <li><code>package main</code> —— 告诉 Go「这是个可执行程序,不是库」。库会是 <code>package tdengine</code> 这种。</li>
+  <li><code>func main()</code> —— 程序入口。<strong>整个项目只能有一个 <code>package main</code> 的 <code>main</code> 函数</strong>。找到它,就找到了程序的总指挥。</li>
+  <li><code>import (...)</code> —— 用到的标准库/第三方包。<code>"log"</code>、<code>"os"</code> 是 Go 标准库,类似 JDK 自带。</li>
+</ul>
+
+<div class="map">
+  <div class="cell go"><span class="tag">Go</span><code>func main()</code><br>无参无返回,命令行参数用 <code>os.Args</code> 取。</div>
+  <div class="cell java"><span class="tag">Java</span><code>public static void main(String[] args)</code><br>参数在签名里。</div>
+</div>
+
+<h2>2. 顺着 main() 往下读:启动顺序就是执行顺序</h2>
+
+<p>Go 没有 Spring 那种「依赖注入 + 注解扫描」的魔法。<code>main()</code> 里的代码<strong>从上到下就是执行顺序</strong>,这反而比 Java 好读。看真实代码(精简版):</p>
+
+<pre><code>func main() {
+    cfg := loadConfig()                          // 1. 读配置(全环境变量)
+
+    cfg.DataTopics, cfg.MetaTopics, perr =       // 2. 从 init.sql 解析 topic
+        parseStables(initSQLText)
+
+    sc := newShutdownCoordinator()               // 3. 建关闭协调器
+    ctx := sc.ctx
+
+    m := newMetrics(cfg)
+    go m.pushLoop(ctx)                           // 4. 启动指标推送(goroutine)
+
+    recovery := newRecovery(cfg, m, initSQLText)
+    go recovery.probeLoop(ctx)                   // 5. 启动重建探测(goroutine)
+
+    localInit := openConn(...)                   // 6. 初始化本机 schema
+    initSchema(localInit, cfg, initSQLText)
+    localInit.Close()
+
+    startDataConsumers(ctx, cfg, ...)            // 7. 启动数据面消费者
+    startMetaConsumers(ctx, cfg, ...)            //    启动 META 面消费者
+
+    go maybeResync(ctx, cfg, m)                  // 8. 重建回补
+    go runHTTP(cfg, m, recovery)                 // 9. HTTP 服务
+
+    sc.waitForShutdown(10 * time.Second)         // 10. 阻塞等关闭信号
+}</code></pre>
+
+<div class="note">
+  <span class="h">🔑 读懂 Go 的第一个心法</span>
+  <strong>看 main() 的顺序 = 理解程序的骨架。</strong>你已经能看出:这个进程启动后并行跑了好几个后台任务(指标推送、重建探测、HTTP 服务),主线程最后卡在 <code>waitForShutdown</code> 等信号。这就是整个进程的运行模型。
+</div>
+
+<h3>两个新语法,看一眼就够</h3>
+
+<div class="map">
+  <div class="cell go"><span class="tag">Go · :=</span><code>cfg := loadConfig()</code><br>「短声明」:声明变量并推断类型。Java 10 的 <code>var</code>。函数内到处都是它。</div>
+  <div class="cell java"><span class="tag">Java</span><code>var cfg = loadConfig();</code></div>
+</div>
+
+<div class="map">
+  <div class="cell go"><span class="tag">Go · go f()</span><code>go m.pushLoop(ctx)</code><br>「goroutine」:在新的轻量线程里跑这个函数,不阻塞当前线程。相当于 Java 开个线程异步执行。</div>
+  <div class="cell java"><span class="tag">Java</span><code>new Thread(() -> pushLoop(ctx)).start();</code><br>或 Java 21 虚拟线程。</div>
+</div>
+
+<p>现在你能翻译第 4、5、8、9 行了:「<code>go xxx(ctx)</code>」= 「起个后台线程跑 xxx」。它们和主线程<strong>并发</strong>执行。</p>
+
+<h2>3. 评审视角:看 main 要问的三个问题</h2>
+
+<p>作为架构师,你评审 Java 的启动类会问什么?Go 一模一样:</p>
+<ol>
+  <li><strong>初始化顺序对不对?</strong> 这里 <code>ctx</code> 在第 3 步创建,之后所有后台任务都用它——顺序正确。若某个 <code>go</code> 用了还没初始化的东西,就是 bug。</li>
+  <li><strong>后台任务有没有泄漏?</strong> 每个 <code>go f(ctx)</code> 都要能通过 <code>ctx</code> 被取消而退出。第 7 课我们会专门评审 goroutine 泄漏——这是 Go 评审的第一大雷区。</li>
+  <li><strong>谁阻塞主线程?</strong> <code>waitForShutdown</code> 没有它,main 返回 → 进程立即退出,后台任务全死。评审时确认它存在。</li>
+</ol>
+
+<h2>4. 自测:用一句话描述启动流程</h2>
+
+<div class="quiz">
+  <div class="q-tag">检索练习 · Retrieval</div>
+  <div class="q-text">不看上面代码,回忆:<code>main()</code> 最后那行 <code>sc.waitForShutdown(...)</code> 如果删掉,会发生什么?</div>
+  <details>
+    <summary>点开看答案</summary>
+    <p><code>main()</code> 会立刻返回 → 整个进程退出 → 之前用 <code>go</code> 启动的所有后台任务(指标推送、消费者、HTTP)被强制终止。所以这行是「让主线程活着、等关闭信号」的锚。Java 里你通常靠阻塞队列或 <code>server.await()</code> 达到同样效果。</p>
+  </details>
+</div>
+
+<div class="quiz">
+  <div class="q-tag">翻译练习 · Java→Go</div>
+  <div class="q-text"><code>go m.pushLoop(ctx)</code> 这一行,用 Java 写最接近的等价是?</div>
+  <details>
+    <summary>点开看答案</summary>
+    <p>异步启动一个后台任务执行 <code>pushLoop</code>。最接近:<code>new Thread(() -&gt; m.pushLoop(ctx)).start();</code>(或用 Executor 提交)。关键理解:<code>go</code> 之后当前函数<strong>不等待</strong>,立刻继续往下执行。</p>
+  </details>
+</div>
+
+<h2>5. 推荐精读</h2>
+<p>这一课只需要 3 个语法点。想快速印证,花 10 分钟过一遍官方交互教程的「basics」前三节:</p>
+<p>👉 <a href="https://go.dev/tour/basics/1" target="_blank">A Tour of Go — Basics(官方)</a> —— 看到 Packages/Functions/Import 即可,其余后面课程再碰。</p>
+
+<div class="note">
+  <span class="h">遇到生词?</span>
+  翻 <a href="../reference/go-glossary.html">Go 术语速查表</a>。第 1 课你只需要 <code>package</code> / <code>func</code> / <code>:=</code> / <code>go</code> 四个词。
+</div>
+
+<hr style="margin:2rem 0;border:none;border-top:1px solid var(--rule)">
+
+<h2>课后可以问我(你的 Go 老师)</h2>
+<p>这一课有任何不清楚的,直接问。比如:</p>
+<ul>
+  <li>「<code>sc.ctx</code> 里的 <code>ctx</code> 到底是什么?为什么每个函数都要传它?」(预告:第 7 课讲 context)</li>
+  <li>「<code>localInit.Close()</code> 为什么不写成 defer?」(预告:第 2 课讲 defer)</li>
+  <li>「我打开 <code>config.go</code> 想看 <code>loadConfig()</code>,有些语法看不懂,帮我讲讲?」</li>
+</ul>
+<p>下一课我们进入 <strong>第 2 课:错误处理与 defer</strong>——读 <code>config.go</code> 和 <code>openConn</code>,看 Go 怎么不用 try/catch 管理资源与错误。这是评审 Go 代码的另一大重点。</p>
+
+<footer class="lesson-foot">
+  <div class="nav">
+    <span>📘 <a href="../reference/go-glossary.html">术语速查</a></span>
+    <span><a href="0002-错误处理与defer.html">下一课:错误处理与 defer →</a></span>
+  </div>
+</footer>
+</div>
+</body>
+</html>

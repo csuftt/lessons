@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 8 课:项目导航与数据流 —— 读懂整个 tdengine-replicator</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>
+  .filemap { display:grid; grid-template-columns: 1fr; gap:.5rem; margin:1rem 0; }
+  .frow { display:grid; grid-template-columns: 130px 1fr; gap:.8rem; align-items:start;
+          padding:.45rem .6rem; border:1px solid var(--rule); border-radius:5px; background:#fbfaf6; }
+  .frow .fn { font-family:"JetBrains Mono",monospace; font-size:.82rem; color:var(--go); font-weight:600; }
+  .frow .fd { font-size:.83rem; color:var(--ink); }
+  .flow { background:#f4f1ea; border:1px solid var(--rule); border-radius:6px; padding:1rem; margin:1rem 0;
+          font-family:"JetBrains Mono",monospace; font-size:.78rem; line-height:1.7; overflow-x:auto; white-space:pre; }
+  .arrow { color:var(--accent); font-weight:700; }
+  .legend span { display:inline-block; margin-right:1.2rem; font-size:.78rem; color:var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="lesson-head">
+  <div class="num">Lesson 0008 · 约 15 分钟</div>
+  <h1>项目导航与数据流:读懂整个 tdengine-replicator</h1>
+  <div class="mission">目标:读懂并评审 Go 项目 · 实战 = tdengine-replicator</div>
+</header>
+
+<p><strong>本课赢点</strong>:把前 7 课的语法碎片串成一张全景图。你拿到<strong>任意</strong> Go 项目,能用一套固定方法 10 分钟内理清「入口 → 数据流 → 文件分工」。并真正读懂 tdengine-replicator 这 14 个文件。</p>
+
+<p>← 上一课:<a href="0007-context与sync.html">context 与 sync</a></p>
+
+<h2>1. 先读三样:go.mod → README → main.go</h2>
+
+<p>这是通用的「Go 项目侦察三件套」:</p>
+<ol>
+  <li><strong><code>go.mod</code></strong>——项目的「身份证」。</li>
+  <li><strong><code>README.md</code></strong>——作者自述的意图(比代码先读)。</li>
+  <li><strong><code>main.go</code></code></strong>——程序入口,执行顺序即阅读顺序。</li>
+</ol>
+
+<h3>go.mod 怎么读</h3>
+<pre><code>module github.com/suiteng/tdengine-replicator   // ① 模块全路径(import 前缀)
+go 1.21                                         // ② Go 版本
+
+require (                                       // ③ 直接依赖
+    github.com/prometheus/client_golang v1.19.0 //    指标暴露
+    github.com/taosdata/driver-go/v3 v3.5.5     //    TDengine 官方驱动
+)
+require (                                       // ④ indirect:被依赖间接拉进来的
+    github.com/google/uuid v1.3.0 // indirect
+    ...
+)</code></pre>
+<div class="map">
+  <div class="cell go"><span class="tag">Go · go.mod</span><code>module</code> 是全局唯一路径(类似 Maven groupId:artifactId)。<code>require</code> 是依赖,版本<strong>精确</strong>(非范围)。<code>// indirect</code>=间接依赖。</div>
+  <div class="cell java"><span class="tag">Java · pom.xml</span>对应坐标+依赖。go.sum 类似 pom 的锁定版本(更严格)。</div>
+</div>
+<p>一眼能看出:这是「用 TDengine 驱动 + Prometheus 指标」的独立小程序,依赖极少(健康信号——Go 项目崇尚少依赖)。</p>
+
+<h2>2. 关键结构现象:14 个文件全是 <code>package main</code></h2>
+
+<p>用一条命令看清布局:</p>
+<pre><code>$ grep -l "^package main" *.go | wc -l
+14</code></pre>
+
+<p>本项目所有 .go 文件都在<strong>同一个 <code>main</code> 包</strong>。这意味着:</p>
+<div class="warn">
+  <span class="h">🔑 同包文件之间无需 import,符号直接共享</span>
+  <code>main.go</code> 调用 <code>loadConfig()</code>,但 <code>loadConfig</code> 定义在 <code>config.go</code>——<strong>没有 import 语句</strong>。同 package 的所有标识符(函数、类型、变量)互相可见,就像 Java 同一个类里的方法。这是初学者最容易困惑的点:「这函数哪来的?怎么没 import?」——答案:它在同包的另一个文件里。
+</div>
+<p>所以读本项目,把 14 个文件当成「一个巨型 class 的不同段落」即可。Java 架构师可以类比为:每个 .go 文件 = 一个方面的拆分(init 放 init.go、连接放 tdengine.go、消费者放 data_consumer.go…),但它们共享同一作用域。</p>
+
+<h3>文件分工速查表(读项目时的「目录」)</h3>
+<div class="filemap">
+  <div class="frow"><div class="fn">main.go</div><div class="fd">入口。启动顺序:配置→解析→协调器→指标→recovery→建表→起消费者→HTTP→等关闭</div></div>
+  <div class="frow"><div class="fn">config.go</div><div class="fd">Config/TopicSpec 结构体 + loadConfig()(全环境变量)+ 列位置推导方法</div></div>
+  <div class="frow"><div class="fn">init.go</div><div class="fd">initSchema():执行 init.sql + 补 repl 列 + 建 topic。含 <code>//go:embed init.sql</code></div></div>
+  <div class="frow"><div class="fn">parse.go</div><div class="fd">从 init.sql 解析出 DataTopics/MetaTopics(parseStables)</div></div>
+  <div class="frow"><div class="fn">tdengine.go</div><div class="fd">连接/查询/拼 INSERT(openConn、queryMaxTS、buildInsert、formatValue)</div></div>
+  <div class="frow"><div class="fn">data_consumer.go</div><div class="fd">数据面:poll 对端 TMQ → 攒批 → 写本机 → commit(at-least-once)</div></div>
+  <div class="frow"><div class="fn">meta_consumer.go</div><div class="fd">META 面:消费 DDL/SET TAG,幂等应用,读后写防回声</div></div>
+  <div class="frow"><div class="fn">recovery.go</div><div class="fd">RecoveryCoordinator:感知本地重建 → reinit + resync(Mutex/inflight/cooldown)</div></div>
+  <div class="frow"><div class="fn">resync.go</div><div class="fd">回补引擎:FIRST(ts) diff、force-full、single-flight、worker 池</div></div>
+  <div class="frow"><div class="fn">graceful_shutdown.go</div><div class="fd">ShutdownCoordinator:信号→cancel→WaitGroup 等齐(优雅关闭)</div></div>
+  <div class="frow"><div class="fn">metrics.go</div><div class="fd">Prometheus 指标 + pushLoop 推 Pushgateway</div></div>
+  <div class="frow"><div class="fn">consumer_cleanup.go</div><div class="fd">清理 lost 状态的消费者组(防重复实例堆积)</div></div>
+  <div class="frow"><div class="fn">parse_test.go</div><div class="fd">parse.go 的单测(Go 测试 <code>_test.go</code> 后缀)</div></div>
+</div>
+
+<h2>3. <code>//go:embed</code>:把文件编译进二进制</h2>
+<pre><code>//go:embed init.sql     // 编译时把 init.sql 的内容嵌入二进制
+var initSQL string       // 运行时 initSQL 就是文件内容,无需挂载文件</code></pre>
+<p>这是 Go 1.16+ 的特性。Java 没有直接对应(最接近的是把资源放 classpath 用 ClassLoader 读)。<code>//go:embed</code> 让 tdengine-replicator 单镜像运行时不依赖任何配置文件——init.sql 进了二进制,部署更干净。</p>
+
+<h2>4. 主数据流(把前 7 课串起来)</h2>
+
+<div class="legend">
+  <span><span class="arrow">→</span> 数据流</span>
+  <span><strong style="color:var(--go)">goroutine</strong></span>
+  <span><strong style="color:var(--accent)">控制/恢复</strong></span>
+</div>
+
+<div class="flow">对端 TDengine (peer)                        本机 TDengine (local)
+┌─────────────────┐                         ┌─────────────────┐
+│  数据 TMQ topic  │                         │                 │
+│  META TMQ topic  │                         │   写入目标       │
+└────────┬────────┘                         └────────▲────────┘
+         │ poll                                       │ INSERT
+<span class="arrow">         ▼</span>                                          │
+┌────────────────────────────────────────┐            │
+│ <strong>data_consumer.go</strong>  (<strong style="color:var(--go)">goroutine × topic×slot</strong>)          │            │
+│  for { select{ ctx.Done / ticker.C /   │            │
+│         default→Poll } }               │            │
+│   parseRow → 跳过 repl=true 回声        │            │
+│   → 现查源端 tag → append 到 buf       │            │
+│   → len≥BatchSize 或 ticker → <strong>flush</strong> │──buildInsert──┘
+│   → local.Exec → 成功才 consumer.Commit │
+│                 (at-least-once)          │
+└────────────────────┬───────────────────┘
+                     │ 写失败 not exist
+<span class="arrow" style="color:var(--accent)">                     ▼</span>
+┌────────────────────────────────────────┐
+│ <strong>recovery.go</strong> RecoveryCoordinator       │
+│  Trigger (Mutex 保护 inflight/cooldown) │
+│   → <strong style="color:var(--accent)">recover goroutine</strong>: initSchema +  │
+│     runResync(FIRST(ts) diff / full)   │──补数据──→ local
+│  + probeLoop (30s 探测 schema) 主动触发 │
+└────────────────────────────────────────┘
+
+控制面:main → sc.cancel() (SIGTERM) ──所有 goroutine 的 ctx.Done() 就绪──→ 优雅退出</div>
+
+<p>用 Java 架构师的话翻译:这是一套「消费-攒批-写入-提交」的管道,类似 Kafka 消费者 + 批量写库;<code>ctx</code> 是总线的取消信号;<code>RecoveryCoordinator</code> 是「自愈协调器」(检测到库被重建就重灌);优雅关闭靠 ctx 树状取消 + WaitGroup 等齐。你完全可以用 Spring 的心智模型理解,只是组件换成 Go 原语。</p>
+
+<h2>5. 通用「任意 Go 项目读法」清单</h2>
+<ol>
+  <li><code>cat go.mod</code> —— 看模块名、Go 版本、关键依赖。</li>
+  <li><code>ls *.go</code> / 看目录结构 —— 单 package 还是多 package(多 package 时每个子目录是一个包)。</li>
+  <li>找 <code>func main()</code> —— 顺着调用链读,执行顺序即顺序。</li>
+  <li>遇到没 import 的函数/类型 —— <code>grep -rn "func 名字" .</code> 找定义(很可能在同包另一文件)。</li>
+  <li>看 <code>type Xxx struct</code> —— 摸清核心数据模型(本项目:Config / TopicSpec / pendingRow / 各 Coordinator)。</li>
+  <li>看 <code>go func</code> / <code>select</code> —— 摸清并发模型(几个后台任务、怎么停)。</li>
+  <li>看 <code>_test.go</code> —— 测试是理解意图的最佳文档。</li>
+</ol>
+
+<h2>6. 自测</h2>
+
+<div class="quiz">
+  <div class="q-tag">检索练习</div>
+  <div class="q-text"><code>main.go</code> 调 <code>loadConfig()</code> 却没 import config,这合法吗?为什么?</div>
+  <details>
+    <summary>点开看答案</summary>
+    <p>合法。因为 <code>loadConfig</code> 定义在 <code>config.go</code>,而 config.go 和 main.go 同属 <code>package main</code>。同 package 内的标识符<strong>无需 import、直接可见</strong>。这是 Go 初学者最大的困惑点。跨 package 才需要 import。</p>
+  </details>
+</div>
+
+<div class="quiz">
+  <div class="q-tag">理解题</div>
+  <div class="q-text">tdengine-replicator 数据面为什么是「at-least-once」?哪一行保证了这点?</div>
+  <details>
+    <summary>点开看答案</summary>
+    <p>因为 <strong>写成功后才提交 offset</strong>(data_consumer.go:104 <code>consumer.Commit()</code> 在 local.Exec 成功分支里)。写失败 → 不 commit → 下次 poll 重投该批 → 可能重复。所以是 at-least-once(至少一次,可能重复)而非 exactly-once。本项目靠 <code>repl=true</code> 回声标识 + upsert 去重来兜底重复——这是评审时要关注的「重复如何被吸收」机制。</p>
+  </details>
+</div>
+
+<div class="quiz">
+  <div class="q-tag">导航题</div>
+  <div class="q-text">你想知道 <code>buildInsert</code> 怎么实现的,但你不知道它在哪个文件。最快办法?</div>
+  <details>
+    <summary>点开看答案</summary>
+    <p><code>grep -rn "func buildInsert" .</code>(或用 IDE 的 Go to Definition)。Go 函数定义都是 <code>func 名字</code> 开头,grep 这个模式秒定位。同包内符号靠 grep,跨包符号靠 import 路径 + 包名。这也是为什么 Go 命名习惯:导出符号(首字母大写)用完整英文、唯一性好,便于全局 grep。</p>
+  </details>
+</div>
+
+<h2>7. 推荐精读</h2>
+<p>👉 <a href="https://go.dev/doc/code" target="_blank">Go 官方:How to Write Go Code(module/package/导入 官方教程)</a></p>
+<p>👉 <a href="https://go.dev/blog/embed" target="_blank">Go 官方博客:embed</a></p>
+
+<hr style="margin:2rem 0;border:none;border-top:1px solid var(--rule)">
+<p>下一课:<strong>第 9 课 —— Go 代码评审清单(capstone)</strong>。把 9 课学到的所有评审点浓缩成一张可勾选的清单,逐条套用到 tdengine-replicator,产出一份真实可用的 review 报告。</p>
+
+<footer class="lesson-foot">
+  <div class="nav">
+    <span>← <a href="0007-context与sync.html">第 7 课</a></span>
+    <span><a href="0009-代码评审清单.html">下一课:代码评审清单 →</a> · 📘 <a href="../reference/go-glossary.html">速查表</a></span>
+  </div>
+</footer>
+</div>
+</body>
+</html>

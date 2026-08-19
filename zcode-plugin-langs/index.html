@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>zcode-idea-plugin 开发语言课程</title>
+<link rel="stylesheet" href="assets/lesson.css">
+</head>
+<body>
+
+<header class="doc-head">
+  <span>课程索引 · zcode-idea-plugin 开发语言</span>
+</header>
+
+<h1>zcode-idea-plugin 开发语言课程</h1>
+<p class="lead">目标：<strong>独立读懂、修改、评审</strong>这个 IDEA 插件的两端代码——
+Kotlin 插件端（IntelliJ Platform）与 React/TypeScript webview 端。
+全部素材取自本仓库真实代码。</p>
+
+<h2>技术栈地图</h2>
+<div class="grid-2">
+  <div class="card">
+    <h4>🧩 插件端 · Kotlin</h4>
+    <ul>
+      <li>Kotlin 1.9.24 / JVM 17 / Gradle</li>
+      <li>IntelliJ Platform SDK 2024.1</li>
+      <li>Service / ToolWindow / JCEF</li>
+      <li>协程 + EDT 线程模型</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>🎨 Webview 端 · TS/React</h4>
+    <ul>
+      <li>React 19 + TypeScript 5.7 + Vite 7</li>
+      <li>Zustand 状态管理</li>
+      <li>Less 样式 + singlefile 打包</li>
+      <li>JCEF IPC 双向桥（bridge.ts）</li>
+    </ul>
+  </div>
+</div>
+
+<h2>学习路线</h2>
+<table>
+<thead>
+<tr><th>#</th><th>主题</th><th>内容</th><th>状态</th></tr>
+</thead>
+<tbody>
+<tr><td>0001</td><td>Kotlin 语法（Java 映射法）</td><td>精读 ZCodeServiceImpl.kt：可空性/let/扩展函数/reified</td><td><a href="lessons/0001-read-kotlin-with-java-eyes.html">✓ 已生成</a></td></tr>
+<tr><td>0002</td><td>线程与 EDT</td><td>invokeLater / 16ms 节流 / 协程对照（本仓库实际无协程）</td><td><a href="lessons/0002-thread-and-edt.html">✓ 已生成</a></td></tr>
+<tr><td>0003</td><td>IntelliJ Platform 骨架</td><td>plugin.xml / ToolWindow 工厂 / @Service / 启动全景</td><td><a href="lessons/0003-intellij-platform-skeleton.html">✓ 已生成</a></td></tr>
+<tr><td>0004</td><td>TS 基础 + React 组件</td><td>精读 FileRef / WaitingIndicator：props/事件/useState/useEffect</td><td><a href="lessons/0004-ts-react-components.html">✓ 已生成</a></td></tr>
+<tr><td>0005</td><td>Hooks + Zustand</td><td>精读 useStore.ts：sendMessage 状态机 / selector / 批量订阅</td><td><a href="lessons/0005-hooks-zustand.html">✓ 已生成</a></td></tr>
+<tr><td>0006</td><td>JCEF IPC 桥</td><td>JBCefJSQuery ↔ executeJavaScript，9 步完整链路追踪</td><td><a href="lessons/0006-jcef-ipc-bridge.html">✓ 已生成</a></td></tr>
+<tr><td>0007</td><td>构建与调试</td><td>dev server / runIde 双回路 / 诊断面板 / 常见坑</td><td><a href="lessons/0007-build-and-debug.html">✓ 已生成</a></td></tr>
+</tbody>
+</table>
+
+<h2>速查表（随时翻）</h2>
+<ul>
+<li><a href="reference/kotlin-java-cheatsheet.html">Kotlin for Java 开发者速查表</a> — 语法映射 + 惯用法 + 术语词典</li>
+<li><a href="reference/ts-react-cheatsheet.html">TypeScript / React 速查表</a> — TS 类型 + Hooks + Zustand + IPC 桥对照</li>
+</ul>
+
+</body>
+</html>

@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 5 课:interface —— Go 的鸭子类型</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+<header class="lesson-head">
+  <div class="num">Lesson 0005 · 约 12 分钟</div>
+  <h1>interface:Go 的鸭子类型</h1>
+  <div class="mission">目标:读懂并评审 Go 项目 · 实战 = tdengine-replicator</div>
+</header>
+
+<p><strong>本课赢点</strong>:你理解 Go 接口的「隐式实现」——这是 Java 架构师读懂 Go 设计的关键一跃。你能看懂 <code>switch e := ev.(type)</code> 这类「类型断言/类型 switch」,并评审接口设计是否合理。</p>
+
+<p>← 上一课:<a href="0004-slice-map与nil.html">slice、map 与 nil</a></p>
+
+<h2>1. 核心转变:实现接口不用写 <code>implements</code></h2>
+
+<p>Java 里,一个类要显式声明 <code>class Foo implements Bar</code>。Go 不用——<strong>只要你的类型实现了接口要求的全部方法,它就自动满足这个接口</strong>。这叫「鸭子类型」:走起来像鸭子、叫起来像鸭子,那就是鸭子。</p>
+
+<p>看 Go 最常用的接口 <code>error</code>。它内置于语言,本质是这样:</p>
+
+<pre><code>type error interface {      // 内置接口:只有一个方法
+    Error() string
+}</code></pre>
+
+<p>含义:任何类型,只要有一个 <code>Error() string</code> 方法,就是一个 <code>error</code>。本项目 <code>tdengine.go</code> 里到处用的 <code>err</code>,就是这个接口类型的值——具体是什么类型不重要,只要它能 <code>Error()</code> 返回错误描述。</p>
+
+<div class="map">
+  <div class="cell go"><span class="tag">Go · 隐式实现</span>类型无需声明 implements。方法集匹配即可。「在消费者那端」定义接口。</div>
+  <div class="cell java"><span class="tag">Java · 显式 implements</span>类必须写 <code>implements Bar</code>,否则编译不过。「在生产者那端」绑定。</div>
+</div>
+
+<div class="note">
+  <span class="h">🔑 这个设计的评审含义</span>
+  接口和实现<strong>解耦</strong>。你可以为第三方库的类型(改不了它的源码)定义接口——Java 做不到。评审 Go 设计时,关注接口是否「小而聚焦」(常用经验:1~3 个方法)。Go 格言:「接口越大越抽象,越小越复用」。糟糕的 Go 代码常表现为「巨型接口」(像 Java 的 IService),违背语言哲学。
+</div>
+
+<h2>2. <code>any</code> / <code>interface{}</code>:Go 的 Object</h2>
+
+<p>看 <code>queryMaxTS</code>(tdengine.go:84)和 <code>formatValue</code>(tdengine.go:166),里面有个 <code>switch v := dest[0].(type)</code>。先理解 <code>dest[0]</code> 是什么类型——它来自 driver-go:</p>
+
+<pre><code>dest := make([]driver.Value, 1)   // driver.Value 实质就是 interface{}</code></pre>
+
+<p><code>driver.Value</code> 本质是 <code>interface{}</code>——「空接口」。<strong>空接口没有任何方法,所以任何类型都满足它</strong>。它是 Go 的「万能容器」,类似 Java 的 <code>Object</code>。Go 1.18 起可以用别名 <code>any</code> 代替 <code>interface{}</code>,两者完全等价。</p>
+
+<div class="map">
+  <div class="cell go"><span class="tag">Go · any / interface{}</span>零方法的接口,任何值都能装。从 TDengine 查出来的列值可能是 int64/string/bool/time.Time,统一用 any 承载。</div>
+  <div class="cell java"><span class="tag">Java · Object</span>所有类的祖先。用法类似,但 Go 的 any 是「编译期不知道类型、运行期才知道」。</div>
+</div>
+
+<h2>3. 类型断言与类型 switch:把 any 拆回具体类型</h2>
+
+<p>any 装进去容易,拿出来要「断言」具体类型。两种写法,本项目都有:</p>
+
+<h3>写法 A:单个类型断言</h3>
+<pre><code>// data_consumer.go:170 —— repl 列期望是 bool
+if b, ok := row[spec.replIdx()].(bool); ok && b {   // .(bool) 断言它是 bool
+    return parsedRow{replTrue: true}, true          // ok=false 表示其实不是 bool
+}
+tbname, _ := row[spec.tbnameIdx()].(string)         // 断言是 string,_ 丢弃 ok</code></pre>
+
+<p><code>x.(T)</code> 读作「断言 x 是 T 类型」。双值形式 <code>v, ok := x.(T)</code> 中,<code>ok</code> 表示断言是否成立(类似 map 的「键是否存在」)。<strong>断言失败时:双值形式 ok=false 安全;单值形式会 panic</strong>。</p>
+
+<h3>写法 B:类型 switch(多类型分流)</h3>
+<pre><code>// data_consumer.go:123 —— TMQ 消息可能是数据,也可能是错误
+switch e := ev.(type) {
+case *tmqcommon.DataMessage:        // 如果是数据消息
+    ...                              // e 的类型是 *DataMessage,可直接用
+case tmqcommon.Error:               // 如果是错误
+    log.Printf("poll error: %s", e.String())
+}</code></pre>
+
+<p><code>switch e := ev.(type)</code> 是 Go 处理「多种可能类型」的惯用法。在每个 <code>case</code> 分支里,<code>e</code> 自动是该分支的具体类型——不用强转。看 <code>queryMaxTS</code> 的另一个例子(tdengine.go:84):</p>
+
+<pre><code>switch v := dest[0].(type) {
+case int64:
+    return v, nil              // 这里 v 是 int64
+case time.Time:
+    return v.UnixNano(), nil   // 这里 v 是 time.Time
+default:
+    // 兜底:字符串解析
+}</code></pre>
+
+<div class="map">
+  <div class="cell go"><span class="tag">Go · type switch</span><code>switch v := x.(type) { case T1: ... }</code>。每个 case 里 v 是该具体类型。</div>
+  <div class="cell java"><span class="tag">Java · instanceof + 强转</span><code>if (x instanceof Long l) {...}</code>(Java 16 模式匹配)。理念接近。</div>
+</div>
+
+<div class="warn">
+  <span class="h">⚠️ 评审:断言可能 panic</span>
+  <code>v := x.(T)</code>(单值)断言失败 = panic,整个 goroutine 崩。评审时优先用双值形式 <code>v, ok := x.(T)</code>。本项目 <code>parseRow</code> 用 <code>tbname, _ := row[..].(string)</code>(双值丢弃 ok)是安全的——断言失败 tbname 就是零值 "",不会崩。<code>if b, ok := row[..].(bool); ok && b</code> 也是安全写法。这是好习惯。
+</div>
+
+<h2>4. 评审视角:接口的两条经验法则</h2>
+<ol>
+  <li><strong>「接受接口,返回结构体」(Accept interfaces, return structs)</strong>——Go 经典格言。函数参数尽量用小接口(灵活、可测),返回值用具体 struct(明确、可演进)。本项目 <code>openConn</code> 返回具体类型 <code>*af.Connector</code> 而非接口,符合。</li>
+  <li><strong>警惕「接口污染」</strong>——如果一个接口只有一个实现,且没有跨包复用需求,它可能是「为了像 Java 而生」的多余抽象。Go 倾向于「先用具体类型,等出现第二个实现再抽接口」。tdengine-replicator 几乎不用自定义接口(直接用 driver-go 的具体类型),这反而是地道的 Go 风格。</li>
+</ol>
+
+<h2>5. 自测</h2>
+
+<div class="quiz">
+  <div class="q-tag">检索练习</div>
+  <div class="q-text">一个 Go 类型要满足内置 <code>error</code> 接口,需要做什么?要写 <code>implements error</code> 吗?</div>
+  <details>
+    <summary>点开看答案</summary>
+    <p>只要实现 <code>Error() string</code> 方法即可,<strong>不需要</strong>写 implements。Go 是隐式满足。这也是为什么全项目所有 error 值(来自 af.Open、c.Query、strconv.Atoi…)虽然底层类型各不相同,都能用 <code>if err != nil</code> 统一处理。</p>
+  </details>
+</div>
+
+<div class="quiz">
+  <div class="q-tag">辨析题</div>
+  <div class="q-text"><code>v := x.(string)</code> 和 <code>v, ok := x.(string)</code>,x 其实不是 string 时分别发生什么?</div>
+  <details>
+    <summary>点开看答案</summary>
+    <p>前者<strong>panic</strong>(运行时崩溃,goroutine 退出)。后者<strong>安全</strong>:ok=false,v 是 string 的零值("")。评审规则:不确定类型时一律用双值形式。本项目 <code>parseRow</code> 正确使用了双值形式。</p>
+  </details>
+</div>
+
+<div class="quiz">
+  <div class="q-tag">评审练习</div>
+  <div class="q-text">你看到一个 Go 包定义了 15 个方法的巨型接口,只有一个实现。你的评审意见?</div>
+  <details>
+    <summary>点开看答案</summary>
+    <p>「接口污染」。Go 哲学是接口小而聚焦(1~3 方法最佳)。巨型单实现接口通常是 Java 思维的产物,徒增抽象、阻碍复用。建议:要么删掉接口直接用 struct,要么按使用场景拆成多个小接口(interface segregation)。除非有明确的「面向测试 mock」或「多实现」需求。</p>
+  </details>
+</div>
+
+<h2>6. 推荐精读</h2>
+<p>👉 <a href="https://go.dev/tour/methods/9" target="_blank">A Tour of Go — Interfaces(官方)</a> · <a href="https://go.dev/tour/methods/16" target="_blank">Type assertions</a></p>
+<p>👉 <a href="https://go.dev/doc/effective_go#interfaces_and_types" target="_blank">Effective Go — Interfaces and types</a></p>
+
+<hr style="margin:2rem 0;border:none;border-top:1px solid var(--rule)">
+<p>下一课:<strong>第 6 课 —— goroutine、channel 与 select(并发原语)</strong>,读 <code>ShutdownCoordinator.Shutdown</code>(channel+select+WaitGroup)和 <code>data_consumer</code> 的非阻塞轮询,讲 Go 并发模型——评审 Go 代码的第一大雷区。</p>
+
+<footer class="lesson-foot">
+  <div class="nav">
+    <span>← <a href="0004-slice-map与nil.html">第 4 课</a></span>
+    <span><a href="0006-goroutine与channel.html">下一课:goroutine、channel 与 select →</a> · 📘 <a href="../reference/go-glossary.html">速查表</a></span>
+  </div>
+</footer>
+</div>
+</body>
+</html>

@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 1 课 · 用 Java 的眼睛读 Kotlin — zcode-plugin-langs</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+
+<header class="lesson-head">
+  <a href="../index.html">← 课程索引</a>
+  <span>第 1 课 / 7</span>
+  <a href="../reference/kotlin-java-cheatsheet.html">速查表</a>
+</header>
+
+<h1>第 1 课：用 Java 的眼睛读 Kotlin</h1>
+<p class="lead">目标：学完这课，你能<strong>不查资料、逐行解释</strong>插件里最小的真实文件
+<code>ZCodeServiceImpl.kt</code>（47 行）——它是 Kotlin 语法的浓缩样本。</p>
+
+<h2>为什么拿这个文件开刀</h2>
+<p>它是整个插件 Kotlin 侧的<strong>最小完整文件</strong>：类、构造、可空性、lambda、锁、
+扩展函数、注解、reified 泛型全都有，而且不依赖任何外部库。读懂它 = 拿到了读其他
+Kotlin 文件的钥匙。</p>
+<blockquote>
+<p>源码位置：<code>intellij-plugin/src/main/kotlin/com/zcode/ideaplugin/ZCodeServiceImpl.kt</code>（2026-08 状态，全文 47 行）</p>
+</blockquote>
+
+<h2>一、Java → Kotlin 语法速射表</h2>
+<p>你 Java 很强，所以这里只讲<strong>映射</strong>，不讲"新语言"。本课先记 8 条，足够读文件；完整版在
+<a href="../reference/kotlin-java-cheatsheet.html">速查表</a>。</p>
+
+<table>
+<thead>
+<tr><th>Java 概念</th><th>Kotlin 写法</th><th>差别一句话</th></tr>
+</thead>
+<tbody>
+<tr><td>类 + 构造器</td><td><code>class ZCodeServiceImpl(private val project: Project) : ZCodeService</code></td><td>构造器参数直接声明为属性，<code>val</code>=只读</td></tr>
+<tr><td>字段 + getter/setter</td><td><code>private var client: ZCodeProtocolClient? = null</code></td><td>编译器自动生成 getter/setter，你几乎不写它们</td></tr>
+<tr><td>可空性</td><td><code>?</code> 后缀 / <code>?.</code> 安全调用 / <code>?:</code> Elvis</td><td>可空性是<strong>类型系统的一部分</strong>，编译器强制处理</td></tr>
+<tr><td>单表达式方法</td><td><code>fun isStarted(): Boolean = ...</code></td><td>省略大括号和 return，直接 <code>=</code> 表达式</td></tr>
+<tr><td>lambda</td><td><code>lock.withLock { ... }</code></td><td>尾随闭包语法：lambda 放括号外，<code>it</code> 指唯一参数</td></tr>
+<tr><td>给已有类加方法</td><td><code>fun Project.zCodeService(): ZCodeService</code></td><td>扩展函数：对 <code>Project</code> 类型"新增"方法（编译成静态函数）</td></tr>
+<tr><td>反射拿泛型类型</td><td><code>service&lt;ZCodeServiceImpl&gt;()</code></td><td>reified 内联泛型：编译期直接拿到类型，无擦除</td></tr>
+<tr><td>注解</td><td><code>@Service(Service.Level.PROJECT)</code></td><td>几乎一样，带参数用括号</td></tr>
+</tbody>
+</table>
+
+<h2>二、精读全文（47 行逐块拆解）</h2>
+
+<pre><code>package com.zcode.ideaplugin
+
+import com.intellij.openapi.components.Service
+import com.intellij.openapi.components.service
+import com.intellij.openapi.project.Project
+import com.zcode.ideaplugin.protocol.ZCodeProtocolClient
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
+
+/** 管理该项目对应的 ZCodeProtocolClient 实例。 */
+@Service(Service.Level.PROJECT)                                    <span class="hl">← L18</span>
+class ZCodeServiceImpl(private val project: Project) : ZCodeService {  <span class="hl">← L19</span>
+
+    @Volatile                                               <span class="hl">← L21</span>
+    private var client: ZCodeProtocolClient? = null         <span class="hl">← L22</span>
+
+    private val lock = ReentrantLock()                      <span class="hl">← L24</span>
+
+    override fun getClient(): ZCodeProtocolClient {         <span class="hl">← L26</span>
+        client?.let { if (it.isAlive()) return it }         <span class="hl">← L27</span>
+        return lock.withLock {                              <span class="hl">← L28</span>
+            client?.let { if (it.isAlive()) return it }
+            val newClient = ZCodeProtocolClient.start()
+            client = newClient
+            newClient
+        }
+    }
+
+    override fun isStarted(): Boolean = client?.isAlive() == true   <span class="hl">← L36</span>
+
+    override fun shutdown() {
+        lock.withLock {
+            client?.close()
+            client = null
+        }
+    }
+}
+
+/** 便捷扩展：project.zCodeService() */
+fun Project.zCodeService(): ZCodeService = service&lt;ZCodeServiceImpl&gt;()  <span class="hl">← L47</span></code></pre>
+
+<table>
+<thead>
+<tr><th>行</th><th>代码</th><th>Java 脑翻译 + 要点</th></tr>
+</thead>
+<tbody>
+<tr><td>L18</td><td><code>@Service(Service.Level.PROJECT)</code></td><td>声明为"项目级服务"，IntelliJ 框架自动创建/管理生命周期，不用手动 new。对应旧式 plugin.xml 里手写 <code>&lt;service&gt;</code> 声明。</td></tr>
+<tr><td>L19</td><td><code>class ...(private val project: Project)</code></td><td>主构造函数参数 <code>project</code> 自动成为私有只读属性——省掉"字段 + 构造器赋值"两行样板。</td></tr>
+<tr><td>L21-22</td><td><code>@Volatile private var client: ...? = null</code></td><td><code>var</code> = 可变属性；<code>?</code> = 可能为 null（null 表示"还没启动"）。@Volatile 语义和 Java 一样。</td></tr>
+<tr><td>L27</td><td><code>client?.let { ... }</code></td><td><strong>Kotlin 最常用惯用法</strong>：非空才执行。<code>?.</code> 保证 null 时不进入；块内 <code>it</code> 自动是<strong>非空</strong>类型。注意 <code>return it</code> 是 <strong>non-local return</strong>——直接退出整个 <code>getClient()</code>（let 是内联函数所以允许）。</td></tr>
+<tr><td>L28</td><td><code>lock.withLock { ... }</code></td><td>锁 + lambda：等价 Java <code>synchronized(lock) { ... }</code> 或 <code>lock.lock() / try / finally unlock()</code>。块内最后一行 <code>newClient</code> 就是返回值。</td></tr>
+<tr><td>L36</td><td><code>= client?.isAlive() == true</code></td><td>表达式函数体。为何写 <code>== true</code>？因为 <code>client?.isAlive()</code> 类型是 <code>Boolean?</code>（可能 null），不能直接当 if 条件，显式比较。</td></tr>
+<tr><td>L47</td><td><code>fun Project.zCodeService() = service&lt;...&gt;()</code></td><td>扩展函数 + reified 泛型：让全工程写 <code>project.zCodeService()</code> 拿到服务，调用方完全不用关心 ServiceManager。这是本仓库到处在用的模式。</td></tr>
+</tbody>
+</table>
+
+<h2>三、检索练习（先自己答，再点答案）</h2>
+
+<div class="quiz" data-title="第 1 课练习">
+  <div class="quiz-q" data-answer="0">
+    <p class="q-text">1. <code>client?.let { ... }</code> 中 <code>?.</code> 的作用？</p>
+    <button class="quiz-opt">空安全调用</button>
+    <button class="quiz-opt">空值合并符</button>
+    <button class="quiz-opt">泛型通配符</button>
+    <button class="quiz-opt">强制解引用</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="1">
+    <p class="q-text">2. <code>a ?: b</code> 当 a 为 null 时返回？</p>
+    <button class="quiz-opt">返回左边值</button>
+    <button class="quiz-opt">返回右边值</button>
+    <button class="quiz-opt">抛出空异常</button>
+    <button class="quiz-opt">返回空引用</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="0">
+    <p class="q-text">3. <code>fun Project.zCodeService()</code> 是什么函数？</p>
+    <button class="quiz-opt">扩展函数</button>
+    <button class="quiz-opt">顶层函数</button>
+    <button class="quiz-opt">内联函数</button>
+    <button class="quiz-opt">高阶函数</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="0">
+    <p class="q-text">4. <code>lock.withLock { ... }</code> 内部等价于 Java 的？</p>
+    <button class="quiz-opt">同步代码块</button>
+    <button class="quiz-opt">原子计数器</button>
+    <button class="quiz-opt">线程局部量</button>
+    <button class="quiz-opt">乐观锁自旋</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="0">
+    <p class="q-text">5. <code>var</code> 与 <code>val</code> 的核心区别？</p>
+    <button class="quiz-opt">可变与只读</button>
+    <button class="quiz-opt">静态与实例</button>
+    <button class="quiz-opt">公有与私有</button>
+    <button class="quiz-opt">延迟与立即</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="0">
+    <p class="q-text">6. <code>= client?.isAlive() == true</code> 这种写法叫什么？</p>
+    <button class="quiz-opt">省略大括号</button>
+    <button class="quiz-opt">必须有参数</button>
+    <button class="quiz-opt">使用 return</button>
+    <button class="quiz-opt">仅限空函数</button>
+    <p class="quiz-feedback"></p>
+  </div>
+</div>
+
+<p><em>第 6 题正确名称是"表达式函数体"——省略大括号、用 <code>=</code> 直接返回表达式的函数写法。</em></p>
+
+<h2>四、课后任务（下次课前做）</h2>
+<p>打开 <code>protocol-client/src/main/kotlin/com/zcode/ideaplugin/protocol/model/Messages.kt</code>，
+找到 <code>sealed class ProtocolMessage</code>（用 <code>grep -n</code> 或 IDE 搜索），回答：</p>
+<ol>
+<li>它有哪几个 <code>data class</code> 子类？（提示：5 个）</li>
+<li>协议消息为什么设计成 <code>sealed class</code> 而不是普通父类？<br>
+<em>提示：sealed = "密封"，编译器知道全部子类，<code>when</code> 分支可以穷尽检查——这是 Kotlin 替代 Java 多态/instanceof 链的利器，本插件解析消息全靠它。</em></li>
+</ol>
+
+<h2>五、推荐主源 + 下一步</h2>
+<p>本课所有断言都可在官方文档找到依据，首选主源（必读）：</p>
+<ul>
+<li><a href="https://kotlinlang.org/docs/idioms.html">Kotlin 官方 Idioms（惯用法）</a>——let/apply/run、扩展函数、data class 等，几分钟读完</li>
+<li><a href="https://kotlinlang.org/docs/java-to-kotlin-interop.html">官方 Java → Kotlin 互操作指南</a>——可空性、集合、static 的差异</li>
+</ul>
+<p>完整语法对照收进 <a href="../reference/kotlin-java-cheatsheet.html">速查表：Kotlin for Java 开发者</a>，随时翻。</p>
+
+<div class="next">
+<p><strong>有疑问？</strong> 随时问我（agent 是你的老师）：任何一行看不懂、任何术语想展开，直接问。
+下一课预告：<strong>协程与 EDT</strong>——插件里所有"异步不卡 UI"的机制，也是你评审代码时最常踩坑的地方。</p>
+</div>
+
+</body>
+</html>

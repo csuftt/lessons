@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Go 术语速查(Java 架构师版)</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+<header class="lesson-head">
+  <div class="num">Reference · 速查表</div>
+  <h1>Go 术语速查(Java 架构师版)</h1>
+  <div class="mission">读 tdengine-replicator 时反复出现的术语,左侧 Go、右侧 Java 对应</div>
+</header>
+
+<p>这份速查表收录读 Go 项目最高频的术语。每条都给 Java 对应物与关键差异。课程中遇到陌生词,先来这里查。</p>
+
+<h2>项目与模块</h2>
+<div class="map">
+  <div class="cell go"><span class="tag">Go · go.mod</span>module 声明 + 依赖清单(require)。<code>module github.com/suiteng/tdengine-replicator</code> 是模块全局唯一路径。</div>
+  <div class="cell java"><span class="tag">Java · pom.xml</span>Maven 坐标 + dependencies。Go 依赖版本精确锁在 go.sum。</div>
+</div>
+<div class="map">
+  <div class="cell go"><span class="tag">Go · package</span>同目录所有 .go 文件必须同 package。包名 = 导入名。</div>
+  <div class="cell java"><span class="tag">Java · package</span>Go 更严格:一个目录一个包。</div>
+</div>
+<div class="map">
+  <div class="cell go"><span class="tag">Go · package main</span>可执行程序的包。<code>func main()</code> 是入口,无参数无返回。</div>
+  <div class="cell java"><span class="tag">Java · main 方法</span><code>public static void main(String[] args)</code>。Go 的 main 不接命令行参数(用 <code>os.Args</code> 取)。</div>
+</div>
+<div class="map">
+  <div class="cell go"><span class="tag">Go · 首字母大小写=可见性</span>大写开头=导出(包外可见,如 <code>Config</code>);小写=包内私有(如 <code>loadConfig</code>)。无 public/private 关键字。</div>
+  <div class="cell java"><span class="tag">Java · public/private</span>Go 用首字母大小写替代修饰符。</div>
+</div>
+
+<h2>语法核心</h2>
+<div class="map">
+  <div class="cell go"><span class="tag">Go · :=</span>短变量声明+推断类型,只能在函数内。<code>cfg := loadConfig()</code></div>
+  <div class="cell java"><span class="tag">Java · var</span><code>var cfg = loadConfig();</code>(Java 10+)。</div>
+</div>
+<div class="map">
+  <div class="cell go"><span class="tag">Go · 多返回值</span>函数可返回多个值。<code>b, err := os.ReadFile(p)</code></div>
+  <div class="cell java"><span class="tag">Java · 异常</span>Java 抛异常;Go 把 error 当普通返回值。</div>
+</div>
+<div class="map">
+  <div class="cell go"><span class="tag">Go · error</span>内置接口(<code>Error() string</code>),不是异常。<code>if err != nil</code> 最高频惯用法。</div>
+  <div class="cell java"><span class="tag">Java · Exception</span>Go 没有 try/catch,错误逐层返回。</div>
+</div>
+<div class="map">
+  <div class="cell go"><span class="tag">Go · nil</span>指针/接口/slice/map/channel 的零值,表示「空」。</div>
+  <div class="cell java"><span class="tag">Java · null</span>类似,但 Go 的 nil 是有类型的。</div>
+</div>
+<div class="map">
+  <div class="cell go"><span class="tag">Go · struct</span>字段集合,值类型。无继承,靠组合。</div>
+  <div class="cell java"><span class="tag">Java · class</span>Go 没有类,struct + 方法 + interface 替代。</div>
+</div>
+<div class="map">
+  <div class="cell go"><span class="tag">Go · 接收者(值/指针)</span><code>func (t T) m()</code> t 是副本;<code>func (t *T) m()</code> t 是指针。修改状态必须用指针接收者。</div>
+  <div class="cell java"><span class="tag">Java · this</span>Java 对象天然引用,无副本概念。</div>
+</div>
+<div class="map">
+  <div class="cell go"><span class="tag">Go · defer</span>函数返回前执行(栈式,后进先出)。常用于关连接。</div>
+  <div class="cell java"><span class="tag">Java · try-finally</span>等价 finally。</div>
+</div>
+
+<h2>容器</h2>
+<div class="map">
+  <div class="cell go"><span class="tag">Go · slice <code>[]T</code></span>动态数组。<code>append(s,x)</code> 须赋值回。切片 <code>s[:n]</code> 共享底层数组(评审重点)。</div>
+  <div class="cell java"><span class="tag">Java · ArrayList</span>subList 也共享,但 Go 覆盖所有切片操作。</div>
+</div>
+<div class="map">
+  <div class="cell go"><span class="tag">Go · map <code>map[K]V</code></span>哈希表。<code>v, ok := m[k]</code> 判存在。nil map 写入 panic(须 make)。</div>
+  <div class="cell java"><span class="tag">Java · HashMap</span>put/get。</div>
+</div>
+
+<h2>接口与类型</h2>
+<div class="map">
+  <div class="cell go"><span class="tag">Go · 隐式实现</span>类型无需 implements,方法集匹配即满足。「消费方定义接口」。经验:1~3 方法最佳。</div>
+  <div class="cell java"><span class="tag">Java · 显式 implements</span>必须声明。Go 鸭子类型是最大转变。</div>
+</div>
+<div class="map">
+  <div class="cell go"><span class="tag">Go · any / interface{}</span>零方法接口,任何值都能装。Go 版 Object。</div>
+  <div class="cell java"><span class="tag">Java · Object</span>编译期不知类型,运行期才知。</div>
+</div>
+<div class="map">
+  <div class="cell go"><span class="tag">Go · 类型断言</span><code>v := x.(T)</code>(失败 panic)vs <code>v, ok := x.(T)</code>(安全)。优先双值。</div>
+  <div class="cell java"><span class="tag">Java · instanceof + 强转</span><code>x instanceof T t</code>(Java 16+)。</div>
+</div>
+<div class="map">
+  <div class="cell go"><span class="tag">Go · type switch</span><code>switch v := x.(type){case T1:...}</code>,每 case 内 v 是该具体类型。</div>
+  <div class="cell java"><span class="tag">Java · instanceof 链</span>理念接近。</div>
+</div>
+
+<h2>并发</h2>
+<div class="map">
+  <div class="cell go"><span class="tag">Go · goroutine</span><code>go f()</code> 启轻量线程(M:N,几 KB 栈)。无返回值。评审重点:能否通过 ctx 退出(防泄漏)。</div>
+  <div class="cell java"><span class="tag">Java · 虚拟线程</span>Java 21 <code>Thread.startVirtualThread</code>。</div>
+</div>
+<div class="map">
+  <div class="cell go"><span class="tag">Go · channel</span><code>chan T</code>,goroutine 间管道。发/收都阻塞。<code>close(ch)</code> 后接收不再阻塞。<code>chan struct{}</code> 当纯信号。close 责任必须唯一。</div>
+  <div class="cell java"><span class="tag">Java · BlockingQueue/Latch</span>channel 更万能:可当队列、锁、信号。</div>
+</div>
+<div class="map">
+  <div class="cell go"><span class="tag">Go · select</span><strong>channel 版 switch</strong>(和普通 switch 不同)。多路复用「哪个 channel 先就绪」。带 default=非阻塞,不带=阻塞。</div>
+  <div class="cell java"><span class="tag">Java · Selector/NIO</span>理念类似多路复用。</div>
+</div>
+<div class="map">
+  <div class="cell go"><span class="tag">Go · context.Context</span>取消/超时/传值载体。几乎所有长函数第一个参数。<code>&lt;-ctx.Done()</code> 收取消。<strong>WithCancel/WithTimeout 必须 defer cancel()</strong>。树状:取消父→所有子取消。</div>
+  <div class="cell java"><span class="tag">Java · 无直接对应</span>接近「取消信号 + scoped 值」。</div>
+</div>
+<div class="map">
+  <div class="cell go"><span class="tag">Go · sync.WaitGroup</span><code>Add(1)/Done()/Wait()</code>,等一群 goroutine 结束。Add 与 defer Done 必须配对。</div>
+  <div class="cell java"><span class="tag">Java · CountDownLatch</span>最接近。</div>
+</div>
+<div class="map">
+  <div class="cell go"><span class="tag">Go · sync.Mutex</span><code>Lock()/Unlock()</code> 显式成对,无 synchronized。每条 return 都要 Unlock。</div>
+  <div class="cell java"><span class="tag">Java · synchronized/ReentrantLock</span>Go 更原始显式。</div>
+</div>
+<div class="map">
+  <div class="cell go"><span class="tag">Go · sync.Once</span><code>Once.Do(f)</code> 保证 f 只执行一次,并发安全。常用于初始化/告警去重。</div>
+  <div class="cell java"><span class="tag">Java · 双检锁单例</span>Once 一行替代。</div>
+</div>
+
+<h2>项目导航</h2>
+<div class="map">
+  <div class="cell go"><span class="tag">Go · 同 package 共享</span>同目录同 package 的 .go 文件,符号<strong>无需 import 直接可见</strong>。这是没 import 却能调用的原因。</div>
+  <div class="cell java"><span class="tag">Java · 同类内方法</span>类比为同 class 不同段落。</div>
+</div>
+<div class="map">
+  <div class="cell go"><span class="tag">Go · //go:embed</span>编译时把文件嵌入二进制。<code>//go:embed init.sql</code> + <code>var initSQL string</code>。运行时不依赖外部文件。</div>
+  <div class="cell java"><span class="tag">Java · classpath 资源</span>用 ClassLoader 读 resources。</div>
+</div>
+
+<footer class="lesson-foot">
+  <div class="nav">
+    <span>← <a href="../lessons/0001-程序入口main-go.html">第 1 课</a></span>
+    <span>📘 配套 9 课 + 本速查表组成完整课程</span>
+  </div>
+</footer>
+</div>
+</body>
+</html>

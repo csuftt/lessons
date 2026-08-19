@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 3 课 · IntelliJ Platform 骨架 — zcode-plugin-langs</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+
+<header class="lesson-head">
+  <a href="../index.html">← 课程索引</a>
+  <span>第 3 课 / 7</span>
+  <a href="../reference/kotlin-java-cheatsheet.html">速查表</a>
+  <a href="../lessons/0002-thread-and-edt.html">← 第 2 课</a>
+</header>
+
+<h1>第 3 课：IntelliJ Platform 骨架——从 plugin.xml 到右侧工具栏</h1>
+<p class="lead">目标：学完这课，你能说清<strong>三行 plugin.xml 声明如何变成 IDE 右侧的 ZCode 标签</strong>，
+以及 Service 的现代注册方式。</p>
+
+<h2>一、plugin.xml：插件的"户口本"</h2>
+<p>IntelliJ 插件没有 main() 入口，一切靠 <strong>声明式注册</strong>：在 plugin.xml 里声明
+"我有这些扩展"，平台在合适的时机实例化并调用。全文只有 27 行（
+<code>intellij-plugin/src/main/resources/META-INF/plugin.xml</code>）：</p>
+
+<pre><code>&lt;idea-plugin&gt;
+    &lt;id&gt;com.zcode.ideaplugin.zcode-assistant&lt;/id&gt;              <span class="hl">← 唯一 ID</span>
+    &lt;name&gt;ZCode Assistant&lt;/name&gt;
+    &lt;description&gt;在 IDEA 里管理 ZCode 会话…&lt;/description&gt;
+
+    &lt;!-- 兼容的 IDE 版本范围：2024.1+ 全支持（含 2026.x）--&gt;
+    &lt;idea-version since-build="241" until-build="261.*"/&gt;     <span class="hl">← 版本范围</span>
+
+    &lt;!-- 依赖 JCEF（嵌入式 Chromium，用于渲染 React UI）--&gt;
+    &lt;depends&gt;com.intellij.modules.platform&lt;/depends&gt;           <span class="hl">← 平台依赖</span>
+
+    &lt;extensions defaultExtensionNs="com.intellij"&gt;
+        &lt;!-- 注册 ToolWindow（右侧工具栏）--&gt;
+        &lt;toolWindow id="ZCode"
+                    anchor="right"
+                    factoryClass="com.zcode.ideaplugin.ui.ZCodeToolWindowFactory"
+                    icon="AllIcons.Toolwindows.ToolWindowProject"
+                    secondary="false"/&gt;                          <span class="hl">← 三行核心声明</span>
+    &lt;/extensions&gt;
+&lt;/idea-plugin&gt;</code></pre>
+
+<p>三处关键声明：</p>
+<table>
+<thead>
+<tr><th>声明</th><th>含义</th><th>对应代码</th></tr>
+</thead>
+<tbody>
+<tr><td><code>&lt;idea-version since-build="241" /&gt;</code></td><td>兼容 2024.1+ 到 2026.1</td><td>与 <code>build.gradle.kts</code> 的 <code>sinceBuild/untilBuild</code> 一致</td></tr>
+<tr><td><code>&lt;depends&gt;com.intellij.modules.platform&lt;/depends&gt;</code></td><td>只依赖平台核心，不依赖具体 IDE 产品</td><td>IC/IDEA 都能装</td></tr>
+<tr><td><code>&lt;toolWindow id="ZCode" anchor="right" factoryClass="..." /&gt;</code></td><td>右侧注册一个叫 ZCode 的工具栏</td><td><code>ZCodeToolWindowFactory</code> 类</td></tr>
+</tbody>
+</table>
+
+<h2>二、ToolWindow 生命周期：声明 → 工厂 → 面板</h2>
+<p>平台遇到 <code>factoryClass</code> 后：首次打开标签时调用工厂的
+<code>createToolWindowContent</code>，把面板塞进内容管理器：</p>
+
+<pre><code>class ZCodeToolWindowFactory : ToolWindowFactory, DumbAware {
+    override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
+        val panel = ZCodeToolWindowPanel(project)              <span class="hl">← 真正的 UI 面板</span>
+        val content = ContentFactory.getInstance()
+            .createContent(panel, "", false)
+        toolWindow.contentManager.addContent(content)
+    }
+}</code></pre>
+
+<p>要点：</p>
+<ul>
+<li><code>DumbAware</code>：告诉平台"索引还没建好也能显示我"——否则开 IDEA 时索引阶段标签会灰掉</li>
+<li>面板是<strong>懒创建</strong>的：用户没点过 ZCode 标签，工厂不会执行</li>
+<li><code>ZCodeToolWindowPanel</code> 内部才是 JCEF 浏览器 + React UI 的宿主（第 6 课展开）</li>
+</ul>
+
+<h2>三、Service：现代注册方式（不用写 plugin.xml）</h2>
+<p>第 1 课读过的 <code>ZCodeServiceImpl</code> 用 <code>@Service(Service.Level.PROJECT)</code> 注解
+声明自己是"项目级服务"。这是<strong>现代方式</strong>：注解 + 编译期处理，替代旧式在
+plugin.xml 手写 <code>&lt;service&gt;</code> 标签。获取方式：</p>
+
+<pre><code>// 接口定义（ZCodeService.kt）
+interface ZCodeService {
+    fun getClient(): ZCodeProtocolClient
+    fun isStarted(): Boolean
+    fun shutdown()
+}
+
+// 扩展函数：全工程一句拿到服务（ZCodeServiceImpl.kt L47）
+fun Project.zCodeService(): ZCodeService = service&lt;ZCodeServiceImpl&gt;()
+
+// 调用方（如 ToolWindowPanel 里）
+val client = project.zCodeService().getClient()</code></pre>
+
+<p>Service 的三个 Level：</p>
+<table>
+<thead>
+<tr><th>级别</th><th>生命周期</th><th>典型用途</th></tr>
+</thead>
+<tbody>
+<tr><td><code>Service.Level.APP</code></td><td>整个 IDE 进程一个</td><td>全局单例（当前未用）</td></tr>
+<tr><td><code>Service.Level.PROJECT</code></td><td>每个项目一个，项目关闭销毁</td><td>本仓库的 <code>ZCodeServiceImpl</code></td></tr>
+<tr><td><code>Service.Level.MODULE</code></td><td>每个模块一个</td><td>少用</td></tr>
+</tbody>
+</table>
+
+<h2>四、启动全景（把 1-3 课串起来）</h2>
+<table>
+<thead>
+<tr><th>时机</th><th>发生了什么</th></tr>
+</thead>
+<tbody>
+<tr><td>IDE 启动</td><td>平台读 plugin.xml，注册 ToolWindow 扩展（此刻不创建面板）</td></tr>
+<tr><td>用户点 ZCode 标签</td><td>平台调 <code>ZCodeToolWindowFactory.createToolWindowContent</code></td></tr>
+<tr><td>面板构造</td><td><code>ZCodeToolWindowPanel(project)</code>：创建 JCEF 浏览器，注入 JS 桥</td></tr>
+<tr><td>首次需要客户端</td><td><code>project.zCodeService().getClient()</code> → 懒启动 app-server 子进程（双重检查锁，第 1 课）</td></tr>
+<tr><td>项目关闭</td><td><code>shutdown()</code>：关闭子进程、清引用</td></tr>
+</tbody>
+</table>
+
+<h2>五、检索练习</h2>
+
+<div class="quiz" data-title="第 3 课练习">
+  <div class="quiz-q" data-answer="2">
+    <p class="q-text">1. 插件没有 main()，靠什么注册扩展？</p>
+    <button class="quiz-opt">注解扫描</button>
+    <button class="quiz-opt">静态方法</button>
+    <button class="quiz-opt">plugin.xml</button>
+    <button class="quiz-opt">服务发现</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="1">
+    <p class="q-text">2. toolWindow 的 factoryClass 指向？</p>
+    <button class="quiz-opt">面板类</button>
+    <button class="quiz-opt">工厂类</button>
+    <button class="quiz-opt">服务类</button>
+    <button class="quiz-opt">协议类</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="3">
+    <p class="q-text">3. 面板是什么时候创建的？</p>
+    <button class="quiz-opt">IDE 启动时</button>
+    <button class="quiz-opt">编译完成时</button>
+    <button class="quiz-opt">打开文件时</button>
+    <button class="quiz-opt">点标签时</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="0">
+    <p class="q-text">4. @Service(Level.PROJECT) 的生命周期是？</p>
+    <button class="quiz-opt">随项目走</button>
+    <button class="quiz-opt">随进程走</button>
+    <button class="quiz-opt">随窗口走</button>
+    <button class="quiz-opt">随模块走</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="1">
+    <p class="q-text">5. DumbAware 表示该工厂？</p>
+    <button class="quiz-opt">需要索引</button>
+    <button class="quiz-opt">不依赖索引</button>
+    <button class="quiz-opt">后台运行</button>
+    <button class="quiz-opt">延迟加载</button>
+    <p class="quiz-feedback"></p>
+  </div>
+</div>
+
+<h2>六、推荐主源 + 课后任务</h2>
+<ul>
+<li><a href="https://plugins.jetbrains.com/docs/intellij/plugin-configuration-file.html">Plugin Configuration File（plugin.xml 权威文档）</a></li>
+<li><a href="https://plugins.jetbrains.com/docs/intellij/tool-windows.html">Tool Windows 文档</a></li>
+<li><a href="https://plugins.jetbrains.com/docs/intellij/plugin-services.html">Plugin Services 文档</a></li>
+</ul>
+<p><strong>课后任务（动手验证"声明即注册"）</strong>：把 plugin.xml 里的
+<code>&lt;toolWindow .../&gt;</code> 三行注释掉，跑 <code>./gradlew :intellij-plugin:runIde</code>，
+观察右侧工具栏 ZCode 标签消失；再改回来恢复。这个实验能让你把"声明"和"效果"焊死在一起。</p>
+
+<div class="next">
+<p><strong>有疑问？</strong> 随时问我。下一课切换到前端：<strong>TS 基础 + React 组件</strong>。</p>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>读懂 Go 项目 · 课程索引</title>
+<link rel="stylesheet" href="assets/style.css">
+<style>
+  .course-list { list-style:none; padding-left:0; counter-reset:lesson; }
+  .course-list li { counter-increment:lesson; padding:.7rem .9rem; border:1px solid var(--rule);
+    border-radius:6px; margin:.5rem 0; background:#fbfaf6; transition:background .15s; }
+  .course-list li:hover { background:#f4f1ea; }
+  .course-list a { color:var(--ink); font-weight:600; font-size:1rem; }
+  .course-list a:hover { color:var(--accent); text-decoration:none; }
+  .course-list .desc { display:block; font-size:.83rem; color:var(--muted); margin-top:.15rem; font-weight:400; }
+  .course-list .tag { font-family:"JetBrains Mono",monospace; font-size:.7rem; color:var(--go); margin-right:.4rem; }
+  .store { font-size:.78rem; color:var(--muted); margin-top:2rem; padding:.6rem .8rem; background:#f4f1ea; border-radius:5px; border:1px dashed var(--rule); }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="lesson-head">
+  <div class="num">Course · 9 课 + 速查表</div>
+  <h1>读懂并评审 Go 项目</h1>
+  <div class="mission">以 tdengine-replicator 为实战 · 面向 Java/Spring 架构师</div>
+</header>
+
+<p>这是一套为 Java 架构师设计的 Go 阅读课。<strong>每课 8–15 分钟,锚定你项目里的真实代码</strong>,用 Java→Go 映射作脚手架。建议按顺序读,每课末尾的折叠自测真做一遍。底部「下一课」可直接跳转。</p>
+
+<h2>课程</h2>
+<ol class="course-list">
+  <li><a href="lessons/0001-程序入口main-go.html">从 main.go 入手:程序入口与启动流程</a>
+    <span class="desc"><span class="tag">入门</span>package / func / := / go。读懂启动顺序 = 理解程序骨架。</span></li>
+  <li><a href="lessons/0002-错误处理与defer.html">错误处理与 defer:Go 没有 try/catch</a>
+    <span class="desc"><span class="tag">核心</span>error 返回值 / if err != nil / defer / 多返回值。评审第二大重点。</span></li>
+  <li><a href="lessons/0003-struct与指针接收者.html">struct、方法与指针接收者</a>
+    <span class="desc"><span class="tag">核心</span>没有 class 的面向对象。值接收者 vs 指针接收者(评审高发 bug)。</span></li>
+  <li><a href="lessons/0004-slice-map与nil.html">slice、map 与 nil:容器与共享陷阱</a>
+    <span class="desc"><span class="tag">核心</span>append 要赋值 / 切片共享底层数组 / nil map 写入 panic。</span></li>
+  <li><a href="lessons/0005-interface鸭子类型.html">interface:Go 的鸭子类型</a>
+    <span class="desc"><span class="tag">设计</span>隐式实现 / any / 类型断言 / type switch。Java 架构师的关键一跃。</span></li>
+  <li><a href="lessons/0006-goroutine与channel.html">goroutine、channel 与 select</a>
+    <span class="desc"><span class="tag">并发</span>并发原语三件套。goroutine 泄漏 = 评审第一大雷区。</span></li>
+  <li><a href="lessons/0007-context与sync.html">context 与 sync:并发协调</a>
+    <span class="desc"><span class="tag">并发</span>ctx 取消树 / WaitGroup / Mutex / Once。把 goroutine 组织起来。</span></li>
+  <li><a href="lessons/0008-项目导航与数据流.html">项目导航与数据流</a>
+    <span class="desc"><span class="tag">综合</span>go.mod / 同 package 共享 / go:embed / 14 文件分工图 / 主数据流 / 通用读法清单。</span></li>
+  <li><a href="lessons/0009-代码评审清单.html">Go 代码评审清单(capstone)</a>
+    <span class="desc"><span class="tag">实战</span>A→B→C→D→E 五维清单,逐条套用到 tdengine-replicator,产出真实 review。</span></li>
+</ol>
+
+<h2>随时查阅</h2>
+<ul class="toc">
+  <li><a href="reference/go-glossary.html">📘 Go 术语速查(Java 对照)</a> —— 忘了某个词就来这查。</li>
+</ul>
+
+<div class="note">
+  <span class="h">怎么用这套课</span>
+  1) 按顺序读到第 8 课,你就掌握了读懂任意中型 Go 项目的全套基础。2) 第 9 课是评审清单,以后 review Go 代码照着勾。3) 读的过程中卡住,随时回来问我——可以贴项目里任意一段代码,我用 Java 类比讲透。
+</div>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 6 课:goroutine、channel 与 select —— Go 并发原语</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+<header class="lesson-head">
+  <div class="num">Lesson 0006 · 约 14 分钟</div>
+  <h1>goroutine、channel 与 select:Go 并发原语</h1>
+  <div class="mission">目标:读懂并评审 Go 项目 · 实战 = tdengine-replicator</div>
+</header>
+
+<p><strong>本课赢点</strong>:你能看懂 <code>go f()</code>、<code>ch &lt;- v</code>、<code>select{}</code> 三件套,并识别「goroutine 泄漏」——这是评审 Go 代码的第一大雷区。</p>
+
+<p>← 上一课:<a href="0005-interface鸭子类型.html">interface 鸭子类型</a></p>
+
+<h2>1. goroutine:轻量线程</h2>
+
+<p>第 1 课你见过 <code>go m.pushLoop(ctx)</code>。<code>go 函数调用</code> = 在一个新 goroutine 里并发执行,当前代码<strong>不等待</strong>立刻继续。goroutine 是 Go 运行时调度的轻量线程(初始栈几 KB),一个进程跑几万个不夸张。</p>
+
+<p>看 <code>startDataConsumers</code>(data_consumer.go:21)如何起一批 goroutine:</p>
+
+<pre><code>func startDataConsumers(ctx context.Context, cfg Config, ...) {
+    for _, spec := range cfg.DataTopics {
+        for slot := 0; slot < cfg.ConsumerSlots; slot++ {
+            go runDataConsumer(ctx, cfg, spec, slot, m, rc, sc)   // 每个 topic×slot 起一个 goroutine
+        }
+    }
+}</code></pre>
+
+<div class="map">
+  <div class="cell go"><span class="tag">Go · goroutine</span><code>go f(args)</code>。无返回值(返回了也没人接)。M:N 调度,几 KB 栈。</div>
+  <div class="cell java"><span class="tag">Java · 虚拟线程</span>Java 21 <code>Thread.startVirtualThread(...)</code>。理念接近 goroutine。</div>
+</div>
+
+<div class="warn">
+  <span class="h">⚠️ goroutine 泄漏 = Go 头号评审点</span>
+  <code>go f()</code> 起 goroutine 容易,让它<strong>退出</strong>难。如果一个 goroutine 永远阻塞(比如卡在 <code>consumer.Poll()</code> 或 <code>&lt;-ch</code>),它会一直占着内存和连接——这叫 goroutine 泄漏。评审规则:<strong>每个 <code>go f(ctx)</code> 都要能通过 ctx 取消而退出</strong>。本项目每个 runDataConsumer 都接收 ctx,并在循环里检查 <code>case &lt;-ctx.Done(): return</code>——正确。
+</div>
+
+<h2>2. channel:goroutine 间的管道</h2>
+
+<p>channel 是 Go 并发的「通信」原语。语法 <code>chan T</code>。两种操作:</p>
+
+<pre><code>ch := make(chan string)   // 创建一个传 string 的无缓冲 channel
+ch &lt;- "hello"             // 发送(把 "hello" 塞进 ch)
+v := &lt;-ch                 // 接收(从 ch 取一个出来,赋给 v)</code></pre>
+
+<p>关键性质:<strong>发送和接收都会阻塞</strong>,直到对端就绪。无缓冲 channel 像面对面交接:发送方必须等接收方在场,反之亦然。这天然构成同步点。</p>
+
+<p>看 <code>ShutdownCoordinator.Shutdown</code>(graceful_shutdown.go:40)如何用 channel 等待「所有 goroutine 结束」:</p>
+
+<pre><code>func (sc *ShutdownCoordinator) Shutdown(timeout time.Duration) {
+    sc.cancel()                          // 1. 发取消信号(通知所有 goroutine 该退出了)
+
+    done := make(chan struct{})          // 2. 建一个传「无数据信号」的 channel(struct{} 不占空间
+    go func() {                          //    这是惯用法:用 chan struct{} 当「事件信号」)
+        sc.wg.Wait()                     // 3. 等所有 goroutine 调完 Done()(WaitGroup,下节讲)
+        close(done)                      // 4. close(ch) 通知「完成了」
+    }()
+
+    select {                             // 5. 二选一(见下节)
+    case &lt;-done:                         //    所有 goroutine 正常退出
+        log.Printf("所有goroutine已正常关闭")
+    case &lt;-time.After(timeout):          //    或者超时
+        log.Printf("关闭超时，强制退出")
+        os.Exit(1)
+    }
+}</code></pre>
+
+<p>这里 <code>close(done)</code> 是关键:<code>close</code> 一个 channel 后,对它的接收操作<strong>立刻不再阻塞</strong>、返回零值。所以 <code>&lt;-done</code> 在 close 之前一直阻塞,close 之后立刻通过——这就是「事件通知」模式。</p>
+
+<div class="map">
+  <div class="cell go"><span class="tag">Go · channel</span>语言级一等公民。阻塞式同步。<code>close(ch)</code> 广播「结束」。<code>chan struct{}</code> 当纯信号。</div>
+  <div class="cell java"><span class="tag">Java · BlockingQueue / CountDownLatch</span>channel 更万能:能当队列、当锁、当信号。</div>
+</div>
+
+<h2>3. select:多路复用(channel 版 switch)</h2>
+
+<p><code>select</code> 专门处理多个 channel 操作「谁先就绪」。<strong>它和普通 switch 完全不同</strong>——是给 channel 用的。语法:</p>
+
+<pre><code>select {
+case v := &lt;-ch1:        // 如果 ch1 能收到
+    use(v)
+case ch2 &lt;- x:          // 如果 ch2 能发出
+    // ...
+default:                // 可选:都不行就立刻走这里(非阻塞)
+    // ...
+}</code></pre>
+
+<p>select 会<strong>随机</strong>挑一个就绪的 case 执行;有 <code>default</code> 时,没有 case 就绪就立刻走 default(非阻塞)。</p>
+
+<h3>实战 1:非阻塞轮询(data_consumer.go:109)</h3>
+<pre><code>for {
+    select {
+    case &lt;-ctx.Done():   // 收到取消 → 收尾退出
+        flush()
+        return
+    case &lt;-ticker.C:    // 定时器到 → 触发攒批刷新
+        flush()
+        continue
+    default:             // 都没就绪 → 不阻塞,往下 Poll
+    }
+    ev := consumer.Poll(500)
+    ...
+}</code></pre>
+<p>这个循环是「消费-攒批」的核心。<code>default</code> 分支让它<strong>不会卡在 select 上</strong>——没信号时立刻去 Poll,保持高吞吐。同时 ctx.Done() 保证随时能优雅退出。这是非常地道的 Go 并发模式。</p>
+
+<h3>实战 2:取消信号监听</h3>
+<p>几乎每个后台循环都是这个骨架:</p>
+<pre><code>for {
+    select {
+    case &lt;-ctx.Done():    // 主人喊停,立刻退
+        return
+    case &lt;-tk.C:          // 定时干活
+        doWork()
+    }
+}</code></pre>
+<p>看 <code>probeLoop</code>(recovery.go:120)、<code>diffCheckLoop</code>、<code>recentDiffLoop</code>——全是这个模式。评审 Go 后台任务的第一眼:有没有 <code>case &lt;-ctx.Done(): return</code>。<strong>没有 = 泄漏隐患</strong>。</p>
+
+<h2>4. 评审清单:并发四大问</h2>
+<ol>
+  <li><strong>每个 goroutine 怎么退出?</strong> 找它的循环/阻塞点,确认有 <code>ctx.Done()</code> 或明确的结束条件。</li>
+  <li><strong>channel 谁负责 close?</strong> close 一个 channel 两次会 panic;往已 close 的 channel 发会 panic。评审确认 close 责任唯一(通常是唯一的发送方)。</li>
+  <li><strong>有没有 <code>default</code> 误用?</strong> select 带 default 是非阻塞;如果你本意是「等待」却写了 default,会变成忙轮询烧 CPU。</li>
+  <li><strong>共享变量有没有竞态?</strong> 多个 goroutine 读写同一变量必须有保护(下节讲 Mutex)。本项目 <code>RecoveryCoordinator</code> 的 <code>inflight/lastRun</code> 用 Mutex 保护——正确。</li>
+</ol>
+
+<h2>5. 自测</h2>
+
+<div class="quiz">
+  <div class="q-tag">检索练习</div>
+  <div class="q-text"><code>close(done)</code> 之后,执行 <code>&lt;-done</code> 会发生什么?为什么要用 <code>chan struct{}</code>?</div>
+  <details>
+    <summary>点开看答案</summary>
+    <p>close 后 <code>&lt;-done</code> <strong>立刻返回</strong>(零值,struct{} 的零值无意义),不再阻塞。这正是「事件通知」:发送方 close,所有接收方同时解除阻塞。用 <code>chan struct{}</code> 因为它<strong>不携带任何数据</strong>(struct{} 占 0 字节),纯粹当信号用——这是 Go 惯用法。传数据才用 <code>chan T</code>。</p>
+  </details>
+</div>
+
+<div class="quiz">
+  <div class="q-tag">评审练习</div>
+  <div class="q-text">下面这段后台循环,评审意见?<pre><code>go func() {
+    for {
+        doWork()
+        time.Sleep(time.Second)
+    }
+}()</code></pre></div>
+  <details>
+    <summary>点开看答案</summary>
+    <p><strong>goroutine 泄漏</strong>。这个循环<strong>没有任何退出条件</strong>——进程不退它就永远跑,且无法被取消。应接收 ctx 并改为 <code>select { case &lt;-ctx.Done(): return; case &lt;-time.After(time.Second): doWork() }</code>。对比本项目 <code>probeLoop</code> 的正确骨架。这类「无 ctx 的 go + 死循环」是评审打回的典型。</p>
+  </details>
+</div>
+
+<div class="quiz">
+  <div class="q-tag">辨析题</div>
+  <div class="q-text">select 带 <code>default</code> 和不带 default,行为差异是?</div>
+  <details>
+    <summary>点开看答案</summary>
+    <p>不带 default:没有 case 就绪时,<strong>阻塞</strong>直到某个 case 就绪(适合「等待事件」)。带 default:没有 case 就绪时,<strong>立刻</strong>走 default 分支(适合「非阻塞尝试」)。本项目 data_consumer 的主循环带 default 是为了「没事干就去 Poll」保持吞吐;而 <code>Shutdown</code> 的 select 不带 default 是为了「死等 done 或超时」。</p>
+  </details>
+</div>
+
+<h2>6. 推荐精读</h2>
+<p>👉 <a href="https://go.dev/tour/concurrency/1" target="_blank">A Tour of Go — Concurrency(goroutine/channel/select 官方)</a></p>
+<p>👉 <a href="https://go.dev/ref/spec#Select_statements" target="_blank">Go 语言规范 — Select statements</a>(权威)</p>
+<p>💡 经典阅读:<a href="https://go.dev/blog/pipelines" target="_blank">Go 官方博客:Go Concurrency Patterns — Pipelines</a></p>
+
+<hr style="margin:2rem 0;border:none;border-top:1px solid var(--rule)">
+<p>下一课:<strong>第 7 课 —— context.Context 与 sync(并发协调)</strong>,讲为什么每个函数第一个参数都是 ctx,以及 WaitGroup/Mutex/Once 怎么用——把上节课的 goroutine「组织」起来。</p>
+
+<footer class="lesson-foot">
+  <div class="nav">
+    <span>← <a href="0005-interface鸭子类型.html">第 5 课</a></span>
+    <span><a href="0007-context与sync.html">下一课:context 与 sync 协调 →</a> · 📘 <a href="../reference/go-glossary.html">速查表</a></span>
+  </div>
+</footer>
+</div>
+</body>
+</html>

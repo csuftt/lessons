@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 9 课:Go 代码评审清单(capstone)</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>
+  .checklist { list-style:none; padding-left:0; }
+  .checklist li { padding:.55rem .8rem; border:1px solid var(--rule); border-radius:5px; margin:.45rem 0;
+                  background:#fbfaf6; font-size:.88rem; }
+  .checklist li .h { font-weight:700; display:block; margin-bottom:.15rem; }
+  .checklist .sev { display:inline-block; font-size:.68rem; font-family:"JetBrains Mono",monospace;
+                    padding:.05rem .4rem; border-radius:3px; margin-left:.5rem; vertical-align:middle; }
+  .sev.good { background:#e6f4ea; color:#1e7d3c; }
+  .sev.risk { background:#fbeceb; color:#8a1538; }
+  .sev.note { background:#fff6e0; color:#8a6d00; }
+  .verdict { font-size:.82rem; color:var(--muted); margin-top:.2rem; }
+  .verdict code { font-size:.8rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="lesson-head">
+  <div class="num">Lesson 0009 · capstone · 约 12 分钟</div>
+  <h1>Go 代码评审清单:把 9 课装进一张表</h1>
+  <div class="mission">目标:读懂并评审 Go 项目 · 实战 = tdengine-replicator</div>
+</header>
+
+<p><strong>本课赢点</strong>:你拿到一份 Go 代码,能照这张清单 15 分钟过一遍、产出结构化评审意见。下面每一条都标注了<strong>本项目实际表现</strong>(绿=做得好 / 红=风险 / 黄=可改进),这就是你能给作者提的一份真实 review。</p>
+
+<p>← 上一课:<a href="0008-项目导航与数据流.html">项目导航与数据流</a> · 这是本系列<strong>最后一课</strong>。</p>
+
+<h2>评审清单(按优先级,tdengine-replicator 实评)</h2>
+
+<h3>A. 并发(头号雷区)</h3>
+<ul class="checklist">
+  <li>
+    <span class="h">A1. 每个 <code>go f(ctx)</code> 都能通过 ctx 退出? <span class="sev good">本项目:好</span></span>
+    data_consumer/recovery/probeLoop 全部接收 ctx 并在循环里 <code>case &lt;-ctx.Done(): return</code>。无泄漏。
+    <div class="verdict">依据:data_consumer.go:110 / recovery.go:124 / 171 / 211</div>
+  </li>
+  <li>
+    <span class="h">A2. WaitGroup 的 Add 与 defer Done 严格配对? <span class="sev good">本项目:好</span></span>
+    <code>sc.Register()</code> 后紧跟 <code>defer sc.Done()</code>,所有 return 路径都执行 Done。
+    <div class="verdict">依据:data_consumer.go:30-31</div>
+  </li>
+  <li>
+    <span class="h">A3. 共享状态有 Mutex 保护?锁的每条 return 都解锁? <span class="sev note">本项目:可改进</span></span>
+    RecoveryCoordinator 的 inflight/lastRun 有 Mutex——正确。但 Trigger 内多次手动 <code>r.mu.Unlock()</code>(提前 return),虽每条都对了,但<strong>易漏</strong>;建议用 <code>defer</code> 缩小持锁或重构临界区。可提改进项。
+    <div class="verdict">依据:recovery.go:44-68</div>
+  </li>
+  <li>
+    <span class="h">A4. channel 的 close 责任唯一? <span class="sev good">本项目:好</span></span>
+    <code>Shutdown</code> 中 <code>done</code> 只由唯一 goroutine close,接收方只读。
+    <div class="verdict">依据:graceful_shutdown.go:47-51</div>
+  </li>
+</ul>
+
+<h3>B. 错误处理</h3>
+<ul class="checklist">
+  <li>
+    <span class="h">B1. 每个返回的 err 都被检查? <span class="sev good">本项目:好</span></span>
+    openConn/queryMaxTS/consumer 创建等关键路径都检查 err。
+    <div class="verdict">少数故意忽略处用 <code>_, _ =</code>(如 consumer.Commit)标注了「忽略」意图,可接受。</div>
+  </li>
+  <li>
+    <span class="h">B2. <code>log.Fatalf</code> 只用于启动期? <span class="sev note">本项目:边界</span></span>
+    openConn 用 Fatalf——它<strong>只在 main 启动序列调用</strong>(localInit、消费者内连接也调 openConn,但那是 goroutine 里,Fatalf 会退出整个进程)。消费者 goroutine 里连接失败用 Fatalf 会打死进程,建议改 log+重连。可提改进。
+    <div class="verdict">依据:tdengine.go:17 / data_consumer.go:32</div>
+  </li>
+  <li>
+    <span class="h">B3. 错误判断靠字符串匹配?升级会脆裂? <span class="sev risk">本项目:风险</span></span>
+    <code>isIdempotentErr/isNotExistErr</code> 用 <code>strings.Contains(err.Error(), "not exist")</code>,大小写还写了两个变体(作者已被坑过)。TDengine 改文案会静默失效 → 幂等误判/补偿漏触发。<strong>最值得提的设计风险</strong>。缓解:固化驱动版本(项目已锁 v3.5.5)。
+    <div class="verdict">依据:tdengine.go:32-48</div>
+  </li>
+  <li>
+    <span class="h">B4. 配置解析失败静默回退? <span class="sev risk">本项目:风险</span></span>
+    <code>envIntOr</code>/<code>envBoolOr</code> 解析失败默默用默认值。端口写成 "abc" → 静默连默认端口,排查极痛。建议启动期配置失败 fail fast(log.Fatalf)。
+    <div class="verdict">依据:config.go:104-122</div>
+  </li>
+</ul>
+
+<h3>C. 资源与 defer</h3>
+<ul class="checklist">
+  <li>
+    <span class="h">C1. Open/Query 后紧跟 defer Close? <span class="sev good">本项目:好</span></span>
+    queryChildTag/queryMaxTS 在 <code>if err==nil</code> 之后 defer Close,顺序正确。
+    <div class="verdict">依据:tdengine.go:58 / 76</div>
+  </li>
+  <li>
+    <span class="h">C2. context.WithTimeout 配 defer cancel? <span class="sev good">本项目:好</span></span>
+    recovery.recover 正确配对。go vet 可通过。
+    <div class="verdict">依据:recovery.go:77-78</div>
+  </li>
+  <li>
+    <span class="h">C3. 每个 consumer goroutine 独占连接并 defer Close? <span class="sev good">本项目:好</span></span>
+    runDataConsumer 开 local/peer/consumer 三连接,全部 defer Close,goroutine 退出即释放。
+    <div class="verdict">依据:data_consumer.go:32-53</div>
+  </li>
+</ul>
+
+<h3>D. 类型与数据</h3>
+<ul class="checklist">
+  <li>
+    <span class="h">D1. 修改状态的方法用指针接收者? <span class="sev good">本项目:好</span></span>
+    Coordinator/metrics 全用 <code>(x *T)</code>;TopicSpec 纯计算用值接收者,一致。
+    <div class="verdict">依据:见第 3 课</div>
+  </li>
+  <li>
+    <span class="h">D2. slice 切片长期持有/跨 goroutine 是否拷贝防别名? <span class="sev good">本项目:好</span></span>
+    parseRow 用 <code>append([]driver.Value(nil), row[:d]...)</code> 显式拷贝 dataVals,防止共享原行底层数组。
+    <div class="verdict">依据:data_consumer.go:178 / 见第 4 课</div>
+  </li>
+  <li>
+    <span class="h">D3. nil map 写入?nil slice 追加? <span class="sev good">本项目:好</span></span>
+    map 都用 make 初始化;slice 用 append 赋值回。
+    <div class="verdict">依据:resync.go:302 等</div>
+  </li>
+  <li>
+    <span class="h">D4. 类型断言用双值形式防 panic? <span class="sev good">本项目:好</span></span>
+    parseRow 的 <code>.(bool)</code>/<code>.(string)</code> 都用 <code>, ok</code> 安全形式。
+    <div class="verdict">依据:data_consumer.go:170-173 / 见第 5 课</div>
+  </li>
+</ul>
+
+<h3>E. 设计与地道性</h3>
+<ul class="checklist">
+  <li>
+    <span class="h">E1. 接口小而聚焦?无接口污染? <span class="sev good">本项目:好</span></span>
+    几乎不定义自定义接口,直接用 driver-go 具体类型 + 内置 error。地道。
+  </li>
+  <li>
+    <span class="h">E2. 依赖少且精确锁版? <span class="sev good">本项目:好</span></span>
+    仅 2 个直接依赖,版本固定(尤其 driver-go native 固化 v3.5.5,注释说明原因)。
+  </li>
+  <li>
+    <span class="h">E3. 并发安全有测试覆盖? <span class="sev note">本项目:可改进</span></span>
+    仅 parse_test.go 一个测试。resync/recovery 等核心并发逻辑缺测试。建议补 runResync diff 逻辑的单测 + <code>go test -race</code>。
+    <div class="verdict">依据:parse_test.go 是唯一测试</div>
+  </li>
+</ul>
+
+<h2>把清单变成你的肌肉记忆</h2>
+<p>评审任意 Go PR 时,按 <strong>A→B→C→D→E</strong> 顺序扫一遍。其中 A(并发)和 B(错误)出 bug 概率最高、最致命,优先看。这张表是「最小可用集」,随你经验增长可以扩充。</p>
+
+<div class="quiz">
+  <div class="q-tag">综合演练</div>
+  <div class="q-text">拿本项目任意一个文件(如 meta_consumer.go / resync.go),照清单 A→E 扫一遍,看能不能找出上面没列到的一个点。</div>
+  <details>
+    <summary>提示</summary>
+    <p>这不是有标准答案的题——这是真实评审动作。把你的发现告诉我(贴文件名 + 你觉得的问题),我帮你判断对不对、严重不严重。这就是把知识变成「智慧」的一步。</p>
+  </details>
+</div>
+
+<hr style="margin:2rem 0;border:none;border-top:1px solid var(--rule)">
+
+<h2>🎉 恭喜,9 课全部完成</h2>
+<p>你现在具备了<strong>读懂并评审一个中型 Go 项目</strong>的全部基础知识,且全程是在你自己的 tdengine-replicator 上练的。回顾你掌握的:</p>
+<ul>
+  <li>✅ 入口与启动顺序(第 1 课)</li>
+  <li>✅ 错误处理与 defer(第 2 课)</li>
+  <li>✅ struct / 方法 / 指针接收者(第 3 课)</li>
+  <li>✅ slice / map / nil 与共享陷阱(第 4 课)</li>
+  <li>✅ interface 鸭子类型(第 5 课)</li>
+  <li>✅ goroutine / channel / select(第 6 课)</li>
+  <li>✅ context / sync 协调(第 7 课)</li>
+  <li>✅ 项目导航与数据流(第 8 课)</li>
+  <li>✅ 评审清单(第 9 课)</li>
+</ul>
+
+<h2>下一步:从「知识」到「智慧」</h2>
+<p>课程给你的脚手架已经搭好。真正长肉的是<strong>你自己读真实代码、问真实问题</strong>。建议:</p>
+<ol>
+  <li><strong>通读 tdengine-replicator 全部 14 文件</strong>,带着第 9 课清单逐个过。卡住的语法来问我。</li>
+  <li><strong>挑一个文件做一次完整 code review</strong>(meta_consumer.go / resync.go 是最有嚼头的),把发现告诉我,我当你的 review 搭子。</li>
+  <li>遇到陌生模式,贴给我,我用 Java 类比讲透。这是「滚动加深」——下次记得更牢。</li>
+</ol>
+<p>你随时可以回来。术语忘了查 <a href="../reference/go-glossary.html">速查表</a>,某课忘了重读对应 lesson。要我陪你逐行讲某个文件,或给你出针对性的实战评审题,直接说。</p>
+
+<footer class="lesson-foot">
+  <div class="nav">
+    <span>← <a href="0008-项目导航与数据流.html">第 8 课</a></span>
+    <span>📘 <a href="../reference/go-glossary.html">速查表</a></span> <span class="disabled">🎓 已是最后一课</span>
+  </div>
+</footer>
+</div>
+</body>
+</html>

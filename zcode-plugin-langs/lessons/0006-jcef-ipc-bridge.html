@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 6 课 · JCEF IPC 桥：React ↔ Java — zcode-plugin-langs</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+
+<header class="lesson-head">
+  <a href="../index.html">← 课程索引</a>
+  <span>第 6 课 / 7</span>
+  <a href="../reference/ts-react-cheatsheet.html">速查表</a>
+  <a href="../lessons/0005-hooks-zustand.html">← 第 5 课</a>
+</header>
+
+<h1>第 6 课：JCEF IPC 桥——React 和 Java 怎么打电话</h1>
+<p class="lead">目标：学完这课，你能<strong>画出一条消息从 React 按钮 → Java handler → 流式事件 → 回到 React 的完整路径</strong>，
+并读懂 bridge.ts 与 ZCodeToolWindowPanel.kt 的对应关系。</p>
+
+<h2>一、为什么需要 IPC 桥</h2>
+<p>React UI 跑在 <strong>JCEF</strong>（IntelliJ 内置的嵌入式 Chromium）里，和 Kotlin 端不在同一个
+进程/上下文。两端通信只有两条官方通道（文件头注释 L40-48）：</p>
+<table>
+<thead>
+<tr><th>方向</th><th>通道</th><th>仓库实现</th></tr>
+</thead>
+<tbody>
+<tr><td>JS → Java</td><td><code>JBCefJSQuery</code>（官方推荐，签名稳定）</td><td>前端调 <code>window.sendToJava(jsonStr)</code></td></tr>
+<tr><td>Java → JS</td><td><code>executeJavaScript(...)</code>（直接执行 JS）</td><td>Java 调 <code>window.zcodeBridge.onMessage(obj)</code></td></tr>
+</tbody>
+</table>
+
+<h2>二、JS → Java：注入的"动态函数名"问题（bridge.ts 精读）</h2>
+
+<pre><code>// ============ 全局类型声明 ============
+declare global {
+  interface Window {
+    /** Java 注入：JBCefJSQuery 动态函数（发送消息到 Java） */
+    __ZCODE_CEF_QUERY__?: (args: {
+      request: string
+      persistent?: boolean
+      onSuccess?: (r: string) =&gt; void
+      onFailure?: (e: string) =&gt; void
+    }) =&gt; void
+    /** 兼容：旧版直接挂到 window 上的 sendToJava */
+    sendToJava?: (msg: unknown) =&gt; void
+    /** Java → JS 回调入口 */
+    zcodeBridge?: { onMessage: (msg: unknown) =&gt; void }
+    ...
+  }
+}</code></pre>
+
+<p>关键难点（注释里写得很清楚）：JBCefJSQuery 创建时生成的 JS 函数名是
+<strong>运行时动态的</strong>（如 <code>cefQuery_1015760238_1</code>），不能硬编码。
+所以 Java 端注入页面时把它赋给固定全局变量 <code>__ZCODE_CEF_QUERY__</code>。
+TS 的 <code>declare global</code> 就是给这些"Java 塞进来的窗口属性"写类型声明——
+<strong>类型契约跟着代码走，两端才不会对不上</strong>。</p>
+
+<h2>三、Java → JS：字符串转义陷阱（ZCodeToolWindowPanel.kt 精读）</h2>
+<p>Java 往 JS 推消息是"拼一段 JS 代码字符串"：</p>
+
+<pre><code>// L318 附近的注释（原样保留）：关键：executeJavaScript 的 JS 代码里，
+// 我们构造一个 JS 字符串字面量
+val js = "window.zcodeBridge.onMessage(${jsonText})"</code></pre>
+<p>如果 <code>jsonText</code> 里含 <code>"</code>、<code>\</code>、换行，拼出来的 JS 直接语法错误——所以
+<strong>任何经 executeJavaScript 传的字符串必须做 JSON 转义</strong>（这就是为什么注释强调
+"构造 JS 字符串字面量"）。这是 JCEF 通信第一坑：<strong>不是网络协议，是代码注入</strong>。</p>
+
+<p>另外（L229 附近注释）：注入必须在 <strong>UI 线程</strong>执行——这呼应了第 2 课的 EDT 铁律：
+<code>executeJavaScript</code> 是 UI 操作。</p>
+
+<h2>四、完整链路追踪：发一条消息</h2>
+
+<table>
+<thead>
+<tr><th>#</th><th>端</th><th>发生什么</th><th>代码位置</th></tr>
+</thead>
+<tbody>
+<tr><td>1</td><td>React</td><td>InputBox 回车 → <code>sendMessage(text)</code></td><td><code>useStore.ts</code> L196</td></tr>
+<tr><td>2</td><td>React</td><td>store 先 <code>sendToJava({op:'subscribe'})</code> 再 <code>{op:'send'}</code></td><td><code>useStore.ts</code> L207-212</td></tr>
+<tr><td>3</td><td>React</td><td>bridge 把消息 JSON 序列化，调注入的 <code>__ZCODE_CEF_QUERY__</code></td><td><code>bridge.ts</code> L180 <code>sendToJava</code></td></tr>
+<tr><td>4</td><td>Java</td><td>JBCefJSQuery 回调 → <code>handleJsMessage</code> 按 <code>op</code> 分发</td><td><code>ZCodeToolWindowPanel.kt</code> L100</td></tr>
+<tr><td>5</td><td>Java</td><td>op=send → 调 <code>ZCodeProtocolClient.send()</code>（阻塞等 app-server）</td><td><code>protocol-client</code> <code>send()</code></td></tr>
+<tr><td>6</td><td>Java</td><td>流式事件回调 → 16ms 缓冲合并成批（第 2 课）</td><td><code>ZCodeToolWindowPanel.kt</code> L890</td></tr>
+<tr><td>7</td><td>Java</td><td><code>executeJavaScript</code> 把批事件推回 React</td><td><code>ZCodeToolWindowPanel.kt</code> L331</td></tr>
+<tr><td>8</td><td>React</td><td><code>window.zcodeBridge.onMessage</code> → 分发给 store 订阅者</td><td><code>bridge.ts</code> L108 <code>initBridge</code></td></tr>
+<tr><td>9</td><td>React</td><td><code>handleStreamBatch</code> 一次 set → 界面更新</td><td><code>useStore.ts</code> L560</td></tr>
+</tbody>
+</table>
+
+<h2>五、开发模式：没有 JCEF 怎么办（mock）</h2>
+<p>bridge.ts L13-15 注释：开发模式（<code>localhost:5173</code>）没有 JCEF，走
+<code>isInJcef()</code> 检测后改用 mock 响应，方便纯前端调试。两条通道并存：</p>
+<ul>
+<li><strong>生产</strong>：JCEF 注入 → 真 Java 桥</li>
+<li><strong>开发</strong>：vite dev server → mock（伪造 Java 响应）</li>
+</ul>
+<p>这就是为什么 store 的订阅要分"批量通道 + 单事件兜底通道"（第 5 课）——mock 模式只能走单事件通道。</p>
+
+<h2>六、检索练习</h2>
+
+<div class="quiz" data-title="第 6 课练习">
+  <div class="quiz-q" data-answer="1">
+    <p class="q-text">1. JS → Java 的官方通道是？</p>
+    <button class="quiz-opt">WebSocket</button>
+    <button class="quiz-opt">JBCefJSQuery</button>
+    <button class="quiz-opt">HTTP 请求</button>
+    <button class="quiz-opt">共享内存</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="2">
+    <p class="q-text">2. Java → JS 推送用哪个 API？</p>
+    <button class="quiz-opt">sendMessage</button>
+    <button class="quiz-opt">postMessage</button>
+    <button class="quiz-opt">executeJavaScript</button>
+    <button class="quiz-opt">invokeLater</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="0">
+    <p class="q-text">3. 动态函数名赋给固定变量是为了？</p>
+    <button class="quiz-opt">硬编码解耦</button>
+    <button class="quiz-opt">提升性能</button>
+    <button class="quiz-opt">防止注入</button>
+    <button class="quiz-opt">简化打包</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="3">
+    <p class="q-text">4. executeJavaScript 拼 JS 必须处理？</p>
+    <button class="quiz-opt">编码集</button>
+    <button class="quiz-opt">端口号</button>
+    <button class="quiz-opt">会话状态</button>
+    <button class="quiz-opt">字符串转义</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="1">
+    <p class="q-text">5. 开发模式（5173）下 JS 桥走？</p>
+    <button class="quiz-opt">真实 Java</button>
+    <button class="quiz-opt">mock 响应</button>
+    <button class="quiz-opt">本地代理</button>
+    <button class="quiz-opt">无响应</button>
+    <p class="quiz-feedback"></p>
+  </div>
+</div>
+
+<h2>七、推荐主源 + 课后任务</h2>
+<ul>
+<li><a href="https://plugins.jetbrains.com/docs/intellij/embedded-browser-jcef.html">IntelliJ 官方 JCEF 文档（CefBrowser / JBCefJSQuery）</a></li>
+<li><a href="https://plugins.jetbrains.com/docs/intellij/jcef-js-query.html">JBCefJSQuery 参考（本课主源）</a></li>
+</ul>
+<p><strong>课后任务</strong>：给两端加一个 <code>op=ping</code>：前端 <code>sendToJava({op:'ping'})</code>，
+Java 端 handler 里返回 <code>{"op":"pong","time":...}</code>，前端收到后在控制台打印。
+完成后你会对整条链路有肌肉记忆。</p>
+
+<div class="next">
+<p><strong>有疑问？</strong> 随时问我。最后一课：<strong>构建与调试</strong>——两条开发回路怎么跑、怎么查。</p>
+</div>
+
+</body>
+</html>

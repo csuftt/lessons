@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 7 课:context 与 sync —— 并发协调</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+<header class="lesson-head">
+  <div class="num">Lesson 0007 · 约 12 分钟</div>
+  <h1>context 与 sync:并发协调</h1>
+  <div class="mission">目标:读懂并评审 Go 项目 · 实战 = tdengine-replicator</div>
+</header>
+
+<p><strong>本课赢点</strong>:你理解为什么 Go 几乎每个函数第一个参数都是 <code>ctx context.Context</code>,并掌握 WaitGroup / Mutex / Once 三件套——把 goroutine 安全地组织起来。</p>
+
+<p>← 上一课:<a href="0006-goroutine与channel.html">goroutine、channel 与 select</a></p>
+
+<h2>1. context.Context:取消信号 + 超时 + 值,一统天下</h2>
+
+<p>Java 里你想让一个后台任务可取消,得自己造轮子(标志位、Interrupt、Future.cancel)。Go 用一个标准接口 <code>context.Context</code> 统一解决,贯穿所有代码。<strong>约定:长生命周期函数第一个参数就是 ctx</strong>。本项目 <code>runDataConsumer(ctx, ...)</code>、<code>probeLoop(ctx)</code>、<code>runResync(ctx, ...)</code> 全是。</p>
+
+<p>ctx 能做三件事,本项目用到前两件:</p>
+<ul>
+  <li><strong>取消</strong>:调用 <code>cancel()</code> 后,所有持有该 ctx(或其子 ctx)的 goroutine 通过 <code>&lt;-ctx.Done()</code> 解除阻塞、收到退出信号。</li>
+  <li><strong>超时</strong>:到点自动取消。</li>
+  <li><strong>携带值</strong>(request-scoped):本项目未用。</li>
+</ul>
+
+<p>看两个创建 ctx 的真实场景:</p>
+
+<pre><code>// graceful_shutdown.go:21 —— 派生「可手动取消」的根 ctx
+func newShutdownCoordinator() *ShutdownCoordinator {
+    ctx, cancel := context.WithCancel(context.Background())  // context.Background() 是根
+    return &ShutdownCoordinator{ctx: ctx, cancel: cancel}
+}
+// 收到 SIGTERM 时调 sc.cancel() → 所有用这个 ctx 的 goroutine 的 Done() 立刻就绪
+
+// recovery.go:77 —— 派生「4 小时后自动取消」的子 ctx
+ctx, cancel := context.WithTimeout(context.Background(), timeout)
+defer cancel()        // ← 必配对:函数返回时释放 ctx 占的资源
+... runResync(ctx ...) // 把 ctx 传下去,回补超时自动中止</code></pre>
+
+<div class="warn">
+  <span class="h">⚠️ 评审铁律:凡 <code>context.WithCancel/WithTimeout/WithDeadline</code> 必须配 <code>defer cancel()</code></span>
+  <code>go vet</code> 会检查这个。漏掉 cancel() 会泄漏 ctx 及其关联的 goroutine/定时器,直到父 ctx 取消。本项目 recovery.go:78 正确地 <code>defer cancel()</code>。评审时看到 WithTimeout 后没有 defer cancel = 一定打回。
+</div>
+
+<h3>ctx 如何向下传递:形成树</h3>
+<p>ctx 是树状的:<code>context.Background()</code> 是根,每次 WithCancel/WithTimeout 产生<strong>子 ctx</strong>。取消父 ctx → 所有子 ctx 自动取消。本项目:main 派生根 ctx → 传给每个 consumer/recovery loop → 它们内部再派生带超时的子 ctx(recovery)。取消根 ctx(关闭信号)→ 整棵树取消 → 所有 goroutine 退出。这就是「优雅关闭」能一秒停全部的原理。</p>
+
+<p>读 ctx 状态的两个方法:<code>&lt;-ctx.Done()</code>(阻塞,直到取消)和 <code>ctx.Err()</code>(返回 nil/Canceled/DeadlineExceeded)。本项目 recovery.go:97 用 <code>if ctx.Err() != nil</code> 在长循环里随时检查是否已超时。</p>
+
+<h2>2. sync.WaitGroup:等一群 goroutine 全部结束</h2>
+
+<p>Java 里你用 <code>CountDownLatch</code> 或 <code>CompletableFuture.allOf</code>。Go 用 <code>sync.WaitGroup</code>,三个动作:Add(计数+1)、Done(计数-1)、Wait(阻塞到计数归零)。</p>
+
+<p>看本项目怎么用它跟踪所有 consumer:</p>
+
+<pre><code>// data_consumer.go:30 —— 每个 consumer goroutine 启动时注册,结束时通知
+func runDataConsumer(ctx context ...) {
+    sc.Register()        // 内部 sc.wg.Add(1)
+    defer sc.Done()      // 内部 sc.wg.Done() —— 函数返回时 -1
+    ...
+}
+
+// graceful_shutdown.go:29 —— Register/Done 的实现
+func (sc *ShutdownCoordinator) Register() context.Context {
+    sc.wg.Add(1)
+    return sc.ctx
+}
+func (sc *ShutdownCoordinator) Done() { sc.wg.Done() }
+
+// graceful_shutdown.go:49 —— 关闭时等全部
+go func() {
+    sc.wg.Wait()         // 阻塞,直到所有 consumer 都 Done()
+    close(done)
+}()</code></pre>
+
+<div class="warn">
+  <span class="h">⚠️ 评审:WaitGroup 的 Add 和 Done 必须严格配对</span>
+  每个 <code>Add(1)</code> 必须有且仅有一个 <code>Done()</code>。多一个 Done → panic(负计数);漏一个 → Wait 永远阻塞 → 优雅关闭卡死超时。<code>defer sc.Done()</code> 紧跟在 <code>sc.Register()</code> 后面是最安全的写法(本项目正是如此),保证所有 return 路径都执行 Done。评审规则:看到 Add,立刻找配对的 defer Done。
+</div>
+
+<div class="note">
+  <span class="h">🔑 为什么 Register 返回 ctx</span>
+  <code>sc.Register()</code> 返回 <code>sc.ctx</code>——一行做两件事:把 goroutine 计入 WaitGroup,同时把取消信号 ctx 交给它。这样 consumer 既知道何时停(ctx.Done()),主人也知道何时等齐(wg.Wait())。优雅关闭的两条腿,一次注册完成。
+</div>
+
+<h2>3. sync.Mutex:保护共享状态</h2>
+
+<p>多个 goroutine 同时读写同一个变量会<strong>数据竞争</strong>(结果不可预测)。Go 不像 Java 有 <code>synchronized</code> 关键字,用 <code>sync.Mutex</code> 显式加锁。看 <code>RecoveryCoordinator.Trigger</code>(recovery.go:44):</p>
+
+<pre><code>type RecoveryCoordinator struct {
+    ...
+    mu       sync.Mutex    // 互斥锁
+    lastRun  time.Time
+    inflight bool          // 多个 goroutine 会同时访问 → 必须加锁
+}
+
+func (r *RecoveryCoordinator) Trigger(reason string, opts resyncOpts) {
+    r.mu.Lock()                    // 进入临界区
+    if r.inflight {                // 安全读 r.inflight
+        r.mu.Unlock()              // ← 注意:提前 return 前手动解锁
+        return
+    }
+    if time.Since(r.lastRun) < r.cool {
+        r.mu.Unlock()
+        return
+    }
+    r.lastRun = time.Now()         // 安全写
+    r.inflight = true              // 安全写
+    r.mu.Unlock()                  // 离开临界区
+
+    go func() {
+        defer func() {
+            r.mu.Lock()
+            r.inflight = false
+            r.mu.Unlock()
+        }()
+        r.recover(opts)
+    }()
+}</code></pre>
+
+<div class="map">
+  <div class="cell go"><span class="tag">Go · Mutex</span><code>mu.Lock()</code> / <code>mu.Unlock()</code>,成对手动调用。没有 synchronized 关键字。</div>
+  <div class="cell java"><span class="tag">Java · synchronized / ReentrantLock</span>Go 更原始、更显式。</div>
+</div>
+
+<div class="warn">
+  <span class="h">⚠️ 评审:锁的「提前 return」陷阱</span>
+  Java 的 synchronized 自动释放锁;Go 的 Mutex <strong>不会</strong>。每个 <code>return</code> 路径都必须先 <code>Unlock</code>,否则<strong>死锁</strong>。上面代码每个提前 return 都手动 Unlock 了,但很容易漏。更地道的写法用 <code>defer</code>:
+  <pre><code>r.mu.Lock()
+defer r.mu.Unlock()   // 函数任意 return 都解锁
+...临界区逻辑...</code></pre>
+  但 <code>defer</code> 会在函数<strong>末尾</strong>才解锁——如果临界区很长、想尽早放锁(像上面 Trigger 想尽快启 goroutine),就得手动 Unlock。本项目选手动 Unlock 是为了缩短持锁时间(合理),但要逐条 return 检查。评审重点:<strong>Lock 之后到函数结束,每条路径是否都恰好 Unlock 一次</strong>。
+</div>
+
+<h2>4. sync.Once:只执行一次</h2>
+
+<p>看 data_consumer.go:17 / 135:</p>
+
+<pre><code>var schemaWarnOnce sync.Once   // 包级变量
+
+schemaWarnOnce.Do(func() {       // 这段日志只会在整个进程第一次触发时打印一次
+    log.Printf("⚠ 行列数与 topic 预期不符，疑似 schema 漂移(同类后续静默)")
+})</code></pre>
+
+<p><code>Once.Do(f)</code> 保证 f 在所有 goroutine 中<strong>只执行一次</strong>,且并发安全。Java 等价 double-checked locking 单例初始化,但 Go 用 Once 一行搞定。本项目用它做「高频路径告警去重」——schema 漂移每秒触发几百次,只告警首条避免刷屏。优雅。</p>
+
+<h2>5. 自测</h2>
+
+<div class="quiz">
+  <div class="q-tag">检索练习</div>
+  <div class="q-text">为什么约定「函数第一个参数是 ctx」?取消一个父 ctx 会发生什么?</div>
+  <details>
+    <summary>点开看答案</summary>
+    <p>ctx 是取消/超时的传播载体。第一个参数传 ctx,是为了让调用链任意一层都能感知「该停了」,且支持超时级联。取消父 ctx → 它的所有子 ctx(WithCancel/WithTimeout 派生的)自动取消 → 持有这些 ctx 的 goroutine 的 <code>Done()</code> 全部就绪,得以退出。这就是优雅关闭能一次停全部 goroutine 的原理。</p>
+  </details>
+</div>
+
+<div class="quiz">
+  <div class="q-tag">评审练习</div>
+  <div class="q-text">某代码:<code>ctx, cancel := context.WithTimeout(...)</code> 后忘了 defer cancel。后果?评审意见?</div>
+  <details>
+    <summary>点开看答案</summary>
+    <p>资源泄漏:ctx 内部关联的定时器/追踪数据直到父 ctx 取消才回收。若这个函数被高频调用(如每个请求派生 ctx),会持续泄漏。<code>go vet</code> 会报错。评审:补 <code>defer cancel()</code>。本项目 recovery.go:78 正确配对。这是 Go 评审的硬性规则,几乎无例外。</p>
+  </details>
+</div>
+
+<div class="quiz">
+  <div class="q-tag">辨析题</div>
+  <div class="q-text">下面哪个会数据竞争?为什么<pre><code>// A: 多个 goroutine 各自用独立局部变量
+// B: 多个 goroutine 读写同一个 RecoveryCoordinator.inflight,无锁</code></pre></div>
+  <details>
+    <summary>点开看答案</summary>
+    <p>B。数据竞争 = 多个 goroutine <strong>至少一个在写</strong> 同一变量且无同步。A 各自独立变量,无共享,安全。B 的 inflight 被多个 trigger 源(写协程 not exist、probeLoop、HTTP /recovery)并发读写,必须用 Mutex(本项目正是)。Go 数据竞争不报编译错,但结果不可预测;可用 <code>go test -race</code> 检测。</p>
+  </details>
+</div>
+
+<h2>6. 推荐精读</h2>
+<p>👉 <a href="https://go.dev/blog/context" target="_blank">Go 官方博客:Go Concurrency Patterns: Context</a> —— context 设计动机与用法,权威。</p>
+<p>👉 <a href="https://pkg.go.dev/sync" target="_blank">Go 标准库 sync 文档</a> —— WaitGroup/Mutex/Once/OnceFunc。</p>
+
+<hr style="margin:2rem 0;border:none;border-top:1px solid var(--rule)">
+<p>下一课:<strong>第 8 课 —— 项目导航与数据流(读懂整个 tdengine-replicator)</strong>,把前 7 课串起来,画出 14 个文件的关系图和主数据流,教你一套「任意 Go 项目的通用读法」。</p>
+
+<footer class="lesson-foot">
+  <div class="nav">
+    <span>← <a href="0006-goroutine与channel.html">第 6 课</a></span>
+    <span><a href="0008-项目导航与数据流.html">下一课:项目导航与数据流 →</a> · 📘 <a href="../reference/go-glossary.html">速查表</a></span>
+  </div>
+</footer>
+</div>
+</body>
+</html>

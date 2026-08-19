@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>速查表 · Kotlin for Java 开发者 — zcode-plugin-langs</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<header class="doc-head">
+  <a href="../index.html">← 课程索引</a>
+  <a href="../lessons/0001-read-kotlin-with-java-eyes.html">← 第 1 课</a>
+  <span>速查表 · Kotlin for Java</span>
+</header>
+
+<h1>速查表：Kotlin for Java 开发者</h1>
+<p class="lead">本插件 Kotlin 侧的全部常用语法，压缩成一张表。设计为打印/快速翻阅用。
+主源：<a href="https://kotlinlang.org/docs/idioms.html">Kotlin Idioms</a> 与
+<a href="https://kotlinlang.org/docs/java-to-kotlin-interop.html">官方互操作指南</a>。</p>
+
+<h2>一、语法映射表（核心）</h2>
+<table>
+<thead>
+<tr><th>Java</th><th>Kotlin</th><th>说明</th></tr>
+</thead>
+<tbody>
+<tr><td><code>public final class Foo {}</code></td><td><code>class Foo</code></td><td>Kotlin 类默认 public + final；想继承需 <code>open</code></td></tr>
+<tr><td><code>class Foo extends Bar implements I</code></td><td><code>class Foo : Bar, I</code></td><td>继承与实现统一用 <code>:</code>，无 implements 关键字</td></tr>
+<tr><td><code>private final int x;</code> + 构造器赋值</td><td><code>private val x: Int</code></td><td>主构造器参数加 <code>val/var</code> 即自动成为属性</td></tr>
+<tr><td><code>private int y = 0; setY(...)</code></td><td><code>private var y = 0</code></td><td>自动生成 getter/setter；<code>var</code> 可变、<code>val</code> 只读</td></tr>
+<tr><td><code>@Nullable String s</code></td><td><code>var s: String?</code></td><td>可空性进类型系统，非空类型不能赋 null</td></tr>
+<tr><td><code>if (s != null) s.length</code></td><td><code>s?.length</code></td><td>安全调用：链上任何一环为 null 则整体 null</td></tr>
+<tr><td><code>s != null ? s : "默认"</code></td><td><code>s ?: "默认"</code></td><td>Elvis 运算符（空值合并）</td></tr>
+<tr><td><code>String.format("x=%d", n)</code></td><td><code>"x=$n"</code></td><td>字符串模板：<code>$变量</code> 或 <code>${表达式}</code></td></tr>
+<tr><td><code>public static void main(...)</code></td><td><code>fun main()</code></td><td>顶层函数即可，不强制类包装</td></tr>
+<tr><td><code>void foo() { ... }</code></td><td><code>fun foo() { ... }</code></td><td>函数用 <code>fun</code> 关键字</td></tr>
+<tr><td><code>T foo() { return x; }</code></td><td><code>fun foo(): T = x</code></td><td>表达式函数体：省略大括号与 return</td></tr>
+<tr><td><code>switch (x) { case 1: ... }</code></td><td><code>when (x) { 1 -> ... }</code></td><td><code>when</code> 是表达式，可返回值，无需 break</td></tr>
+<tr><td><code>for (T t : list)</code></td><td><code>for (t in list)</code></td><td><code>in</code> 迭代；<code>..</code> 表示范围 <code>1..10</code></td></tr>
+<tr><td><code>static class</code> / 单例</td><td><code>object Foo</code></td><td><code>object</code> = 单例；<code>companion object</code> = 静态成员容器</td></tr>
+<tr><td><code>instanceof + cast</code></td><td><code>when (x) { is Foo -> ... }</code></td><td>智能类型转换：判完类型后自动转型，无需显式 cast</td></tr>
+<tr><td><code>Collections.unmodifiableList(...)</code></td><td><code>listOf(...)</code> / <code>mapOf(...)</code></td><td>只读集合工厂：listOf/mapOf/setOf；可变用 mutableListOf 等</td></tr>
+<tr><td><code>@Override</code></td><td><code>override</code></td><td>必须显式写 override（强制）</td></tr>
+<tr><td><code>static final int X = 1</code></td><td><code>const val X = 1</code></td><td>编译期常量；普通顶层只读值用 <code>val</code></td></tr>
+<tr><td><code>public class Pojo { getters/setters/equals/hashCode/toString }</code></td><td><code>data class User(val name: String)</code></td><td>自动生成 equals/hashCode/toString/copy/解构</td></tr>
+<tr><td><code>sealed 层级（受限继承）</code></td><td><code>sealed class</code></td><td>编译器穷尽所有子类，<code>when</code> 可穷尽检查；本仓库协议消息 <code>ProtocolMessage</code> 即此类</td></tr>
+</tbody>
+</table>
+
+<h2>二、标准库惯用法（本仓库实际用到的）</h2>
+<table>
+<thead>
+<tr><th>惯用法</th><th>作用</th><th>本仓库实例</th></tr>
+</thead>
+<tbody>
+<tr><td><code>x?.let { ... }</code></td><td>非空才执行，块内 <code>it</code> 为非空</td><td><code>ZCodeServiceImpl.kt</code> L27 双重检查锁</td></tr>
+<tr><td><code>x?.takeIf { ... }</code></td><td>满足条件才返回 x，否则 null</td><td>条件过滤链</td></tr>
+<tr><td><code>x?.apply { ... }</code></td><td>块内以 this 指代 x，常用于初始化</td><td>构建器式初始化</td></tr>
+<tr><td><code>lock.withLock { ... }</code></td><td>带锁执行，自动解锁（finally 语义）</td><td><code>ZCodeServiceImpl.kt</code> L28/39</td></tr>
+<tr><td><code>runCatching { ... }</code></td><td>try/catch 的柯里化版本，返回 Result</td><td>协议调用包装</td></tr>
+<tr><td><code>fun T.扩展()</code></td><td>给已有类型加方法（编译为静态函数）</td><td><code>fun Project.zCodeService()</code> L47</td></tr>
+<tr><td><code>service&lt;T&gt;()</code></td><td>reified 内联泛型，编译期拿类型</td><td><code>ZCodeServiceImpl.kt</code> L47</td></tr>
+<tr><td><code>list.filter/map/forEach</code></td><td>函数式集合操作</td><td>前端消息处理列表</td></tr>
+</tbody>
+</table>
+
+<h2>三、协程最小集（第 2 课先打个底）</h2>
+<table>
+<thead>
+<tr><th>概念</th><th>一句话</th></tr>
+</thead>
+<tbody>
+<tr><td><code>suspend fun</code></td><td>可挂起函数：能暂停不阻塞线程，只能在协程里调用</td></tr>
+<tr><td><code>launch { }</code></td><td>启动一个协程（不阻塞当前线程），返回 Job</td></tr>
+<tr><td><code>withContext(Dispatchers.IO)</code></td><td>切换到指定线程池执行块，结束后回到调用线程</td></tr>
+<tr><td><code>coroutineScope { }</code></td><td>等待块内所有子协程完成（结构化并发）</td></tr>
+<tr><td>Main/IO/Default</td><td>UI 线程 / IO 线程池 / CPU 密集默认池</td></tr>
+</tbody>
+</table>
+
+<h2>四、术语小词典</h2>
+<table>
+<thead>
+<tr><th>术语</th><th>含义</th></tr>
+</thead>
+<tbody>
+<tr><td>var / val</td><td>可变属性 / 只读属性（val 赋值一次后不可变）</td></tr>
+<tr><td>可空类型（T?）</td><td>类型可容纳 null；非空类型 T 则不能</td></tr>
+<tr><td>安全调用（?.)</td><td>null 时短路返回 null，不抛 NPE</td></tr>
+<tr><td>Elvis（?:)</td><td>左侧为 null 时取右侧值的空值合并</td></tr>
+<tr><td>非空断言（!!)</td><td>强制解引用，null 时抛 NPE——慎用</td></tr>
+<tr><td>扩展函数</td><td>给既有类追加方法的语法糖（静态分派）</td></tr>
+<tr><td>data class</td><td>自动生成 equals/hashCode/toString/copy 的值类</td></tr>
+<tr><td>sealed class</td><td>受限继承层级，子类穷尽，when 分支可穷尽检查</td></tr>
+<tr><td>object</td><td>单例；companion object 承载静态成员</td></tr>
+<tr><td>lambda / it</td><td>函数字面量；it 是单参数 lambda 的隐式参数名</td></tr>
+<tr><td>尾随闭包</td><td>lambda 是最后一个参数时可写在括号外：<code>f { }</code></td></tr>
+<tr><td>non-local return</td><td>内联函数（如 let/apply）内 return 直接退出外层函数</td></tr>
+<tr><td>reified</td><td>内联泛型实化：编译期获得真实类型参数</td></tr>
+<tr><td>表达式函数体</td><td><code>fun f() = expr</code> 省略大括号与 return 的写法</td></tr>
+<tr><td>EDT</td><td>Event Dispatch Thread，IntelliJ UI 唯一允许操作的线程</td></tr>
+<tr><td>ModalityState</td><td>IntelliJ 模态状态，协程调度 UI 时的上下文</td></tr>
+</tbody>
+</table>
+
+<h2>五、易错点（本仓库踩过的）</h2>
+<ul>
+<li><code>VirtualFile.isFile</code> 不存在——Kotlin 里没有 Java 那种属性名错觉，查 SDK 要用 <code>isDirectory</code> 反转或用 <code>file.isValid</code>。</li>
+<li>与 Java 互操作时 <code>put</code> 有重载歧义（Java 方法 <code>put(K,V)</code> 与 Kotlin 集合扩展冲突），需显式类型参数。</li>
+<li><code>Boolean?</code> 不能直接当 if 条件，必须 <code>== true</code> 或 <code>?: false</code>。</li>
+<li><code>!!</code> 是代码味道：能用 <code>?.let</code> / <code>?:</code> 就别用。</li>
+</ul>
+
+</body>
+</html>

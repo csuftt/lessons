@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 3 课:struct、方法与指针接收者 —— 没有 class 的面向对象</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+<header class="lesson-head">
+  <div class="num">Lesson 0003 · 约 12 分钟</div>
+  <h1>struct、方法与指针接收者:没有 class 的面向对象</h1>
+  <div class="mission">目标:读懂并评审 Go 项目 · 实战 = tdengine-replicator</div>
+</header>
+
+<p><strong>本课赢点</strong>:你不再把 Go 的 struct 当成「残废的 class」。你能说清「值接收者」和「指针接收者」的区别——这是 Go 评审里最容易藏 bug 的地方之一。</p>
+
+<p>← 上一课:<a href="0002-错误处理与defer.html">错误处理与 defer</a></p>
+
+<h2>1. struct = 只有数据的 class(方法在「外面」)</h2>
+
+<p>看 <code>Config</code>(config.go:9),你先感受 Go 的 struct:</p>
+
+<pre><code>type Config struct {
+    LocalHost string
+    LocalPort int
+    PeerHost  string
+    PeerPort  int
+    User      string
+    Password  string
+    // ...更多字段
+}</code></pre>
+
+<div class="map">
+  <div class="cell go"><span class="tag">Go · struct</span>只有字段,没有方法、没有构造器、没有继承。字段类型写在字段名<strong>后面</strong>(<code>LocalHost string</code>),无逗号。</div>
+  <div class="cell java"><span class="tag">Java · class</span>字段+方法+构造器+继承都在一个 class 里。<code>private String localHost;</code></div>
+</div>
+
+<p>关键差异:Java 的方法写在 class 大括号里;Go 的方法<strong>写在 struct 外面</strong>,靠「接收者(receiver)」声明归属。看 <code>TopicSpec</code>(config.go:62):</p>
+
+<pre><code>type TopicSpec struct {
+    Topic    string
+    DB       string
+    Stable   string
+    DataCols []string
+    TagCols  []string
+}
+
+func (t TopicSpec) replIdx() int   { return len(t.DataCols) }          // ① 方法
+func (t TopicSpec) tbnameIdx() int { return len(t.DataCols) + 1 }
+func (t TopicSpec) totalCols() int { return len(t.DataCols) + 2 + len(t.TagCols) }</code></pre>
+
+<p>注意 <code>func</code> 和函数名之间多了 <code>(t TopicSpec)</code>——这就是<strong>接收者</strong>。它的意思等同于 Java 的 <code>this</code>:「这个方法属于 TopicSpec,<code>t</code> 就是接收者本身」。调用时:</p>
+
+<pre><code>spec := cfg.DataTopics[0]
+i := spec.replIdx()   // 像 Java 的 spec.replIdx()</code></pre>
+
+<div class="map">
+  <div class="cell go"><span class="tag">Go · 接收者</span><code>func (t TopicSpec) replIdx() int</code><br><code>t</code> 是接收者变量,<code>TopicSpec</code> 是类型。</div>
+  <div class="cell java"><span class="tag">Java · this</span><code>public int replIdx() { ... }</code><br>this 隐含,不用写出来。</div>
+</div>
+
+<p>这里 <code>(t TopicSpec)</code> 里类型前<strong>没有 <code>*</code></strong>——这是「值接收者」,下一节是重点。</p>
+
+<h2>2. 本课核心:值接收者 vs 指针接收者</h2>
+
+<p>对比同项目里两类方法,先看现象:</p>
+
+<pre><code>// config.go —— 值接收者(类型前无 *)
+func (t TopicSpec) replIdx() int { return len(t.DataCols) }
+
+// graceful_shutdown.go —— 指针接收者(类型前有 *)
+func (sc *ShutdownCoordinator) Register() context.Context {
+    sc.wg.Add(1)      // ← 在修改 sc 的字段
+    return sc.ctx
+}</code></pre>
+
+<p><code>*</code> 在 Go 里是「指针」(类似 Java 的引用,但更显式)。这两种写法的区别是 Go 评审的重灾区:</p>
+
+<div class="map">
+  <div class="cell go"><span class="tag">Go · 值接收者 <code>(t TopicSpec)</code></span>t 是<strong>副本</strong>。方法里改 t 不影响原对象。适合只读/纯计算。<code>replIdx</code> 只读 DataCols,用值接收者合理。</div>
+  <div class="cell java"><span class="tag">Java 类比</span>不存在「按副本传递」——Java 对象永远是引用。所以这点对 Java 人<strong>最反直觉</strong>。</div>
+</div>
+
+<div class="map">
+  <div class="cell go"><span class="tag">Go · 指针接收者 <code>(sc *ShutdownCoordinator)</code></span>sc 是指向原对象的<strong>指针</strong>。方法里改 sc 的字段 = 改原对象。<code>Register</code> 调 <code>sc.wg.Add(1)</code> 改了 wg,必须用指针。</div>
+  <div class="cell java"><span class="tag">Java 类比</span>≈ 普通实例方法操作 this。Java 习惯,Go 要你<strong>显式</strong>用 *。</div>
+</div>
+
+<div class="warn">
+  <span class="h">⚠️ 评审高发 bug:该用指针却用了值接收者</span>
+  如果你看到 <code>func (sc ShutdownCoordinator) Register()</code>(漏了 <code>*</code>),<code>sc.wg.Add(1)</code> 改的是<strong>副本的 wg</strong>,原对象的 wg 没变——关闭协调彻底失效,且<strong>不报错</strong>,极难查。评审规则:<strong>方法要修改对象状态 → 必须是指针接收者</strong>。本项目 <code>ShutdownCoordinator</code>、<code>metrics</code>、<code>RecoveryCoordinator</code> 全用指针接收者,因为它们都持状态——正确。
+</div>
+
+<h3>经验法则(够评审用)</h3>
+<ul>
+  <li><strong>要改字段 / struct 很大 / 为了和同类型其他方法一致</strong> → 用指针接收者 <code>(s *T)</code>。</li>
+  <li><strong>纯读、struct 很小(几个基本类型)</strong> → 可以用值接收者 <code>(s T)</code>。</li>
+  <li><strong>同一类型的方法,接收者类型要一致</strong>(别一半值一半指针)——这是 Go 惯用法,混用评审要打回。</li>
+</ul>
+
+<h2>3. 构造器:Go 用约定,不用关键字</h2>
+
+<p>Go 没有 <code>new Config()</code> 这种构造器语法。约定是写一个 <code>NewXxx</code> / <code>newXxx</code> 函数返回实例(通常返回指针):</p>
+
+<pre><code>// graceful_shutdown.go:20
+func newShutdownCoordinator() *ShutdownCoordinator {     // 返回指针
+    ctx, cancel := context.WithCancel(context.Background())
+    return &ShutdownCoordinator{                         // & 取地址 → 得到指针
+        ctx:    ctx,                                     // 字段:值 初始化(键值式)
+        cancel: cancel,
+    }
+}</code></pre>
+
+<div class="map">
+  <div class="cell go"><span class="tag">Go · 构造</span>普通函数 + <code>&amp;T{...}</code>。<code>&amp;</code> 取地址。<code>T{字段:值}</code> 是字面量构造(类似 Java record 全参构造)。</div>
+  <div class="cell java"><span class="tag">Java · 构造</span><code>new ShutdownCoordinator(ctx, cancel)</code> + 构造器方法。</div>
+</div>
+
+<p>评审时找入口:<code>main.go</code> 里 <code>sc := newShutdownCoordinator()</code> / <code>m := newMetrics(cfg)</code> / <code>recovery := newRecovery(...)</code>——看到 <code>newXxx()</code> 就知道是「构造这个对象」。</p>
+
+<h2>4. 顺带:struct 里嵌入「类型」(不是继承)</h2>
+
+<p>Go 没有 <code>extends</code>。<code>ShutdownCoordinator</code> 里:</p>
+
+<pre><code>type ShutdownCoordinator struct {
+    wg     sync.WaitGroup   // 命名字段:持有一个 WaitGroup
+    ctx    context.Context  // 命名字段:持有接口
+    cancel context.CancelFunc
+}</code></pre>
+
+<p>这是<strong>组合</strong>(has-a),不是继承(is-a)。Go 的哲学是「组合优于继承」——和你 Spring 里习惯的类层次不同。后面讲 interface 时你会看到 Go 怎么用「隐式接口」替代继承的多态。</p>
+
+<div class="note">
+  <span class="h">🔑 这对你 Spring 直觉的修正</span>
+  别找「基类/抽象类/继承链」——Go 没有。找「struct + 方法 + interface」三件套:struct 装数据,方法挂外面,interface 定义能力。评审设计时,关心的是「接口是否小而专注」「组合是否合理」,而不是继承层次是否漂亮。
+</div>
+
+<h2>5. 自测</h2>
+
+<div class="quiz">
+  <div class="q-tag">检索练习</div>
+  <div class="q-text"><code>func (t TopicSpec) replIdx()</code> 和 <code>func (sc *ShutdownCoordinator) Register()</code>,哪个会在方法内的修改<strong>不</strong>反映到原对象?</div>
+  <details>
+    <summary>点开看答案</summary>
+    <p>前者(<code>TopicSpec</code>,值接收者)。它是副本,方法内的改动(如果有)只改副本。<code>TopicSpec</code> 方法都是只读计算,无副作用,所以用值接收者没问题。后者是指针接收者,改 sc 就是改原对象。</p>
+  </details>
+</div>
+
+<div class="quiz">
+  <div class="q-tag">评审练习</div>
+  <div class="q-text">某 PR 里写了 <code>func (m metrics) incCount()</code>,方法体是 <code>m.count++</code>。你的评审意见?</div>
+  <details>
+    <summary>点开看答案</summary>
+    <p>bug。值接收者,<code>m.count++</code> 改的是副本,原 metrics.count 永远不增,且无编译错误。必须改成 <code>func (m *metrics) incCount()</code>。本项目 <code>metrics</code> 的方法正是指针接收者(<code>func (m *metrics) pushLoop</code>),对照即可。<strong>凡是方法里写 <code>s.x = ...</code> 或 <code>s.x++</code>,检查接收者是否带 <code>*</code></strong>——这是 Go 评审肌肉记忆。</p>
+  </details>
+</div>
+
+<div class="quiz">
+  <div class="q-tag">翻译练习</div>
+  <div class="q-text"><code>return &amp;ShutdownCoordinator{ctx: ctx, cancel: cancel}</code> 里的 <code>&amp;</code>,对应 Java 什么概念?</div>
+  <details>
+    <summary>点开看答案</summary>
+    <p><code>&amp;</code> 取对象的地址,得到指针。Java 里你拿到的对象引用天然就是「指向堆对象的指针」,所以 Java 程序员从不写 <code>&amp;</code>。Go 把「值」和「指向值的指针」显式区分:<code>ShutdownCoordinator{...}</code> 是值,<code>&amp;ShutdownCoordinator{...}</code> 是指向它的指针。返回指针后,调用方修改的就是同一份对象。</p>
+  </details>
+</div>
+
+<h2>6. 推荐精读</h2>
+<p>👉 <a href="https://go.dev/tour/moretypes/1" target="_blank">A Tour of Go — More types(structs, methods, interfaces 官方)</a></p>
+<p>👉 <a href="https://go.dev/doc/effective_go#data" target="_blank">Effective Go — Data(官方)</a></p>
+
+<hr style="margin:2rem 0;border:none;border-top:1px solid var(--rule)">
+<p>下一课:<strong>第 4 课 —— slice、map 与 nil</strong>,读 <code>buildInsert</code> 的切片操作,搞清 Go 最高频容器和它对 Java 人最容易踩的「底层数组共享」陷阱。</p>
+
+<footer class="lesson-foot">
+  <div class="nav">
+    <span>← <a href="0002-错误处理与defer.html">第 2 课</a></span>
+    <span><a href="0004-slice-map与nil.html">下一课:slice、map 与 nil →</a> · 📘 <a href="../reference/go-glossary.html">速查表</a></span>
+  </div>
+</footer>
+</div>
+</body>
+</html>

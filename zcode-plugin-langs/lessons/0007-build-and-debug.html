@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 7 课 · 构建与调试：两条开发回路 — zcode-plugin-langs</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+
+<header class="lesson-head">
+  <a href="../index.html">← 课程索引</a>
+  <span>第 7 课 / 7</span>
+  <a href="../reference/ts-react-cheatsheet.html">速查表</a>
+  <a href="../lessons/0006-jcef-ipc-bridge.html">← 第 6 课</a>
+</header>
+
+<h1>第 7 课：构建与调试——两条开发回路</h1>
+<p class="lead">目标：学完这课，你能<strong>独立跑起开发环境并定位问题</strong>：
+知道什么时候用浏览器调试、什么时候用 runIde 真机、遇到卡死从哪查起。</p>
+
+<h2>一、两条开发回路（先建立全局图）</h2>
+<table>
+<thead>
+<tr><th>回路</th><th>怎么跑</th><th>适合调试什么</th><th>限制</th></tr>
+</thead>
+<tbody>
+<tr><td>前端 dev server</td><td><code>cd webview &amp;&amp; npm run dev</code>（localhost:5173）</td><td>组件、样式、状态、交互（浏览器 F12 随便用）</td><td>没有真 Java 桥，走 mock</td></tr>
+<tr><td>真机 runIde</td><td><code>./gradlew :intellij-plugin:runIde</code>（启动沙箱 IDE）</td><td>IPC 桥、协议通信、EDT、真实 app-server</td><td>JCEF <strong>没有 DevTools</strong>，只能靠日志/诊断面板</td></tr>
+</tbody>
+</table>
+<p><strong>工作习惯建议</strong>：先 dev server 把 UI 调好，再 runIde 验证两端。别在真机里调 UI——没有 DevTools 等于蒙眼。</p>
+
+<h2>二、前端回路：vite.config.ts 关键点</h2>
+<pre><code>server: {
+  port: 5173,
+  strictPort: true,   // 端口被占就直接报错，不漂移（Java 端硬编码 5173）
+  host: 'localhost',  // 只监听本地
+},</code></pre>
+<ul>
+<li><strong>strictPort</strong>：Java 端 JCEF 直连 5173，端口漂移会连不上——所以宁可报错不漂移</li>
+<li>Java 端怎么知道连 5173？注释说"Java 端 JCEF 直连此地址"——开发模式下 runIde 的 JCEF 直接加载 <code>http://localhost:5173</code>（而不是打包后的 HTML），所以能热重载</li>
+<li>生产打包：<code>npm run build:single</code> → <code>vite-plugin-singlefile</code> 打成单 HTML 内嵌进插件，JCEF 加载本地文件</li>
+</ul>
+
+<h2>三、Kotlin 回路：build.gradle.kts 关键点</h2>
+<pre><code>intellij {
+    version.set("2024.1")     // SDK 版本（首次自动下载约 1.5GB）
+    type.set("IC")            // Community 版
+}
+buildSearchableOptions { enabled = false }   // 跳过全量 UI 扫描（慢且易失败）
+signPlugin { enabled = false }               // 开发期不签名</code></pre>
+<ul>
+<li>修改 Kotlin 后跑 <code>./gradlew :intellij-plugin:runIde</code> 会自动编译再启动沙箱 IDE</li>
+<li>首次会很慢（下 SDK），之后增量编译很快</li>
+<li>Kotlin 单独编译命令：<code>./gradlew :intellij-plugin:compileKotlin</code>（只查编译错误不启 IDE）</li>
+</ul>
+
+<h2>四、真机调试三板斧（JCEF 没有 DevTools）</h2>
+<table>
+<thead>
+<tr><th>工具</th><th>怎么用</th><th>能查到什么</th></tr>
+</thead>
+<tbody>
+<tr><td>前端诊断面板</td><td>bridge.ts 的 <code>onDiagLog</code>/<code>getDiagLog</code>（页面内显示）</td><td>Java 推了哪些事件、批次大小（流式排查首选）</td></tr>
+<tr><td>IDE 日志</td><td>沙箱 IDE Help → Show Log / <code>log.info(...)</code> 打点</td><td>Java 端处理路径、异常堆栈</td></tr>
+<tr><td>app-server 抓包</td><td>协议层直接看请求/响应 JSON</td><td>协议字段对错（如 content vs message）</td></tr>
+</tbody>
+</table>
+
+<h2>五、常见坑速查（本仓库实战踩过）</h2>
+<ul>
+<li><strong>JCEF 无 DevTools</strong>：console.log 看不见？页面诊断面板 + IDE 日志替代</li>
+<li><strong>5173 端口被占</strong>：vite 直接报错（strictPort）——先杀占用进程再起</li>
+<li><strong>runIde 后 build 删不掉文件</strong>：JCEF helper 进程锁了缓存文件（.bdic 被锁）。按命令行精确匹配杀沙箱的 <code>jcef_helper.exe</code>，别按镜像名杀（会误伤正式 IDE）</li>
+<li><strong>流式不更新</strong>：先看诊断面板有没有 streamBatch；有 → 前端合并逻辑问题；没有 → Java 缓冲/推送问题（第 2 课三层节流）</li>
+<li><strong>协议超时全挂</strong>：检查 app-server 子进程 stderr 是否被管道阻塞（4KB 管道满 → 进程假死）——这是本项目踩过的最隐蔽的坑</li>
+<li><strong>前端改动不生效</strong>：组件忘了 import 自己的 less 文件（vite 只打包被 import 的样式）</li>
+</ul>
+
+<h2>六、检索练习</h2>
+
+<div class="quiz" data-title="第 7 课练习">
+  <div class="quiz-q" data-answer="0">
+    <p class="q-text">1. 调组件样式应该用哪个回路？</p>
+    <button class="quiz-opt">dev server</button>
+    <button class="quiz-opt">runIde 真机</button>
+    <button class="quiz-opt">打包测试</button>
+    <button class="quiz-opt">单元测试</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="1">
+    <p class="q-text">2. JCEF 环境能打开 DevTools 吗？</p>
+    <button class="quiz-opt">完全可以</button>
+    <button class="quiz-opt">没有工具</button>
+    <button class="quiz-opt">需要插件</button>
+    <button class="quiz-opt">只能远程</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="2">
+    <p class="q-text">3. strictPort 的意义是？</p>
+    <button class="quiz-opt">提高安全</button>
+    <button class="quiz-opt">加速启动</button>
+    <button class="quiz-opt">端口不漂移</button>
+    <button class="quiz-opt">禁止访问</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="3">
+    <p class="q-text">4. 流式不更新先看哪里？</p>
+    <button class="quiz-opt">看浏览器</button>
+    <button class="quiz-opt">看源码</button>
+    <button class="quiz-opt">重装插件</button>
+    <button class="quiz-opt">诊断面板</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="0">
+    <p class="q-text">5. 只查 Kotlin 编译错误用？</p>
+    <button class="quiz-opt">compileKotlin</button>
+    <button class="quiz-opt">runIde 启动</button>
+    <button class="quiz-opt">buildPlugin</button>
+    <button class="quiz-opt">vite build</button>
+    <p class="quiz-feedback"></p>
+  </div>
+</div>
+
+<h2>七、推荐主源 + 结课任务</h2>
+<ul>
+<li><a href="https://plugins.jetbrains.com/docs/intellij/getting-started.html">IntelliJ Platform 插件开发入门（环境搭建官方指南）</a></li>
+<li><a href="https://vite.dev/guide/">Vite 官方指南</a></li>
+</ul>
+<p><strong>结课任务（把七课串起来）</strong>：跑一次完整闭环——<code>npm run dev</code> 用 mock 模式发一条消息看流式；
+再 <code>runIde</code> 真机发一条，用诊断面板对比两条路径的差异。跑通即毕业。</p>
+
+<div class="next">
+<p><strong>有疑问？</strong> 随时问我。七课全部完成，建议回 <a href="../index.html">课程索引</a> 从头过一遍，
+速查表（<a href="../reference/kotlin-java-cheatsheet.html">Kotlin</a> /
+<a href="../reference/ts-react-cheatsheet.html">TS/React</a>）留着日常翻。</p>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>速查表 · TypeScript / React — zcode-plugin-langs</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<header class="doc-head">
+  <a href="../index.html">← 课程索引</a>
+  <a href="../lessons/0004-ts-react-components.html">← 第 4 课</a>
+  <span>速查表 · TS/React</span>
+</header>
+
+<h1>速查表：TypeScript / React（本插件 webview）</h1>
+<p class="lead">设计为打印/快速翻阅用。主源：<a href="https://react.dev/learn">React Learn</a>、
+<a href="https://www.typescriptlang.org/docs/handbook/intro.html">TS Handbook</a>、
+<a href="https://zustand.docs.pmnd.rs/">Zustand 文档</a>。</p>
+
+<h2>一、TypeScript 核心（本仓库用到的）</h2>
+<table>
+<thead>
+<tr><th>写法</th><th>含义</th><th>备注</th></tr>
+</thead>
+<tbody>
+<tr><td><code>const x: string = 'a'</code></td><td>变量类型标注</td><td>常用 <code>const</code>；<code>let</code> 用于可变</td></tr>
+<tr><td><code>interface Props { path: string }</code></td><td>对象类型契约</td><td>组件 props 的标配；字段用 <code>?</code> 可空：<code>since?: number</code></td></tr>
+<tr><td><code>type View = 'chat' | 'history'</code></td><td>联合类型（字面量枚举）</td><td>本仓库 App.tsx 视图切换用</td></tr>
+<tr><td><code>import type { X } from '...'</code></td><td>仅类型导入</td><td>编译后消失，零运行时开销</td></tr>
+<tr><td><code>a ?? b</code></td><td>空值合并（null/undefined 时取 b）</td><td>对应 Kotlin <code>?:</code></td></tr>
+<tr><td><code>a?.b</code></td><td>可选链访问</td><td>对应 Kotlin <code>?.</code></td></tr>
+<tr><td><code>declare global { interface Window {...} }</code></td><td>给运行时注入的全局变量写类型</td><td>bridge.ts 给 Java 注入的 <code>__ZCODE_CEF_QUERY__</code> 等声明</td></tr>
+<tr><td><code>&lt;T&gt;</code> 泛型</td><td>类型参数</td><td><code>useStore&lt;StoreState&gt;((set, get) =&gt; ...)</code></td></tr>
+<tr><td><code>function f(p: string): number</code></td><td>函数参数/返回值类型</td><td>没返回写 <code>: void</code></td></tr>
+</tbody>
+</table>
+
+<h2>二、React 核心（组件 = 函数）</h2>
+<table>
+<thead>
+<tr><th>概念</th><th>写法</th><th>一句话</th></tr>
+</thead>
+<tbody>
+<tr><td>组件</td><td><code>function X({ props }: Props) { return &lt;div/&gt; }</code></td><td>一个返回 JSX 的函数</td></tr>
+<tr><td>JSX 插值</td><td><code>{表达式}</code></td><td>花括号里写 JS 表达式</td></tr>
+<tr><td>props</td><td><code>&lt;X path={p} onRemove={fn} /&gt;</code></td><td>父传子的"参数表"，只读</td></tr>
+<tr><td>事件</td><td><code>onClick={fn}</code>、<code>onChange={fn}</code></td><td>驼峰命名；回调由父组件传入</td></tr>
+<tr><td>条件渲染</td><td><code>{cond &amp;&amp; &lt;A/&gt;}</code> / <code>{cond ? &lt;A/&gt; : &lt;B/&gt;}</code></td><td>JSX 里用 JS 控制</td></tr>
+<tr><td>列表渲染</td><td><code>{list.map(x =&gt; &lt;Item key={x.id} /&gt;)}</code></td><td>必须给 <code>key</code></td></tr>
+<tr><td>className</td><td><code>className="file-ref"</code></td><td>HTML 的 <code>class</code> 的替代</td></tr>
+</tbody>
+</table>
+
+<h2>三、Hooks 速查</h2>
+<table>
+<thead>
+<tr><th>Hook</th><th>写法</th><th>用途 / 注意</th></tr>
+</thead>
+<tbody>
+<tr><td>useState</td><td><code>const [v, setV] = useState(0)</code></td><td>局部状态。值变了 → 重新渲染。只取 setter 不取值 = 强制刷新技巧</td></tr>
+<tr><td>useEffect</td><td><code>useEffect(() =&gt; { ...; return cleanup }, [deps])</code></td><td>副作用（定时器/订阅）。<strong>清理函数必须写</strong>；空依赖 [] = 只挂载时执行</td></tr>
+<tr><td>useMemo</td><td><code>const x = useMemo(() =&gt; calc(), [deps])</code></td><td>昂贵计算缓存（本仓库用得少）</td></tr>
+<tr><td>useCallback</td><td><code>const fn = useCallback(() =&gt; ..., [deps])</code></td><td>函数引用稳定（配合 memo 子组件）</td></tr>
+<tr><td>自定义 Hook</td><td><code>function useTheme() { ... }</code></td><td>以 use 开头的函数封装复用逻辑，仓库实例 <code>hooks/useTheme.ts</code></td></tr>
+</tbody>
+</table>
+
+<h2>四、Zustand 状态管理</h2>
+<table>
+<thead>
+<tr><th>API</th><th>写法</th><th>说明</th></tr>
+</thead>
+<tbody>
+<tr><td>建 store</td><td><code>create&lt;T&gt;((set, get) =&gt; ({ ... }))</code></td><td>状态 + action 一个对象搞定</td></tr>
+<tr><td>改状态</td><td><code>set({ streaming: true })</code> / <code>set((s) =&gt; ({ ... }))</code></td><td>浅合并；函数式写法可基于旧值</td></tr>
+<tr><td>读最新</td><td><code>get().currentSessionId</code></td><td>action 内部读当前状态</td></tr>
+<tr><td>组件订阅</td><td><code>useStore((s) =&gt; s.messages)</code></td><td>selector 粒度越细，重渲染越少</td></tr>
+<tr><td>外部改</td><td><code>useStore.setState({ askUser: null })</code></td><td>不经过 action 直接改（AskUserDialog 关闭用）</td></tr>
+</tbody>
+</table>
+
+<h2>五、IPC 桥速查（Java ↔ JS 对应）</h2>
+<table>
+<thead>
+<tr><th>方向</th><th>JS 端</th><th>Java 端</th></tr>
+</thead>
+<tbody>
+<tr><td>JS → Java</td><td><code>window.__ZCODE_CEF_QUERY__({ request: jsonStr, ... })</code></td><td><code>JBCefJSQuery.create(browser)</code> 回调 → <code>handleJsMessage</code> 按 op 分发</td></tr>
+<tr><td>Java → JS</td><td><code>window.zcodeBridge.onMessage(obj)</code></td><td><code>executeJavaScript("window.zcodeBridge.onMessage(...)")</code>——<strong>字符串必须转义</strong></td></tr>
+<tr><td>环境检测</td><td><code>isInJcef()</code>（bridge.ts）</td><td>开发模式走 mock，真机走桥</td></tr>
+</tbody>
+</table>
+
+<h2>六、术语小词典</h2>
+<table>
+<thead>
+<tr><th>术语</th><th>含义</th></tr>
+</thead>
+<tbody>
+<tr><td>JSX</td><td>在 JS 里写类 HTML 标签的语法，React 编译成 JS 调用</td></tr>
+<tr><td>props</td><td>组件参数表（只读，父传子）</td></tr>
+<tr><td>state</td><td>组件/全局可变状态；变了就重渲染</td></tr>
+<tr><td>渲染</td><td>执行组件函数产生新界面的过程</td></tr>
+<tr><td>副作用</td><td>渲染之外的事（定时器/网络/订阅），必须放 useEffect</td></tr>
+<tr><td>selector</td><td>从 store 里选字段的订阅函数 <code>(s) =&gt; s.x</code></td></tr>
+<tr><td>action</td><td>store 里改状态的操作函数</td></tr>
+<tr><td>乐观更新</td><td>不等后端确认，先本地把效果画出来（本仓库用户消息立即上屏）</td></tr>
+<tr><td>mock</td><td>开发模式伪造后端响应（bridge.ts 的假 Java）</td></tr>
+<tr><td>singlefile</td><td>vite 把全部资源打进一个 HTML（生产给 JCEF 加载）</td></tr>
+<tr><td>HMR</td><td>dev server 热重载：改代码浏览器即时刷新</td></tr>
+<tr><td>codicon</td><td>VS Code 图标字体（cc-gui 同款，Webview 里当图标用）</td></tr>
+<tr><td>toast</td><td>轻量一次性提示条（本仓库"暂未支持"提示）</td></tr>
+</tbody>
+</table>
+
+<h2>七、易错点（本仓库踩过的）</h2>
+<ul>
+<li>组件必须 <code>import './xxx.less'</code> 才会被 vite 打进包——忘 import 样式不生效</li>
+<li>高频流式事件不要每个都 <code>set</code>——用 <code>onStreamBatch</code> 一次处理整批</li>
+<li>JCEF 里 console.log 看不到——用 bridge.ts 的诊断面板（<code>onDiagLog</code>）</li>
+<li><code>StrictMode</code> 下 useEffect 会执行两次（开发模式）——定时器等副作用要可重复/有清理</li>
+</ul>
+
+</body>
+</html>

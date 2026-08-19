@@ -1,0 +1,15 @@
+# 本地 IDE / 工具产物
+.idea/
+.workbuddy/
+
+# 个人学习过程文件（含个人画像与内部路径，不对外发布）
+**/MISSION.md
+**/NOTES.md
+**/RESOURCES.md
+**/learning-records/
+
+# 二进制资源包（静态站点用不上）
+**/expert-package/
+
+# 个人行程类文件（仅本地使用）
+tech-manager-training/reference/prep-checklist.html
