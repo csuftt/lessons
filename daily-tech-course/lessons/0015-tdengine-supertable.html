@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 15 期 · TDengine 超级表与子表数据建模 — 2026-09-01</title>
+<style>
+:root{
+  --bg:#0d1117;
+  --bg-card:#161b22;
+  --bg-card2:#1c2330;
+  --border:#2d333b;
+  --text:#c9d1d9;
+  --text-strong:#e6edf3;
+  --text-muted:#8b949e;
+  --accent:#78dce8;
+  --accent2:#a9dc76;
+  --accent3:#ff6188;
+  --code-bg:#0a0e14;
+  --warn-bg:rgba(255,159,67,.12);
+  --warn-border:#ff9f43;
+  --tip-bg:rgba(169,220,118,.1);
+  --tip-border:#a9dc76;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  background:var(--bg);
+  color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  line-height:1.75;
+  font-size:16px;
+}
+.wrap{max-width:860px;margin:0 auto;padding:24px 16px 64px}
+
+/* ===== Hero ===== */
+.hero{
+  background:linear-gradient(135deg,#101a1f 0%,#161b22 55%,#101820 100%);
+  border:1px solid var(--border);
+  border-radius:16px;
+  padding:36px 28px;
+  margin-bottom:28px;
+  position:relative;
+  overflow:hidden;
+}
+.hero::before{
+  content:"";
+  position:absolute;top:-60px;right:-60px;
+  width:220px;height:220px;border-radius:50%;
+  background:radial-gradient(circle,rgba(120,220,232,.16),transparent 70%);
+}
+.hero .issue{color:var(--accent);font-size:.9rem;letter-spacing:2px;font-weight:600;margin-bottom:8px}
+.hero h1{color:var(--text-strong);font-size:1.7rem;line-height:1.4;margin-bottom:16px;position:relative}
+.hero .subtitle{color:var(--text-muted);font-size:1rem;margin-bottom:20px}
+.meta{display:flex;flex-wrap:wrap;gap:10px;align-items:center;position:relative}
+.tag{
+  display:inline-flex;align-items:center;gap:6px;
+  padding:4px 14px;border-radius:999px;font-size:.82rem;font-weight:600;
+}
+.tag-tech{background:rgba(120,220,232,.14);color:var(--accent);border:1px solid rgba(120,220,232,.4)}
+.tag-date{background:rgba(255,97,136,.12);color:#ff9db6;border:1px solid rgba(255,97,136,.35)}
+.tag-time{background:rgba(169,220,118,.12);color:var(--accent2);border:1px solid rgba(169,220,118,.35)}
+
+/* ===== Section ===== */
+section{
+  background:var(--bg-card);
+  border:1px solid var(--border);
+  border-radius:14px;
+  padding:26px 24px;
+  margin-bottom:22px;
+}
+h2{
+  color:var(--text-strong);
+  font-size:1.25rem;
+  margin-bottom:16px;
+  display:flex;align-items:center;gap:10px;
+}
+h2 .num{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:28px;height:28px;border-radius:8px;flex-shrink:0;
+  background:rgba(120,220,232,.15);color:var(--accent);
+  font-size:.9rem;font-weight:700;
+}
+h3{color:var(--text-strong);font-size:1.05rem;margin:18px 0 10px}
+p{margin-bottom:12px}
+strong{color:var(--text-strong)}
+code.inline{
+  background:var(--bg-card2);border:1px solid var(--border);
+  border-radius:5px;padding:1px 7px;font-size:.86em;
+  color:#ffd580;font-family:"SF Mono",Consolas,"Cascadia Code",Menlo,monospace;
+}
+ul,ol{padding-left:22px;margin-bottom:12px}
+li{margin-bottom:6px}
+
+/* ===== Code ===== */
+.codeblock{
+  background:var(--code-bg);
+  border:1px solid var(--border);
+  border-radius:10px;
+  margin:14px 0 18px;
+  overflow:hidden;
+}
+.codeblock .code-head{
+  display:flex;justify-content:space-between;align-items:center;
+  padding:8px 14px;border-bottom:1px solid var(--border);
+  background:rgba(255,255,255,.02);
+  font-size:.78rem;color:var(--text-muted);
+}
+.codeblock .dots{display:flex;gap:6px}
+.codeblock .dots i{width:10px;height:10px;border-radius:50%;display:block}
+.codeblock pre{
+  padding:16px;overflow-x:auto;
+  font-family:"SF Mono",Consolas,"Cascadia Code",Menlo,monospace;
+  font-size:.84rem;line-height:1.7;color:#c8ccd0;
+  tab-size:2;
+}
+.kw{color:#ff6188}
+.str{color:#a9dc76}
+.num-lit{color:#ab9df2}
+.cm{color:#5c6370;font-style:italic}
+.fn{color:#78dce8}
+.op{color:#ffcb6b}
+
+/* ===== Callout ===== */
+.callout{
+  border-radius:10px;padding:14px 18px;margin:14px 0;
+  font-size:.94rem;
+}
+.callout.warn{background:var(--warn-bg);border-left:3px solid var(--warn-border)}
+.callout.tip{background:var(--tip-bg);border-left:3px solid var(--tip-border)}
+.callout .callout-title{font-weight:700;margin-bottom:6px}
+.callout.warn .callout-title{color:var(--warn-border)}
+.callout.tip .callout-title{color:var(--accent2)}
+
+/* ===== Diagram ===== */
+.diagram{
+  background:var(--code-bg);
+  border:1px solid var(--border);
+  border-radius:10px;
+  padding:20px 16px;
+  margin:16px 0;
+  overflow-x:auto;
+}
+.dg-title{text-align:center;color:var(--accent);font-size:.85rem;font-weight:600;margin-bottom:14px;letter-spacing:1px}
+.stable-box{
+  border:2px dashed var(--accent);border-radius:10px;
+  padding:12px;max-width:520px;margin:0 auto 8px;
+  background:rgba(120,220,232,.05);
+}
+.stable-box .sb-name{color:var(--accent);font-weight:700;text-align:center;font-size:.95rem;margin-bottom:10px}
+.schema-row{
+  display:flex;flex-wrap:wrap;gap:6px;justify-content:center;
+  font-family:Consolas,monospace;font-size:.76rem;
+}
+.cell{
+  padding:3px 10px;border-radius:5px;
+  background:rgba(120,220,232,.12);color:#bfeef5;
+  border:1px solid rgba(120,220,232,.25);
+}
+.cell.tagc{
+  background:rgba(255,97,136,.12);color:#ffb3c4;
+  border-color:rgba(255,97,136,.3);
+}
+.dg-label{text-align:center;color:var(--text-muted);font-size:.78rem;margin:6px 0 10px}
+.child-row{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+.child-card{
+  border:1px solid var(--border);border-radius:8px;
+  background:var(--bg-card2);padding:10px 12px;
+  min-width:150px;flex:0 1 auto;
+}
+.child-card .cc-name{color:var(--accent2);font-size:.8rem;font-weight:700;margin-bottom:6px;font-family:Consolas,monospace}
+.child-card .cc-tag{color:#ffb3c4;font-size:.72rem;font-family:Consolas,monospace;margin-bottom:6px}
+.child-card .cc-data{color:var(--text-muted);font-size:.72rem;font-family:Consolas,monospace;line-height:1.6}
+.query-box{
+  max-width:560px;margin:14px auto 0;
+  border:1px solid var(--accent2);border-radius:8px;
+  padding:10px 14px;background:rgba(169,220,118,.06);
+}
+.query-box .qb-title{color:var(--accent2);font-size:.78rem;font-weight:700;margin-bottom:4px}
+.query-box .qb-body{font-family:Consolas,monospace;font-size:.75rem;color:var(--text);line-height:1.6}
+
+/* ===== Table ===== */
+table{width:100%;border-collapse:collapse;margin:14px 0 18px;font-size:.88rem}
+th,td{padding:9px 12px;text-align:left;border:1px solid var(--border)}
+th{background:var(--bg-card2);color:var(--text-strong);font-weight:600;white-space:nowrap}
+td{color:var(--text)}
+tr:nth-child(even) td{background:rgba(255,255,255,.015)}
+
+/* ===== Summary ===== */
+.summary-card{
+  background:linear-gradient(135deg,#141a15 0%,#161b22 100%);
+  border:1px solid rgba(169,220,118,.35);
+  border-radius:14px;padding:26px 24px;margin-bottom:22px;
+}
+.summary-card h2{color:var(--accent2)}
+.summary-card li{margin-bottom:10px}
+.summary-card li::marker{color:var(--accent2)}
+
+/* ===== Details / 思考题 ===== */
+details{
+  background:var(--bg-card2);
+  border:1px solid var(--border);
+  border-radius:12px;
+  margin-bottom:14px;
+  overflow:hidden;
+}
+details summary{
+  cursor:pointer;padding:16px 20px;
+  color:var(--text-strong);font-weight:600;
+  list-style:none;position:relative;
+  padding-right:40px;
+  user-select:none;
+}
+details summary::-webkit-details-marker{display:none}
+details summary::after{
+  content:"+";position:absolute;right:18px;top:50%;transform:translateY(-50%);
+  width:24px;height:24px;border-radius:50%;
+  background:rgba(120,220,232,.15);color:var(--accent);
+  display:flex;align-items:center;justify-content:center;
+  font-weight:700;transition:.2s;
+}
+details[open] summary::after{content:"−";transform:translateY(-50%) rotate(180deg)}
+details .details-body{padding:4px 20px 20px;border-top:1px solid var(--border)}
+details .q-tag{
+  display:inline-block;font-size:.72rem;font-weight:700;
+  background:rgba(255,97,136,.14);color:#ff9db6;
+  padding:2px 10px;border-radius:999px;margin-bottom:10px;
+}
+details h4{color:var(--accent);margin:14px 0 8px;font-size:.95rem}
+details p{font-size:.92rem}
+details ol,details ul{font-size:.92rem}
+
+/* ===== Footer ===== */
+.footer{
+  text-align:center;color:var(--text-muted);
+  font-size:.8rem;padding-top:10px;
+}
+.footer .brand{color:var(--accent);font-weight:600}
+
+@media (max-width:600px){
+  .hero{padding:26px 18px}
+  .hero h1{font-size:1.35rem}
+  section{padding:20px 16px}
+  .codeblock pre{font-size:.76rem}
+  table{font-size:.8rem}
+  th,td{padding:7px 8px}
+}
+</style>
+</head>
+<body>
+<div style="position:fixed;top:14px;left:14px;z-index:9999;">
+<a href="../index.html" style="display:inline-block;padding:6px 14px;border-radius:999px;background:rgba(20,26,38,.88);color:#7da7ff;font-size:13px;text-decoration:none;border:1px solid rgba(90,130,220,.45);backdrop-filter:blur(4px);font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.35);" onmouseover="this.style.background='rgba(30,40,60,.95)'" onmouseout="this.style.background='rgba(20,26,38,.88)'">← 课程目录</a>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<div class="hero">
+  <div class="issue">DAILY TECH MICRO-COURSE · 第 15 期</div>
+  <h1>TDengine 超级表与子表数据建模<br>—— 一设备一表，是玄学还是科学？</h1>
+  <div class="subtitle">时序数据库建模的第一道分水岭：建错表，写入翻车、查询爆炸；建对表，千万设备稳如老狗。</div>
+  <div class="meta">
+    <span class="tag tag-tech">🗄 TDengine</span>
+    <span class="tag tag-date">📅 2026-09-01</span>
+    <span class="tag tag-time">⏱ 预计阅读 10 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="num">01</span>从一个真实事故说起</h2>
+  <p>某能源平台接入 <strong>12 万台智能电表</strong>，每台 5 秒上报一次电流、电压、相位。团队最初用 MySQL，三个月后单表 40 亿行，写入延迟飙升到秒级，磁盘告警。迁移 TDengine 后，架构师拍脑袋做了两个决定：</p>
+  <ul>
+    <li>❌ <strong>所有设备塞进一张超级表</strong>，<code class="inline">device_id</code> 做普通列而非标签 —— 查单设备曲线要全表扫描标签列；</li>
+    <li>❌ <strong>标签里放了「当日累计电量」</strong>这种高频变化字段 —— 每次上报都在更新标签，标签索引疯狂重建。</li>
+  </ul>
+  <p>结果：TDengine 撑住了写入，但查询比 MySQL 还慢。问题不在数据库，在<strong>建模</strong>。时序库的建模哲学与传统 OLTP 完全不同——今天我们把这层窗户纸捅破。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="num">02</span>核心原理：超级表 = 模板 + 标签</h2>
+  <p>TDengine 的「<strong>一个数据采集点一张表</strong>」不是营销口号，而是存储引擎的根基：</p>
+  <ul>
+    <li><strong>超级表（STable）</strong>：定义<strong>数据列</strong>（时序采集量，随时间变化）和<strong>标签列</strong>（静态属性，如设备位置、厂商）。它只是模板，本身不存数据。</li>
+    <li><strong>子表</strong>：每个设备一张，继承超级表 schema，各自持有不同的标签值。子表内数据<strong>按时间严格有序</strong>、列式压缩（时间戳用 delta-of-delta 编码，压比极高）。</li>
+    <li><strong>二维剪裁</strong>：查询时先按<strong>标签过滤</strong>定位子表（标签有内存索引），再按<strong>时间范围</strong>裁剪数据块——两层过滤让 IO 只发生在极小的数据切片上。</li>
+  </ul>
+
+  <div class="diagram">
+    <div class="dg-title">超级表 / 子表 / 标签剪裁 结构关系</div>
+    <div class="stable-box">
+      <div class="sb-name">STABLE power.meters（模板）</div>
+      <div class="schema-row">
+        <span class="cell">ts TIMESTAMP</span>
+        <span class="cell">current FLOAT</span>
+        <span class="cell">voltage INT</span>
+        <span class="cell">phase FLOAT</span>
+        <span class="cell tagc">location TAG</span>
+        <span class="cell tagc">factory TAG</span>
+      </div>
+    </div>
+    <div class="dg-label">▼ 自动建子表，标签值各异</div>
+    <div class="child-row">
+      <div class="child-card">
+        <div class="cc-name">d001</div>
+        <div class="cc-tag">广州1号站 / 厂A</div>
+        <div class="cc-data">ts↑ 有序 + 列式压缩</div>
+      </div>
+      <div class="child-card">
+        <div class="cc-name">d002</div>
+        <div class="cc-tag">深圳3号站 / 厂B</div>
+        <div class="cc-data">ts↑ 有序 + 列式压缩</div>
+      </div>
+      <div class="child-card">
+        <div class="cc-name">d003</div>
+        <div class="cc-tag">佛山2号站 / 厂A</div>
+        <div class="cc-data">ts↑ 有序 + 列式压缩</div>
+      </div>
+    </div>
+    <div class="query-box">
+      <div class="qb-title">查询剪裁路径</div>
+      <div class="qb-body">WHERE factory='厂A' → 命中 d001、d003（标签索引）<br>AND ts &gt; NOW-1h → 只读两子表最近 1h 数据块（时间裁剪）</div>
+    </div>
+  </div>
+
+  <div class="callout tip">
+    <div class="callout-title">💡 架构师视角的关键洞察</div>
+    子表数量本身不是负担（百万级子表完全 OK），<strong>负担来自错误的聚合方式</strong>。把「设备维度」下沉为子表边界后，单设备查询天然变成主键点查；跨设备聚合则利用标签索引先收敛集合，再并行扫描。
+  </div>
+</section>
+
+<!-- ================= 03 建模决策 ================= -->
+<section>
+  <h2><span class="num">03</span>建模决策：四条架构权衡</h2>
+
+  <h3>① 一张超级表还是多张？</h3>
+  <table>
+    <tr><th>维度</th><th>合入一张超级表</th><th>拆分多张超级表</th></tr>
+    <tr><td>采集 schema</td><td>字段基本一致</td><td>字段差异大、大量空列</td></tr>
+    <tr><td>采集频率</td><td>相近（同数量级）</td><td>秒级 vs 小时级混存浪费严重</td></tr>
+    <tr><td>查询模式</td><td>常做跨类型联合聚合</td><td>各查各的、互不关联</td></tr>
+    <tr><td>保留策略</td><td>KEEP 是库级参数，一致即可</td><td>需不同保留期 → 必须拆（甚至拆库）</td></tr>
+  </table>
+
+  <h3>② 标签设计三原则</h3>
+  <ul>
+    <li><strong>只放静态属性</strong>：位置、厂商、型号、所属线路。任何会随上报变化的值放数据列。</li>
+    <li><strong>面向查询过滤</strong>：业务高频过滤条件 = 标签候选。没人查的字段别做标签，白占内存索引。</li>
+    <li><strong>控制基数语义</strong>：标签值的组合数决定子表定位效率，「设备 ID」这类唯一标识放标签即可，不需要额外冗余。</li>
+  </ul>
+
+  <h3>③ 库与 vgroups 规划</h3>
+  <p>database 是资源隔离与保留策略的边界：按业务线/地域分库；<code class="inline">VGROUPS</code> 决定写入并行度（每个 vgroup 是一组多副本的存储分片）。经验起点：<strong>每 50~100 万 TPS 量级对应 8~16 个 vgroup</strong>，后续可结合副本数与磁盘 IO 压测微调。</p>
+
+  <h3>④ 容量粗算</h3>
+  <p>磁盘 ≈ <strong>设备数 × 每日报文数 × 列数 × 单值压缩后字节 × 副本数</strong>。时序压缩收益极高（电压这类缓变列可压到 <strong>1 字节以内/值</strong>），但务必按真实数据压测——别拿 OLTP 的容量直觉套时序库。</p>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="num">04</span>实战：从建库到降采样查询</h2>
+
+  <div class="codeblock">
+    <div class="code-head"><span>power-modeling.sql</span><span class="dots"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></span></div>
+    <pre><span class="cm">-- 1. 建库：保留 365 天，每个文件覆盖 10 天数据，4 个 vgroups</span>
+<span class="kw">CREATE DATABASE</span> power <span class="kw">KEEP</span> <span class="num-lit">365</span> <span class="kw">DURATION</span> <span class="num-lit">10</span> <span class="kw">VGROUPS</span> <span class="num-lit">4</span>;
+
+<span class="cm">-- 2. 超级表：数据列 + 标签列</span>
+<span class="kw">CREATE STABLE</span> power.meters (
+  ts        <span class="kw">TIMESTAMP</span>,
+  current   <span class="kw">FLOAT</span>,
+  voltage   <span class="kw">INT</span>,
+  phase     <span class="kw">FLOAT</span>
+) <span class="kw">TAGS</span> (
+  location  <span class="kw">NCHAR</span>(<span class="num-lit">64</span>),   <span class="cm">-- 静态：安装位置</span>
+  factory   <span class="kw">NCHAR</span>(<span class="num-lit">32</span>),   <span class="cm">-- 静态：厂商</span>
+  line_id   <span class="kw">INT</span>           <span class="cm">-- 静态：所属线路</span>
+);
+
+<span class="cm">-- 3. 自动建子表写入（首次出现 d001 时自动建表并打标签）</span>
+<span class="kw">INSERT INTO</span> power.d001 <span class="kw">USING</span> power.meters
+  <span class="kw">TAGS</span>(<span class="str">'广州-1号变电站'</span>, <span class="str">'厂商A'</span>, <span class="num-lit">7</span>)
+  <span class="kw">VALUES</span>(<span class="fn">NOW</span>, <span class="num-lit">10.3</span>, <span class="num-lit">220</span>, <span class="num-lit">0.31</span>);
+
+<span class="cm">-- 4. 单设备曲线：点查子表，毫秒级</span>
+<span class="kw">SELECT</span> * <span class="kw">FROM</span> power.d001
+<span class="kw">WHERE</span> ts <span class="op">&gt;</span> <span class="fn">NOW</span> - <span class="num-lit">10m</span>;
+
+<span class="cm">-- 5. 跨设备聚合：先标签剪裁，再并行扫描</span>
+<span class="kw">SELECT</span> <span class="fn">location</span>, <span class="fn">AVG</span>(voltage), <span class="fn">MAX</span>(current)
+<span class="kw">FROM</span> power.meters
+<span class="kw">WHERE</span> factory <span class="op">=</span> <span class="str">'厂商A'</span> <span class="kw">AND</span> ts <span class="op">&gt;</span> <span class="fn">NOW</span> - <span class="num-lit">1h</span>
+<span class="kw">PARTITION BY</span> location;
+
+<span class="cm">-- 6. 降采样：5 分钟窗口均值，喂给监控大盘</span>
+<span class="kw">SELECT</span> <span class="fn">_wstart</span>, <span class="fn">AVG</span>(current), <span class="fn">MAX</span>(phase)
+<span class="kw">FROM</span> power.meters
+<span class="kw">WHERE</span> ts <span class="op">&gt;</span> <span class="fn">NOW</span> - <span class="num-lit">1d</span>
+<span class="kw">INTERVAL</span>(<span class="num-lit">5m</span>);</pre>
+  </div>
+
+  <div class="callout warn">
+    <div class="callout-title">⚠️ 生产环境三大坑</div>
+    <ol>
+      <li><strong>标签批量更新代价</strong>：几十万子表集体改标签会触发元数据重写，安排在低峰期，分批 <code class="inline">ALTER TABLE ... SET TAG</code>。</li>
+      <li><strong>乱序写入</strong>：时间戳大幅回跳（如设备对时钟漂移）会让压缩失效、写入放大。网关侧先做时间戳校准。</li>
+      <li><strong>时区陷阱</strong>：写入统一用 UTC 毫秒，展示层转换时区；混用本地时间会导致窗口聚合错位 8 小时。</li>
+    </ol>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<div class="summary-card">
+  <h2>📌 今日要点</h2>
+  <ol>
+    <li><strong>一个设备一张子表</strong>是 TDengine 的存储根基：时间有序 + 列式压缩 + 二维剪裁（标签定子表、时间定数据块），建模必须顺着这个哲学走。</li>
+    <li><strong>标签只放静态属性</strong>，且必须是高频过滤条件；高频变化字段进标签等于自废武功。</li>
+    <li><strong>拆不拆超级表</strong>看四件事：schema 差异、采集频率、查询模式、保留策略（KEEP 是库级，不同保留期必须拆）。</li>
+    <li><strong>容量与并行度靠公式 + 压测</strong>：vgroups 决定写入并行度，磁盘按「设备 × 频率 × 列 × 压缩字节 × 副本」估算后用真实数据验证。</li>
+    <li>生产三大坑：<strong>标签批量更新、乱序写入、时区错位</strong>——都在网关/写入侧提前治理，别指望数据库兜底。</li>
+  </ol>
+</div>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="num">05</span>架构师思考题</h2>
+
+  <details>
+    <summary>思考题一：12 万电表（5 秒/次）+ 2 万充电桩（1 秒/次），schema 有 60% 重合，该建一张超级表还是两张？</summary>
+    <div class="details-body">
+      <div class="q-tag">建模权衡</div>
+      <p><strong>结论先行：建议拆成两张超级表，甚至两个 database。</strong>逐层拆解理由：</p>
+      <h4>1. 采集频率差一个数量级</h4>
+      <p>1 秒 vs 5 秒意味着单位时间写入量差 5 倍。混存时，充电桩子表的数据块密度远高于电表，文件合并（compaction）策略、内存占用曲线都被高频端主导，低频端的存储碎片率上升。分开建表后可对充电桩库单独加大 <code class="inline">BUFFER</code> 与 vgroups 配额。</p>
+      <h4>2. schema 重合 60% ≠ 应该合表</h4>
+      <p>剩下 40% 的差异字段（充电桩特有的 SOC、功率模块温度等）会造成电表子表大量空列。虽然 TDengine 空列存储开销极低，但查询侧 <code class="inline">SELECT *</code> 的反序列化成本与语义混乱是真实代价。「加 type 标签区分」的方案会让每次电表查询都要带上 <code class="inline">WHERE type='meter'</code> 过滤，一旦漏写就污染聚合结果——这是典型的<strong>正确性风险换表数量</strong>的负收益交换。</p>
+      <h4>3. 业务查询模式天然隔离</h4>
+      <p>电表侧关心线损与负载曲线，充电桩侧关心充电会话与功率峰值，几乎不存在跨两类设备的联合聚合。若确有「全站点总功率」这类需求，在应用层分别查询后求和，或用流计算预聚合，都比物理合表更干净。</p>
+      <h4>4. 保留策略大概率不同</h4>
+      <p>电网侧合规要求曲线数据留 1~3 年，充电桩运营数据可能只需 3~6 个月。KEEP 是 database 级参数，保留期不同基本锁死了「拆库」的答案。</p>
+      <p><strong>决策口诀：频率差数量级、schema 差四成、查询不交叉、保留期不一致——四条中了两条就该拆。</strong></p>
+    </div>
+  </details>
+
+  <details>
+    <summary>思考题二：新项目预计 50 万设备、每设备 10 列、10 秒上报一次，3 副本、保留 180 天，如何预估磁盘容量与 vgroups？</summary>
+    <div class="details-body">
+      <div class="q-tag">容量规划</div>
+      <h4>第一步：算原始写入速率（定 vgroups）</h4>
+      <p>每日报文数 = 86,400 秒 ÷ 10 秒 = 8,640 条/设备/天；全局 TPS = 500,000 × 0.1 = <strong>5 万行/秒</strong>（每行 10 列 ≈ 50 万列值/秒）。按「8~16 vgroups 支撑百万级 TPS」的经验斜率，5 万 TPS 属轻负载，<strong>初始 4~6 个 vgroups 足够</strong>；若读写混合且有重查询，取上限 6~8 并压测确认。vgroups 后期可扩但涉及数据重平衡，宁可一次到位也别缩手缩脚。</p>
+      <h4>第二步：算压缩后磁盘（定存储）</h4>
+      <p>单行原始约 10 列 × 4~8 字节 ≈ 50~80 字节；时序压缩后（delta-of-delta + 列级字典），缓变列可到 1 字节/值以下，激进估计单行 <strong>5~15 字节</strong>。取中位 10 字节：</p>
+      <ul>
+        <li>每日原始数据：500,000 × 8,640 × 10 B ≈ <strong>43 GB/天</strong>（压缩后）；</li>
+        <li>180 天保留：43 × 180 ≈ <strong>7.7 TB</strong>；</li>
+        <li>× 3 副本 ≈ <strong>23 TB</strong>，另留 30% 余量应对 compaction 峰值与标签/索引元数据 → <strong>规划 30 TB</strong>。</li>
+      </ul>
+      <h4>第三步：压测校准（拒绝纸面架构）</h4>
+      <p>公式给的是数量级，真实压缩率取决于数据形态（电压 220 缓变 vs 电流剧烈波动，压比差 5~10 倍）。拿真实设备采样 1 周，用 <code class="inline">SHOW DATABASES</code> 观察磁盘增长率反推压缩率，再回到第二步修正。同时监控 vgroup 写入延迟 P99，超过 100ms 持续出现即触发扩容预案。</p>
+      <p><strong>架构口诀：TPS 定 vgroups，保留期 × 压缩率定磁盘，压测定真相。</strong></p>
+    </div>
+  </details>
+</section>
+
+<div class="footer">
+  <span class="brand">Daily Tech Micro-Course</span> · 第 15 期 · TDengine 系列 · 明日预告：Kubernetes HPA 自动伸缩
+</div>
+
+</div>
+</body>
+</html>

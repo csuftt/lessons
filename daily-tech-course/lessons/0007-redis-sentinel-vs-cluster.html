@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 7 期 · Redis 集群方案：哨兵 vs Cluster 的选型与架构权衡 — 2026-08-18</title>
+<style>
+:root{
+  --bg:#0d1117;
+  --bg-card:#161b22;
+  --bg-card2:#1c2330;
+  --border:#2d333b;
+  --text:#c9d1d9;
+  --text-strong:#e6edf3;
+  --text-muted:#8b949e;
+  --accent:#ff6188;
+  --accent2:#a9dc76;
+  --accent3:#78dce8;
+  --code-bg:#0a0e14;
+  --warn-bg:rgba(255,159,67,.12);
+  --warn-border:#ff9f43;
+  --tip-bg:rgba(169,220,118,.1);
+  --tip-border:#a9dc76;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  background:var(--bg);
+  color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  line-height:1.75;
+  font-size:16px;
+}
+.wrap{max-width:860px;margin:0 auto;padding:24px 16px 64px}
+
+/* ===== Hero ===== */
+.hero{
+  background:linear-gradient(135deg,#1a1016 0%,#161b22 55%,#101820 100%);
+  border:1px solid var(--border);
+  border-radius:16px;
+  padding:36px 28px;
+  margin-bottom:28px;
+  position:relative;
+  overflow:hidden;
+}
+.hero::before{
+  content:"";
+  position:absolute;top:-60px;right:-60px;
+  width:220px;height:220px;border-radius:50%;
+  background:radial-gradient(circle,rgba(255,97,136,.18),transparent 70%);
+}
+.hero .series{color:var(--accent);font-weight:600;font-size:.85rem;letter-spacing:.12em;text-transform:uppercase;margin-bottom:10px}
+.hero h1{color:var(--text-strong);font-size:1.7rem;line-height:1.4;margin-bottom:16px}
+.meta{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.tag{
+  display:inline-flex;align-items:center;gap:6px;
+  background:var(--bg-card2);border:1px solid var(--border);
+  color:var(--text-muted);border-radius:999px;
+  padding:4px 14px;font-size:.82rem;
+}
+.tag b{color:var(--text-strong);font-weight:600}
+.tag.redis{border-color:rgba(255,97,136,.45);color:#ff9db6}
+.tag.redis b{color:#ff9db6}
+
+/* ===== Section ===== */
+.section{
+  background:var(--bg-card);
+  border:1px solid var(--border);
+  border-radius:16px;
+  padding:28px;
+  margin-bottom:22px;
+}
+.section h2{
+  color:var(--text-strong);font-size:1.22rem;
+  padding-left:14px;border-left:4px solid var(--accent);
+  margin-bottom:18px;line-height:1.5;
+}
+.section h3{
+  color:var(--text-strong);font-size:1.02rem;
+  margin:22px 0 10px;
+}
+.section h3::before{content:"◆ ";color:var(--accent);font-size:.8em}
+p{margin-bottom:12px}
+p:last-child{margin-bottom:0}
+strong{color:var(--text-strong)}
+em{color:var(--accent3);font-style:normal}
+a{color:var(--accent3)}
+
+/* ===== Code ===== */
+pre{
+  background:var(--code-bg);
+  border:1px solid var(--border);
+  border-radius:10px;
+  padding:16px 18px;
+  overflow-x:auto;
+  font-size:.84rem;line-height:1.7;
+  margin:14px 0;
+  font-family:"Cascadia Code","JetBrains Mono",Consolas,"Courier New",monospace;
+}
+code{font-family:inherit}
+p code,li code,td code{
+  background:rgba(110,118,129,.18);
+  border-radius:5px;padding:2px 7px;
+  color:var(--accent3);font-size:.86em;
+}
+.cm{color:#7f8c98}          /* comment */
+.kw{color:#ff6188}          /* keyword */
+.st{color:#a9dc76}          /* string */
+.nm{color:#78dce8}          /* number/func */
+.op{color:#ffd580}          /* param/option */
+
+/* ===== Lists ===== */
+ul,ol{padding-left:22px;margin-bottom:12px}
+li{margin-bottom:6px}
+li::marker{color:var(--accent)}
+
+/* ===== Callout ===== */
+.callout{
+  border-radius:12px;padding:16px 18px;
+  margin:16px 0;font-size:.94rem;
+  border-left:4px solid;
+}
+.callout.warn{background:var(--warn-bg);border-color:var(--warn-border)}
+.callout.warn .t{color:#ffb56b}
+.callout.tip{background:var(--tip-bg);border-color:var(--tip-border)}
+.callout.tip .t{color:var(--accent2)}
+.callout .t{font-weight:700;display:block;margin-bottom:6px;font-size:.9rem}
+
+/* ===== Architecture diagram ===== */
+.diagram{
+  background:var(--code-bg);
+  border:1px dashed var(--border);
+  border-radius:12px;padding:20px 14px;
+  margin:16px 0;
+  overflow-x:auto;
+}
+.arch{display:flex;flex-direction:column;gap:14px;min-width:520px}
+.row{display:flex;gap:12px;align-items:stretch}
+.box{
+  flex:1;background:var(--bg-card2);
+  border:1px solid var(--border);border-radius:10px;
+  padding:12px 14px;text-align:center;
+}
+.box .t{font-weight:700;color:var(--text-strong);font-size:.92rem;margin-bottom:4px}
+.box .d{color:var(--text-muted);font-size:.78rem;line-height:1.55}
+.box.hl{border-color:rgba(255,97,136,.55);background:rgba(255,97,136,.08)}
+.box.hl .t{color:#ff9db6}
+.box.gr{border-color:rgba(169,220,118,.5);background:rgba(169,220,118,.07)}
+.box.gr .t{color:var(--accent2)}
+.box.bl{border-color:rgba(120,220,232,.5);background:rgba(120,220,232,.07)}
+.box.bl .t{color:var(--accent3)}
+.arrow{color:var(--text-muted);font-size:1.2rem;display:flex;align-items:center;justify-content:center}
+.dlabel{text-align:center;color:var(--text-muted);font-size:.78rem;margin-top:-6px}
+
+/* ===== Comparison table ===== */
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:.88rem}
+th,td{border:1px solid var(--border);padding:10px 12px;text-align:left;vertical-align:top}
+th{background:var(--bg-card2);color:var(--text-strong);font-weight:600}
+td{color:var(--text)}
+tr:nth-child(even) td{background:rgba(255,255,255,.015)}
+td .win{color:var(--accent2);font-weight:600}
+td .lose{color:#ff8a9b}
+
+/* ===== Summary cards ===== */
+.summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:6px}
+.sum-card{
+  background:var(--bg-card2);border:1px solid var(--border);
+  border-radius:12px;padding:16px;
+}
+.sum-card .n{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:26px;height:26px;border-radius:50%;
+  background:rgba(255,97,136,.15);color:var(--accent);
+  font-weight:700;font-size:.85rem;margin-bottom:8px;
+}
+.sum-card .t{color:var(--text-strong);font-weight:600;font-size:.95rem;margin-bottom:6px}
+.sum-card .d{color:var(--text-muted);font-size:.85rem;line-height:1.65}
+
+/* ===== Q&A collapsible ===== */
+details{
+  background:var(--bg-card2);
+  border:1px solid var(--border);
+  border-radius:12px;
+  padding:0;
+  margin-bottom:14px;
+  overflow:hidden;
+}
+details summary{
+  cursor:pointer;padding:16px 20px;
+  color:var(--text-strong);font-weight:600;font-size:.95rem;
+  list-style:none;display:flex;align-items:flex-start;gap:10px;
+  transition:background .15s;
+}
+details summary::-webkit-details-marker{display:none}
+details summary:hover{background:rgba(255,255,255,.03)}
+details summary .q-mark{
+  color:var(--accent);font-weight:800;flex-shrink:0;
+}
+details summary .chev{margin-left:auto;color:var(--text-muted);transition:transform .2s;flex-shrink:0}
+details[open] summary .chev{transform:rotate(90deg)}
+details .answer{
+  padding:4px 20px 18px 42px;
+  border-top:1px dashed var(--border);
+  padding-top:14px;
+  font-size:.92rem;
+}
+details .answer h4{color:var(--accent3);font-size:.9rem;margin:14px 0 6px}
+details .answer p{margin-bottom:10px}
+details .answer ul{margin-bottom:10px}
+
+/* ===== Footer ===== */
+.footer{
+  text-align:center;color:var(--text-muted);
+  font-size:.8rem;margin-top:36px;
+  padding-top:20px;border-top:1px solid var(--border);
+}
+.footer b{color:var(--text)}
+
+/* ===== Responsive ===== */
+@media(max-width:640px){
+  .hero{padding:26px 18px}
+  .hero h1{font-size:1.35rem}
+  .section{padding:20px 16px}
+  pre{font-size:.78rem;padding:12px}
+  table{font-size:.8rem}
+  th,td{padding:8px}
+  .row{flex-direction:row}
+}
+</style>
+</head>
+<body>
+<div style="position:fixed;top:14px;left:14px;z-index:9999;">
+<a href="../index.html" style="display:inline-block;padding:6px 14px;border-radius:999px;background:rgba(20,26,38,.88);color:#7da7ff;font-size:13px;text-decoration:none;border:1px solid rgba(90,130,220,.45);backdrop-filter:blur(4px);font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.35);" onmouseover="this.style.background='rgba(30,40,60,.95)'" onmouseout="this.style.background='rgba(20,26,38,.88)'">← 课程目录</a>
+</div>
+
+<div class="wrap">
+
+<!-- ============ HERO ============ -->
+<header class="hero">
+  <div class="series">每日架构师微课程 · 第 7 期</div>
+  <h1>Redis 集群方案：哨兵 vs Cluster 的选型与架构权衡</h1>
+  <div class="meta">
+    <span class="tag">📅 <b>2026-08-18</b>（周二）</span>
+    <span class="tag redis">⚡ Redis 系列 · 第 3 讲</span>
+    <span class="tag">⏱ 预计阅读 <b>10 分钟</b></span>
+    <span class="tag">🎯 高可用 / 哨兵 / Cluster / 容量规划</span>
+  </div>
+</header>
+
+<!-- ============ 1. 场景引入 ============ -->
+<section class="section">
+  <h2>一、从一个真实的容量危机说起</h2>
+  <p>某社交电商的 Redis 主从架构（1 主 2 从 + 3 哨兵）平稳运行了一年，直到大促前压测暴露三个问题：</p>
+  <ol>
+    <li><strong>内存触顶</strong>：单实例内存 24GB，逼近 <code>maxmemory</code>，删除策略一旦触发，热 key 淘汰引发缓存穿透；</li>
+    <li><strong>写瓶颈</strong>：写 QPS 峰值 9 万，单节点（64C 机器）CPU 已到 75%，无法水平扩展；</li>
+    <li><strong>故障恢复慢</strong>：主从切换后，新从库全量同步生成 RDB + 传输 + 加载耗时 8 分钟，期间只读降级。</li>
+  </ol>
+  <p>团队面临一个经典架构决策：<strong>继续主从+哨兵做读写分离缓解？还是引入 Redis Cluster 分片？</strong>这正是今天要拆解的问题。</p>
+</section>
+
+<!-- ============ 2. 原理讲解 ============ -->
+<section class="section">
+  <h2>二、两种方案的本质区别：HA 与扩展性</h2>
+  <p>先厘清一个常被混淆的概念：<em>哨兵解决的是"高可用"，Cluster 同时解决"高可用 + 水平扩展"</em>。但两者的实现机制完全不同。</p>
+
+  <h3>哨兵：旁路仲裁 + 故障转移</h3>
+  <p>哨兵本身是一组独立进程（建议 ≥3 个、奇数部署），不处理数据，只做三件事：监控、仲裁、故障转移。核心流程：</p>
+  <ul>
+    <li><strong>主观下线（sdown）</strong>：单个哨兵 ping 主节点超过 <code>down-after-milliseconds</code> 未响应；</li>
+    <li><strong>客观下线（odown）</strong>：达到 <em>quorum</em> 个哨兵都认为下线，才判定真故障；</li>
+    <li><strong>选举 leader</strong>：哨兵之间用 Raft 思想选 leader 执行转移，需 <em>majority（n/2+1）</em> 授权；</li>
+    <li><strong>挑选新主</strong>：按 <code>replica-priority</code> → 复制偏移量越大越优先 → runid 字典序，三层排序。</li>
+  </ul>
+
+  <div class="diagram">
+    <div class="arch">
+      <div class="row">
+        <div class="box bl"><div class="t">哨兵 S1</div><div class="d">监控 / 仲裁</div></div>
+        <div class="box bl"><div class="t">哨兵 S2</div><div class="d">监控 / 仲裁</div></div>
+        <div class="box bl"><div class="t">哨兵 S3</div><div class="d">监控 / 仲裁</div></div>
+      </div>
+      <div class="dlabel">▲ quorum=2，majority=2（3 节点容忍 1 个哨兵故障）</div>
+      <div class="row">
+        <div class="box hl"><div class="t">Master（主）</div><div class="d">读写入口</div></div>
+        <div class="arrow">⇅ 复制</div>
+        <div class="box gr"><div class="t">Replica-1</div><div class="d">候选新主</div></div>
+        <div class="box gr"><div class="t">Replica-2</div><div class="d">只读/候选</div></div>
+      </div>
+      <div class="dlabel">▲ 数据全量单份，容量与写吞吐受限于单节点</div>
+    </div>
+  </div>
+
+  <h3>Cluster：数据分片 + 去中心化自治</h3>
+  <p>Cluster 把数据切成 <em>16384 个哈希槽</em>，每个节点负责一部分槽：<code>slot = CRC16(key) mod 16384</code>。它没有旁路仲裁者，节点间通过 <em>gossip 协议</em>互相交换状态，自己完成下线判定与主从提升。客户端可连任意节点，路由不匹配时返回重定向：</p>
+  <ul>
+    <li><strong>MOVED</strong>：槽已归属他节点（迁移完成），客户端应更新本地槽位表；</li>
+    <li><strong>ASK</strong>：槽正在迁移中，仅本次请求转向目标节点，不动槽位表。</li>
+  </ul>
+
+  <div class="diagram">
+    <div class="arch">
+      <div class="row">
+        <div class="box hl"><div class="t">分片 A</div><div class="d">Master-1：slot 0–5460</div></div>
+        <div class="box hl"><div class="t">分片 B</div><div class="d">Master-2：slot 5461–10922</div></div>
+        <div class="box hl"><div class="t">分片 C</div><div class="d">Master-3：slot 10923–16383</div></div>
+      </div>
+      <div class="row">
+        <div class="box gr"><div class="t">Replica-1</div><div class="d">A 的副本</div></div>
+        <div class="box gr"><div class="t">Replica-2</div><div class="d">B 的副本</div></div>
+        <div class="box gr"><div class="t">Replica-3</div><div class="d">C 的副本</div></div>
+      </div>
+      <div class="dlabel">▲ 6 节点最小生产拓扑：3 分片 × 2 副本，容量与写吞吐×3</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 3. 选型对比 ============ -->
+<section class="section">
+  <h2>三、架构选型对比：一张表定胜负</h2>
+  <table>
+    <tr><th>维度</th><th>主从 + 哨兵</th><th>Redis Cluster</th></tr>
+    <tr><td>数据容量</td><td class="lose">受限于单机内存（建议 ≤25GB）</td><td class="win">线性扩展，数百 GB～TB 级</td></tr>
+    <tr><td>写吞吐</td><td class="lose">单主写入，无法水平扩展</td><td class="win">按分片数线性提升</td></tr>
+    <tr><td>多 key 操作</td><td class="win">MGET/事务/Lua 全兼容</td><td class="lose">要求 key 同 slot（hash tag）</td></tr>
+    <tr><td>客户端</td><td class="win">任意客户端 + 哨兵地址即可</td><td class="lose">需支持集群协议与拓扑刷新</td></tr>
+    <tr><td>运维复杂度</td><td class="win">低，语义简单</td><td class="lose">高：扩缩容需迁移槽位</td></tr>
+    <tr><td>适用场景</td><td>缓存、容量可控、语义依赖强</td><td>大规模存储、高写入、可预见的增长</td></tr>
+  </table>
+  <div class="callout tip">
+    <span class="t">💡 架构师经验法则</span>
+    <strong>纯缓存场景优先哨兵</strong>：数据可从 DB 重建，容量可通过拆业务命名空间缓解，简单可靠胜过一切；<strong>当满足任一条件时上 Cluster</strong>——单实例内存预计超过 25GB、写 QPS 单点打满、或 Redis 承担了存储职责（丢失不可接受）。
+  </div>
+</section>
+
+<!-- ============ 4. 实战 ============ -->
+<section class="section">
+  <h2>四、实战配置：两套方案的关键参数</h2>
+
+  <h3>哨兵方案：必须改的三个默认值</h3>
+  <pre><span class="cm"># sentinel.conf —— 生产基线</span>
+port <span class="nm">26379</span>
+sentinel monitor mymaster <span class="nm">10.0.1.10</span> <span class="nm">6379</span> <span class="op">2</span>          <span class="cm"># quorum=2</span>
+sentinel down-after-milliseconds mymaster <span class="op">5000</span>   <span class="cm"># 默认30s太慢</span>
+sentinel failover-timeout mymaster <span class="op">30000</span>
+sentinel parallel-syncs mymaster <span class="op">1</span>              <span class="cm"># 逐个复制，避免带宽打爆</span>
+
+<span class="cm"># ---- 被监控节点侧（防脑裂的关键）----</span>
+min-replicas-to-write <span class="op">1</span>     <span class="cm"># 至少1个从库心跳正常才接受写</span>
+min-replicas-max-lag <span class="op">5</span>     <span class="cm"># 从库延迟超5秒视为失联</span></pre>
+
+  <p>Spring Boot 接入只需给哨兵地址，客户端自动发现真实主节点：</p>
+  <pre>spring:
+  data:
+    redis:
+      sentinel:
+        master: <span class="st">mymaster</span>
+        nodes: <span class="st">10.0.1.20:26379,10.0.1.21:26379,10.0.1.22:26379</span>
+      password: <span class="st">******</span></pre>
+
+  <h3>Cluster 方案：从建集群到多 key 支持</h3>
+  <pre><span class="cm"># 每个节点 redis.conf</span>
+cluster-enabled <span class="kw">yes</span>
+cluster-config-file <span class="st">nodes-6379.conf</span>
+cluster-node-timeout <span class="op">15000</span>   <span class="cm"># 节点失联判定窗口</span>
+
+<span class="cm"># 一条命令创建 3 主 3 从</span>
+redis-cli --cluster create <span class="nm">10.0.2.11:6379</span> <span class="nm">10.0.2.12:6379</span> <span class="nm">10.0.2.13:6379</span> \
+  <span class="nm">10.0.2.14:6379</span> <span class="nm">10.0.2.15:6379</span> <span class="nm">10.0.2.16:6379</span> \
+  --cluster-replicas <span class="op">1</span>
+
+<span class="cm"># hash tag：让相关 key 落入同一分片，解锁 MGET/Lua</span>
+<span class="cm"># user:1001:profile 与 user:1001:orders → {user:1001}:profile</span>
+SET <span class="st">{user:1001}:profile</span> <span class="st">"..."</span>
+SET <span class="st">{user:1001}:orders</span> <span class="st">"..."</span>
+MGET <span class="st">{user:1001}:profile</span> <span class="st">{user:1001}:orders</span>   <span class="cm"># 同slot，OK</span></pre>
+
+  <div class="callout warn">
+    <span class="t">⚠️ 生产坑点清单</span>
+    <ul style="margin-bottom:0">
+      <li><strong>hash tag 是双刃剑</strong>：大热点用户的 key 全挤一个分片，等于人为制造热 key，热点账号要单独治理；</li>
+      <li><strong>扩容要提前规划</strong>：槽迁移期间性能下降 10%–30%，务必在低峰执行并开启客户端 <code>ASK</code> 重定向支持；</li>
+      <li><strong><code>cluster-require-full-coverage</code> 默认 yes</strong>：任一分片全挂则整个集群拒绝写——缓存场景可设为 <code>no</code>，牺牲一致性保可用；</li>
+      <li><strong>客户端拓扑刷新</strong>：Lettuce 需开启 <code>enableClusterTopologyRefresh</code>，否则故障切换后持续打到已下线节点。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ 5. 容量规划 ============ -->
+<section class="section">
+  <h2>五、容量规划与高可用设计要点</h2>
+  <p>以开篇案例做一次规划演算：目标数据量 60GB，读 30 万 QPS / 写 9 万 QPS，单节点安全水位定为内存 70%、CPU 60%：</p>
+  <ul>
+    <li><strong>分片数</strong>：60GB ÷ (25GB × 70%) ≈ 4 分片（向上取整，预留 40% 增长）；</li>
+    <li><strong>读写校验</strong>：写 9万 ÷ 4 = 2.25 万/分片（安全），读 30万 ÷ 4 主 + 4 从，均摊 3.75 万/节点（安全）；</li>
+    <li><strong>部署反亲和</strong>：同一分片的主从必须跨机架/可用区，避免宿主机故障导致分片整体消失；</li>
+    <li><strong>多副本跨 AZ</strong>：3 分片 × 2 副本 = 6 节点，主从分置两个 AZ，容忍单 AZ 故障；</li>
+    <li><strong>大 key 预防</strong>：单 key 超过 10KB 或集合超 5000 元素即告警，分片再大也扛不住大 key 迁移风暴。</li>
+  </ul>
+</section>
+
+<!-- ============ 6. 今日要点 ============ -->
+<section class="section">
+  <h2>六、今日要点</h2>
+  <div class="summary-grid">
+    <div class="sum-card"><span class="n">1</span><div class="t">定位不同</div><div class="d">哨兵只解决高可用；Cluster 同时解决高可用与水平扩展，代价是客户端和运维复杂度。</div></div>
+    <div class="sum-card"><span class="n">2</span><div class="t">选型法则</div><div class="d">纯缓存、单实例 ≤25GB 用哨兵；数据量大、写瓶颈、Redis 承担存储职责时上 Cluster。</div></div>
+    <div class="sum-card"><span class="n">3</span><div class="t">哨兵防脑裂</div><div class="d">quorum 与 majority 是两回事；节点侧配 min-replicas-to-write，失联旧主自动拒绝写入。</div></div>
+    <div class="sum-card"><span class="n">4</span><div class="t">Cluster 多 key</div><div class="d">MGET/事务/Lua 要求同 slot，用 hash tag 解决，但需警惕热点倾斜。</div></div>
+    <div class="sum-card"><span class="n">5</span><div class="t">容量规划</div><div class="d">按内存 70%、CPU 60% 水位反推分片数，主从跨 AZ 反亲和，规划期预留 40% 增长。</div></div>
+  </div>
+</section>
+
+<!-- ============ 7. 思考题 ============ -->
+<section class="section">
+  <h2>七、架构师思考题</h2>
+
+  <details>
+    <summary><span class="q-mark">Q1</span><span>你们的核心缓存目前是"哨兵主从"架构，业务方希望把用户关系（关注/粉丝，约 80GB，丢失需全量重建）也放进 Redis。作为架构师，你会迁移到 Cluster 吗？迁移过程中如何保证业务无感？</span><span class="chev">▶</span></summary>
+    <div class="answer">
+      <h4>解题方向</h4>
+      <p>不要直接回答"迁"或"不迁"，先做职责切分——这是架构师与工程师的分水岭。缓存和存储的可信度要求完全不同，混布一套集群会让容量规划和故障域互相污染。</p>
+      <h4>参考思路</h4>
+      <ul>
+        <li><strong>第一步：数据分层</strong>。核心缓存（可重建、延迟敏感）保留哨兵架构不动；用户关系这类"丢失不可接受"的数据，本质是存储，应迁移到 Cluster（或评估是否更适合用文档数据库承载）。80GB 已远超单机安全水位，Cluster 是合理选择。</li>
+        <li><strong>第二步：迁移方案——双写 + 灰度读</strong>。典型四阶段：① 新集群建好后开双写（以旧集群为准，新集群写失败仅告警）；② 存量数据用 SCAN 分批搬运（禁止 KEYS，每批 100–500 个 key，控制迁移 QPS）；③ 对账：抽样比对两边数据一致率，达 99.99%+ 后按流量比例灰度切读（1% → 10% → 50% → 100%）；④ 观察一周无对账差异后停旧写、下线旧集群。</li>
+        <li><strong>关键保障</strong>：双写阶段必须可回退——读流量切到新集群的开关要能在 1 分钟内拨回；迁移批任务要限速，避免打满旧集群带宽影响线上；给用户关系 key 设计 hash tag（如 <code>{user:1001}:follows</code>）时先采样验证 key 分布，防止倾斜。</li>
+        <li><strong>加分项</strong>：提出"迁移期间一致性窗口"问题——双写中间态下新旧集群短暂不一致，读旧集群可能读到新值、读新集群读到旧值，需要业务侧容忍最终一致或按 key 版本号对齐。</li>
+      </ul>
+    </div>
+  </details>
+
+  <details>
+    <summary><span class="q-mark">Q2</span><span>Cluster 集群某分片的主从节点同时宕机（宿主机故障），此时集群整体是什么状态？默认配置下业务会受到什么影响？你如何设计配置和部署来把这个故障域控制到最小？</span><span class="chev">▶</span></summary>
+    <div class="answer">
+      <h4>解题方向</h4>
+      <p>考察对 <code>cluster-require-full-coverage</code> 的理解深度，以及"配置决策必须回归数据职责"的思维。同一故障在缓存场景和存储场景下，正确答案截然相反。</p>
+      <h4>参考思路</h4>
+      <ul>
+        <li><strong>状态分析</strong>：该分片的 16384/N 个槽无节点服务，其余分片健康。默认 <code>cluster-require-full-coverage yes</code> 时，<em>整个集群</em>对所有槽不完整的写请求返回 <code>CLUSTERDOWN</code> 错误——不是只挂 1/N 流量，而是全部写不可用，这是很多人踩过的最惨烈的坑。</li>
+        <li><strong>配置决策</strong>：① 纯缓存场景 → 设为 <code>no</code>，牺牲该分片数据的可用性换取其余 1-1/N 流量正常，配合缓存 miss 回源 DB 兜底，代价是 DB 短时压力升高（要预估回源放大倍数）；② 存储场景 → 保持 <code>yes</code>，宁可整体拒写也不能让部分 key 悄悄消失——可用性故障可修，静默丢数据是事故升级。</li>
+        <li><strong>部署层控制故障域</strong>：① 主从强制反亲和（跨机架/跨 AZ），用 K8s <code>podAntiAffinity</code> 或云厂商置放组硬性保证，从根上消除"主从同宿主机"的可能；② 增加副本数：核心数据 3 副本（1 主 2 从），容忍双节点故障；③ 监控前置：对 <code>cluster_state</code>、<code>cluster_slots_ok</code>、复制延迟 <code>master_repl_offset差值</code> 配置告警，故障切换发生时 30 秒内触达值班人。</li>
+        <li><strong>恢复预案</strong>：节点拉起后若数据目录完好，会自动重新加入并追增量；若数据丢失，从备份（RDB+备份中心）恢复后以新节点身份空槽加入，等待槽位重分配——预案里要写清楚两种路径的操作步骤与预计耗时。</li>
+      </ul>
+    </div>
+  </details>
+</section>
+
+<div class="footer">
+  每日架构师微课程 · 第 7 期 · <b>Redis 系列 · 第 3 讲</b><br>
+  下一讲预告：Redis 缓存设计模式（穿透/击穿/雪崩治理）
+</div>
+
+</div>
+</body>
+</html>

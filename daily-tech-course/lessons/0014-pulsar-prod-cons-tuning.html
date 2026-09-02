@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 14 期 · Apache Pulsar 生产者/消费者调优 — 2026-08-31</title>
+<style>
+:root{
+  --bg:#0d1117;
+  --bg-card:#161b22;
+  --bg-card2:#1c2330;
+  --border:#2d333b;
+  --text:#c9d1d9;
+  --text-strong:#e6edf3;
+  --text-muted:#8b949e;
+  --accent:#ff6188;
+  --accent2:#a9dc76;
+  --accent3:#78dce8;
+  --code-bg:#0a0e14;
+  --warn-bg:rgba(255,159,67,.12);
+  --warn-border:#ff9f43;
+  --tip-bg:rgba(169,220,118,.1);
+  --tip-border:#a9dc76;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  background:var(--bg);
+  color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  line-height:1.75;
+  font-size:16px;
+}
+.wrap{max-width:860px;margin:0 auto;padding:24px 16px 64px}
+
+/* ===== Hero ===== */
+.hero{
+  background:linear-gradient(135deg,#101a1f 0%,#161b22 55%,#101820 100%);
+  border:1px solid var(--border);
+  border-radius:16px;
+  padding:36px 28px;
+  margin-bottom:28px;
+  position:relative;
+  overflow:hidden;
+}
+.hero::before{
+  content:"";
+  position:absolute;top:-60px;right:-60px;
+  width:220px;height:220px;border-radius:50%;
+  background:radial-gradient(circle,rgba(120,220,232,.16),transparent 70%);
+}
+.hero .series{color:var(--accent3);font-weight:600;font-size:.85rem;letter-spacing:.12em;text-transform:uppercase;margin-bottom:10px}
+.hero h1{color:var(--text-strong);font-size:1.7rem;line-height:1.4;margin-bottom:16px}
+.meta{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.tag{
+  display:inline-flex;align-items:center;gap:6px;
+  background:var(--bg-card2);border:1px solid var(--border);
+  color:var(--text-muted);border-radius:999px;
+  padding:4px 14px;font-size:.82rem;
+}
+.tag b{color:var(--text-strong);font-weight:600}
+.tag.pulsar{border-color:rgba(120,220,232,.45);color:#8ee4ee}
+.tag.pulsar b{color:#8ee4ee}
+
+/* ===== Section ===== */
+.section{
+  background:var(--bg-card);
+  border:1px solid var(--border);
+  border-radius:16px;
+  padding:28px;
+  margin-bottom:22px;
+}
+.section h2{
+  color:var(--text-strong);font-size:1.22rem;
+  padding-left:14px;border-left:4px solid var(--accent3);
+  margin-bottom:18px;line-height:1.5;
+}
+.section h3{
+  color:var(--text-strong);font-size:1.02rem;
+  margin:22px 0 10px;
+}
+.section h3::before{content:"◆ ";color:var(--accent3);font-size:.8em}
+p{margin-bottom:12px}
+p:last-child{margin-bottom:0}
+strong{color:var(--text-strong)}
+em{color:var(--accent);font-style:normal}
+a{color:var(--accent3)}
+
+/* ===== Code ===== */
+pre{
+  background:var(--code-bg);
+  border:1px solid var(--border);
+  border-radius:10px;
+  padding:16px 18px;
+  overflow-x:auto;
+  font-size:.84rem;line-height:1.7;
+  margin:14px 0;
+  font-family:"Cascadia Code","JetBrains Mono",Consolas,"Courier New",monospace;
+}
+code{font-family:inherit}
+p code,li code,td code{
+  background:rgba(110,118,129,.18);
+  border-radius:5px;padding:2px 7px;
+  color:var(--accent3);font-size:.86em;
+}
+.cm{color:#7f8c98}          /* comment */
+.kw{color:#ff6188}          /* keyword */
+.st{color:#a9dc76}          /* string */
+.nm{color:#78dce8}          /* number/func */
+.op{color:#ffd580}          /* param/option */
+
+/* ===== Lists ===== */
+ul,ol{padding-left:22px;margin-bottom:12px}
+li{margin-bottom:6px}
+li::marker{color:var(--accent3)}
+
+/* ===== Callout ===== */
+.callout{
+  border-radius:12px;padding:16px 18px;
+  margin:16px 0;font-size:.94rem;
+  border-left:4px solid;
+}
+.callout.warn{background:var(--warn-bg);border-color:var(--warn-border)}
+.callout.warn .t{color:#ffb56b}
+.callout.tip{background:var(--tip-bg);border-color:var(--tip-border)}
+.callout.tip .t{color:var(--accent2)}
+.callout .t{font-weight:700;display:block;margin-bottom:6px;font-size:.9rem}
+
+/* ===== Diagram ===== */
+.diagram{
+  background:var(--code-bg);
+  border:1px dashed var(--border);
+  border-radius:12px;padding:20px 14px;
+  margin:16px 0;
+  overflow-x:auto;
+}
+.arch{display:flex;flex-direction:column;gap:14px;min-width:560px}
+.row{display:flex;gap:12px;align-items:stretch}
+.box{
+  flex:1;background:var(--bg-card2);
+  border:1px solid var(--border);border-radius:10px;
+  padding:12px 14px;text-align:center;
+}
+.box .t{font-weight:700;color:var(--text-strong);font-size:.92rem;margin-bottom:4px}
+.box .d{color:var(--text-muted);font-size:.78rem;line-height:1.55}
+.box.hl{border-color:rgba(255,97,136,.55);background:rgba(255,97,136,.08)}
+.box.hl .t{color:#ff9db6}
+.box.gr{border-color:rgba(169,220,118,.5);background:rgba(169,220,118,.07)}
+.box.gr .t{color:var(--accent2)}
+.box.bl{border-color:rgba(120,220,232,.5);background:rgba(120,220,232,.07)}
+.box.bl .t{color:var(--accent3)}
+.box.ye{border-color:rgba(255,213,128,.5);background:rgba(255,213,128,.07)}
+.box.ye .t{color:#ffd580}
+.arrow{color:var(--text-muted);font-size:1.2rem;display:flex;align-items:center;justify-content:center}
+.dlabel{text-align:center;color:var(--text-muted);font-size:.78rem;margin-top:-6px}
+
+/* pipeline strip */
+.pipe{display:flex;gap:6px;align-items:center;min-width:640px}
+.pipe .stage{
+  flex:1;background:var(--bg-card2);
+  border:1px solid var(--border);border-radius:8px;
+  padding:8px 6px;text-align:center;
+}
+.pipe .stage .t{font-weight:700;color:var(--text-strong);font-size:.8rem}
+.pipe .stage .d{color:var(--text-muted);font-size:.7rem;line-height:1.5}
+.pipe .sep{color:var(--accent3);flex-shrink:0;font-weight:700}
+.stage.c1{border-color:rgba(120,220,232,.5)}
+.stage.c2{border-color:rgba(255,213,128,.5)}
+.stage.c3{border-color:rgba(255,97,136,.5)}
+.stage.c4{border-color:rgba(169,220,118,.5)}
+
+/* ===== Table ===== */
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:.88rem}
+th,td{border:1px solid var(--border);padding:10px 12px;text-align:left;vertical-align:top}
+th{background:var(--bg-card2);color:var(--text-strong);font-weight:600}
+td{color:var(--text)}
+tr:nth-child(even) td{background:rgba(255,255,255,.015)}
+td .win{color:var(--accent2);font-weight:600}
+td .lose{color:#ff8a9b}
+
+/* ===== Summary cards ===== */
+.summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:6px}
+.sum-card{
+  background:var(--bg-card2);border:1px solid var(--border);
+  border-radius:12px;padding:16px;
+}
+.sum-card .n{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:26px;height:26px;border-radius:50%;
+  background:rgba(120,220,232,.15);color:var(--accent3);
+  font-weight:700;font-size:.85rem;margin-bottom:8px;
+}
+.sum-card .t{color:var(--text-strong);font-weight:600;font-size:.95rem;margin-bottom:6px}
+.sum-card .d{color:var(--text-muted);font-size:.85rem;line-height:1.65}
+
+/* ===== Q&A collapsible ===== */
+details{
+  background:var(--bg-card2);
+  border:1px solid var(--border);
+  border-radius:12px;
+  padding:0;
+  margin-bottom:14px;
+  overflow:hidden;
+}
+details summary{
+  cursor:pointer;padding:16px 20px;
+  color:var(--text-strong);font-weight:600;font-size:.95rem;
+  list-style:none;display:flex;align-items:flex-start;gap:10px;
+  transition:background .15s;
+}
+details summary::-webkit-details-marker{display:none}
+details summary:hover{background:rgba(255,255,255,.03)}
+details summary .q-mark{
+  color:var(--accent3);font-weight:800;flex-shrink:0;
+}
+details summary .chev{margin-left:auto;color:var(--text-muted);transition:transform .2s;flex-shrink:0}
+details[open] summary .chev{transform:rotate(90deg)}
+details .answer{
+  padding:4px 20px 18px 42px;
+  border-top:1px dashed var(--border);
+  padding-top:14px;
+  font-size:.92rem;
+}
+details .answer h4{color:var(--accent3);font-size:.9rem;margin:14px 0 6px}
+details .answer p{margin-bottom:10px}
+details .answer ul{margin-bottom:10px}
+
+/* ===== Footer ===== */
+.footer{
+  text-align:center;color:var(--text-muted);
+  font-size:.8rem;margin-top:36px;
+  padding-top:20px;border-top:1px solid var(--border);
+}
+.footer b{color:var(--text)}
+
+/* ===== Responsive ===== */
+@media(max-width:640px){
+  .hero{padding:26px 18px}
+  .hero h1{font-size:1.35rem}
+  .section{padding:20px 16px}
+  pre{font-size:.78rem;padding:12px}
+  table{font-size:.8rem}
+  th,td{padding:8px}
+  .row{flex-direction:row}
+}
+</style>
+</head>
+<body>
+<div style="position:fixed;top:14px;left:14px;z-index:9999;">
+<a href="../index.html" style="display:inline-block;padding:6px 14px;border-radius:999px;background:rgba(20,26,38,.88);color:#7da7ff;font-size:13px;text-decoration:none;border:1px solid rgba(90,130,220,.45);backdrop-filter:blur(4px);font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.35);" onmouseover="this.style.background='rgba(30,40,60,.95)'" onmouseout="this.style.background='rgba(20,26,38,.88)'">← 课程目录</a>
+</div>
+
+<div class="wrap">
+
+<!-- ============ HERO ============ -->
+<header class="hero">
+  <div class="series">每日架构师微课程 · 第 14 期</div>
+  <h1>Apache Pulsar 生产者/消费者调优<br>—— 批量、流控窗口与容量速算</h1>
+  <div class="meta">
+    <span class="tag pulsar">📡 Apache Pulsar</span>
+    <span class="tag">📅 <b>2026-08-31</b>（周一）</span>
+    <span class="tag">⏱ 约 10 分钟</span>
+    <span class="tag">📚 Pulsar 系列 · 第 3 讲</span>
+  </div>
+</header>
+
+<!-- ============ 场景 ============ -->
+<section class="section">
+  <h2>一、从一次压测毛刺说起</h2>
+  <p>大促压测中，订单服务向 Pulsar 发送事件流：4C8G 的 Pod 上单 Producer 打到 2 万 msg/s 时，99 分位延迟出现周期性 200ms 毛刺；同一时间，下游库存服务的 3 个 Consumer 内存涨到 3GB、频繁 Full GC，backlog 每小时增长 200 万条。</p>
+  <p>Broker 侧 CPU 才 30%、BookKeeper 写延迟正常——<strong>瓶颈不在服务端，而在客户端参数</strong>。Pulsar 的吞吐与延迟上限，很大程度上由 Producer 的批量窗口和 Consumer 的预取窗口决定。这两个"窗口"正是今天的核心。</p>
+</section>
+
+<!-- ============ Producer ============ -->
+<section class="section">
+  <h2>二、Producer 发送链路与调优</h2>
+  <p>Pulsar Java 客户端的发送路径是一条流水线，理解每一站才知道参数作用在哪：</p>
+
+  <div class="diagram">
+    <div class="pipe">
+      <div class="stage c1"><div class="t">sendAsync()</div><div class="d">写入本地批缓冲</div></div>
+      <div class="sep">→</div>
+      <div class="stage c2"><div class="t">Batch 缓冲</div><div class="d">条数/时延阈值触发</div></div>
+      <div class="sep">→</div>
+      <div class="stage c2"><div class="t">压缩</div><div class="d">LZ4 / ZSTD</div></div>
+      <div class="sep">→</div>
+      <div class="stage c3"><div class="t">在途队列</div><div class="d">maxPendingMessages</div></div>
+      <div class="sep">→</div>
+      <div class="stage c4"><div class="t">Broker</div><div class="d">持久化 BookKeeper</div></div>
+      <div class="sep">→</div>
+      <div class="stage c1"><div class="t">回调确认</div><div class="d">future 完成</div></div>
+    </div>
+    <div class="dlabel">Producer 发送流水线：批触发 → 压缩 → 流控窗口 → 持久化 → 回调</div>
+  </div>
+
+  <h3>核心参数成组调整</h3>
+  <table>
+    <tr><th>参数</th><th>默认值</th><th>作用与调优方向</th></tr>
+    <tr><td><code>batchingMaxMessages</code></td><td>1000</td><td>单批最大条数。吞吐型场景可加大到 2000~5000，直接摊薄每条消息的 RPC 开销</td></tr>
+    <tr><td><code>batchingMaxPublishDelay</code></td><td>1ms</td><td>批等待窗口。延迟敏感可保持 1ms；吞吐优先放大到 5~10ms（代价是端到端延迟上浮）</td></tr>
+    <tr><td><code>maxPendingMessages</code></td><td>1000</td><td><em>在途未确认请求上限，即 Producer 端流控窗口</em>。窗口满后新 send 被拒绝或阻塞</td></tr>
+    <tr><td><code>blockIfQueueFull</code></td><td>false</td><td>false = 快速失败保护自己；true = 阻塞等待，形成对上游业务线程的反压</td></tr>
+    <tr><td><code>compressionType</code></td><td>NONE</td><td>ZSTD 压缩比高、CPU 略贵；LZ4 低延迟。带宽紧张优先 ZSTD</td></tr>
+    <tr><td><code>connectionsPerBroker</code></td><td>1</td><td>单连接 TCP 缓冲可能成瓶颈，高并发客户端可调到 2~3</td></tr>
+  </table>
+
+  <h3>生产级 Producer 配置</h3>
+<pre><span class="cm">// 吞吐优先 + 反压保护的典型配置</span>
+Producer&lt;byte[]&gt; producer = client.newProducer()
+    .topic(<span class="st">"persistent://tn/order/event"</span>)
+    .<span class="op">enableBatching</span>(<span class="kw">true</span>)
+    .<span class="op">batchingMaxMessages</span>(<span class="nm">3000</span>)
+    .<span class="op">batchingMaxPublishDelay</span>(<span class="nm">5</span>, TimeUnit.MILLISECONDS)
+    .<span class="op">compressionType</span>(CompressionType.ZSTD)
+    .<span class="op">maxPendingMessages</span>(<span class="nm">3000</span>)          <span class="cm">// 流控窗口</span>
+    .<span class="op">blockIfQueueFull</span>(<span class="kw">true</span>)             <span class="cm">// 反压业务线程，避免丢消息</span>
+    .<span class="op">sendTimeout</span>(<span class="nm">30</span>, TimeUnit.SECONDS)
+    .create();</pre>
+
+  <div class="callout warn">
+    <span class="t">⚠️ 高频事故：异步 send 不处理异常 = 静默丢消息</span>
+    <code>sendAsync()</code> 返回 future，队列满、超时、序列化失败都只体现在回调里。业务代码若不接 <code>exceptionally</code>，消息丢了都无人知晓。必须落补偿路径：
+  </div>
+<pre>producer.newMessage()
+    .value(payload)
+    .<span class="op">key</span>(orderId)                        <span class="cm">// 保序与 Key_Shared 路由依据</span>
+    .sendAsync()
+    .thenAccept(msgId -&gt; metrics.<span class="nm">incSuccess</span>())
+    .<span class="nm">exceptionally</span>(ex -&gt; {               <span class="cm">// 坑：缺了这里就是静默丢失</span>
+        deadLetterStore.<span class="nm">save</span>(payload);        <span class="cm">// 本地盘/DB 兜底，异步重投</span>
+        <span class="kw">return null</span>;
+    });</pre>
+</section>
+
+<!-- ============ Consumer ============ -->
+<section class="section">
+  <h2>三、Consumer 流控：push + permit 模型</h2>
+  <p>Pulsar 对 Consumer 是 <strong>push 模型 + 许可证（permit）流控</strong>：Broker 按订阅的 dispatch 限制向客户端推消息；Consumer 本地维护一个 <code>receiverQueueSize</code> 大小的预取队列。每处理完一条消息归还 permit，Broker 才继续推。<em>背压是天然的</em>——处理慢，permit 归还慢，推送自动降速。</p>
+
+  <div class="diagram">
+    <div class="arch">
+      <div class="row">
+        <div class="box bl"><div class="t">Broker</div><div class="d">按 permit 推送，cursor 跟踪确认位点</div></div>
+        <div class="arrow">→</div>
+        <div class="box ye"><div class="t">预取队列</div><div class="d">receiverQueueSize 条缓存（默认 1000）</div></div>
+        <div class="arrow">→</div>
+        <div class="box hl"><div class="t">业务处理</div><div class="d">单线程 receive 循环</div></div>
+      </div>
+      <div class="row">
+        <div class="box gr"><div class="t">ack / nack</div><div class="d">确认位点前移，或触发重投/死信</div></div>
+        <div class="arrow">↖</div>
+        <div class="box" style="border-color:rgba(139,148,158,.4)"><div class="t">permit 归还</div><div class="d">流控窗口释放，Broker 继续推</div></div>
+        <div class="arrow">↖</div>
+        <div class="box bl"><div class="t">Broker 感知</div><div class="d">处理速度反馈回推送速度</div></div>
+      </div>
+    </div>
+  </div>
+
+  <h3>receiverQueueSize 的内存账本</h3>
+  <p>这是 Consumer 最重要的参数。内存占用 ≈ <code>receiverQueueSize × 平均消息大小</code>。默认 1000 在小消息下无感，但若消息是 100KB 的 JSON 大报文，单 Consumer 就要吃 <strong>100MB 堆</strong>，10 个 Partition 的多分区订阅还受 <code>maxTotalReceiverQueueSizeAcrossPartitions</code>（默认 50000）总闸约束。<em>压测时 Full GC 的元凶多半是它</em>。</p>
+  <ul>
+    <li><strong>吞吐型小消息</strong>：适当调大（2000~5000），摊薄请求往返开销；</li>
+    <li><strong>大报文 / 处理慢</strong>：坚决调小（100~500），甚至设 0 变成逐条拉取，防止消息在客户端堆积腐烂；</li>
+    <li><strong>多分区订阅</strong>：关注总闸参数，避免 N 个分区 × 队列深度的乘积失控。</li>
+  </ul>
+
+<pre><span class="cm">// Consumer 典型配置</span>
+Consumer&lt;byte[]&gt; consumer = client.newConsumer()
+    .<span class="op">topic</span>(<span class="st">"order-event"</span>)
+    .<span class="op">subscriptionName</span>(<span class="st">"inventory-svc"</span>)
+    .<span class="op">subscriptionType</span>(SubscriptionType.Key_Shared)
+    .<span class="op">receiverQueueSize</span>(<span class="nm">500</span>)
+    .<span class="op">ackTimeout</span>(<span class="nm">0</span>, TimeUnit.SECONDS)          <span class="cm">// 关闭自动重投（见下方坑点）</span>
+    .<span class="op">negativeAckRedeliveryDelay</span>(<span class="nm">10</span>, TimeUnit.SECONDS)
+    .subscribe();</pre>
+
+  <div class="callout warn">
+    <span class="t">⚠️ ackTimeout 不是"处理超时告警"，而是自动重投</span>
+    很多团队把 <code>ackTimeout</code> 当监控用，结果处理超过 30s 的消息被 Broker 原样重推：<strong>重复消费 + 毒丸消息无限循环</strong>，backlog 越压越多。正确姿势：ackTimeout 设 0 关闭，处理失败用显式 <code>nack()</code> 控制重投节奏，配合重试队列与死信主题（DLQ）兜底。
+  </div>
+</section>
+
+<!-- ============ 容量规划 ============ -->
+<section class="section">
+  <h2>四、架构师视角：容量速算公式</h2>
+  <p>选型参数前先算两笔账，避免拍脑袋定并发度：</p>
+  <table>
+    <tr><th>侧</th><th>速算公式</th><th>说明</th></tr>
+    <tr><td>Producer</td><td>实例数 = 目标吞吐 ÷ 单实例实测吞吐 × 1.5</td><td>单实例吞吐由 batch 大小与发送延迟决定，压测得出，留 50% 余量应对毛刺</td></tr>
+    <tr><td>Consumer</td><td>并发数 = 目标吞吐 ÷ (1000ms ÷ 单条处理耗时)</td><td>单条 5ms 即 200 msg/s；<span class="lose">线性加机器往往追不上，需要改消费模型</span></td></tr>
+    <tr><td>端到端延迟</td><td>≈ batch 延迟 + 网络 RTT + 持久化 + 预取排队</td><td>batch 窗口每放大 1ms，延迟预算直接加 1ms</td></tr>
+  </table>
+  <p>当 Consumer 追不上生产速率时，<strong>加实例是线性收益，改模型是量级收益</strong>：批量拉取攒批处理、IO 异步化（处理与落库解耦）、按 key 分组并行——这才是架构师该推进的方向。</p>
+</section>
+
+<!-- ============ 坑点 ============ -->
+<section class="section">
+  <h2>五、生产坑点速查</h2>
+  <ul>
+    <li><strong>静默丢失</strong>：<code>sendAsync()</code> 不接 <code>exceptionally</code>，队列满/超时均无感知；</li>
+    <li><strong>队列满两种表现</strong>：<code>blockIfQueueFull=false</code> 抛 <code>ProducerQueueIsFullError</code> 快速失败；true 则业务线程被挂起——选哪个取决于上游能否接受阻塞；</li>
+    <li><strong>客户端内存上限</strong>：Java 客户端默认 64MB direct memory 池（<code>pulsar.client.memory-limit</code>），高吞吐下打满同样表现为发送卡顿，需与堆一起监控；</li>
+    <li><strong>ackTimeout 重投风暴</strong>：超时即重推，毒丸消息雪崩式放大，务必显式 nack + DLQ；</li>
+    <li><strong>Key_Shared 慢消费者</strong>：卡住的是 hash range（上期内容），调 receiverQueueSize 救不了，需拆分重 key 或用 <code>peek/skip</code> 运维处置。</li>
+  </ul>
+</section>
+
+<!-- ============ 今日要点 ============ -->
+<section class="section">
+  <h2>今日要点</h2>
+  <div class="summary-grid">
+    <div class="sum-card">
+      <span class="n">1</span>
+      <div class="t">吞吐靠批，延迟靠窗口</div>
+      <div class="d">Producer 吞吐 = batch 大小 × 发送频率；batching 参数必须与延迟预算成组权衡，不可单调。</div>
+    </div>
+    <div class="sum-card">
+      <span class="n">2</span>
+      <div class="t">maxPendingMessages 是流控闸门</div>
+      <div class="d">配合 blockIfQueueFull 形成 producer 端反压或快速失败策略，这是防雪崩的第一道门。</div>
+    </div>
+    <div class="sum-card">
+      <span class="n">3</span>
+      <div class="t">receiverQueueSize 按消息大小倒推</div>
+      <div class="d">内存 ≈ 队列深度 × 消息体积；大报文调小，吞吐小消息调大，多分区看总闸。</div>
+    </div>
+    <div class="sum-card">
+      <span class="n">4</span>
+      <div class="t">失败路径必须显式设计</div>
+      <div class="d">异步 send 接 exceptionally 落兜底；消费失败用 nack + 重试队列 + DLQ，禁用 ackTimeout 自动重投。</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 思考题 ============ -->
+<section class="section">
+  <h2>架构师思考题</h2>
+
+  <details>
+    <summary><span class="q-mark">Q1</span>大促场景：订单事件 2KB/条、峰值 8 万 msg/s，Producer 分布在 8 个 Pod。压测发现 99 分位延迟周期性冲到 200ms，Broker 与 BookKeeper 指标均健康。请给出参数设计与排查路径。<span class="chev">▶</span></summary>
+    <div class="answer">
+      <h4>第一步：容量速算</h4>
+      <p>8 个 Pod 均摊 1 万 msg/s。按 batch=500 条 × 2KB = 1MB/批、batchingMaxPublishDelay=5ms，单连接理论吞吐 500÷0.005 = 10 万 msg/s，单 Pod 1 万 msg/s 看似余量充足——<strong>所以毛刺一定出在"排队"环节而非发送能力</strong>。</p>
+      <h4>第二步：按流水线定位 200ms 毛刺</h4>
+      <ul>
+        <li><strong>在途队列满</strong>：maxPendingMessages=1000（默认）在 1 万 msg/s 下仅 100ms 缓冲，叠加 BookKeeper 刷盘抖动即打满 → blockIfQueueFull=true 时业务线程被挂起，表现正好是周期性 200ms。对策：调到 3000+，观察毛刺是否消失；</li>
+        <li><strong>客户端内存池</strong>：64MB direct memory 打满后 send 阻塞等池释放，监控 <code>pulsar_client_memory</code> 指标确认，必要时放大 memory-limit；</li>
+        <li><strong>GC 停顿</strong>：4C8G Pod 堆小，压测期间 GC 日志对齐毛刺时间点；</li>
+        <li><strong>单连接 TCP 缓冲</strong>：connectionsPerBroker 提到 2 再压一轮对比。</li>
+      </ul>
+      <h4>第三步：验证手段</h4>
+      <p>打开发送链路分段计时（send 入队耗时 vs future 完成耗时），二分定位是在客户端排队还是网络/broker 段。前者查上述参数，后者才回服务端。<strong>架构要点：客户端侧的流控窗口和内存池是"隐藏队列"，容量规划必须把这两级排队算进延迟预算。</strong></p>
+    </div>
+  </details>
+
+  <details>
+    <summary><span class="q-mark">Q2</span>库存服务消费单条耗时 50ms，10 个 Partition、3 个 Consumer，backlog 每小时涨 200 万。扩容到多少个 Consumer 才够？如果不够，架构上怎么破？<span class="chev">▶</span></summary>
+    <div class="answer">
+      <h4>第一步：算清缺口</h4>
+      <p>生产速率 ≈ 2000万 ÷ 3600s ≈ <strong>556 msg/s</strong>。单 Consumer 能力 = 1000 ÷ 50 = <strong>20 msg/s</strong>。3 个 Consumer 仅 60 msg/s，缺口近 500/s。</p>
+      <h4>第二步：线性扩容的天花板</h4>
+      <p>Partition 数是消费并发的物理上限：10 个 Partition 最多 10 个有效 Consumer（Shared/Key_Shared 下再多也闲置），即 200 msg/s——<strong>仍然不够</strong>。就算扩到 20 个 Partition + 20 个 Consumer，也只是勉强追平，没有任何余量应对峰值，且数据库写入侧可能先被打挂。</p>
+      <h4>第三步：改模型，拿量级收益</h4>
+      <ul>
+        <li><strong>攒批处理</strong>：receive 循环里攒 50~100 条批量落库。50 条/批 × 20 批/s，单 Consumer 吞吐可到 1000+ msg/s，3 个 Consumer 就能消化 556/s——瓶颈从"逐条 RTT"变成"批处理吞吐"；</li>
+        <li><strong>IO 异步化</strong>：处理逻辑里的同步 DB 调用改为异步或写入本地缓冲由单独线程批量刷，让 receive 线程只做分发；</li>
+        <li><strong>按 key 分组并行</strong>：若必须保 key 顺序（Key_Shared），先按 orderId 哈希到内存队列，同 key 串行、异 key 并行，顺序与吞吐兼得；</li>
+        <li><strong>兜底监控</strong>：backlog 增速 ÷ 消费速率 = 追平时间，纳入容量水位告警；同时确认 retention 覆盖最长故障恢复窗口，避免 backlog 超期被删造成真实丢数。</li>
+      </ul>
+      <p><strong>架构结论：消费跟不上时，先问"单条处理成本能否下降一个量级"，再问"要多少机器"。加实例是线性解，改消费模型是指数解。</strong></p>
+    </div>
+  </details>
+</section>
+
+<div class="footer">
+  <b>每日架构师微课程</b> · 第 14 期 · Apache Pulsar 系列（第 3 讲）<br>
+  下期预告：Pulsar 分层存储与消息可靠性
+</div>
+
+</div>
+</body>
+</html>

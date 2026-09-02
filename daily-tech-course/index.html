@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日架构师微课程</title>
+<link rel="stylesheet" href="assets/daily.css">
+<style>
+  .sub { color: var(--muted); margin: 0 0 1.8rem; font-size: .95rem; }
+  a.lesson-row {
+    display: flex; gap: .9rem; align-items: baseline;
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 10px; padding: .8rem 1.1rem; margin-bottom: .6rem;
+    text-decoration: none; color: var(--ink);
+    transition: border-color .15s;
+  }
+  a.lesson-row:hover { border-color: var(--accent); text-decoration: none; }
+  .lesson-row .no {
+    font-family: var(--font-mono); font-size: .8rem; color: var(--accent);
+    flex: none; min-width: 2.6rem;
+  }
+  .lesson-row .t { font-weight: 600; font-size: .95rem; }
+  .lesson-row .cat {
+    flex: none; font-size: .72rem; color: var(--muted);
+    border: 1px solid var(--line); border-radius: 999px; padding: .08rem .55rem;
+    white-space: nowrap;
+  }
+  .archive-note { font-size: .82rem; color: var(--muted); margin: 1.2rem 0 .8rem; }
+  .tag-latest { color: var(--ok); font-size: .72rem; margin-left: .4rem; }
+</style>
+</head>
+<body>
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE</span>
+  <span>每日架构师微课程</span>
+</header>
+
+<h1>🏗️ 每日架构师微课程</h1>
+<p class="sub">每天 10 分钟，一个知识点吃透 · 八大技术栈轮换 · <a href="../index.html">← 返回课程总目录</a></p>
+
+<h2>课程列表</h2>
+
+<a class="lesson-row" href="lessons/0016-k8s-hpa.html">
+  <span class="no">0016</span><span class="t">Kubernetes HPA 自动伸缩：别让流量高峰击穿你的服务</span><span class="cat">K8s</span><span class="tag-latest">最新</span>
+</a>
+<a class="lesson-row" href="lessons/0015-tdengine-supertable.html">
+  <span class="no">0015</span><span class="t">TDengine 超级表与子表数据建模</span><span class="cat">TDengine</span>
+</a>
+<a class="lesson-row" href="lessons/0014-pulsar-prod-cons-tuning.html">
+  <span class="no">0014</span><span class="t">Apache Pulsar 生产者/消费者调优</span><span class="cat">Pulsar</span>
+</a>
+<a class="lesson-row" href="lessons/0013-pulsar-subscription-models.html">
+  <span class="no">0013</span><span class="t">Apache Pulsar 订阅模型：四种订阅、游标与 Key_Shared 保序</span><span class="cat">Pulsar</span>
+</a>
+<a class="lesson-row" href="lessons/0012-pulsar-vs-kafka.html">
+  <span class="no">0012</span><span class="t">Apache Pulsar 存算分离架构与 Kafka 对比</span><span class="cat">Pulsar</span>
+</a>
+<a class="lesson-row" href="lessons/0011-redis-memory-management.html">
+  <span class="no">0011</span><span class="t">Redis 内存管理：淘汰策略、过期删除与碎片治理</span><span class="cat">Redis</span>
+</a>
+<a class="lesson-row" href="lessons/0010-redis-performance-tuning.html">
+  <span class="no">0010</span><span class="t">Redis 性能调优：慢查询、大 Key、热 Key 与全链路延迟排查</span><span class="cat">Redis</span>
+</a>
+<a class="lesson-row" href="lessons/0009-redis-distributed-lock.html">
+  <span class="no">0009</span><span class="t">Redis 分布式锁：从 SET NX 到 Redisson 看门狗与 RedLock 争议</span><span class="cat">Redis</span>
+</a>
+<a class="lesson-row" href="lessons/0008-redis-cache-patterns.html">
+  <span class="no">0008</span><span class="t">Redis 缓存设计模式：穿透 / 击穿 / 雪崩的系统化治理</span><span class="cat">Redis</span>
+</a>
+<a class="lesson-row" href="lessons/0007-redis-sentinel-vs-cluster.html">
+  <span class="no">0007</span><span class="t">Redis 集群方案：哨兵 vs Cluster 的选型与架构权衡</span><span class="cat">Redis</span>
+</a>
+<a class="lesson-row" href="lessons/0006-redis-persistence.html">
+  <span class="no">0006</span><span class="t">Redis 持久化机制：RDB vs AOF 的架构权衡</span><span class="cat">Redis</span>
+</a>
+<a class="lesson-row" href="lessons/0005-redis-data-structures.html">
+  <span class="no">0005</span><span class="t">Redis 数据结构与选型</span><span class="cat">Redis</span>
+</a>
+<a class="lesson-row" href="lessons/0004-mysql-replication.html">
+  <span class="no">0004</span><span class="t">MySQL 主从复制与读写分离架构</span><span class="cat">MySQL</span>
+</a>
+<a class="lesson-row" href="lessons/0003-mysql-index-explain.html">
+  <span class="no">0003</span><span class="t">MySQL 索引优化与执行计划深度分析</span><span class="cat">MySQL</span>
+</a>
+<a class="lesson-row" href="lessons/0002-nacos-registry-config.html">
+  <span class="no">0002</span><span class="t">Nacos 服务注册与配置中心</span><span class="cat">Spring Cloud</span>
+</a>
+<a class="lesson-row" href="lessons/0001-sentinel-circuit-breaking.html">
+  <span class="no">0001</span><span class="t">Sentinel 熔断限流实战</span><span class="cat">Spring Cloud</span>
+</a>
+
+<p class="archive-note">※ 第 1-16 期为存档期（2026-08-12 ~ 2026-09-02），保留原深色版式；第 17 期起采用本站统一版式。技术栈轮换：Spring Cloud → MySQL → Redis → Pulsar → TDengine → MinIO → K8s → 架构运维通用。</p>
+
+<div class="next">
+  <p><strong>📚 持续更新中</strong></p>
+  <p>每个工作日早 7 点更新一期 · 下一期：架构与中间件运维通用专题</p>
+</div>
+
+<footer class="lesson-foot">
+  <div class="nav">
+    <a href="../index.html">← 课程总目录</a>
+    <a href="https://csuftt.github.io/lessons/">线上站点</a>
+  </div>
+</footer>
+</body>
+</html>

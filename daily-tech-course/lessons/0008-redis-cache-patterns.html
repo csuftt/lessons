@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 8 期 · Redis 缓存设计模式：穿透 / 击穿 / 雪崩的系统化治理 — 2026-08-20</title>
+<style>
+:root{
+  --bg:#0d1117;
+  --bg-card:#161b22;
+  --bg-card2:#1c2330;
+  --border:#2d333b;
+  --text:#c9d1d9;
+  --text-strong:#e6edf3;
+  --text-muted:#8b949e;
+  --accent:#ff6188;
+  --accent2:#a9dc76;
+  --accent3:#78dce8;
+  --code-bg:#0a0e14;
+  --warn-bg:rgba(255,159,67,.12);
+  --warn-border:#ff9f43;
+  --tip-bg:rgba(169,220,118,.1);
+  --tip-border:#a9dc76;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  background:var(--bg);
+  color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  line-height:1.75;
+  font-size:16px;
+}
+.wrap{max-width:860px;margin:0 auto;padding:24px 16px 64px}
+
+/* ===== Hero ===== */
+.hero{
+  background:linear-gradient(135deg,#1a1016 0%,#161b22 55%,#101820 100%);
+  border:1px solid var(--border);
+  border-radius:16px;
+  padding:36px 28px;
+  margin-bottom:28px;
+  position:relative;
+  overflow:hidden;
+}
+.hero::before{
+  content:"";
+  position:absolute;top:-60px;right:-60px;
+  width:220px;height:220px;border-radius:50%;
+  background:radial-gradient(circle,rgba(255,97,136,.18),transparent 70%);
+}
+.hero .series{color:var(--accent);font-weight:600;font-size:.85rem;letter-spacing:.12em;text-transform:uppercase;margin-bottom:10px}
+.hero h1{color:var(--text-strong);font-size:1.7rem;line-height:1.4;margin-bottom:16px}
+.meta{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.tag{
+  display:inline-flex;align-items:center;gap:6px;
+  background:var(--bg-card2);border:1px solid var(--border);
+  color:var(--text-muted);border-radius:999px;
+  padding:4px 14px;font-size:.82rem;
+}
+.tag b{color:var(--text-strong);font-weight:600}
+.tag.redis{border-color:rgba(255,97,136,.45);color:#ff9db6}
+.tag.redis b{color:#ff9db6}
+
+/* ===== Section ===== */
+.section{
+  background:var(--bg-card);
+  border:1px solid var(--border);
+  border-radius:16px;
+  padding:28px;
+  margin-bottom:22px;
+}
+.section h2{
+  color:var(--text-strong);font-size:1.22rem;
+  padding-left:14px;border-left:4px solid var(--accent);
+  margin-bottom:18px;line-height:1.5;
+}
+.section h3{
+  color:var(--text-strong);font-size:1.02rem;
+  margin:22px 0 10px;
+}
+.section h3::before{content:"◆ ";color:var(--accent);font-size:.8em}
+p{margin-bottom:12px}
+p:last-child{margin-bottom:0}
+strong{color:var(--text-strong)}
+em{color:var(--accent3);font-style:normal}
+a{color:var(--accent3)}
+
+/* ===== Code ===== */
+pre{
+  background:var(--code-bg);
+  border:1px solid var(--border);
+  border-radius:10px;
+  padding:16px 18px;
+  overflow-x:auto;
+  font-size:.84rem;line-height:1.7;
+  margin:14px 0;
+  font-family:"Cascadia Code","JetBrains Mono",Consolas,"Courier New",monospace;
+}
+code{font-family:inherit}
+p code,li code,td code{
+  background:rgba(110,118,129,.18);
+  border-radius:5px;padding:2px 7px;
+  color:var(--accent3);font-size:.86em;
+}
+.cm{color:#7f8c98}          /* comment */
+.kw{color:#ff6188}          /* keyword */
+.st{color:#a9dc76}          /* string */
+.nm{color:#78dce8}          /* number/func */
+.op{color:#ffd580}          /* param/option */
+
+/* ===== Lists ===== */
+ul,ol{padding-left:22px;margin-bottom:12px}
+li{margin-bottom:6px}
+li::marker{color:var(--accent)}
+
+/* ===== Callout ===== */
+.callout{
+  border-radius:12px;padding:16px 18px;
+  margin:16px 0;font-size:.94rem;
+  border-left:4px solid;
+}
+.callout.warn{background:var(--warn-bg);border-color:var(--warn-border)}
+.callout.warn .t{color:#ffb56b}
+.callout.tip{background:var(--tip-bg);border-color:var(--tip-border)}
+.callout.tip .t{color:var(--accent2)}
+.callout .t{font-weight:700;display:block;margin-bottom:6px;font-size:.9rem}
+
+/* ===== Architecture diagram ===== */
+.diagram{
+  background:var(--code-bg);
+  border:1px dashed var(--border);
+  border-radius:12px;padding:20px 14px;
+  margin:16px 0;
+  overflow-x:auto;
+}
+.arch{display:flex;flex-direction:column;gap:14px;min-width:520px}
+.row{display:flex;gap:12px;align-items:stretch}
+.box{
+  flex:1;background:var(--bg-card2);
+  border:1px solid var(--border);border-radius:10px;
+  padding:12px 14px;text-align:center;
+}
+.box .t{font-weight:700;color:var(--text-strong);font-size:.92rem;margin-bottom:4px}
+.box .d{color:var(--text-muted);font-size:.78rem;line-height:1.55}
+.box.hl{border-color:rgba(255,97,136,.55);background:rgba(255,97,136,.08)}
+.box.hl .t{color:#ff9db6}
+.box.gr{border-color:rgba(169,220,118,.5);background:rgba(169,220,118,.07)}
+.box.gr .t{color:var(--accent2)}
+.box.bl{border-color:rgba(120,220,232,.5);background:rgba(120,220,232,.07)}
+.box.bl .t{color:var(--accent3)}
+.arrow{color:var(--text-muted);font-size:1.2rem;display:flex;align-items:center;justify-content:center}
+.dlabel{text-align:center;color:var(--text-muted);font-size:.78rem;margin-top:-6px}
+
+/* ===== Comparison table ===== */
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:.88rem}
+th,td{border:1px solid var(--border);padding:10px 12px;text-align:left;vertical-align:top}
+th{background:var(--bg-card2);color:var(--text-strong);font-weight:600}
+td{color:var(--text)}
+tr:nth-child(even) td{background:rgba(255,255,255,.015)}
+td .win{color:var(--accent2);font-weight:600}
+td .lose{color:#ff8a9b}
+
+/* ===== Summary cards ===== */
+.summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:6px}
+.sum-card{
+  background:var(--bg-card2);border:1px solid var(--border);
+  border-radius:12px;padding:16px;
+}
+.sum-card .n{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:26px;height:26px;border-radius:50%;
+  background:rgba(255,97,136,.15);color:var(--accent);
+  font-weight:700;font-size:.85rem;margin-bottom:8px;
+}
+.sum-card .t{color:var(--text-strong);font-weight:600;font-size:.95rem;margin-bottom:6px}
+.sum-card .d{color:var(--text-muted);font-size:.85rem;line-height:1.65}
+
+/* ===== Q&A collapsible ===== */
+details{
+  background:var(--bg-card2);
+  border:1px solid var(--border);
+  border-radius:12px;
+  padding:0;
+  margin-bottom:14px;
+  overflow:hidden;
+}
+details summary{
+  cursor:pointer;padding:16px 20px;
+  color:var(--text-strong);font-weight:600;font-size:.95rem;
+  list-style:none;display:flex;align-items:flex-start;gap:10px;
+  transition:background .15s;
+}
+details summary::-webkit-details-marker{display:none}
+details summary:hover{background:rgba(255,255,255,.03)}
+details summary .q-mark{
+  color:var(--accent);font-weight:800;flex-shrink:0;
+}
+details summary .chev{margin-left:auto;color:var(--text-muted);transition:transform .2s;flex-shrink:0}
+details[open] summary .chev{transform:rotate(90deg)}
+details .answer{
+  padding:4px 20px 18px 42px;
+  border-top:1px dashed var(--border);
+  padding-top:14px;
+  font-size:.92rem;
+}
+details .answer h4{color:var(--accent3);font-size:.9rem;margin:14px 0 6px}
+details .answer p{margin-bottom:10px}
+details .answer ul{margin-bottom:10px}
+
+/* ===== Footer ===== */
+.footer{
+  text-align:center;color:var(--text-muted);
+  font-size:.8rem;margin-top:36px;
+  padding-top:20px;border-top:1px solid var(--border);
+}
+.footer b{color:var(--text)}
+
+/* ===== Responsive ===== */
+@media(max-width:640px){
+  .hero{padding:26px 18px}
+  .hero h1{font-size:1.35rem}
+  .section{padding:20px 16px}
+  pre{font-size:.78rem;padding:12px}
+  table{font-size:.8rem}
+  th,td{padding:8px}
+  .row{flex-direction:row}
+}
+</style>
+</head>
+<body>
+<div style="position:fixed;top:14px;left:14px;z-index:9999;">
+<a href="../index.html" style="display:inline-block;padding:6px 14px;border-radius:999px;background:rgba(20,26,38,.88);color:#7da7ff;font-size:13px;text-decoration:none;border:1px solid rgba(90,130,220,.45);backdrop-filter:blur(4px);font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.35);" onmouseover="this.style.background='rgba(30,40,60,.95)'" onmouseout="this.style.background='rgba(20,26,38,.88)'">← 课程目录</a>
+</div>
+
+<div class="wrap">
+
+<!-- ============ HERO ============ -->
+<header class="hero">
+  <div class="series">每日架构师微课程 · 第 8 期</div>
+  <h1>Redis 缓存设计模式：穿透 / 击穿 / 雪崩的系统化治理</h1>
+  <div class="meta">
+    <span class="tag">📅 <b>2026-08-20</b>（周四）</span>
+    <span class="tag redis">⚡ Redis 系列 · 第 4 讲</span>
+    <span class="tag">⏱ 预计阅读 <b>10 分钟</b></span>
+    <span class="tag">🎯 布隆过滤器 / 互斥重建 / 逻辑过期 / 多级缓存</span>
+  </div>
+</header>
+
+<!-- ============ 1. 场景引入 ============ -->
+<section class="section">
+  <h2>一、一次凌晨两点的事故复盘</h2>
+  <p>某电商平台的商品详情页缓存采用"<em>Cache-Aside</em>"模式：读缓存 → miss 则查 DB → 回写缓存，TTL 统一 30 分钟。凌晨两点运营批量导入 10 万个新商品，同时爬虫用不存在的商品 ID 高频探测接口。三分钟后 MySQL CPU 100%，整站商品接口超时。复盘发现三个问题叠加爆发：</p>
+  <ol>
+    <li><strong>穿透</strong>：爬虫查询不存在的 ID，缓存永远 miss，请求全部砸向 DB；</li>
+    <li><strong>击穿</strong>：10 万商品同时导入，TTL 起点相同，30 分钟后集中过期，热点 key 过期瞬间并发重建把 DB 打挂；</li>
+    <li><strong>雪崩效应</strong>：DB 慢 → 请求线程堆积 → 应用线程池耗尽 → 故障从商品服务扩散到订单、支付。</li>
+  </ol>
+  <p>这三个问题<strong>形态相似、根因不同、解法各异</strong>，混为一谈会导致治理无效。今天从架构师视角系统化拆解。</p>
+</section>
+
+<!-- ============ 2. 原理讲解 ============ -->
+<section class="section">
+  <h2>二、三兄弟的本质区别：先诊断，再开药</h2>
+  <table>
+    <tr><th>维度</th><th>穿透（Penetration）</th><th>击穿（Breakdown）</th><th>雪崩（Avalanche）</th></tr>
+    <tr><td>触发条件</td><td>查询<strong>不存在</strong>的数据</td><td><strong>热点</strong> key 过期瞬间</td><td><strong>大量</strong> key 同时过期 / Redis 宕机</td></tr>
+    <tr><td>请求特征</td><td>恶意攻击或业务空查</td><td>正常高并发读</td><td>正常流量遇集中失效</td></tr>
+    <tr><td>缓存层状态</td><td>无数据可缓存</td><td>单个 key 失效</td><td>大面积失效或整体不可用</td></tr>
+    <tr><td>核心解法</td><td class="win">布隆过滤器 + 空值缓存</td><td class="win">互斥重建 / 逻辑过期</td><td class="win">随机 TTL + 多级缓存 + 熔断降级</td></tr>
+  </table>
+
+  <div class="diagram">
+    <div class="arch">
+      <div class="row">
+        <div class="box bl"><div class="t">穿透</div><div class="d">key 不存在 → 缓存永远 miss → 全部落 DB</div></div>
+        <div class="box hl"><div class="t">击穿</div><div class="d">1 个热点 key 过期 → 万级并发同时重建</div></div>
+        <div class="box gr"><div class="t">雪崩</div><div class="d">N 个 key 同时过期 / 实例宕机 → DB 瞬间过载</div></div>
+      </div>
+      <div class="dlabel">▲ 记忆口诀：穿透查"无"、击穿点"热"、雪崩塌"片"</div>
+    </div>
+  </div>
+
+  <h3>穿透治理：把"不存在的请求"挡在缓存之外</h3>
+  <ul>
+    <li><strong>布隆过滤器</strong>：启动时将全量合法 ID 灌入（约 1GB / 1亿 key，误判率 1%）。请求先过过滤器：<em>说"不存在"就一定不存在，直接拒绝</em>；说"存在"才继续查缓存。代价是新增数据需异步补录，删除有滞后；</li>
+    <li><strong>空值缓存</strong>：查 DB 确认不存在后，写入 <code>key → null</code> 并设短 TTL（30s~5min），兜住过滤器误判与漏录窗口；</li>
+    <li><strong>入口校验</strong>：ID 格式、范围、权限在网关层拦截，能挡掉 80% 的恶意探测。</li>
+  </ul>
+
+  <h3>击穿治理：热点 key 重建只放一个请求进去</h3>
+  <ul>
+    <li><strong>互斥锁重建</strong>：缓存 miss 时先抢分布式锁，抢到的线程查 DB 回写，其余线程<strong>短暂自旋重读缓存</strong>（不是直接打 DB）。吞吐略降，但 DB 压力恒定；</li>
+    <li><strong>逻辑过期</strong>：物理 TTL 永不失效，value 内嵌过期时间字段。读到"逻辑过期"数据时<strong>返回旧值 + 异步线程抢锁重建</strong>——绝不阻塞读请求，适合秒杀类热点，代价是短暂的数据陈旧窗口。</li>
+  </ul>
+
+  <h3>雪崩治理：把失效时间与故障域打散</h3>
+  <ul>
+    <li><strong>TTL 加随机抖动</strong>：<code>TTL = base + random(0, 600s)</code>，从根上消灭"同时过期"；</li>
+    <li><strong>多级缓存</strong>：本地 Caffeine（秒级）→ Redis（分钟级）→ DB，Redis 整体不可用时本地缓存兜住核心读；</li>
+    <li><strong>熔断降级</strong>：缓存层故障时对 DB 回源限流（如 Sentinel 按 DB 水位的 60% 限流），返回默认页/兜底数据，<em>保住 DB 就是保住全局</em>。</li>
+  </ul>
+</section>
+
+<!-- ============ 3. 实战 ============ -->
+<section class="section">
+  <h2>三、实战代码：三套可落地的治理方案</h2>
+
+  <h3>方案一：布隆过滤器防穿透（Redisson）</h3>
+  <pre><span class="cm">// 启动时初始化：预计 1 亿商品，误判率 1%</span>
+RBloomFilter&lt;Long&gt; filter = redisson.getBloomFilter(<span class="st">"product:bloom"</span>);
+filter.<span class="nm">tryInit</span>(<span class="op">100_000_000L</span>, <span class="op">0.01</span>);  <span class="cm">// 约 120MB 内存</span>
+
+<span class="kw">public</span> Product <span class="nm">getProduct</span>(Long id) {
+    <span class="kw">if</span> (!filter.<span class="nm">contains</span>(id)) {
+        <span class="kw">return</span> <span class="kw">null</span>;                    <span class="cm">// 一定不存在，直接拒绝</span>
+    }
+    <span class="cm">// ... 正常 Cache-Aside 流程，miss 时回写缓存</span>
+}</pre>
+
+  <h3>方案二：互斥锁重建防击穿</h3>
+  <pre><span class="kw">public</span> Product <span class="nm">getWithMutex</span>(Long id) <span class="kw">throws</span> Exception {
+    String key = <span class="st">"product:"</span> + id;
+    String val = redis.<span class="nm">get</span>(key);
+    <span class="kw">if</span> (val == <span class="kw">null</span>) {
+        String lockKey = <span class="st">"lock:rebuild:"</span> + key;
+        RLock lock = redisson.<span class="nm">getLock</span>(lockKey);
+        <span class="cm">// 等 3s 获取锁；持有 30s 自动释放，防死锁</span>
+        <span class="kw">if</span> (lock.<span class="nm">tryLock</span>(<span class="op">3</span>, <span class="op">30</span>, TimeUnit.SECONDS)) {
+            <span class="kw">try</span> {
+                val = redis.<span class="nm">get</span>(key);          <span class="cm">// ★ 双重检查：可能已被重建</span>
+                <span class="kw">if</span> (val == <span class="kw">null</span>) {
+                    val = loadFromDb(id);
+                    redis.<span class="nm">setex</span>(key, <span class="op">1800</span> + randomTtl(), val);
+                }
+            } <span class="kw">finally</span> { lock.<span class="nm">unlock</span>(); }
+        } <span class="kw">else</span> {
+            Thread.<span class="nm">sleep</span>(<span class="op">50</span>);              <span class="cm">// 未抢到锁：自旋重读，而非打 DB</span>
+            <span class="kw">return</span> <span class="nm">getWithMutex</span>(id);
+        }
+    }
+    <span class="kw">return</span> parse(val);
+}</pre>
+
+  <h3>方案三：逻辑过期防击穿（不阻塞读）</h3>
+  <pre><span class="cm">// value 结构：{"data":{...},"expire":1755648000000}，物理 TTL 不设置</span>
+<span class="kw">public</span> Product <span class="nm">getWithLogicalExpire</span>(Long id) {
+    CacheWrapper w = parse(redis.<span class="nm">get</span>(<span class="st">"product:"</span> + id));
+    <span class="kw">if</span> (w != <span class="kw">null</span> &amp;&amp; !w.<span class="nm">isExpired</span>()) <span class="kw">return</span> w.data;   <span class="cm">// 新鲜：直接返回</span>
+
+    <span class="cm">// 已逻辑过期：抢到锁才异步重建，抢不到/已有人重建 → 返回旧值</span>
+    <span class="kw">if</span> (redisson.<span class="nm">getLock</span>(<span class="st">"lock:rebuild:"</span> + id).<span class="nm">tryLock</span>()) {
+        executor.<span class="nm">submit</span>(() -&gt; {
+            <span class="kw">try</span> { rebuildFromDb(id); }
+            <span class="kw">finally</span> { unlock(); }
+        });
+    }
+    <span class="kw">return</span> w == <span class="kw">null</span> ? <span class="kw">null</span> : w.data;   <span class="cm">// 旧值兜底，读永不阻塞</span>
+}</pre>
+
+  <div class="callout warn">
+    <span class="t">⚠️ 生产坑点清单</span>
+    <ul style="margin-bottom:0">
+      <li><strong>双重检查不能省</strong>：拿到锁后必须再查一次缓存，否则锁排队线程会重复重建，锁形同虚设；</li>
+      <li><strong>tryLock 必须带 waitTime 上限</strong>：自旋递归要有最大次数（如 20 次），否则 Redis 抖动时线程栈打爆；</li>
+      <li><strong>布隆过滤器不能删元素</strong>：商品下架后过滤器仍放行 → 必须与空值缓存配合使用；</li>
+      <li><strong>逻辑过期有陈旧窗口</strong>：库存、价格类强一致数据禁用此方案，只用于展示型热点数据。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ 4. 架构设计 ============ -->
+<section class="section">
+  <h2>四、整体防御架构：四层漏斗模型</h2>
+  <p>单一方案都有失效场景，生产环境应按"<em>逐层过滤、越往后流量越小</em>"的漏斗思路组合部署：</p>
+  <div class="diagram">
+    <div class="arch">
+      <div class="row">
+        <div class="box bl"><div class="t">L1 入口校验</div><div class="d">网关层 ID 格式/频控/签名 → 挡恶意流量</div></div>
+        <div class="box bl"><div class="t">L2 布隆过滤器</div><div class="d">不存在的 key 直接拒绝（穿透）</div></div>
+      </div>
+      <div class="arrow">▼</div>
+      <div class="row">
+        <div class="box gr"><div class="t">L3 本地缓存</div><div class="d">Caffeine 秒级 TTL，兜住热点与 Redis 抖动（击穿/雪崩）</div></div>
+        <div class="box gr"><div class="t">L4 Redis + 随机 TTL</div><div class="d">互斥重建 + 逻辑过期（击穿）+ 多级兜底（雪崩）</div></div>
+      </div>
+      <div class="arrow">▼</div>
+      <div class="row">
+        <div class="box hl"><div class="t">L5 DB 回源（限流）</div><div class="d">Sentinel 按 DB 水位 60% 限流，超限走降级页 —— 最后的底线</div></div>
+      </div>
+      <div class="dlabel">▲ 每层只放行"下一层能承受"的流量，DB 永远不是第一承受者</div>
+    </div>
+  </div>
+  <div class="callout tip">
+    <span class="t">💡 容量规划参考</span>
+    估算回源峰值 QPS = 热点 key 数 ÷ 重建周期 × 并发系数。例：1 万热点商品、TTL 30min（含抖动均值）→ 稳态回源 ≈ 1万/1800s ≈ 6 QPS，但<strong>冷启动或缓存整体失效时瞬时可达数千 QPS</strong>——按瞬时值规划 DB 水位与限流阈值，而不是稳态均值，这是雪崩预案最常犯的估算错误。
+  </div>
+</section>
+
+<!-- ============ 5. 今日要点 ============ -->
+<section class="section">
+  <h2>五、今日要点</h2>
+  <div class="summary-grid">
+    <div class="sum-card"><span class="n">1</span><div class="t">先诊断再开药</div><div class="d">穿透查"无"、击穿点"热"、雪崩塌"片"——三者也常叠加爆发，治理方案要组合部署而非单选。</div></div>
+    <div class="sum-card"><span class="n">2</span><div class="t">穿透三板斧</div><div class="d">入口校验 + 布隆过滤器（说无则无）+ 空值缓存（兜误判）。布隆不能删元素，必须与空值缓存配合。</div></div>
+    <div class="sum-card"><span class="n">3</span><div class="t">击穿双方案</div><div class="d">互斥锁重建（一致性好、读有阻塞）vs 逻辑过期（读不阻塞、有陈旧窗口），按数据一致性要求选型。</div></div>
+    <div class="sum-card"><span class="n">4</span><div class="t">雪崩靠打散+兜底</div><div class="d">TTL 随机抖动消灭集中过期；多级缓存与回源限流保住 DB——保住 DB 就保住全局。</div></div>
+    <div class="sum-card"><span class="n">5</span><div class="t">按瞬时值规划</div><div class="d">回源容量按冷启动/整体失效的瞬时峰值规划限流阈值，稳态均值会严重低估风险。</div></div>
+  </div>
+</section>
+
+<!-- ============ 6. 思考题 ============ -->
+<section class="section">
+  <h2>六、架构师思考题</h2>
+
+  <details>
+    <summary><span class="q-mark">Q1</span><span>你的系统用布隆过滤器防穿透，运行三个月后突然出现 DB 回源激增。排查发现过滤器误判率从 1% 涨到了 8%。可能是什么原因？作为架构师，如何在设计阶段就规避这个问题？</span><span class="chev">▶</span></summary>
+    <div class="answer">
+      <h4>解题方向</h4>
+      <p>考察对布隆过滤器"只能增、不能删"特性的工程化理解。误判率不是静态的，它会随着数据规模和过滤器状态的演变而恶化。</p>
+      <h4>参考思路</h4>
+      <ul>
+        <li><strong>原因一：预估容量远小于实际数据量</strong>。布隆过滤器的误判率公式约为 <code>(1 - e^(-kn/m))^k</code>（k 哈希次数、n 实际元素数、m 位数组大小）。当初按 1 亿 key、1% 误判率分配的位数组，若实际灌入 1.5 亿 key，位数组置位比例（load factor）超出设计值，误判率会指数级上升——这是最常见的根因，业务增长超预期。</li>
+        <li><strong>原因二：没有考虑"删除"需求</strong>。大量商品下架后，过滤器仍认为 key 存在，为了"纠错"有人会重建过滤器，若重建期间并发写入使用不同实例或错过的增量未补录，状态错乱后误判与漏判同时出现（漏判更危险：存在的 key 被拒，业务直接报错）。</li>
+        <li><strong>设计阶段规避</strong>：① 容量预估打 2~3 倍冗余，把"三年后的数据量"作为 n 代入公式；② 选用 <em>Counting Bloom Filter</em> 或 Redisson 的 <code>RCountingBloomFilter</code> 思路（代价是 4~8 倍内存），支持删除操作；③ 有条件时升级为 <em>Cuckoo Filter</em>，天然支持删除且空间效率更高；④ 监控过滤器置位率，超过 70% 告警并触发"滚动重建"：新过滤器建好后原子切换（双 buffer），期间双写保证增量不丢。</li>
+        <li><strong>兜底防线</strong>：永远保留空值缓存作为第二道防线——即使过滤器误判率恶化到 8%，穿透到 DB 的请求仍会被空值缓存挡住大部分。这体现了核心架构思想：<em>任何单点方案都会退化，纵深防御才可靠</em>。</li>
+      </ul>
+    </div>
+  </details>
+
+  <details>
+    <summary><span class="q-mark">Q2</span><span>秒杀场景下，爆款商品详情是典型热点 key，业务要求"读延迟 P99 < 50ms、数据可容忍 5 秒陈旧、DB 绝不能被打挂"。你会如何组合今天的三套方案设计缓存架构？说明每一层的取舍理由。</span><span class="chev">▶</span></summary>
+    <div class="answer">
+      <h4>解题方向</h4>
+      <p>没有标准答案，考察的是把"一致性要求、延迟要求、可用性要求"翻译成技术选型的能力。关键洞察：5 秒陈旧容忍度非常高，这直接指向逻辑过期方案。</p>
+      <h4>参考思路</h4>
+      <ul>
+        <li><strong>第一层：本地缓存 Caffeine，TTL 3~5 秒</strong>。秒杀读 QPS 可达数十万，即使 Redis 集群也会因单分片热点产生尾延迟。本地缓存把 95% 以上的读挡在应用进程内，P99 天然达标。3~5 秒 TTL 与业务容忍度对齐，且秒杀商品数极少（&lt;100 个），内存占用可忽略。</li>
+        <li><strong>第二层：Redis + 逻辑过期，重建周期 5 秒</strong>。不用互斥锁重建——秒杀场景读阻塞 3 秒等于事故，而 5 秒陈旧窗口恰好覆盖逻辑过期的代价。value 内嵌过期时间，过期后返回旧值 + 异步重建，读路径上没有任何同步等待。爆款 key 物理永不过期，从根上消灭击穿。</li>
+        <li><strong>第三层：重建任务用"合并回源"（singleflight 思想）</strong>。同一商品 5 秒窗口内只允许一个重建任务打到 DB（Redisson 锁或 JVM 内 CompletableFuture 去重），DB 对每个热点商品的回源频率被锁定为 ≤1 次/5 秒，无论线上 QPS 多高——这就是"按瞬时值规划"的极致形式：回源 QPS 有数学上界。</li>
+        <li><strong>第四层：Sentinel 回源限流兜底</strong>。若出现未预料的新热点（突然爆红的商品）没有本地缓存和逻辑过期保护，回源限流按 DB 容量的 60% 设阈值，超限返回静态降级页（"商品信息加载中"），保 DB 不挂。宁可少数用户看到降级页，不能全站雪崩。</li>
+        <li><strong>加分项</strong>：① 指出秒杀热点 key 在 Cluster 下的倾斜问题——爆款商品 hash tag 会集中到单分片，可配合本地缓存消化（这正是第一层存在的另一个理由）；② 提到"预热"：秒杀开始前 10 分钟主动加载热点数据到本地缓存与 Redis，避免开场冷启动回源风暴。</li>
+      </ul>
+    </div>
+  </details>
+</section>
+
+<div class="footer">
+  每日架构师微课程 · 第 8 期 · <b>Redis 系列 · 第 4 讲</b><br>
+  下一讲预告：Redis 分布式锁（Redisson 看门狗 / RedLock 争议 / 主从切换锁丢失）
+</div>
+
+</div>
+</body>
+</html>

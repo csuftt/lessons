@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日架构师微课程 · Redis 数据结构与选型 | 2026-08-16</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --card: #161b22;
+    --card2: #1c2333;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --accent2: #f78166;
+    --green: #7ee787;
+    --yellow: #e3b341;
+    --purple: #bc8cff;
+    --red: #ff7b72;
+    --code-bg: #0a0e14;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    line-height: 1.75;
+    font-size: 16px;
+  }
+  .container { max-width: 860px; margin: 0 auto; padding: 0 20px 60px; }
+
+  /* ===== 头部 ===== */
+  header {
+    background: linear-gradient(135deg, #161b22 0%, #2a1418 55%, #0f1b2d 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 40px 20px 32px;
+    text-align: center;
+  }
+  .brand { color: var(--muted); font-size: 13px; letter-spacing: 3px; text-transform: uppercase; margin-bottom: 14px; }
+  h1 { font-size: 26px; font-weight: 700; margin-bottom: 16px; }
+  @media (min-width: 640px) { h1 { font-size: 32px; } }
+  .meta { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; align-items: center; }
+  .tag {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 14px; border-radius: 999px; font-size: 13px;
+    border: 1px solid var(--border); background: var(--card);
+  }
+  .tag.redis { color: var(--accent2); border-color: rgba(247,129,102,.45); }
+  .tag.date { color: var(--muted); }
+  .tag.time { color: var(--yellow); }
+
+  /* ===== 章节卡片 ===== */
+  section.card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 26px 24px;
+    margin-top: 22px;
+  }
+  .step-label {
+    display: inline-block; font-size: 12px; font-weight: 600; letter-spacing: 1px;
+    color: var(--accent); border: 1px solid rgba(88,166,255,.4);
+    padding: 2px 10px; border-radius: 4px; margin-bottom: 10px;
+  }
+  h2 { font-size: 20px; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+  h3 { font-size: 16px; margin: 18px 0 8px; color: var(--purple); }
+  p { margin-bottom: 12px; color: #c9d1d9; }
+  ul, ol { margin: 0 0 12px 22px; color: #c9d1d9; }
+  li { margin-bottom: 6px; }
+  strong { color: var(--text); }
+  .hl { color: var(--accent); }
+  .hl-g { color: var(--green); }
+  .hl-y { color: var(--yellow); }
+  .hl-r { color: var(--red); }
+  .hl-p { color: var(--purple); }
+
+  /* ===== 代码块 ===== */
+  .code-block {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin: 14px 0;
+    overflow: hidden;
+  }
+  .code-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 8px 14px; background: #161b22; border-bottom: 1px solid var(--border);
+    font-size: 12px; color: var(--muted);
+  }
+  .code-header .lang { color: var(--purple); font-weight: 600; }
+  pre {
+    padding: 14px 16px; overflow-x: auto;
+    font-family: "JetBrains Mono", "Fira Code", Consolas, "Courier New", monospace;
+    font-size: 13px; line-height: 1.65;
+  }
+  @media (max-width: 640px) { pre { font-size: 12px; } }
+  code.inline {
+    background: rgba(88,166,255,.12); color: var(--accent);
+    padding: 1px 6px; border-radius: 4px; font-size: 13.5px;
+    font-family: Consolas, "Courier New", monospace;
+  }
+  .cm  { color: #7d8590; }            /* 注释 */
+  .kw  { color: #ff7b72; }            /* 关键字 */
+  .str { color: #a5d6ff; }            /* 字符串 */
+  .num { color: #79c0ff; }            /* 数字 */
+  .fn  { color: #d2a8ff; }            /* 函数/命令 */
+  .var { color: #ffa657; }            /* 变量/值 */
+
+  /* ===== 架构图 ===== */
+  .diagram {
+    background: var(--code-bg); border: 1px solid var(--border);
+    border-radius: 8px; padding: 18px 12px; margin: 14px 0;
+    overflow-x: auto; text-align: center;
+  }
+  .diagram svg { max-width: 100%; height: auto; }
+
+  /* ===== 提示框 ===== */
+  .callout {
+    border-left: 3px solid var(--accent);
+    background: rgba(88,166,255,.08);
+    border-radius: 0 8px 8px 0;
+    padding: 12px 16px; margin: 14px 0; font-size: 14.5px; color: #c9d1d9;
+  }
+  .callout.warn { border-color: var(--yellow); background: rgba(227,179,65,.08); }
+  .callout.danger { border-color: var(--red); background: rgba(255,123,114,.08); }
+  .callout b { color: var(--text); }
+
+  /* ===== 表格 ===== */
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+  th { background: var(--card2); color: var(--accent); white-space: nowrap; }
+  td { color: #c9d1d9; }
+
+  /* ===== 要点 & 思考题 ===== */
+  .summary-box {
+    background: linear-gradient(135deg, rgba(88,166,255,.08), rgba(188,140,255,.06));
+    border: 1px solid rgba(88,166,255,.35);
+  }
+  .summary-box h2 { color: var(--green); }
+  .think-box { border-color: rgba(188,140,255,.4); }
+  .think-box h2 { color: var(--purple); }
+  details {
+    background: var(--card2); border: 1px solid var(--border);
+    border-radius: 8px; margin: 12px 0; overflow: hidden;
+  }
+  details summary {
+    cursor: pointer; padding: 14px 18px; font-weight: 600;
+    color: var(--purple); list-style: none; user-select: none;
+    display: flex; align-items: center; gap: 10px;
+  }
+  details summary::before { content: "▸"; transition: transform .2s; color: var(--accent); font-size: 15px; }
+  details[open] summary::before { transform: rotate(90deg); }
+  details summary:hover { background: rgba(188,140,255,.06); }
+  details .answer { padding: 4px 18px 16px; color: #c9d1d9; font-size: 14.5px; }
+  details .answer h4 { color: var(--accent); margin: 12px 0 6px; font-size: 14.5px; }
+
+  footer {
+    text-align: center; color: var(--muted); font-size: 13px;
+    padding: 30px 20px 10px; border-top: 1px solid var(--border); margin-top: 40px;
+  }
+</style>
+</head>
+<body>
+<div style="position:fixed;top:14px;left:14px;z-index:9999;">
+<a href="../index.html" style="display:inline-block;padding:6px 14px;border-radius:999px;background:rgba(20,26,38,.88);color:#7da7ff;font-size:13px;text-decoration:none;border:1px solid rgba(90,130,220,.45);backdrop-filter:blur(4px);font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.35);" onmouseover="this.style.background='rgba(30,40,60,.95)'" onmouseout="this.style.background='rgba(20,26,38,.88)'">← 课程目录</a>
+</div>
+
+
+<header>
+  <div class="brand">DAILY ARCHITECT MICRO-COURSE · 每日架构师微课程 · 第 5 期</div>
+  <h1>Redis 数据结构与选型<br><span style="font-size:.6em;color:var(--muted);font-weight:400;">同样的数据，选对结构 = 省一半内存、快一个数量级</span></h1>
+  <div class="meta">
+    <span class="tag redis">🟥 Redis 系列 · 数据结构与选型</span>
+    <span class="tag date">📅 2026-08-16</span>
+    <span class="tag time">⏱️ 预计阅读 10 分钟</span>
+  </div>
+</header>
+
+<div class="container">
+
+<!-- ============ 01 场景导入 ============ -->
+<section class="card">
+  <span class="step-label">SCENARIO · 从实际问题出发</span>
+  <h2>🚨 全部用 String 存 JSON，一台 64G 的 Redis 被塞满了</h2>
+  <p>某电商 App 需要五类缓存能力：购物车、商品销量计数、大促排行榜、每日签到、活动页 UV 统计。初期团队图省事，<strong>所有数据都用 String 存 JSON 字符串</strong>。三个月后问题集中爆发：</p>
+  <ul>
+    <li><strong>内存爆炸</strong>：3000 万购物车 key，每个 value 是完整 JSON，序列化体积 400B+，实际有效数据只有 60B；</li>
+    <li><strong>更新低效</strong>：购物车改一个商品数量，也要 <code class="inline">GET</code> 整个 JSON → 反序列化 → 修改 → 再 <code class="inline">SET</code>，网络来回放大 7 倍；</li>
+    <li><strong>排行榜没法做</strong>：用 <code class="inline">ZRANGE</code> 之外的方式排序，只能拉全量数据到应用层内存排序，一次 8 秒；</li>
+    <li><strong>UV 统计把内存打穿</strong>：每个访客一个 key，一天 2 亿 key，直接触发 maxmemory 驱逐，缓存雪崩。</li>
+  </ul>
+  <p>这不是容量问题，是<strong class="hl">建模问题</strong>。Redis 是"数据结构服务器"而不是大号 HashMap——每类业务语义都对应一个最优结构。本讲从底层编码讲起，给出架构师视角的选型方法论。</p>
+</section>
+
+<!-- ============ 02 原理 ============ -->
+<section class="card">
+  <span class="step-label">PRINCIPLE · 原理讲解</span>
+  <h2>📦 双层结构：命令层的"类型"与存储层的"编码"</h2>
+  <p>Redis 对外暴露 9 种类型，但对内每个 key 的存储会根据<strong class="hl">数据规模与内容</strong>自动选择紧凑编码或标准结构——小数据用省内存的紧凑结构，长大了自动"升级"，<strong>过程对业务完全透明，但升级的代价必须被架构师知晓</strong>。</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 780 330" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif">
+    <defs>
+      <marker id="ar" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+        <path d="M0,0 L0,6 L9,3 z" fill="#f78166"/>
+      </marker>
+    </defs>
+    <!-- 上层：命令类型 -->
+    <text x="390" y="26" text-anchor="middle" fill="#8b949e" font-size="12">命令层（用户可见的类型）</text>
+    <g font-size="13" font-weight="bold" text-anchor="middle">
+      <rect x="20"  y="40" width="80" height="34" rx="6" fill="#1c2333" stroke="#58a6ff"/><text x="60"  y="62" fill="#58a6ff">String</text>
+      <rect x="112" y="40" width="80" height="34" rx="6" fill="#1c2333" stroke="#58a6ff"/><text x="152" y="62" fill="#58a6ff">Hash</text>
+      <rect x="204" y="40" width="80" height="34" rx="6" fill="#1c2333" stroke="#58a6ff"/><text x="244" y="62" fill="#58a6ff">List</text>
+      <rect x="296" y="40" width="80" height="34" rx="6" fill="#1c2333" stroke="#58a6ff"/><text x="336" y="62" fill="#58a6ff">Set</text>
+      <rect x="388" y="40" width="80" height="34" rx="6" fill="#1c2333" stroke="#58a6ff"/><text x="428" y="62" fill="#58a6ff">ZSet</text>
+      <rect x="480" y="40" width="90" height="34" rx="6" fill="#1c2333" stroke="#7ee787"/><text x="525" y="62" fill="#7ee787">Bitmap</text>
+      <rect x="582" y="40" width="100" height="34" rx="6" fill="#1c2333" stroke="#7ee787"/><text x="632" y="62" fill="#7ee787">HyperLogLog</text>
+      <rect x="694" y="40" width="66" height="34" rx="6" fill="#1c2333" stroke="#7ee787"/><text x="727" y="62" fill="#7ee787">…</text>
+    </g>
+    <!-- 中间转换层 -->
+    <text x="390" y="102" text-anchor="middle" fill="#e3b341" font-size="12">阈值判断（entries / value 长度 / 是否纯数字）→ 自动升级，不可逆</text>
+    <g>
+      <line x1="60"  y1="74"  x2="60"  y2="130" stroke="#f78166" stroke-width="1.6" marker-end="url(#ar)"/>
+      <line x1="152" y1="74"  x2="152" y2="130" stroke="#f78166" stroke-width="1.6" marker-end="url(#ar)"/>
+      <line x1="244" y1="74"  x2="244" y2="130" stroke="#f78166" stroke-width="1.6" marker-end="url(#ar)"/>
+      <line x1="336" y1="74"  x2="336" y2="130" stroke="#f78166" stroke-width="1.6" marker-end="url(#ar)"/>
+      <line x1="428" y1="74"  x2="428" y2="130" stroke="#f78166" stroke-width="1.6" marker-end="url(#ar)"/>
+    </g>
+    <!-- 下层：底层编码 -->
+    <g font-size="12.5" text-anchor="middle">
+      <rect x="20" y="134" width="150" height="88" rx="8" fill="#0a0e14" stroke="#30363d"/>
+      <text x="95" y="156" fill="#ff7b72" font-weight="bold">String 三态</text>
+      <text x="95" y="177" fill="#c9d1d9">int（纯数字）</text>
+      <text x="95" y="195" fill="#c9d1d9">embstr（≤44B）</text>
+      <text x="95" y="213" fill="#c9d1d9">raw（长字符串）</text>
+
+      <rect x="186" y="134" width="150" height="88" rx="8" fill="#0a0e14" stroke="#30363d"/>
+      <text x="261" y="156" fill="#ff7b72" font-weight="bold">Hash / ZSet</text>
+      <text x="261" y="177" fill="#c9d1d9">listpack（紧凑）</text>
+      <text x="261" y="195" fill="#c9d1d9">→ hashtable（Hash）</text>
+      <text x="261" y="213" fill="#c9d1d9">→ skiplist+dict（ZSet）</text>
+
+      <rect x="352" y="134" width="150" height="88" rx="8" fill="#0a0e14" stroke="#30363d"/>
+      <text x="427" y="156" fill="#ff7b72" font-weight="bold">List</text>
+      <text x="427" y="177" fill="#c9d1d9">quicklist</text>
+      <text x="427" y="195" fill="#c9d1d9">（双链表串起多个</text>
+      <text x="427" y="213" fill="#c9d1d9">listpack 节点）</text>
+
+      <rect x="518" y="134" width="150" height="88" rx="8" fill="#0a0e14" stroke="#30363d"/>
+      <text x="593" y="156" fill="#ff7b72" font-weight="bold">Set</text>
+      <text x="593" y="177" fill="#c9d1d9">intset（全整数）</text>
+      <text x="593" y="195" fill="#c9d1d9">listpack（7.2+ 小集合）</text>
+      <text x="593" y="213" fill="#c9d1d9">→ hashtable</text>
+    </g>
+    <!-- 底部要点 -->
+    <rect x="20" y="244" width="648" height="66" rx="8" fill="#1c2333" stroke="#bc8cff" stroke-dasharray="5 3"/>
+    <text x="344" y="270" text-anchor="middle" fill="#bc8cff" font-size="13" font-weight="bold">紧凑编码的意义：省内存 + CPU 缓存友好</text>
+    <text x="344" y="292" text-anchor="middle" fill="#8b949e" font-size="12">代价：紧凑结构上的写操作是 O(N) 整体重建 → 阈值就是"内存 vs CPU"的平衡点</text>
+  </svg>
+  </div>
+
+  <h3>关键阈值（默认值，可通过 config 调整）</h3>
+  <table>
+    <tr><th>类型</th><th>紧凑编码</th><th>升级条件（默认）</th><th>升级后</th></tr>
+    <tr><td>String</td><td>int / embstr</td><td>非纯数字 或 长度 &gt; 44B</td><td>raw</td></tr>
+    <tr><td>Hash</td><td>listpack</td><td>field 数 &gt; 128 或 单 value &gt; 64B</td><td>hashtable</td></tr>
+    <tr><td>ZSet</td><td>listpack</td><td>member 数 &gt; 128 或 单 member &gt; 64B</td><td>skiplist + dict</td></tr>
+    <tr><td>Set</td><td>intset</td><td>元素数 &gt; 512 或 出现非整数</td><td>hashtable</td></tr>
+  </table>
+
+  <div class="code-block">
+    <div class="code-header"><span class="lang">bash</span><span>redis-cli · 用 OBJECT ENCODING 看穿存储真相</span></div>
+    <pre><span class="fn">SET</span> <span class="var">stock:1001</span> <span class="num">500</span>
+<span class="fn">OBJECT</span> <span class="var">ENCODING</span> <span class="var">stock:1001</span>      <span class="cm"># → int</span>
+<span class="fn">SET</span> <span class="var">user:name</span> <span class="str">"arch"</span>
+<span class="fn">OBJECT</span> <span class="var">ENCODING</span> <span class="var">user:name</span>     <span class="cm"># → embstr（≤44B）</span>
+<span class="fn">HSET</span> <span class="var">cart:1001</span> <span class="var">skuA</span> <span class="num">2</span> <span class="var">skuB</span> <span class="num">1</span>
+<span class="fn">OBJECT</span> <span class="var">ENCODING</span> <span class="var">cart:1001</span>     <span class="cm"># → listpack</span>
+<span class="cm"># 往这个 Hash 塞 129 个 field 之后：</span>
+<span class="cm"># OBJECT ENCODING cart:1001 → hashtable（再删回 128 个也不会降级！）</span></pre>
+  </div>
+
+  <div class="callout warn">
+    <b>升级不可逆。</b>listpack → hashtable 是单向门。线上排查"内存突然涨了一截"时，先想想是不是某批数据把一批 key 推过了阈值。同样地，<b>渐进式 rehash</b> 期间 dict 同时持有两张哈希表，大 key 改造期内存峰值接近 2 倍，扩容评估要留余量。
+  </div>
+</section>
+
+<!-- ============ 03 选型 ============ -->
+<section class="card">
+  <span class="step-label">ARCHITECTURE · 架构选型决策表</span>
+  <h2>🧭 九类业务语义 → 九种结构，别用 String 硬扛一切</h2>
+  <table>
+    <tr><th>业务语义</th><th>选型</th><th>关键命令</th><th>架构师关注点</th></tr>
+    <tr><td>计数器 / 分布式锁 / 限流</td><td><b class="hl-g">String</b></td><td>INCR / SET NX EX</td><td>原子性靠单线程，锁要带唯一值+Lua 释放</td></tr>
+    <tr><td>对象多字段、频繁局部更新（购物车）</td><td><b class="hl-g">Hash</b></td><td>HSET / HINCRBY</td><td>字段级读写，避免整 JSON 序列化；防 bigkey 单 Hash 超 1 万 field</td></tr>
+    <tr><td>最新列表 / 简单任务队列</td><td><b class="hl-g">List</b></td><td>LPUSH / BRPOP</td><td>可靠消息请用 Stream，List 无 ack 机制</td></tr>
+    <tr><td>去重 / 交并差集（共同关注）</td><td><b class="hl-g">Set</b></td><td>SADD / SINTERSTORE</td><td>交集在服务端算，避免拉回应用层</td></tr>
+    <tr><td>排行榜 / 延迟队列</td><td><b class="hl-g">ZSet</b></td><td>ZINCRBY / ZREVRANGE</td><td>O(logN) 插入 + 天然按 score 有序，见下方实战</td></tr>
+    <tr><td>签到 / 布隆式活跃标记</td><td><b class="hl-g">Bitmap</b></td><td>SETBIT / BITCOUNT</td><td>1 亿用户/天 ≈ 12MB，别一个用户一个 key</td></tr>
+    <tr><td>海量 UV 去重计数（允许 0.81% 误差）</td><td><b class="hl-g">HyperLogLog</b></td><td>PFADD / PFCOUNT</td><td>固定 12KB 量级，精度换内存的极致</td></tr>
+    <tr><td>附近的人 / 门店圈选</td><td><b class="hl-g">Geo</b></td><td>GEOADD / GEORADIUS</td><td>底层就是 ZSet + geohash 编码</td></tr>
+    <tr><td>可靠消息流（消费组 / ack / pending）</td><td><b class="hl-g">Stream</b></td><td>XADD / XREADGROUP</td><td>轻量 MQ 场景替代 List，与 Pulsar 的分工要想清楚</td></tr>
+  </table>
+  <div class="callout">
+    <b>选型第一原则：</b>先定义<strong>读写模式</strong>（整存整取 or 局部更新？需要排序吗？需要去重吗？容忍误差吗？），再倒推结构——而不是"我都会 String 就全用 String"。这和分库分表前先做领域建模是同一个道理。
+  </div>
+</section>
+
+<!-- ============ 04 实战 ============ -->
+<section class="card">
+  <span class="step-label">PRACTICE · 生产实战</span>
+  <h2>🛠️ 重构：三个典型场景的代码级改法</h2>
+
+  <h3>① 购物车：String+JSON → Hash</h3>
+  <div class="code-block">
+    <div class="code-header"><span class="lang">redis-cli / Java (Lettuce)</span><span>字段级原子更新，网络流量缩 85%</span></div>
+    <pre><span class="cm"># 加购 1 件，一条命令搞定，无需读-改-写整个 JSON</span>
+<span class="fn">HINCRBY</span> <span class="var">cart:1001</span> <span class="var">sku:8848</span> <span class="num">1</span>
+<span class="cm"># 结算时才取全量</span>
+<span class="fn">HGETALL</span> <span class="var">cart:1001</span>
+<span class="cm">// Java 侧：RHash 结构直映射，替代 RBucket&lt;CartJson&gt;</span>
+<span class="kw">RMap</span>&lt;<span class="kw">String</span>, <span class="kw">Integer</span>&gt; cart = redisson.<span class="fn">getMap</span>(<span class="str">"cart:1001"</span>);
+cart.<span class="fn">addAndGet</span>(<span class="str">"sku:8848"</span>, <span class="num">1</span>);</pre>
+  </div>
+
+  <h3>② 大促排行榜：ZSet 一把梭</h3>
+  <div class="code-block">
+    <div class="code-header"><span class="lang">redis-cli</span><span>Top100 实时榜 + 我的排名</span></div>
+    <pre><span class="cm"># 下单后原子加分（score = 销量）</span>
+<span class="fn">ZINCRBY</span> <span class="var">rank:activity:2026</span> <span class="num">1</span> <span class="str">"sku:8848"</span>
+<span class="cm"># 实时 Top 100（带分数），O(logN + M)</span>
+<span class="fn">ZREVRANGE</span> <span class="var">rank:activity:2026</span> <span class="num">0</span> <span class="num">99</span> <span class="kw">WITHSCORES</span>
+<span class="cm"># 查某商品排名（返回 0-based），无需全量排序</span>
+<span class="fn">ZREVRANK</span> <span class="var">rank:activity:2026</span> <span class="str">"sku:8848"</span>
+<span class="cm"># 榜单瘦身：只留前 1 万名，防止亿级 member 撑爆 skiplist</span>
+<span class="fn">ZREMRANGEBYRANK</span> <span class="var">rank:activity:2026</span> <span class="num">10000</span> <span class="num">-1</span></pre>
+  </div>
+
+  <h3>③ 签到：一亿用户一天一个 Bitmap</h3>
+  <div class="code-block">
+    <div class="code-header"><span class="lang">redis-cli</span><span>内存从 9GB+ 降到 12MB</span></div>
+    <pre><span class="cm"># uid=10086 在 8 月 16 日签到（offset = uid）</span>
+<span class="fn">SETBIT</span> <span class="var">sign:20260816</span> <span class="num">10086</span> <span class="num">1</span>
+<span class="cm"># 当日签到总人数</span>
+<span class="fn">BITCOUNT</span> <span class="var">sign:20260816</span>
+<span class="cm"># 连续 7 天都签到的用户：AND 聚合到新 key</span>
+<span class="fn">BITOP</span> <span class="kw">AND</span> <span class="var">sign:7d</span> <span class="var">sign:20260816</span> <span class="var">sign:20260815</span> <span class="var">sign:20260814</span> <span class="cm">…</span>
+<span class="cm"># 用户维度查 31 天签到日历：按天分桶 + BITFIELD 取位段</span>
+<span class="fn">GETBIT</span> <span class="var">sign:20260816</span> <span class="num">10086</span></pre>
+  </div>
+
+  <h3>④ 坑点排查：bigkey 与编码突变</h3>
+  <div class="code-block">
+    <div class="code-header"><span class="lang">bash</span><span>线上巡检三板斧</span></div>
+    <pre><span class="cm"># 采样找出大 key（低峰期执行，-i 0.1 限速防打爆 CPU）</span>
+redis-cli --bigkeys -i <span class="num">0.1</span>
+<span class="cm"># 精确测量单个 key 内存（O(1) 元素数 + 采样字节数）</span>
+<span class="fn">MEMORY</span> <span class="var">USAGE</span> <span class="var">cart:1001</span> <span class="var">SAMPLES</span> <span class="num">0</span>
+<span class="cm"># 异步删除大 key：UNLINK 代替 DEL，不阻塞主线程</span>
+<span class="fn">UNLINK</span> <span class="var">huge:key</span>
+<span class="cm"># 渐进清空大 Hash：SCAN 游标遍历 + 分批 HDEL</span></pre>
+  </div>
+
+  <div class="callout danger">
+    <b>真实事故模式：</b>大促前运营批量导入 50 万 SKU 到一个 ZSet，skiplist 内存是 listpack 的 5～8 倍，且该 key 热点写集中——主线程 CPU 单核打满，所有命令 P99 从 1ms 涨到 80ms。<b>解法：</b>按类目分片成 100 个 ZSet（<code class="inline">rank:{cate}:act</code>），查询侧先合并 TopN。
+  </div>
+</section>
+
+<!-- ============ 05 要点 ============ -->
+<section class="card summary-box">
+  <span class="step-label">SUMMARY · 今日要点</span>
+  <h2>✅ 带走这 5 条</h2>
+  <ol>
+    <li><strong>Redis 是数据结构服务器</strong>：选型先看读写模式（局部更新→Hash、排序→ZSet、去重→Set/HLL、位标记→Bitmap），不要全用 String 存 JSON。</li>
+    <li><strong>双层结构 + 阈值升级</strong>：listpack/intset 紧凑省内存但写是 O(N)；超阈值（默认 128 entries / 64B value）自动升级为 hashtable / skiplist，<strong>不可逆</strong>。</li>
+    <li><strong>容量规划看编码</strong>：同样的数据，编码不同内存差 5～8 倍；Bitmap 让"亿级用户签到"从 9GB 变 12MB，HyperLogLog 让 UV 统计恒定 12KB。</li>
+    <li><strong>bigkey 是万恶之源</strong>：单 key 元素数控制 1 万以内，删除用 UNLINK，遍历用 SCAN，巡检用 --bigkeys + MEMORY USAGE。</li>
+    <li><strong>热点写 key 考虑分片</strong>：排行榜按类目/分片拆 ZSet，读写压力与内存双降——这是用架构手段化解单 key 天花板。</li>
+  </ol>
+</section>
+
+<!-- ============ 06 思考题 ============ -->
+<section class="card think-box">
+  <span class="step-label">THINK · 架构师思考题</span>
+  <h2>🧠 点击展开，检验你的架构判断力</h2>
+
+  <details>
+    <summary>思考题 1：为什么 Redis 小数据用 listpack 而不是 hashtable？把 hash-max-listpack-entries 调大到 10000 是好主意吗？</summary>
+    <div class="answer">
+      <h4>解题方向：从两种结构的内存模型与操作复杂度入手</h4>
+      <p>hashtable 每个条目需要独立的 dictEntry（约 24B：三个指针）+ 两个指针的桶数组开销 + 内存碎片，还有指针跳转破坏 CPU 缓存局部性；listpack 是<strong>一块连续内存</strong>，元素紧凑排列，只有"entry 头 + 内容 + 长度"的边际开销，且顺序遍历对 CPU L1 缓存极其友好。对于几十个 field 的小对象，listpack 通常省 4～6 倍内存。</p>
+      <h4>为什么不能无脑调大阈值</h4>
+      <p>listpack 的写操作（插入/修改/删除）需要<strong>原地移动后续所有字节</strong>，复杂度 O(N)；N=10000 时每次 HSET 都要 memmove 数十 KB。而 hashtable 写是均摊 O(1)。阈值本质是"内存收益 vs CPU 代价"的平衡点：默认 128/64 是官方压测的经验拐点。合理区间是 128～512，且 value 长度阈值别超过几百字节。</p>
+      <h4>参考结论</h4>
+      <p>小对象（如购物车、商品属性）适度调大 entries 阈值（如 256）通常划算；但要看监控指标：<code class="inline">latency</code> 与 <code class="inline">instantaneous_ops</code>，如果 HSET P99 抬升就回退。更本质的优化是<strong>控制业务建模粒度</strong>——让单个 Hash 天然只装一个领域对象的字段，而不是靠阈值兜底。</p>
+    </div>
+  </details>
+
+  <details>
+    <summary>思考题 2：亿级用户的活动榜单，只奖励 Top 100，但要支持"我离上榜还差多少"。只用一个 ZSet 存全量用户可行吗？如何设计？</summary>
+    <div class="answer">
+      <h4>先算容量账（架构师第一反应）</h4>
+      <p>1 亿 member 全塞一个 ZSet：skiplist 每节点 forward 指针（多层）+ backward 指针 + span/level 元数据 ≈ 90～130B/member（member 本身另算），加上伴生 dict，总量在 <strong>15GB 量级</strong>。单 key 这么大带来三个问题：主线程操作该 key 的耗时被放大（ZINCRBY O(logN)，N=1 亿 ≈ 27 层比较）、迁移/同步以 key 为单位无法并行、删除/过期会长时间阻塞。结论：<strong>单 ZSet 存全量不可行</strong>。</p>
+      <h4>推荐架构：全量分片 + 冠军榜两层结构</h4>
+      <ul>
+        <li><strong>全量层</strong>：按 uid 哈希分 128 片，<code class="inline">score:{0..127}</code> 每片约 78 万 member（≈120MB），写入压力与内存均摊，ZINCRBY 单片 O(log 78万)；</li>
+        <li><strong>冠军层</strong>：异步任务（每 2s）对 128 片各取 ZREVRANGE 0 99，归并出全局 Top 100 写入 <code class="inline">champion</code> 小 ZSet，前端只读它，QPS 再高也无压力；</li>
+        <li><strong>"差多少上榜"</strong>：用户读自己分数走所在分片 <code class="inline">ZSCORE</code>；与第 100 名分数（从 champion 取）相减即可——不需要全局排名，避开了 ZREVRANK 全量 O(logN) 且单 key 的坑。</li>
+      </ul>
+      <h4>权衡说明</h4>
+      <p>两层结构引入最多 2s 的榜尾延迟——对运营型榜单完全可接受；若要求强实时，可改为写时双写（加分后判断是否 &gt; 第 100 名分数，是则同步更新 champion），用少量写放大换实时性。这正体现了<strong>用一致性换分区容忍</strong>的分布式设计思维。</p>
+    </div>
+  </details>
+</section>
+
+<footer>
+  每日架构师微课程 · 第 5 期 · Redis 系列 · 数据结构与选型<br>
+  明日预告：Redis 持久化机制（RDB 快照 vs AOF 日志）的架构权衡
+</footer>
+
+</div>
+
+</body>
+</html>

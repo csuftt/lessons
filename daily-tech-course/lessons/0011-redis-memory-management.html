@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 11 期 · Redis 内存管理：淘汰策略、过期删除与碎片治理 — 2026-08-25</title>
+<style>
+:root{
+  --bg:#0d1117;
+  --bg-card:#161b22;
+  --bg-card2:#1c2330;
+  --border:#2d333b;
+  --text:#c9d1d9;
+  --text-strong:#e6edf3;
+  --text-muted:#8b949e;
+  --accent:#ff6188;
+  --accent2:#a9dc76;
+  --accent3:#78dce8;
+  --code-bg:#0a0e14;
+  --warn-bg:rgba(255,159,67,.12);
+  --warn-border:#ff9f43;
+  --tip-bg:rgba(169,220,118,.1);
+  --tip-border:#a9dc76;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  background:var(--bg);
+  color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  line-height:1.75;
+  font-size:16px;
+}
+.wrap{max-width:860px;margin:0 auto;padding:24px 16px 64px}
+
+/* ===== Hero ===== */
+.hero{
+  background:linear-gradient(135deg,#1a1016 0%,#161b22 55%,#101820 100%);
+  border:1px solid var(--border);
+  border-radius:16px;
+  padding:36px 28px;
+  margin-bottom:28px;
+  position:relative;
+  overflow:hidden;
+}
+.hero::before{
+  content:"";
+  position:absolute;top:-60px;right:-60px;
+  width:220px;height:220px;border-radius:50%;
+  background:radial-gradient(circle,rgba(255,97,136,.18),transparent 70%);
+}
+.hero .series{color:var(--accent);font-weight:600;font-size:.85rem;letter-spacing:.12em;text-transform:uppercase;margin-bottom:10px}
+.hero h1{color:var(--text-strong);font-size:1.7rem;line-height:1.4;margin-bottom:16px}
+.meta{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.tag{
+  display:inline-flex;align-items:center;gap:6px;
+  background:var(--bg-card2);border:1px solid var(--border);
+  color:var(--text-muted);border-radius:999px;
+  padding:4px 14px;font-size:.82rem;
+}
+.tag b{color:var(--text-strong);font-weight:600}
+.tag.redis{border-color:rgba(255,97,136,.45);color:#ff9db6}
+.tag.redis b{color:#ff9db6}
+
+/* ===== Section ===== */
+.section{
+  background:var(--bg-card);
+  border:1px solid var(--border);
+  border-radius:16px;
+  padding:28px;
+  margin-bottom:22px;
+}
+.section h2{
+  color:var(--text-strong);font-size:1.22rem;
+  padding-left:14px;border-left:4px solid var(--accent);
+  margin-bottom:18px;line-height:1.5;
+}
+.section h3{
+  color:var(--text-strong);font-size:1.02rem;
+  margin:22px 0 10px;
+}
+.section h3::before{content:"◆ ";color:var(--accent);font-size:.8em}
+p{margin-bottom:12px}
+p:last-child{margin-bottom:0}
+strong{color:var(--text-strong)}
+em{color:var(--accent3);font-style:normal}
+a{color:var(--accent3)}
+
+/* ===== Code ===== */
+pre{
+  background:var(--code-bg);
+  border:1px solid var(--border);
+  border-radius:10px;
+  padding:16px 18px;
+  overflow-x:auto;
+  font-size:.84rem;line-height:1.7;
+  margin:14px 0;
+  font-family:"Cascadia Code","JetBrains Mono",Consolas,"Courier New",monospace;
+}
+code{font-family:inherit}
+p code,li code,td code{
+  background:rgba(110,118,129,.18);
+  border-radius:5px;padding:2px 7px;
+  color:var(--accent3);font-size:.86em;
+}
+.cm{color:#7f8c98}          /* comment */
+.kw{color:#ff6188}          /* keyword */
+.st{color:#a9dc76}          /* string */
+.nm{color:#78dce8}          /* number/func */
+.op{color:#ffd580}          /* param/option */
+
+/* ===== Lists ===== */
+ul,ol{padding-left:22px;margin-bottom:12px}
+li{margin-bottom:6px}
+li::marker{color:var(--accent)}
+
+/* ===== Callout ===== */
+.callout{
+  border-radius:12px;padding:16px 18px;
+  margin:16px 0;font-size:.94rem;
+  border-left:4px solid;
+}
+.callout.warn{background:var(--warn-bg);border-color:var(--warn-border)}
+.callout.warn .t{color:#ffb56b}
+.callout.tip{background:var(--tip-bg);border-color:var(--tip-border)}
+.callout.tip .t{color:var(--accent2)}
+.callout .t{font-weight:700;display:block;margin-bottom:6px;font-size:.9rem}
+
+/* ===== Architecture diagram ===== */
+.diagram{
+  background:var(--code-bg);
+  border:1px dashed var(--border);
+  border-radius:12px;padding:20px 14px;
+  margin:16px 0;
+  overflow-x:auto;
+}
+.arch{display:flex;flex-direction:column;gap:14px;min-width:520px}
+.row{display:flex;gap:12px;align-items:stretch}
+.box{
+  flex:1;background:var(--bg-card2);
+  border:1px solid var(--border);border-radius:10px;
+  padding:12px 14px;text-align:center;
+}
+.box .t{font-weight:700;color:var(--text-strong);font-size:.92rem;margin-bottom:4px}
+.box .d{color:var(--text-muted);font-size:.78rem;line-height:1.55}
+.box.hl{border-color:rgba(255,97,136,.55);background:rgba(255,97,136,.08)}
+.box.hl .t{color:#ff9db6}
+.box.gr{border-color:rgba(169,220,118,.5);background:rgba(169,220,118,.07)}
+.box.gr .t{color:var(--accent2)}
+.box.bl{border-color:rgba(120,220,232,.5);background:rgba(120,220,232,.07)}
+.box.bl .t{color:var(--accent3)}
+.arrow{color:var(--text-muted);font-size:1.2rem;display:flex;align-items:center;justify-content:center}
+.dlabel{text-align:center;color:var(--text-muted);font-size:.78rem;margin-top:-6px}
+
+/* ===== Comparison table ===== */
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:.88rem}
+th,td{border:1px solid var(--border);padding:10px 12px;text-align:left;vertical-align:top}
+th{background:var(--bg-card2);color:var(--text-strong);font-weight:600}
+td{color:var(--text)}
+tr:nth-child(even) td{background:rgba(255,255,255,.015)}
+td .win{color:var(--accent2);font-weight:600}
+td .lose{color:#ff8a9b}
+
+/* ===== Summary cards ===== */
+.summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:6px}
+.sum-card{
+  background:var(--bg-card2);border:1px solid var(--border);
+  border-radius:12px;padding:16px;
+}
+.sum-card .n{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:26px;height:26px;border-radius:50%;
+  background:rgba(255,97,136,.15);color:var(--accent);
+  font-weight:700;font-size:.85rem;margin-bottom:8px;
+}
+.sum-card .t{color:var(--text-strong);font-weight:600;font-size:.95rem;margin-bottom:6px}
+.sum-card .d{color:var(--text-muted);font-size:.85rem;line-height:1.65}
+
+/* ===== Q&A collapsible ===== */
+details{
+  background:var(--bg-card2);
+  border:1px solid var(--border);
+  border-radius:12px;
+  padding:0;
+  margin-bottom:14px;
+  overflow:hidden;
+}
+details summary{
+  cursor:pointer;padding:16px 20px;
+  color:var(--text-strong);font-weight:600;font-size:.95rem;
+  list-style:none;display:flex;align-items:flex-start;gap:10px;
+  transition:background .15s;
+}
+details summary::-webkit-details-marker{display:none}
+details summary:hover{background:rgba(255,255,255,.03)}
+details summary .q-mark{
+  color:var(--accent);font-weight:800;flex-shrink:0;
+}
+details summary .chev{margin-left:auto;color:var(--text-muted);transition:transform .2s;flex-shrink:0}
+details[open] summary .chev{transform:rotate(90deg)}
+details .answer{
+  padding:4px 20px 18px 42px;
+  border-top:1px dashed var(--border);
+  padding-top:14px;
+  font-size:.92rem;
+}
+details .answer h4{color:var(--accent3);font-size:.9rem;margin:14px 0 6px}
+details .answer p{margin-bottom:10px}
+details .answer ul{margin-bottom:10px}
+
+/* ===== Footer ===== */
+.footer{
+  text-align:center;color:var(--text-muted);
+  font-size:.8rem;margin-top:36px;
+  padding-top:20px;border-top:1px solid var(--border);
+}
+.footer b{color:var(--text)}
+
+/* ===== Responsive ===== */
+@media(max-width:640px){
+  .hero{padding:26px 18px}
+  .hero h1{font-size:1.35rem}
+  .section{padding:20px 16px}
+  pre{font-size:.78rem;padding:12px}
+  table{font-size:.8rem}
+  th,td{padding:8px}
+  .row{flex-direction:row}
+}
+</style>
+</head>
+<body>
+<div style="position:fixed;top:14px;left:14px;z-index:9999;">
+<a href="../index.html" style="display:inline-block;padding:6px 14px;border-radius:999px;background:rgba(20,26,38,.88);color:#7da7ff;font-size:13px;text-decoration:none;border:1px solid rgba(90,130,220,.45);backdrop-filter:blur(4px);font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.35);" onmouseover="this.style.background='rgba(30,40,60,.95)'" onmouseout="this.style.background='rgba(20,26,38,.88)'">← 课程目录</a>
+</div>
+
+<div class="wrap">
+
+<!-- ============ HERO ============ -->
+<header class="hero">
+  <div class="series">每日架构师微课程 · 第 11 期</div>
+  <h1>Redis 内存管理：淘汰策略、过期删除与碎片治理（系列收官）</h1>
+  <div class="meta">
+    <span class="tag">📅 <b>2026-08-25</b>（周二）</span>
+    <span class="tag redis">⚡ Redis 系列 · 第 7 讲 · 收官</span>
+    <span class="tag">⏱ 预计阅读 <b>10 分钟</b></span>
+    <span class="tag">🎯 maxmemory-policy / 惰性+定期删除 / 内存碎片 / LFU</span>
+  </div>
+</header>
+
+<!-- ============ 1. 场景引入 ============ -->
+<section class="section">
+  <h2>一、一场由"内存水位"引发的连环事故</h2>
+  <p>某晚高峰，营销系统的 Redis 集群触发告警：<code>maxmemory</code> 使用率达到 <code>95%</code>。十分钟后，业务侧开始批量报错 <code>OOM command not allowed when used memory &gt; 'maxmemory'</code>——该实例用的是默认策略 <code>noeviction</code>，内存打满后所有写请求（包括 <code>SET</code>/<code>EXPIRE</code>）直接被拒。更糟的是，临时切换到 <code>allkeys-lru</code> 后又出现延迟抖动：Redis 在内存高水位下持续"采样—淘汰"，每秒淘汰数千个 key，主线程压力骤增。</p>
+  <p>复盘发现三重问题叠加：<strong>① 容量规划缺失</strong>，没有预留淘汰缓冲；<strong>② 大量 key 没设 TTL</strong>，导致冷数据永远占着内存；<strong>③ 碎片率 1.6</strong>，18GB 有效数据实际占了 29GB 物理内存。今天把 Redis 内存管理一次性讲透：<em>内存账本怎么算、过期 key 怎么删、8 种淘汰策略怎么选、碎片怎么治</em>。</p>
+</section>
+
+<!-- ============ 2. 内存账本 ============ -->
+<section class="section">
+  <h2>二、原理：先看懂 Redis 的"内存账本"</h2>
+  <p>排查内存问题的第一步永远是 <code>INFO memory</code>，但三个核心指标经常被误读：</p>
+  <ul>
+    <li><code>used_memory</code>：Redis 通过分配器（jemalloc）申请的内存总量，包含数据、字典元数据、客户端缓冲区、复制积压缓冲等；</li>
+    <li><code>used_memory_rss</code>：操作系统视角下进程占用的物理内存（Resident Set Size）；</li>
+    <li><code>mem_fragmentation_ratio = rss / used_memory</code>，即<strong>碎片率</strong>。</li>
+  </ul>
+
+  <div class="diagram">
+    <div class="arch">
+      <div class="row">
+        <div class="box bl" style="flex:1.3">
+          <div class="t">used_memory（分配器视角）</div>
+          <div class="d">数据 + 元数据 + 客户端 buffer + repl-backlog</div>
+        </div>
+        <div class="arrow">vs</div>
+        <div class="box" style="flex:1">
+          <div class="t">used_memory_rss（OS 视角）</div>
+          <div class="d">进程实际驻留物理内存（含碎片页）</div>
+        </div>
+      </div>
+      <div class="dlabel">碎片率 = RSS / used_memory —— 两者差值就是"碎片 + 分配器 overhead + fork COW"</div>
+      <div class="row">
+        <div class="box gr"><div class="t">1.0 ~ 1.5</div><div class="d">健康区间（jemalloc 正常开销）</div></div>
+        <div class="box hl"><div class="t">&gt; 1.5</div><div class="d">碎片严重，或正处 fork COW / 客户端 buffer 暴涨</div></div>
+        <div class="box hl"><div class="t">&lt; 1.0</div><div class="d">危险：部分内存被换出到 swap，性能断崖</div></div>
+      </div>
+    </div>
+  </div>
+
+<pre><code><span class="cm"># 一条命令看全内存画像</span>
+redis-cli info memory | egrep \
+  <span class="st">"used_memory_human|used_memory_rss_human|mem_fragmentation_ratio|maxmemory_human|maxmemory_policy|mem_not_counted_for_evapor"</span>
+
+<span class="cm"># 让 Redis 自己"看诊"（4.0+，会给出碎片/lua/大 client buffer 诊断）</span>
+redis-cli memory doctor
+
+<span class="cm"># 逐项拆解内存去向：字典元数据 / 各 db key 数 / 客户端 buffer</span>
+redis-cli memory stats</code></pre>
+
+  <div class="callout warn">
+    <span class="t">⚠️ 常见坑：碎片率 &gt; 1.5 未必是碎片</span>
+    <code>fork</code> 做 RDB/AOF rewrite 时的 <strong>写时复制（COW）</strong>会让 RSS 短暂翻倍；某个慢客户端把输出缓冲区撑到几百 MB 也会推高 RSS。看到高碎片率先问：最近有没有 bgsave？<code>client list</code> 里有没有 omem 巨大的连接？
+  </div>
+</section>
+
+<!-- ============ 3. 过期删除 ============ -->
+<section class="section">
+  <h2>三、过期删除：惰性 + 定期的组合拳</h2>
+  <p>key 设置了 <code>EXPIRE</code> 后，Redis <strong>不会</strong>为它启动定时器。到期的 key 依靠两个策略协同清理：</p>
+  <ul>
+    <li><strong>惰性删除</strong>：每次访问 key 时先检查时钟，过期就地删除并返回 nil。代价几乎为零，但<strong>冷 key 永远不会被清理</strong>；</li>
+    <li><strong>定期删除</strong>：由 <code>hz</code> 控制（默认 10，即每 100ms 一轮），每轮从<strong>设置了 TTL 的 key 中随机抽 20 个</strong>检查，删除已过期的；若过期占比超过 <code>25%</code>，立即再抽一轮继续。这是一个自适应循环——过期 key 越多清理越勤，但单轮有时间上限，避免阻塞主线程。</li>
+  </ul>
+  <p>架构含义：<em>定期删除是概率性的，"设置了 TTL"不等于"到期即删"</em>。如果你有 1000 万个一次性 key 同时到期，它们会分批被清掉，期间内存水位持续偏高——大批量过期应把 TTL 加随机抖动打散，而不是精确同一时刻。</p>
+  <div class="callout tip">
+    <span class="t">💡 主从架构注意</span>
+    从库不主动删除过期 key，只等主库同步 DEL 指令（读取时按逻辑过期返回空）。所以<strong>过期 key 的内存占用要在主库视角评估</strong>，从库 RSS 偏高属正常现象。
+  </div>
+</section>
+
+<!-- ============ 4. 8 种淘汰策略 ============ -->
+<section class="section">
+  <h2>四、8 种淘汰策略：怎么选才不踩坑</h2>
+  <p>当 <code>used_memory &gt; maxmemory</code> 时触发淘汰。8 种策略 = <strong>作用域（allkeys / volatile）× 算法（LRU / LFU / random / ttl）</strong>，外加默认的 noeviction：</p>
+
+  <table>
+    <tr><th>策略</th><th>候选范围</th><th>算法</th><th>适用场景</th></tr>
+    <tr><td><code>noeviction</code>（默认）</td><td>不淘汰</td><td>写命令报错</td><td>Redis 当<strong>存储</strong>用（分布式锁、去重表、队列）<span class="lose">用作缓存时是事故之源</span></td></tr>
+    <tr><td><code>allkeys-lru</code></td><td>全部 key</td><td>近似 LRU</td><td><span class="win">纯缓存首选</span>，key 没设 TTL 也无所谓</td></tr>
+    <tr><td><code>allkeys-lfu</code></td><td>全部 key</td><td>LFU（4.0+）</td><td><span class="win">热点分明的缓存</span>，防"偶发批量扫描"污染</td></tr>
+    <tr><td><code>volatile-lru / volatile-lfu</code></td><td>仅带 TTL 的 key</td><td>近似 LRU / LFU</td><td><strong>混合用途</strong>：既存永久数据又存缓存，永久 key 永不淘汰</td></tr>
+    <tr><td><code>volatile-ttl</code></td><td>仅带 TTL 的 key</td><td>剩余 TTL 最短先走</td><td>知道"越早过期的越没价值"的业务</td></tr>
+    <tr><td><code>allkeys-random / volatile-random</code></td><td>全部 / 带 TTL</td><td>随机</td><td>访问概率均匀、key 同质化时（少见）</td></tr>
+  </table>
+
+  <div class="callout warn">
+    <span class="t">⚠️ volatile 系列的隐藏陷阱</span>
+    如果实例里<strong>没有任何 key 设置 TTL</strong>，volatile-* 无 key 可淘汰，行为退化为 noeviction——继续报 OOM 错误。切策略前先 <code>redis-cli --bigkeys</code> 确认 TTL 覆盖情况。
+  </div>
+
+  <h3>近似 LRU：为什么不用精确 LRU</h3>
+  <p>精确 LRU 需要全局双向链表：每个 key 额外约 24 字节指针，1000 万 key 就要多耗 200MB+，且每次访问都要移动链表节点。Redis 的做法是复用每个对象头里已有的 <code>24bit lru</code> 字段存"最后访问时钟"，淘汰时<strong>随机采样 <code>maxmemory-samples</code>（默认 5）个 key，淘汰其中最久未访问的</strong>；3.0+ 又加了候选池（eviction pool），多轮采样积累候选，使效果逼近精确 LRU。采样数调到 10 更准，但 CPU 开销随之上升——一般 5 就够。</p>
+
+  <h3>LFU：按访问频率淘汰（4.0+）</h3>
+  <p>LRU 的软肋是<strong>偶发访问</strong>：一次离线任务批量扫描 50 万个冷 key，LRU 会误以为它们"最近常用"而把真正的热点挤出去（缓存污染）。LFU 复用同样的 24bit：高 16 位存分钟级衰减时钟，低 8 位存<strong>对数计数器（Morris 近似计数，0~255）</strong>——不是线性计数，访问次数越多增长越慢，255 就能代表百万级访问。</p>
+<pre><code><span class="cm"># LFU 调参（改前先评估访问模式）</span>
+CONFIG SET maxmemory-policy allkeys-lfu
+CONFIG SET lfu-log-factor <span class="nm">10</span>    <span class="cm"># 越大计数增长越慢（10 时约 100w 次访问到 255）</span>
+CONFIG SET lfu-decay-time <span class="nm">1</span>     <span class="cm"># 每隔 1 分钟未被访问，计数 -1（防"过气网红"占位）</span>
+
+<span class="cm"># 观察单个 key 的空闲时间 / 访问计数</span>
+OBJECT FREQ hot:key      <span class="cm"># LFU 计数</span>
+OBJECT IDLETIME hot:key  <span class="cm"># LRU 空闲秒数（会刷新时钟，排障专用，别在业务里调）</span></code></pre>
+</section>
+
+<!-- ============ 5. 碎片治理 ============ -->
+<section class="section">
+  <h2>五、碎片治理：activedefrag 而不是重启</h2>
+  <p>碎片怎么来的？jemalloc 按固定大小类别分配内存，频繁写入<strong>长度不一</strong>的 value、大量删除后，空闲页散落在各处，分配器无法归还给操作系统——于是 RSS 居高不下。4.0+ 的<strong>主动碎片整理</strong>可以在不重启的前提下，把数据搬移到连续内存块，把碎片"挤"出去：</p>
+<pre><code><span class="cm"># redis.conf（确认编译时使用 jemalloc：INFO server 里的 mem_allocator）</span>
+activedefrag <span class="kw">yes</span>
+active-defrag-ignore-bytes <span class="nm">100mb</span>      <span class="cm"># 碎片绝对量低于此值不触发</span>
+active-defrag-threshold-lower <span class="nm">10</span>      <span class="cm"># 碎片率超过 10% 开始整理</span>
+active-defrag-threshold-upper <span class="nm">100</span>     <span class="cm"># 碎片率 100% 时整理占 CPU 上限</span>
+active-defrag-cycle-min <span class="nm">1</span>             <span class="cm"># 整理线程最低 CPU 占比 %</span>
+active-defrag-cycle-max <span class="nm">25</span>            <span class="cm"># 最高 CPU 占比 %（峰值期调低）</span></code></pre>
+  <p>碎片整理本质是<strong>用 CPU 换内存</strong>，会带来额外延迟（通常 &lt;1ms 量级）。生产建议：碎片率 &gt; 1.5 且持续再开启；开启后观察 <code>latency</code> 与 CPU，逐步调参；同时从业务侧根治——<strong>固定 value 尺寸、拆大 key、避免长短混杂写入</strong>，比事后整理划算得多。</p>
+</section>
+
+<!-- ============ 6. 架构师清单 ============ -->
+<section class="section">
+  <h2>六、架构师清单：容量规划与监控红线</h2>
+  <ul>
+    <li><strong>容量公式</strong>：<code>maxmemory ≈ 物理内存 × 50%~70%</code>。余量要覆盖 fork COW、复制积压缓冲、客户端 buffer、碎片（10%~30%）和淘汰缓冲。32GB 机器跑缓存，maxmemory 设 20GB 是稳妥起点；</li>
+    <li><strong>缓存定位</strong>：选 <code>allkeys-lru</code> 或 <code>allkeys-lfu</code>，且 maxmemory 之上留 20% 水位缓冲——高水位下持续淘汰会引发延迟抖动（"淘汰风暴"）；</li>
+    <li><strong>存储定位</strong>：选 <code>noeviction</code>，但必须配容量冗余 + 水位告警（80% 预警 / 90% 严重），淘汰丢数据比报错更可怕；</li>
+    <li><strong>监控四指标</strong>：<code>used_memory</code> 水位、<code>mem_fragmentation_ratio</code>、<code>evicted_keys</code>（每秒淘汰数）、<code>expired_keys</code>。evicted_keys 持续大于 0 = 容量不足或 TTL 缺失；</li>
+    <li><strong>Cluster 注意</strong>：maxmemory 与淘汰策略是<strong>节点级</strong>配置，逐节点设置；hash 倾斜时单节点先触发淘汰，扩容前先看热分片。</li>
+  </ul>
+</section>
+
+<!-- ============ 7. 今日要点 ============ -->
+<section class="section">
+  <h2>📌 今日要点</h2>
+  <div class="summary-grid">
+    <div class="sum-card">
+      <span class="n">1</span>
+      <div class="t">三个内存指标</div>
+      <div class="d">used_memory（分配器）vs RSS（OS）；碎片率 1.0~1.5 健康，&gt;1.5 先排除 fork COW / 大客户端 buffer，&lt;1.0 说明在用 swap。</div>
+    </div>
+    <div class="sum-card">
+      <span class="n">2</span>
+      <div class="t">过期 = 惰性 + 定期</div>
+      <div class="d">定期删除每 100ms 抽样 20 个、过期超 25% 再来一轮；大批量同时过期要加随机抖动，从库不主动删过期 key。</div>
+    </div>
+    <div class="sum-card">
+      <span class="n">3</span>
+      <div class="t">策略选型一句话</div>
+      <div class="d">纯缓存 allkeys-lru/lfu；混合用途 volatile-*（确认 TTL 覆盖）；存储定位 noeviction + 水位告警 + 容量冗余。</div>
+    </div>
+    <div class="sum-card">
+      <span class="n">4</span>
+      <div class="t">LFU 防缓存污染</div>
+      <div class="d">对数计数器 + 分钟衰减，天然抵御偶发批量扫描；调 lfu-log-factor 控制敏感度、lfu-decay-time 控制"过气"速度。</div>
+    </div>
+    <div class="sum-card">
+      <span class="n">5</span>
+      <div class="t">碎片用整理不用重启</div>
+      <div class="d">activedefrag 用 CPU 换内存，治本是固定 value 尺寸、拆大 key；重启前必须做主从切换 + 缓存预热方案。</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 8. 思考题 ============ -->
+<section class="section">
+  <h2>🧠 架构师思考题</h2>
+
+  <details>
+    <summary><span class="q-mark">Q1</span>你们系统有个后台任务每晚批量"预热"50 万个商品 key（只访问一次），次日发现真正的热点 key 被大量挤出缓存。为什么 LRU 会这样？换 LFU 就万事大吉了吗？还要调哪些参数？<span class="chev">▶</span></summary>
+    <div class="answer">
+      <h4>解题方向</h4>
+      <p>本题考察 LRU/LFU 的失效场景与 LFU 参数的架构权衡，分三层回答：</p>
+      <h4>① 为什么 LRU 会误伤</h4>
+      <p>LRU 的唯一依据是"最后访问时间"。预热任务把 50 万个冷 key 挨个访问一遍，每个 key 的 lru 时钟都被刷新成"刚刚"，而真正的热点如果恰好有几分钟没被访问（比如凌晨低峰期），在采样淘汰时反而比刚扫过的冷 key"更旧"，于是被挤出去。这是典型的<strong>缓存污染</strong>：LRU 区分不了"访问一次"和"访问一万次"。</p>
+      <h4>② 为什么 LFU 能缓解</h4>
+      <p>LFU 的 8bit 对数计数器按频率计数：新 key 初始计数为 5，预热扫一次最多涨到 6~7；而历史热点计数早已到几十上百。淘汰采样时冷 key 几乎总是最小分被逐出，热点得以保全。</p>
+      <h4>③ 换 LFU 不是万事大吉——参数与代价</h4>
+      <ul>
+        <li><code>lfu-log-factor</code> 过大 → 计数涨不动，所有 key 都挤在低位，退化成近似随机淘汰；过小 → 一访问就到高位，又变成"一次性热点占死内存"，需要按业务 QPS 做压测标定；</li>
+        <li><code>lfu-decay-time</code> 决定衰减速度：商品热点有周期性（大促前后切换），衰减太慢会导致"上周的热点"赖着不走，衰减太快热点身份保不住；</li>
+        <li>另一个工程解法是<strong>不换策略，改用法</strong>：预热任务绕开主缓存（预热到本地/独立实例），或对预热 key 打短 TTL——架构上"隔离污染源"往往比调算法参数更稳。</li>
+      </ul>
+      <p><strong>参考结论</strong>：换 allkeys-lfu + 标定 log-factor/decay-time 是正解之一，但先评估能否把批量扫描隔离出缓存路径——能隔离就不动全局策略，改动面最小。</p>
+    </div>
+  </details>
+
+  <details>
+    <summary><span class="q-mark">Q2</span>线上单实例 used_memory 18GB、RSS 27GB、碎片率 1.5 持续两周，业务量没增长。你会怎么排查和治理？如果最终决定"重启回收"，直接 <code>shutdown</code> 有什么风险，怎么安全地做？<span class="q-mark" style="margin-left:8px">（进阶）</span><span class="chev">▶</span></summary>
+    <div class="answer">
+      <h4>解题方向</h4>
+      <p>这是一道完整的内存排障 + 变更管控题，考察"先定位、再治理、变更要有回退路径"的架构素养。</p>
+      <h4>第一步：确认碎片是真碎片</h4>
+      <ul>
+        <li>对照 bgsave/aof-rewrite 时间线，排除 fork COW 的瞬时 RSS 膨胀（COW 是脉冲，碎片是持续）；</li>
+        <li><code>client list</code> 查 omem 异常的慢消费客户端（Pub/Sub 或从库全量同步未完成都会撑大输出缓冲）；</li>
+        <li><code>MEMORY DOCTOR</code> / <code>MEMORY STATS</code> 让 Redis 给出官方诊断；<code>INFO memory</code> 里的 <code>mem_not_counted_for_evict</code> 是否巨大。</li>
+      </ul>
+      <h4>第二步：治理优先级</h4>
+      <p>① 业务侧先治大 key 与长短混杂写入（用 <code>--memkeys</code> 找出元凶）；② 确认 mem_allocator 是 jemalloc 后，低峰开启 <code>activedefrag</code>，从 cycle-min=1 小步试跑，观察延迟和 CPU；③ 只有整理无效（如碎片源于历史超大 value 已删）才考虑重启回收。</p>
+      <h4>第三步：直接 shutdown 的三重风险</h4>
+      <ul>
+        <li><strong>冷启动雪崩</strong>：18GB 缓存清空后，数百万请求同时 miss 打到 DB，可能直接压垮数据库——这是最大的风险；</li>
+        <li><strong>可用性窗口</strong>：单实例重启 = 服务中断；若有 AOF，18GB 数据重放可能要几分钟；</li>
+        <li><strong>Cluster 连锁反应</strong>：分片集群中主节点下线触发主从切换，期间该分片写入受影响，若其他从库数据陈旧还可能丢最近写入。</li>
+      </ul>
+      <h4>安全重启的标准动作</h4>
+      <p>① 确认有可用的从库且主从同步完成（<code>master_repl_offset</code> 追平）；② 低峰期执行<strong>故障转移</strong>（sentinel failover 或 cluster failover），让从库转主，业务无感；③ 旧主空实例重启，内存干净归还；④ <strong>预热</strong>后再做一次 failover 切回（或保持新拓扑不动）；⑤ 全程盯着 miss 率、DB QPS、分片延迟，随时可中止。<strong>没有预热方案的重启 = 定时炸弹</strong>。</p>
+    </div>
+  </details>
+</section>
+
+<div class="footer">
+  <b>每日架构师微课程</b> · 第 11 期 · 2026-08-25 · Redis 系列 第 7 讲（收官）<br>
+  下一系列：Apache Pulsar —— 从计算存储分层架构说起
+</div>
+
+</div>
+</body>
+</html>

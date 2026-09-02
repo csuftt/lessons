@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · Kubernetes HPA 自动伸缩 | 2026-09-02</title>
+<style>
+  :root{
+    --bg:#0d1117; --bg2:#161b22; --card:#1c2230; --card2:#232a3a;
+    --border:#2d3650; --text:#e6edf3; --muted:#8b949e; --dim:#6e7681;
+    --accent:#3b82f6; --accent2:#60a5fa; --k8s:#326ce5;
+    --green:#3fb950; --orange:#d29922; --red:#f85149; --purple:#bc8cff; --cyan:#39c5cf;
+    --code-bg:#0b0f16; --mono:'Cascadia Code',Consolas,'JetBrains Mono',monospace;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75; font-size:15.5px;
+    background-image:radial-gradient(ellipse 60% 40% at 50% -10%,rgba(50,108,229,.14),transparent);
+  }
+  .container{max-width:880px;margin:0 auto;padding:24px 20px 80px}
+
+  /* ===== 头部 ===== */
+  header{margin-bottom:28px}
+  .meta-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:14px;font-size:13px;color:var(--muted)}
+  .badge{display:inline-flex;align-items:center;gap:6px;padding:3px 12px;border-radius:999px;font-size:12.5px;font-weight:600}
+  .badge-tech{background:rgba(50,108,229,.18);color:#7da7ff;border:1px solid rgba(50,108,229,.45)}
+  .badge-date{background:var(--bg2);border:1px solid var(--border);color:var(--muted)}
+  .badge-time{background:rgba(63,185,80,.12);border:1px solid rgba(63,185,80,.4);color:#56d364}
+  .badge-no{background:rgba(188,140,255,.12);border:1px solid rgba(188,140,255,.4);color:#c9a6ff}
+  h1{font-size:28px;line-height:1.35;font-weight:700;letter-spacing:.5px;margin-bottom:8px;
+     background:linear-gradient(90deg,#e6edf3,#7da7ff);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+  .subtitle{color:var(--muted);font-size:15px}
+
+  /* ===== 章节卡片 ===== */
+  section{background:var(--card);border:1px solid var(--border);border-radius:14px;
+    padding:24px 26px;margin-bottom:22px;box-shadow:0 4px 20px rgba(0,0,0,.25)}
+  section>h2{font-size:19px;margin-bottom:14px;display:flex;align-items:center;gap:10px;color:var(--accent2)}
+  .sec-num{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:8px;
+    background:rgba(59,130,246,.18);border:1px solid rgba(59,130,246,.4);font-size:13px;color:#7da7ff;flex:none}
+  h3{font-size:16px;color:var(--text);margin:18px 0 8px}
+  p{margin-bottom:12px;color:var(--text)}
+  .muted{color:var(--muted)}
+  .hl{color:#7da7ff;font-weight:600}
+  .hl-g{color:#56d364;font-weight:600}
+  .hl-o{color:#e3b341;font-weight:600}
+  .hl-r{color:#ff7b72;font-weight:600}
+  .hl-p{color:#d2a8ff;font-weight:600}
+  strong{color:#f0f6fc}
+
+  /* ===== 代码块 ===== */
+  .code-block{background:var(--code-bg);border:1px solid var(--border);border-radius:10px;margin:14px 0;overflow:hidden}
+  .code-title{display:flex;justify-content:space-between;align-items:center;padding:8px 14px;
+    background:#111726;border-bottom:1px solid var(--border);font-size:12.5px;color:var(--muted)}
+  .code-title .dot{color:var(--dim);letter-spacing:2px}
+  pre{padding:14px 16px;overflow-x:auto;font-family:var(--mono);font-size:13px;line-height:1.65;color:#c9d1d9}
+  code{font-family:var(--mono)}
+  p code,li code,td code{background:rgba(110,118,129,.22);padding:1.5px 6px;border-radius:5px;font-size:13px;color:#a5d6ff}
+  .c-com{color:#7c8598;font-style:italic}
+  .c-kw{color:#ff7b72}
+  .c-str{color:#a5d6ff}
+  .c-num{color:#79c0ff}
+  .c-fn{color:#d2a8ff}
+  .c-tag{color:#7ee787}
+  .c-attr{color:#79c0ff}
+
+  /* ===== 提示框 ===== */
+  .tip,.warn,.danger{border-radius:10px;padding:14px 18px;margin:14px 0;font-size:14px;display:flex;gap:10px}
+  .tip{background:rgba(63,185,80,.08);border:1px solid rgba(63,185,80,.35)}
+  .warn{background:rgba(210,153,34,.08);border:1px solid rgba(210,153,34,.35)}
+  .danger{background:rgba(248,81,73,.08);border:1px solid rgba(248,81,73,.35)}
+  .tip b{color:#56d364}.warn b{color:#e3b341}.danger b{color:#ff7b72}
+  .tip .icon,.warn .icon,.danger .icon{flex:none;font-size:16px;margin-top:2px}
+
+  /* ===== 表格 ===== */
+  .tbl-wrap{overflow-x:auto;margin:14px 0}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  th{background:#111726;color:#7da7ff;text-align:left;padding:10px 12px;border:1px solid var(--border);font-weight:600;white-space:nowrap}
+  td{padding:9px 12px;border:1px solid var(--border);color:var(--text);vertical-align:top}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+
+  /* ===== 架构图 ===== */
+  .diagram{background:var(--code-bg);border:1px solid var(--border);border-radius:10px;margin:14px 0;padding:10px;overflow-x:auto}
+  .diagram svg{display:block;margin:0 auto;min-width:640px;max-width:100%}
+
+  /* ===== 流程步骤 ===== */
+  .steps{display:flex;flex-direction:column;gap:10px;margin:14px 0}
+  .step{display:flex;gap:14px;align-items:flex-start;background:var(--bg2);border:1px solid var(--border);
+    border-radius:10px;padding:12px 16px}
+  .step-n{flex:none;width:24px;height:24px;border-radius:50%;background:rgba(59,130,246,.2);border:1px solid rgba(59,130,246,.5);
+    color:#7da7ff;font-size:12.5px;font-weight:700;display:flex;align-items:center;justify-content:center;margin-top:3px}
+  .step p{margin:0;font-size:14px}
+
+  /* ===== 要点总结 ===== */
+  .key-points li{margin-bottom:12px;padding-left:6px;list-style:none;display:flex;gap:10px;font-size:14.5px}
+  .key-points li::before{content:'◆';color:#7da7ff;flex:none;margin-top:1px}
+  ul.key-points{margin-top:6px}
+
+  /* ===== 思考题 ===== */
+  details{background:var(--bg2);border:1px solid var(--border);border-radius:12px;margin:12px 0;overflow:hidden}
+  summary{cursor:pointer;padding:16px 20px;font-weight:600;color:#e3b341;font-size:15px;list-style:none;
+    display:flex;align-items:center;gap:10px;user-select:none;transition:background .15s}
+  summary::-webkit-details-marker{display:none}
+  summary:hover{background:rgba(210,153,34,.06)}
+  summary .chev{margin-left:auto;transition:transform .2s;color:var(--dim);font-size:12px}
+  details[open] .chev{transform:rotate(90deg)}
+  details[open] summary{border-bottom:1px solid var(--border)}
+  .details-body{padding:18px 22px;font-size:14.5px}
+  .details-body p{margin-bottom:10px}
+  .details-body h4{color:#7da7ff;margin:14px 0 6px;font-size:14.5px}
+  .details-body ul,.details-body ol{margin:6px 0 12px 20px}
+  .details-body li{margin-bottom:6px}
+
+  footer{text-align:center;color:var(--dim);font-size:12.5px;margin-top:36px;padding-top:20px;border-top:1px solid var(--border)}
+
+  @media (max-width:640px){
+    body{font-size:14.5px}
+    .container{padding:16px 12px 60px}
+    section{padding:18px 16px}
+    h1{font-size:22px}
+    pre{font-size:12px}
+    .diagram svg{min-width:560px}
+  }
+</style>
+</head>
+<body>
+<div style="position:fixed;top:14px;left:14px;z-index:9999;">
+<a href="../index.html" style="display:inline-block;padding:6px 14px;border-radius:999px;background:rgba(20,26,38,.88);color:#7da7ff;font-size:13px;text-decoration:none;border:1px solid rgba(90,130,220,.45);backdrop-filter:blur(4px);font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.35);" onmouseover="this.style.background='rgba(30,40,60,.95)'" onmouseout="this.style.background='rgba(20,26,38,.88)'">← 课程目录</a>
+</div>
+
+<div class="container">
+
+<!-- ================= 头部 ================= -->
+<header>
+  <div class="meta-row">
+    <span class="badge badge-tech">☸ Kubernetes</span>
+    <span class="badge badge-date">📅 2026-09-02 · 第16期</span>
+    <span class="badge badge-time">⏱ 预计阅读 10 分钟</span>
+    <span class="badge badge-no">🎯 HPA 自动伸缩</span>
+  </div>
+  <h1>HPA 自动伸缩：别让流量高峰"击穿"你的服务</h1>
+  <p class="subtitle">从一次大促翻车事故出发，讲透水平自动伸缩的指标选型、扩缩容策略与容量规划——以及为什么你的 HPA 总是"慢半拍"。</p>
+</header>
+
+<!-- ================= 01 场景问题 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>从一个真实事故说起</h2>
+  <p>凌晨 0 点，营销系统大促活动开启，入口网关 QPS 从 200 飙到 8000。值班同学看着监控大盘：CPU 飙到 95%，P99 延迟从 120ms 涨到 4s，服务开始大面积超时。他冲到终端敲下 <code>kubectl scale --replicas=20</code>——但 Pod 从创建到 Ready 走完拉镜像、挂配置、健康检查、预热全套流程花了近 4 分钟。<strong>流量在 30 秒内就打满了，扩容却要 4 分钟才生效</strong>，这段时间里损失的是真金白银的订单。</p>
+  <p>事后复盘三条结论：</p>
+  <div class="steps">
+    <div class="step"><span class="step-n">1</span><p><strong>人工响应不可能快过流量曲线</strong>——大促流量是秒级爬升，人工决策是分钟级；</p></div>
+    <div class="step"><span class="step-n">2</span><p><strong>固定副本数是容量浪费</strong>——白天 12 副本、凌晨 2 副本就够，固定 12 个意味着每晚浪费 80% 资源；</p></div>
+    <div class="step"><span class="step-n">3</span><p><strong>扩容永远要"提前量"</strong>——HPA 不是水晶球，它是<span class="hl">滞后反馈系统</span>，架构设计必须为这个滞后留出缓冲。</p></div>
+  </div>
+  <p>这就是今天的主角：<strong>Horizontal Pod Autoscaler（HPA）</strong>——Kubernetes 中最常用、也最容易"配了但没用好"的弹性能力。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>HPA 工作原理：一个控制回路</h2>
+  <p>HPA 本质是一个<span class="hl">闭环负反馈控制器</span>，由 <code>kube-controller-manager</code> 内的 HPA 控制器驱动（v2 版本 API 为 <code>autoscaling/v2</code>）：</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="#7da7ff"/>
+      </marker>
+      <marker id="arrowR" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="#f85149"/>
+      </marker>
+    </defs>
+    <!-- 控制回路标题 -->
+    <text x="380" y="24" text-anchor="middle" fill="#8b949e" font-size="13">HPA 控制回路（默认每 15s 采样一次）</text>
+
+    <!-- Metrics Server -->
+    <rect x="20" y="45" width="170" height="72" rx="10" fill="#1c2230" stroke="#326ce5" stroke-width="1.5"/>
+    <text x="105" y="74" text-anchor="middle" fill="#7da7ff" font-size="14" font-weight="600">Metrics Server</text>
+    <text x="105" y="95" text-anchor="middle" fill="#8b949e" font-size="11.5">采集 Pod 指标</text>
+
+    <!-- HPA Controller -->
+    <rect x="295" y="45" width="170" height="72" rx="10" fill="#1c2230" stroke="#d29922" stroke-width="1.5"/>
+    <text x="380" y="70" text-anchor="middle" fill="#e3b341" font-size="14" font-weight="600">HPA 控制器</text>
+    <text x="380" y="89" text-anchor="middle" fill="#8b949e" font-size="11.5">期望副本数 =</text>
+    <text x="380" y="106" text-anchor="middle" fill="#8b949e" font-size="11.5">ceil(当前×期望/实际指标)</text>
+
+    <!-- Deployment -->
+    <rect x="570" y="45" width="170" height="72" rx="10" fill="#1c2230" stroke="#3fb950" stroke-width="1.5"/>
+    <text x="655" y="74" text-anchor="middle" fill="#56d364" font-size="14" font-weight="600">Deployment</text>
+    <text x="655" y="95" text-anchor="middle" fill="#8b949e" font-size="11.5">更新 replicas</text>
+
+    <!-- Pods -->
+    <g>
+      <rect x="20" y="185" width="60" height="46" rx="8" fill="#232a3a" stroke="#326ce5"/>
+      <text x="50" y="213" text-anchor="middle" fill="#8b949e" font-size="11">Pod1</text>
+      <rect x="90" y="185" width="60" height="46" rx="8" fill="#232a3a" stroke="#326ce5"/>
+      <text x="120" y="213" text-anchor="middle" fill="#8b949e" font-size="11">Pod2</text>
+      <rect x="160" y="185" width="60" height="46" rx="8" fill="#232a3a" stroke="#326ce5" stroke-dasharray="4 3"/>
+      <text x="190" y="205" text-anchor="middle" fill="#56d364" font-size="11">PodN</text>
+      <text x="190" y="220" text-anchor="middle" fill="#56d364" font-size="10">(新增)</text>
+    </g>
+
+    <!-- 箭头: MS -> HPA -->
+    <line x1="190" y1="81" x2="290" y2="81" stroke="#7da7ff" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="240" y="70" text-anchor="middle" fill="#6e7681" font-size="10.5">指标值</text>
+
+    <!-- 箭头: HPA -> Deployment -->
+    <line x1="465" y1="81" x2="565" y2="81" stroke="#7da7ff" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="515" y="70" text-anchor="middle" fill="#6e7681" font-size="10.5">scale 决策</text>
+
+    <!-- 箭头: Deployment -> Pods -->
+    <line x1="655" y1="117" x2="655" y2="160" stroke="#7da7ff" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <line x1="655" y1="160" x2="120" y2="160" stroke="#7da7ff" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <line x1="120" y1="160" x2="120" y2="180" stroke="#7da7ff" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="380" y="152" text-anchor="middle" fill="#6e7681" font-size="10.5">创建 / 删除 Pod</text>
+
+    <!-- 反馈箭头: Pods -> MS -->
+    <path d="M 120 231 L 120 255 L 655 255 L 655 231" fill="none" stroke="#f85149" stroke-width="1.3" stroke-dasharray="5 3" marker-end="url(#arrowR)"/>
+    <text x="380" y="273" text-anchor="middle" fill="#8b949e" font-size="10.5">kubelet cAdvisor 上报 → 指标回灌（负反馈）</text>
+
+    <!-- 流量输入 -->
+    <rect x="20" y="288" width="0" height="0"/>
+  </svg>
+  </div>
+
+  <p>核心公式只有一行：</p>
+  <div class="code-block">
+    <div class="code-title"><span>HPA 扩缩容决策公式</span><span class="dot">···</span></div>
+    <pre><span class="c-com"># 以 CPU 利用率指标为例</span>
+期望副本数 = ceil( <span class="c-num">当前副本数</span> × <span class="c-num">当前指标值</span> / <span class="c-num">目标指标值</span> )
+
+<span class="c-com"># 例：当前 4 副本，CPU 实测 90%，目标 60%</span>
+<span class="c-com"># 期望副本数 = ceil(4 × 90 / 60) = 6</span></pre>
+  </div>
+
+  <p>三个决定"体感"的关键参数：</p>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>参数</th><th>默认值</th><th>含义与影响</th></tr>
+    <tr><td><code>--horizontal-pod-autoscaler-sync-period</code></td><td>15s</td><td>采样周期。指标每 15s 才被读一次，决定了反应速度下限</td></tr>
+    <tr><td><code>--horizontal-pod-autoscaler-tolerance</code></td><td>10%</td><td>容差带。指标在目标 ±10% 内不动作，防止频繁抖动</td></tr>
+    <tr><td><code>stabilizationWindowSeconds</code></td><td>扩容 0s / 缩容 300s</td><td>稳定窗口。缩容前"观望"5 分钟，取窗口内最大副本数，防止缩了又扩</td></tr>
+  </table>
+  </div>
+
+  <div class="warn"><span class="icon">⚠️</span><div><b>架构师第一课：</b>HPA 的每一次动作都建立在"过期最多 15 秒的指标"上，而扩出的 Pod 还要经历调度→拉镜像→就绪探针→JVM 预热。把<span class="hl-o">指标采样 + Pod 就绪 + 应用预热</span>三段延迟加起来，才是真实的扩容时延，容量规划必须覆盖这段"真空期"。</div></div>
+</section>
+
+<!-- ================= 03 指标选型 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>指标选型：CPU 只是及格线</h2>
+  <p>大促复盘时团队发现：网关 CPU 已 95%，但 HPA 目标是 70% 却一直没触发扩容——因为当时配置的是 <code>averageUtilization</code>（百分比），而 Deployment 忘了配 <code>resources.requests</code>，导致百分比指标根本无法计算。这是新手最常见的坑之一。</p>
+
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>指标类型</th><th>来源</th><th>适用场景</th><th>架构师点评</th></tr>
+    <tr><td>Resource<br><code>cpu / memory</code></td><td>Metrics Server</td><td>CPU 密集型服务</td><td>开箱即用，但 CPU 与"用户体验"相关性弱；<span class="hl-r">必须配 requests</span></td></tr>
+    <tr><td>Pods 自定义</td><td>应用自身暴露<br>(Prometheus Adapter)</td><td>QPS / 队列深度 / 消息积压</td><td><span class="hl-g">强烈推荐</span>：直接对齐业务压力，如"每副本 500 QPS"</td></tr>
+    <tr><td>Object 外部</td><td>Ingress 等 K8s 对象指标</td><td>按入口流量伸缩后端</td><td>适合网关后端池，避开应用自身指标缺失问题</td></tr>
+    <tr><td>External 外部</td><td>外部监控系统</td><td>按 Kafka lag / Redis 队列伸缩消费端</td><td>异步消费场景的<span class="hl">最优解</span>，伸缩与流量源头解耦</td></tr>
+  </table>
+  </div>
+
+  <div class="tip"><span class="icon">💡</span><div><b>选型心法：</b>同步在线服务用 <strong>QPS（Pods 指标）为主 + CPU（Resource 指标）兜底</strong>的双指标策略——QPS 反映真实负载且不受 JIT/GC 干扰，CPU 防止"低流量但高计算"的异常路径被漏掉；异步消费服务用 <strong>External 指标（消息积压量）</strong>，副本数 = 积压量 ÷ 单副本吞吐。</div></div>
+</section>
+
+<!-- ================= 04 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>架构设计：三层伸缩体系</h2>
+  <p>单靠 HPA 无法应对所有弹性场景。成熟平台的标配是<span class="hl">"HPA（Pod 层）+ Cluster Autoscaler / Karpenter（节点层）+ VPA（垂直层）"</span>三层联动：</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="#56d364"/>
+      </marker>
+    </defs>
+    <!-- 层1 流量 -->
+    <rect x="30" y="20" width="700" height="70" rx="12" fill="#111726" stroke="#2d3650"/>
+    <text x="60" y="48" fill="#e6edf3" font-size="14" font-weight="600">流量入口层</text>
+    <text x="60" y="70" fill="#8b949e" font-size="12">Ingress / 网关 SLB —— 流量第一次触达点，超时与限流配置决定故障是否扩散</text>
+    <rect x="600" y="34" width="110" height="40" rx="8" fill="rgba(59,130,246,.15)" stroke="#3b82f6"/>
+    <text x="655" y="59" text-anchor="middle" fill="#7da7ff" font-size="12.5">限流兜底</text>
+
+    <!-- 层2 HPA -->
+    <rect x="30" y="115" width="700" height="80" rx="12" fill="#111726" stroke="#d29922"/>
+    <text x="60" y="143" fill="#e3b341" font-size="14" font-weight="600">Pod 层 · HPA（秒~分钟级）</text>
+    <text x="60" y="166" fill="#8b949e" font-size="12">按 QPS/CPU 伸缩 Deployment 副本 —— 前提：集群有空闲资源可调度</text>
+    <text x="60" y="184" fill="#6e7681" font-size="11">策略：扩容快（0s 稳定窗）· 缩容慢（300s 稳定窗）· behavior 精细控制速率</text>
+
+    <!-- 层3 节点 -->
+    <rect x="30" y="220" width="700" height="80" rx="12" fill="#111726" stroke="#3fb950"/>
+    <text x="60" y="248" fill="#56d364" font-size="14" font-weight="600">节点层 · Cluster Autoscaler / Karpenter（分钟级）</text>
+    <text x="60" y="271" fill="#8b949e" font-size="12">Pod Pending → 触发节点扩容；节点空闲 → 缩容回收 —— HPA 的"资源池"保障</text>
+    <text x="60" y="289" fill="#6e7681" font-size="11">Karpenter 可按 Pod 尺寸直接选择最优机型并自动下线空节点，省去节点组规划</text>
+
+    <!-- 层间箭头 -->
+    <line x1="380" y1="90" x2="380" y2="112" stroke="#56d364" stroke-width="1.5" marker-end="url(#ar2)"/>
+    <line x1="380" y1="195" x2="380" y2="217" stroke="#56d364" stroke-width="1.5" marker-end="url(#ar2)"/>
+    <text x="400" y="107" fill="#6e7681" font-size="10.5">压力传导</text>
+    <text x="400" y="212" fill="#6e7681" font-size="10.5">Pending 触发</text>
+  </svg>
+  </div>
+
+  <p><strong>联动逻辑：</strong>流量升高 → HPA 先扩 Pod；若节点资源不足，新 Pod 进入 Pending → Cluster Autoscaler/Karpenter 扩节点 → Pod 调度成功。流量回落后反向收缩：先缩 Pod，节点空闲后缩节点。<span class="hl-o">注意缩容顺序必须自上而下</span>，否则可能出现"Pod 被缩掉但节点还空转付费"的窗口期浪费。</p>
+</section>
+
+<!-- ================= 05 实战 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>实战：一份可直接落地的 HPA 配置</h2>
+
+  <h3>5.1 前置条件：Deployment 必须声明 requests</h3>
+  <div class="code-block">
+    <div class="code-title"><span>deployment.yaml（关键片段）</span><span class="dot">···</span></div>
+    <pre><span class="c-tag">apiVersion</span>:<span class="c-str"> apps/v1</span>
+<span class="c-tag">kind</span>:<span class="c-str"> Deployment</span>
+<span class="c-tag">metadata</span>:
+  <span class="c-attr">name</span>:<span class="c-str">order-service</span>
+<span class="c-tag">spec</span>:
+  <span class="c-attr">replicas</span>:<span class="c-num"> 4</span>          <span class="c-com"># HPA 接管后此值成为初始值</span>
+  <span class="c-tag">template</span>:
+    <span class="c-tag">spec</span>:
+      <span class="c-tag">containers</span>:
+        - <span class="c-attr">name</span>:<span class="c-str"> app</span>
+          <span class="c-tag">image</span>:<span class="c-str"> registry.example.com/order-service:v2.4.1</span>
+          <span class="c-tag">resources</span>:
+            <span class="c-attr">requests</span>:
+              <span class="c-attr">cpu</span>:<span class="c-str"> 500m</span>      <span class="c-com"># ← HPA 百分比指标的分母，漏配则 HPA 失效！</span>
+              <span class="c-attr">memory</span>:<span class="c-str"> 512Mi</span>
+            <span class="c-attr">limits</span>:
+              <span class="c-attr">cpu</span>:<span class="c-str"> 1000m</span>
+              <span class="c-attr">memory</span>:<span class="c-str"> 1Gi</span>
+          <span class="c-tag">readinessProbe</span>:          <span class="c-com"># 未 Ready 的 Pod 不计入 HPA 指标，也接不了流量</span>
+            <span class="c-attr">httpGet</span>:<span class="c-str"> { path: /actuator/health/readiness, port: 8080 }</span>
+            <span class="c-attr">initialDelaySeconds</span>:<span class="c-num"> 20</span></pre>
+  </div>
+
+  <h3>5.2 HPA v2：双指标 + behavior 策略</h3>
+  <div class="code-block">
+    <div class="code-title"><span>hpa.yaml（生产可用模板）</span><span class="dot">···</span></div>
+    <pre><span class="c-tag">apiVersion</span>:<span class="c-str"> autoscaling/v2</span>
+<span class="c-tag">kind</span>:<span class="c-str"> HorizontalPodAutoscaler</span>
+<span class="c-tag">metadata</span>:
+  <span class="c-attr">name</span>:<span class="c-str"> order-service-hpa</span>
+<span class="c-tag">spec</span>:
+  <span class="c-attr">scaleTargetRef</span>:
+    <span class="c-attr">apiVersion</span>:<span class="c-str"> apps/v1</span>
+    <span class="c-attr">kind</span>:<span class="c-str"> Deployment</span>
+    <span class="c-attr">name</span>:<span class="c-str"> order-service</span>
+  <span class="c-attr">minReplicas</span>:<span class="c-num"> 4</span>              <span class="c-com"># 容量底线：低于此值不缩，保住最低吞吐</span>
+  <span class="c-attr">maxReplicas</span>:<span class="c-num"> 40</span>             <span class="c-com"># 容量上限：防止指标异常导致副本失控烧钱</span>
+  <span class="c-tag">metrics</span>:
+    <span class="c-com"># 主指标：QPS（需 Prometheus Adapter 暴露自定义指标 http_requests_per_second）</span>
+    - <span class="c-tag">type</span>:<span class="c-str"> Pods</span>
+      <span class="c-tag">pods</span>:
+        <span class="c-attr">metric</span>:
+          <span class="c-attr">name</span>:<span class="c-str"> http_requests_per_second</span>
+        <span class="c-tag">target</span>:
+          <span class="c-attr">type</span>:<span class="c-str"> AverageValue</span>
+          <span class="c-attr">averageValue</span>:<span class="c-str"> "500"</span>   <span class="c-com"># 每副本承载 500 QPS</span>
+    <span class="c-com"># 兜底指标：CPU 利用率</span>
+    - <span class="c-tag">type</span>:<span class="c-str"> Resource</span>
+      <span class="c-tag">resource</span>:
+        <span class="c-attr">name</span>:<span class="c-str"> cpu</span>
+        <span class="c-tag">target</span>:
+          <span class="c-attr">type</span>:<span class="c-str"> Utilization</span>
+          <span class="c-attr">averageUtilization</span>:<span class="c-num"> 60</span>
+  <span class="c-tag">behavior</span>:                     <span class="c-com"># ← 精细化控制伸缩行为，v2 的杀手锏</span>
+    <span class="c-tag">scaleUp</span>:
+      <span class="c-attr">stabilizationWindowSeconds</span>:<span class="c-num"> 0</span>      <span class="c-com"># 扩容不观望，越快越好</span>
+      <span class="c-tag">selectPolicy</span>:<span class="c-str"> Max</span>                  <span class="c-com"># 多策略取更激进者</span>
+      <span class="c-tag">policies</span>:
+        - <span class="c-attr">type</span>:<span class="c-str"> Percent</span>
+          <span class="c-attr">value</span>:<span class="c-num"> 100</span>                  <span class="c-com"># 每周期最多翻倍</span>
+          <span class="c-attr">periodSeconds</span>:<span class="c-num"> 60</span>
+        - <span class="c-attr">type</span>:<span class="c-str"> Pods</span>
+          <span class="c-attr">value</span>:<span class="c-num"> 8</span>                    <span class="c-com"># 或每次最多加 8 个，两者取大</span>
+          <span class="c-attr">periodSeconds</span>:<span class="c-num"> 60</span>
+    <span class="c-tag">scaleDown</span>:
+      <span class="c-attr">stabilizationWindowSeconds</span>:<span class="c-num"> 300</span>    <span class="c-com"># 缩容观望 5 分钟</span>
+      <span class="c-tag">selectPolicy</span>:<span class="c-str"> Min</span>                  <span class="c-com"># 缩容取更保守者</span>
+      <span class="c-tag">policies</span>:
+        - <span class="c-attr">type</span>:<span class="c-str"> Pods</span>
+          <span class="c-attr">value</span>:<span class="c-num"> 2</span>                    <span class="c-com"># 每 2 分钟最多缩 2 个，缓慢释放</span>
+          <span class="c-attr">periodSeconds</span>:<span class="c-num"> 120</span></pre>
+  </div>
+
+  <h3>5.3 常用排障命令</h3>
+  <div class="code-block">
+    <div class="code-title"><span>排障三板斧</span><span class="dot">···</span></div>
+    <pre><span class="c-com"># 1. 看 HPA 决策详情：当前指标、目标值、期望副本数、最近事件</span>
+$ kubectl describe hpa order-service-hpa
+<span class="c-com"># 重点看 Messages 是否出现：</span>
+<span class="c-com">#   "the HPA was unable to compute the replica count"  → 指标取不到</span>
+<span class="c-com">#   "missing request for cpu"                           → Deployment 没配 requests</span>
+
+<span class="c-com"># 2. 实时观察指标与副本数变化</span>
+$ kubectl get hpa order-service-hpa -w
+
+<span class="c-com"># 3. 压测验证（观察 15s 周期内指标采集与扩容触发）</span>
+$ kubectl run load-gen --rm -it --image=busybox --restart=Never -- \
+    sh -c <span class="c-str">"while true; do wget -q -O- http://order-service:8080/api/order; done"</span></pre>
+  </div>
+
+  <div class="danger"><span class="icon">🚨</span><div><b>高频翻车点：</b>① 忘配 <code>resources.requests</code> → CPU 百分比指标直接失效；② JVM 应用未设置 <code>-XX:MaxRAMPercentage</code>，容器内存 limit 与堆不匹配导致 OOMKilled，HPA 扩得越多死得越多；③ <code>minReplicas</code> 设成 1 → 单副本故障时没有缓冲，一缩到底后冷启动雪崩。</div></div>
+</section>
+
+<!-- ================= 06 容量规划 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>容量规划：让弹性"跑赢"流量</h2>
+  <p>HPA 滞后不可消除，只能用容量规划对冲。给一个可复用的估算框架：</p>
+  <div class="steps">
+    <div class="step"><span class="step-n">1</span><p><strong>测量单副本容量：</strong>压测得到单副本极限吞吐（如 800 QPS 时 P99=800ms），按 70% 水位取安全值 ≈ <span class="hl">560 QPS/副本</span>；</p></div>
+    <div class="step"><span class="step-n">2</span><p><strong>计算弹性真空期：</strong>指标采样 15s + 调度拉镜像 40~90s + 就绪探针 20s + 预热 30s ≈ <span class="hl">2~3 分钟</span>；</p></div>
+    <div class="step"><span class="step-n">3</span><p><strong>倒推 minReplicas：</strong>若大促峰值 8000 QPS 且 3 分钟内爬升到位，则 minReplicas ≥ 8000÷560×(爬升占比)。<span class="hl-o">实践上大促场景直接 minReplicas = 峰值副本数的 50%~70%</span>，把 HPA 当"补位"而非"主力"；</p></div>
+    <div class="step"><span class="step-n">4</span><p><strong>留节点缓冲：</strong>HPA maxReplicas 对应的资源量，必须 &lt; 集群可快速扩出的节点容量（CA/Karpenter 节点启动也要 1~3 分钟），否则 Pod 全卡 Pending；</p></div>
+    <div class="step"><span class="step-n">5</span><p><strong>预热与提前扩容：</strong>可预知的活动用 <code>kubectl scale</code> 或定时扩容（CronHPA/KEDA Cron）提前拉满，HPA 只处理计划外波动；JVM 服务开启就绪前预热接口。</p></div>
+  </div>
+  <div class="tip"><span class="icon">💡</span><div><b>成本视角：</b>HPA+Karpenter 组合在典型在线业务上可节省 30%~60% 资源成本——但省钱的前提是"缩得回去"：务必确认缩容策略保守（长稳定窗 + 小步缩），缩容抖动造成的频繁上下节点反而更贵。</div></div>
+</section>
+
+<!-- ================= 要点总结 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>HPA 是滞后反馈系统</strong>：真实扩容时延 = 指标采样(15s) + 调度就绪(1~2min) + 应用预热，容量规划必须覆盖这段真空期。</li>
+    <li><strong>CPU 指标只是及格线</strong>：在线服务推荐 QPS 自定义指标为主 + CPU 兜底的双指标策略；异步消费用 External 指标（消息积压）驱动。</li>
+    <li><strong>requests 是 HPA 的生命线</strong>：Resource 类型百分比指标以 requests 为分母，漏配则 HPA 静默失效。</li>
+    <li><strong>behavior 决定伸缩"手感"</strong>：扩容要快（稳定窗 0、翻倍速率），缩容要慢（300s 稳定窗、小步释放），方向不对称。</li>
+    <li><strong>弹性是三层联动而非单点</strong>：HPA 扩 Pod + CA/Karpenter 扩节点 + 限流兜底，可预知峰值用定时扩容提前打底。</li>
+  </ul>
+</section>
+
+<!-- ================= 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>架构师思考题</h2>
+
+  <details>
+    <summary>题目一：你们的服务是 Spring Boot + JVM 技术栈，HPA 配置了 CPU 60% 目标，但压测中发现流量上来后 P99 飙高、HPA 却迟迟不扩容，副本数稳定不动。排查 describe hpa 发现指标正常（CPU 显示 55% 左右）。请分析可能的原因并给出架构级改进方案。<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 解题方向：从"指标为什么不涨"入手</h4>
+      <p>HPA 不动作说明它"看到的负载不重"，矛盾点在于用户感知与指标感知的偏差。逐层拆解：</p>
+      <ol>
+        <li><strong>线程阻塞型瓶颈，CPU 未必高：</strong>P99 飙高的常见根因是下游 RPC/DB 慢导致工作线程阻塞（BLOCKED/WAITING），线程都在等 I/O，CPU 自然只有 55%。这是 JVM 服务"CPU 正常但服务已濒死"的经典形态。</li>
+        <li><strong>requests 设置过大导致百分比虚低：</strong>若 requests.cpu=2 核而实际负载只需 0.5 核，利用率永远在 25% 附近徘徊，60% 目标几乎不可达——<strong>百分比指标的失真往往源于 requests 与真实用量的偏差</strong>。</li>
+        <li><strong>宿主机的窃取与噪声邻居</strong>、cgroup 限流（throttling）也会造成"利用率不高但延迟高"的假象。</li>
+      </ol>
+      <h4>✅ 参考改进方案（架构级）</h4>
+      <ul>
+        <li><strong>换主指标：</strong>接入 QPS 自定义指标（Prometheus Adapter 暴露 <code>http_server_requests_seconds_count</code> 速率），以"每副本 500 QPS"为伸缩锚点，CPU 降级为兜底。QPS 与线程池/延迟的联动比 CPU 直接得多。</li>
+        <li><strong>修正 requests：</strong>基于 P95 真实用量（Prometheus <code>container_cpu_usage</code> 一周数据）重设 requests，让百分比指标回归真实水位。</li>
+        <li><strong>补充熔断与线程池隔离：</strong>HPA 解决不了下游慢的问题。对下游 RPC 配置 Sentinel/Resilience4j 熔断 + 独立线程池，防止阻塞扩散拖垮整个实例——<strong>弹性伸缩与故障隔离必须配套</strong>。</li>
+        <li><strong>就绪探针加延迟维度：</strong>让健康检查包含下游连通性，濒死实例自动摘除，避免流量继续打到"活着但不干活"的副本。</li>
+      </ul>
+      <p><strong>一句话总结：</strong>HPA 只对"它看得见的指标"负责，架构师的职责是确保指标与真实服务健康度对齐，并接受"有些故障不该靠扩容解决"。</p>
+    </div>
+  </details>
+
+  <details>
+    <summary>题目二：双 11 零点大促，预计峰值流量是日常的 10 倍，且 30 秒内爬升到位。CTO 要求"不能扩容慢半拍，也不能为峰值常态付费"。请设计完整的弹性方案（HPA 参数、节点层、应用层、流程编排四个维度）。<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 解题方向：核心矛盾是"秒级流量 vs 分钟级弹性"</h4>
+      <p>10 倍流量 30 秒爬升，任何被动弹性（HPA→CA 全链路至少 3~5 分钟）都必然滞后。破局思路：<strong>分层对冲——提前量消化大头，被动弹性兜小头，限流保生死线</strong>。</p>
+      <h4>✅ 参考方案</h4>
+      <ul>
+        <li><strong>流程编排（第一优先级）：</strong>大促是<strong>可预知事件</strong>，主力手段应是提前扩容——23:30 通过 KEDA Cron / CronHPA / 流水线把副本拉到预估峰值的 80%（如日常 10 副本 → 提前扩至 80 副本），并触发 Karpenter 预扩节点池。HPA 退化为处理"预估偏差 ±20%"的微调器。</li>
+        <li><strong>HPA 参数：</strong>minReplicas 提高到峰值副本的 60~80%（大促窗口内临时生效，可用 GitOps 分时段下发不同 HPA 配置）；behavior 扩容策略设为 stabilizationWindow=0 + 每 60s 翻倍；缩容策略在活动期间主动"锁死"（<code>selectPolicy: Disabled</code> 或将缩容稳定窗拉长到 1800s），防止流量波动期缩容抖动。</li>
+        <li><strong>节点层：</strong>预置节点缓冲——预留 20% 空闲容量的节点池（可选用竞价实例压成本），确保 HPA 补位的 Pod 秒级可调度而非等待节点启动 2 分钟；Karpenter 配置 <code>do-not-disrupt</code> 注解保护大促期间节点不被回收。</li>
+        <li><strong>应用层与兜底：</strong>① JVM 预热：就绪前打热点流量（或开启 CRIU/CRaC 快照启动，Spring Boot 3 支持）；② 网关限流：按"当前容量×安全水位"动态下发限流阈值，超发流量快速失败并降级非核心链路（推荐读降级、写排队）；③ 依赖分级：大促前完成依赖服务的联动扩容演练——<strong>你扩了订单服务，MySQL/Redis/下游没扩，等于没扩</strong>。</li>
+      </ul>
+      <h4>⚖️ 成本核算（CTO 视角）</h4>
+      <p>假设日常 10 副本常态、大促 80 副本持续 4 小时：纯常态付费 = 80 副本 ×24h；方案成本 = 10×24h + 70×4h ≈ 节省 78%。竞价实例承接大促弹性部分可再降 60~70%。<strong>弹性架构的商业价值 = 峰值保障 × 常态成本最小化的乘积</strong>，两者缺一不可。</p>
+    </div>
+  </details>
+</section>
+
+<footer>
+  每日 10 分钟微课程 · 第 16 期 · Kubernetes 系列<br>
+  下一期预告：Apache Pulsar —— Topic 与 Subscription 模式深度解析
+</footer>
+
+</div>
+</body>
+</html>

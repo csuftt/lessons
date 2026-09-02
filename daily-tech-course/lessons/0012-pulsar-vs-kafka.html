@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 12 期 · Apache Pulsar 存算分离架构与 Kafka 对比 — 2026-08-27</title>
+<style>
+:root{
+  --bg:#0d1117;
+  --bg-card:#161b22;
+  --bg-card2:#1c2330;
+  --border:#2d333b;
+  --text:#c9d1d9;
+  --text-strong:#e6edf3;
+  --text-muted:#8b949e;
+  --accent:#ff6188;
+  --accent2:#a9dc76;
+  --accent3:#78dce8;
+  --code-bg:#0a0e14;
+  --warn-bg:rgba(255,159,67,.12);
+  --warn-border:#ff9f43;
+  --tip-bg:rgba(169,220,118,.1);
+  --tip-border:#a9dc76;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  background:var(--bg);
+  color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  line-height:1.75;
+  font-size:16px;
+}
+.wrap{max-width:860px;margin:0 auto;padding:24px 16px 64px}
+
+/* ===== Hero ===== */
+.hero{
+  background:linear-gradient(135deg,#101a1f 0%,#161b22 55%,#101820 100%);
+  border:1px solid var(--border);
+  border-radius:16px;
+  padding:36px 28px;
+  margin-bottom:28px;
+  position:relative;
+  overflow:hidden;
+}
+.hero::before{
+  content:"";
+  position:absolute;top:-60px;right:-60px;
+  width:220px;height:220px;border-radius:50%;
+  background:radial-gradient(circle,rgba(120,220,232,.16),transparent 70%);
+}
+.hero .series{color:var(--accent3);font-weight:600;font-size:.85rem;letter-spacing:.12em;text-transform:uppercase;margin-bottom:10px}
+.hero h1{color:var(--text-strong);font-size:1.7rem;line-height:1.4;margin-bottom:16px}
+.meta{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.tag{
+  display:inline-flex;align-items:center;gap:6px;
+  background:var(--bg-card2);border:1px solid var(--border);
+  color:var(--text-muted);border-radius:999px;
+  padding:4px 14px;font-size:.82rem;
+}
+.tag b{color:var(--text-strong);font-weight:600}
+.tag.pulsar{border-color:rgba(120,220,232,.45);color:#8ee4ee}
+.tag.pulsar b{color:#8ee4ee}
+
+/* ===== Section ===== */
+.section{
+  background:var(--bg-card);
+  border:1px solid var(--border);
+  border-radius:16px;
+  padding:28px;
+  margin-bottom:22px;
+}
+.section h2{
+  color:var(--text-strong);font-size:1.22rem;
+  padding-left:14px;border-left:4px solid var(--accent3);
+  margin-bottom:18px;line-height:1.5;
+}
+.section h3{
+  color:var(--text-strong);font-size:1.02rem;
+  margin:22px 0 10px;
+}
+.section h3::before{content:"◆ ";color:var(--accent3);font-size:.8em}
+p{margin-bottom:12px}
+p:last-child{margin-bottom:0}
+strong{color:var(--text-strong)}
+em{color:var(--accent);font-style:normal}
+a{color:var(--accent3)}
+
+/* ===== Code ===== */
+pre{
+  background:var(--code-bg);
+  border:1px solid var(--border);
+  border-radius:10px;
+  padding:16px 18px;
+  overflow-x:auto;
+  font-size:.84rem;line-height:1.7;
+  margin:14px 0;
+  font-family:"Cascadia Code","JetBrains Mono",Consolas,"Courier New",monospace;
+}
+code{font-family:inherit}
+p code,li code,td code{
+  background:rgba(110,118,129,.18);
+  border-radius:5px;padding:2px 7px;
+  color:var(--accent3);font-size:.86em;
+}
+.cm{color:#7f8c98}          /* comment */
+.kw{color:#ff6188}          /* keyword */
+.st{color:#a9dc76}          /* string */
+.nm{color:#78dce8}          /* number/func */
+.op{color:#ffd580}          /* param/option */
+
+/* ===== Lists ===== */
+ul,ol{padding-left:22px;margin-bottom:12px}
+li{margin-bottom:6px}
+li::marker{color:var(--accent3)}
+
+/* ===== Callout ===== */
+.callout{
+  border-radius:12px;padding:16px 18px;
+  margin:16px 0;font-size:.94rem;
+  border-left:4px solid;
+}
+.callout.warn{background:var(--warn-bg);border-color:var(--warn-border)}
+.callout.warn .t{color:#ffb56b}
+.callout.tip{background:var(--tip-bg);border-color:var(--tip-border)}
+.callout.tip .t{color:var(--accent2)}
+.callout .t{font-weight:700;display:block;margin-bottom:6px;font-size:.9rem}
+
+/* ===== Architecture diagram ===== */
+.diagram{
+  background:var(--code-bg);
+  border:1px dashed var(--border);
+  border-radius:12px;padding:20px 14px;
+  margin:16px 0;
+  overflow-x:auto;
+}
+.arch{display:flex;flex-direction:column;gap:14px;min-width:560px}
+.row{display:flex;gap:12px;align-items:stretch}
+.box{
+  flex:1;background:var(--bg-card2);
+  border:1px solid var(--border);border-radius:10px;
+  padding:12px 14px;text-align:center;
+}
+.box .t{font-weight:700;color:var(--text-strong);font-size:.92rem;margin-bottom:4px}
+.box .d{color:var(--text-muted);font-size:.78rem;line-height:1.55}
+.box.hl{border-color:rgba(255,97,136,.55);background:rgba(255,97,136,.08)}
+.box.hl .t{color:#ff9db6}
+.box.gr{border-color:rgba(169,220,118,.5);background:rgba(169,220,118,.07)}
+.box.gr .t{color:var(--accent2)}
+.box.bl{border-color:rgba(120,220,232,.5);background:rgba(120,220,232,.07)}
+.box.bl .t{color:var(--accent3)}
+.box.ye{border-color:rgba(255,213,128,.5);background:rgba(255,213,128,.07)}
+.box.ye .t{color:#ffd580}
+.arrow{color:var(--text-muted);font-size:1.2rem;display:flex;align-items:center;justify-content:center}
+.dlabel{text-align:center;color:var(--text-muted);font-size:.78rem;margin-top:-6px}
+
+/* ledger striping grid */
+.stripe{margin-top:6px}
+.stripe .bk-row{display:flex;align-items:center;gap:8px;margin-bottom:8px;min-width:560px}
+.stripe .bk-name{width:86px;flex-shrink:0;color:var(--text-muted);font-size:.78rem;text-align:right}
+.stripe .cells{display:flex;gap:6px;flex:1}
+.stripe .cell{
+  flex:1;height:30px;border-radius:6px;
+  display:flex;align-items:center;justify-content:center;
+  font-size:.72rem;font-weight:700;
+  border:1px dashed transparent;
+}
+.c1{background:rgba(255,97,136,.18);color:#ff9db6;border-color:rgba(255,97,136,.4)}
+.c2{background:rgba(169,220,118,.16);color:var(--accent2);border-color:rgba(169,220,118,.4)}
+.c3{background:rgba(120,220,232,.16);color:var(--accent3);border-color:rgba(120,220,232,.4)}
+.ghost{background:rgba(110,118,129,.08);color:#4b5563}
+
+/* ===== Comparison table ===== */
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:.88rem}
+th,td{border:1px solid var(--border);padding:10px 12px;text-align:left;vertical-align:top}
+th{background:var(--bg-card2);color:var(--text-strong);font-weight:600}
+td{color:var(--text)}
+tr:nth-child(even) td{background:rgba(255,255,255,.015)}
+td .win{color:var(--accent2);font-weight:600}
+td .lose{color:#ff8a9b}
+
+/* ===== Summary cards ===== */
+.summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:6px}
+.sum-card{
+  background:var(--bg-card2);border:1px solid var(--border);
+  border-radius:12px;padding:16px;
+}
+.sum-card .n{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:26px;height:26px;border-radius:50%;
+  background:rgba(120,220,232,.15);color:var(--accent3);
+  font-weight:700;font-size:.85rem;margin-bottom:8px;
+}
+.sum-card .t{color:var(--text-strong);font-weight:600;font-size:.95rem;margin-bottom:6px}
+.sum-card .d{color:var(--text-muted);font-size:.85rem;line-height:1.65}
+
+/* ===== Q&A collapsible ===== */
+details{
+  background:var(--bg-card2);
+  border:1px solid var(--border);
+  border-radius:12px;
+  padding:0;
+  margin-bottom:14px;
+  overflow:hidden;
+}
+details summary{
+  cursor:pointer;padding:16px 20px;
+  color:var(--text-strong);font-weight:600;font-size:.95rem;
+  list-style:none;display:flex;align-items:flex-start;gap:10px;
+  transition:background .15s;
+}
+details summary::-webkit-details-marker{display:none}
+details summary:hover{background:rgba(255,255,255,.03)}
+details summary .q-mark{
+  color:var(--accent3);font-weight:800;flex-shrink:0;
+}
+details summary .chev{margin-left:auto;color:var(--text-muted);transition:transform .2s;flex-shrink:0}
+details[open] summary .chev{transform:rotate(90deg)}
+details .answer{
+  padding:4px 20px 18px 42px;
+  border-top:1px dashed var(--border);
+  padding-top:14px;
+  font-size:.92rem;
+}
+details .answer h4{color:var(--accent3);font-size:.9rem;margin:14px 0 6px}
+details .answer p{margin-bottom:10px}
+details .answer ul{margin-bottom:10px}
+
+/* ===== Footer ===== */
+.footer{
+  text-align:center;color:var(--text-muted);
+  font-size:.8rem;margin-top:36px;
+  padding-top:20px;border-top:1px solid var(--border);
+}
+.footer b{color:var(--text)}
+
+/* ===== Responsive ===== */
+@media(max-width:640px){
+  .hero{padding:26px 18px}
+  .hero h1{font-size:1.35rem}
+  .section{padding:20px 16px}
+  pre{font-size:.78rem;padding:12px}
+  table{font-size:.8rem}
+  th,td{padding:8px}
+  .row{flex-direction:row}
+}
+</style>
+</head>
+<body>
+<div style="position:fixed;top:14px;left:14px;z-index:9999;">
+<a href="../index.html" style="display:inline-block;padding:6px 14px;border-radius:999px;background:rgba(20,26,38,.88);color:#7da7ff;font-size:13px;text-decoration:none;border:1px solid rgba(90,130,220,.45);backdrop-filter:blur(4px);font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.35);" onmouseover="this.style.background='rgba(30,40,60,.95)'" onmouseout="this.style.background='rgba(20,26,38,.88)'">← 课程目录</a>
+</div>
+
+<div class="wrap">
+
+<!-- ============ HERO ============ -->
+<header class="hero">
+  <div class="series">每日架构师微课程 · 第 12 期</div>
+  <h1>Apache Pulsar 系列开篇：存算分离架构，凭什么让扩容不搬数据（与 Kafka 对比）</h1>
+  <div class="meta">
+    <span class="tag">📅 <b>2026-08-27</b>（周四）</span>
+    <span class="tag pulsar">🛰 Apache Pulsar 系列 · 第 1 讲 · 开篇</span>
+    <span class="tag">⏱ 预计阅读 <b>10 分钟</b></span>
+    <span class="tag">🎯 Broker/BookKeeper 分层 / Ledger 条带 / E-Qw-Qa / 订阅模型</span>
+  </div>
+</header>
+
+<!-- ============ 1. 场景引入 ============ -->
+<section class="section">
+  <h2>一、一次"扩容引发的线上事故"</h2>
+  <p>某电商中台 Kafka 集群（36 台 broker）磁盘水位升至 <code>82%</code>，决定扩容 12 台新节点。运维执行 partition reassignment 后，副本数据开始跨机架搬迁：网卡打满、磁盘 IO 争抢，消费 P99 延迟从 20ms 飙到 800ms，持续 6 小时，最后被迫凌晨降级重做。更早之前还踩过一个坑：单台 broker 宕机重启，因为挂了 4TB 分区副本，日志索引恢复耗时 40 分钟，期间相关分区全部不可写。</p>
+  <p>复盘结论：<strong>事故根因不是 Kafka"不行"，而是它的架构使然——计算（服务）与存储（日志副本）耦合在同一个 broker 进程和磁盘上</strong>。扩存储必然牵动数据搬迁；broker 故障必然带着几百 GB 副本一起"遭殃"。Pulsar 的<em>存算分离（Compute-Storage Separation）</em>正是冲着这两个痛点设计的。今天作为 Pulsar 系列开篇，把这套分层架构、Ledger 模型、与 Kafka 的核心差异一次讲清。</p>
+</section>
+
+<!-- ============ 2. 分层架构原理 ============ -->
+<section class="section">
+  <h2>二、原理：两层架构 + Ledger 条带化</h2>
+  <p>Pulsar 把"服务请求"与"持久化数据"拆成两个独立集群：</p>
+  <ul>
+    <li><strong>计算层 Broker（无状态）</strong>：不存任何消息数据。负责接收 Producer 写入、推送给 Consumer、维护 topic 的 <em>ownership</em>（一个 partition 同一时刻只由一个 broker 服务）与订阅游标（cursor）。因为无状态，ownership 可以<strong>秒级切换</strong>——broker 宕机，其他 broker 立即接管，数据毫发无损。</li>
+    <li><strong>存储层 BookKeeper（bookie 集群）</strong>：真正落盘。每个 partition 的消息流被切成一个个 <em>ledger（segment）</em>，每个 ledger 以条带化方式分布到一组 bookie 上；写满（按时间/大小阈值）就 roll 出新 ledger，落到（可能不同的）一组 bookie。</li>
+  </ul>
+
+  <div class="diagram">
+    <div class="arch">
+      <div class="row">
+        <div class="box hl"><div class="t">Producers</div><div class="d">Java/Go/Python 客户端</div></div>
+        <div class="arrow">⇄</div>
+        <div class="box hl"><div class="t">Consumers</div><div class="d">4 种订阅模式 + 游标 cursor</div></div>
+      </div>
+      <div class="dlabel">▲ 计算层：只管协议与服务，不落盘</div>
+      <div class="row">
+        <div class="box bl"><div class="t">Broker-1</div><div class="d">serve topic-A-p0/p1</div></div>
+        <div class="box bl"><div class="t">Broker-2</div><div class="d">serve topic-A-p2</div></div>
+        <div class="box bl"><div class="t">Broker-3</div><div class="d">serve topic-B-p0</div></div>
+      </div>
+      <div class="dlabel">ownership 可秒级漂移 ▼ 写入走 Quorum</div>
+      <div class="row">
+        <div class="box gr"><div class="t">Bookie-1</div><div class="d">journal(SSD) + entry log</div></div>
+        <div class="box gr"><div class="t">Bookie-2</div><div class="d">journal(SSD) + entry log</div></div>
+        <div class="box gr"><div class="t">Bookie-3</div><div class="d">journal(SSD) + entry log</div></div>
+        <div class="box gr"><div class="t">Bookie-4（新增）</div><div class="d">只接新 ledger，不搬老数据</div></div>
+      </div>
+      <div class="row">
+        <div class="box ye"><div class="t">ZooKeeper / 元数据</div><div class="d">topic 元数据、ownership 注册、ledger 清单</div></div>
+      </div>
+    </div>
+  </div>
+
+  <h3>关键机制一：Ledger roll（切分滚动）</h3>
+  <p>一个 partition 的数据 = 无限追加的 ledger 序列。扩容 bookie 后，<strong>新 ledger 自然写到新 bookie，老 ledger 一字不动</strong>——这就是"扩容不搬数据"的原理。用下面这张条带图理解（新增 Bookie-4 后，只有 L3 之后的 ledger 用到它）：</p>
+
+  <div class="diagram stripe">
+    <div class="bk-row"><div class="bk-name">Bookie-1</div><div class="cells"><div class="cell c1">L1 ●</div><div class="cell c2">L2 ●</div><div class="cell ghost">—</div><div class="cell c1">L4 ●</div></div></div>
+    <div class="bk-row"><div class="bk-name">Bookie-2</div><div class="cells"><div class="cell c1">L1 ●</div><div class="cell c2">L2 ●</div><div class="cell c3">L3 ●</div><div class="cell ghost">—</div></div></div>
+    <div class="bk-row"><div class="bk-name">Bookie-3</div><div class="cells"><div class="cell c1">L1 ●</div><div class="cell ghost">—</div><div class="cell c3">L3 ●</div><div class="cell c1">L4 ●</div></div></div>
+    <div class="bk-row"><div class="bk-name">Bookie-4 🆕</div><div class="cells"><div class="cell ghost">—</div><div class="cell c2">L2 ●</div><div class="cell c3">L3 ●</div><div class="cell c1">L4 ●</div></div></div>
+    <div class="dlabel">● = 该 ledger 的一个副本在此 bookie 上；E=3 时每个 ledger 恰好落在 3 台 bookie（不同组合）</div>
+  </div>
+
+  <h3>关键机制二：Quorum 写法定义</h3>
+  <p>BookKeeper 写入由三个参数决定：<code>E</code>（Ensemble，ledger 分布的 bookie 数）、<code>Qw</code>（Write Quorum，每条消息写几副本）、<code>Qa</code>（Ack Quorum，几副本落盘即应答）。生产典型配置 <code>E3-Qw3-Qa2</code>：3 副本、写成功 2 个即向客户端应答——<strong>任一 bookie 慢盘不拖累写入延迟</strong>，同时保证宕机一台不丢已确认消息（还剩 2 副本）。要求更高持久性用 <code>E4-Qw3-Qa2</code>（滚动冗余）。</p>
+
+  <h3>关键机制三：Auto-recovery</h3>
+  <p>bookie 宕机后，BookKeeper 的 rereplication 机制后台把缺失副本从其余 bookie 补到健康节点，broker 与业务全程无感。对比 Kafka：ISR 收缩 + leader 切换发生在服务路径上，数据量大时恢复窗口长。</p>
+</section>
+
+<!-- ============ 3. 架构视角 ============ -->
+<section class="section">
+  <h2>三、架构视角：这套设计值钱在哪，代价是什么</h2>
+  <ul>
+    <li><strong>扩容解耦</strong>：连接数/吞吐涨 → 加 broker；存储涨 → 加 bookie。两条曲线独立扩展，容量规划不再"一锅粥"。</li>
+    <li><strong>故障域更小</strong>：broker 故障只迁移 ownership（秒级）；bookie 故障走后台补副本。存储节点重启不用重放日志索引，恢复时间与数据量基本无关。</li>
+    <li><strong>百万级 topic</strong>：数据与游标分离，单 broker 服务的 topic 数不再受本地磁盘与启动恢复约束，适合 IoT、多租户 SaaS 场景。</li>
+    <li><strong>多租户原生</strong>：<code>tenant → namespace → topic</code> 三级模型，配额（rate limit）、ACL、retention/backlog 策略全部挂在 namespace 上，开箱即用。</li>
+  </ul>
+  <div class="callout warn">
+    <span class="t">⚠️ 架构师要清醒：代价同样真实</span>
+    组件从 1 个变 3 个（broker + bookie + ZK 元数据），链路更长，排障面更宽（写入要同时看 broker 日志和 bookie journal）；小规模（日增 GB 级、几十个 topic）下收益不明显，反而吃掉运维预算。<strong>没有银弹，只有权衡</strong>——规模与多租户压力越大，分层的红利越明显。
+  </div>
+
+  <h3>顺带立个框架：四种订阅模式</h3>
+  <ul>
+    <li><code>Exclusive</code>：排他订阅，单 consumer；</li>
+    <li><code>Failover</code>：主备，同一时刻只有主 consumer 消费（≈ Kafka consumer group 的分区独占）；</li>
+    <li><code>Shared</code>：轮询分发到多个 consumer，<strong>牺牲分区内顺序换水平扩展吞吐</strong>；</li>
+    <li><code>Key_Shared</code>：按消息 key 哈希"黏"到固定 consumer，<strong>同 key 保序 + 水平扩展</strong>——这是 Kafka 模型做不到的差异化能力（后续课程专门讲）。</li>
+  </ul>
+</section>
+
+<!-- ============ 4. 实战 ============ -->
+<section class="section">
+  <h2>四、实战：3 分钟起环境，验证"存算分离"不是口号</h2>
+
+  <h3>1. 本地 standalone（学习/联调）</h3>
+<pre><code><span class="cm"># 开发联调用 standalone（内嵌 broker + bookie + ZK）</span>
+docker run -it --rm \
+  -p 6650:6650 -p 8080:8080 \
+  apachepulsar/pulsar:<span class="nm">3.3.2</span> bin/pulsar standalone</code></pre>
+
+  <h3>2. 查看 topic 的 ledger 结构（验证分层）</h3>
+<pre><code><span class="cm"># 造 1000 条消息</span>
+bin/pulsar-client produce -m <span class="st">"hello-"</span> -n <span class="nm">1000</span> persistent://public/default/orders
+
+<span class="cm"># 看 topic 内部：每个 ledger 的 id/条数/大小/所在 bookie</span>
+bin/pulsar-admin topics stats-internal \
+  persistent://public/default/orders
+
+<span class="cm"># 输出片段 —— 消息确实存在 bookie 上，不在 broker 上：</span>
+<span class="st">"ledgers"</span>: [
+  { <span class="st">"ledgerId"</span>: <span class="nm">17</span>, <span class="st">"entries"</span>: <span class="nm">1000</span>, <span class="st">"size"</span>: <span class="nm">48213</span>,
+    <span class="st">"bookieAddressSet"</span>: [<span class="op">"bk1:3181"</span>, <span class="op">"bk2:3181"</span>, <span class="op">"bk3:3181"</span>] }
+]</code></pre>
+
+  <h3>3. 生产端 Java 代码（吞吐关键参数）</h3>
+<pre><code>PulsarClient client = PulsarClient.builder()
+    .serviceUrl(<span class="st">"pulsar://broker1:6650,broker2:6650"</span>)  <span class="cm">// 多地址自动容灾</span>
+    .connectionsPerBroker(<span class="nm">1</span>)                        <span class="cm">// 连接复用，别多开</span>
+    .build();
+
+Producer&lt;byte[]&gt; producer = client.newProducer()
+    .topic(<span class="st">"persistent://trade/orders/topic"</span>)
+    .enableBatching(<span class="kw">true</span>)                    <span class="cm">// 吞吐核心开关</span>
+    .batchingMaxMessages(<span class="nm">1000</span>)
+    .batchingMaxPublishDelay(<span class="nm">1</span>, TimeUnit.MILLISECONDS)
+    .blockIfQueueFull(<span class="kw">true</span>)                <span class="cm">// 生产端背压，防 OOM</span>
+    .sendTimeout(<span class="nm">30</span>, TimeUnit.SECONDS)
+    .create();</code></pre>
+
+  <h3>4. namespace 策略（运维重点，坑点高发区）</h3>
+<pre><code><span class="cm"># 消费 ack 后保留 7 天 / 100G（默认 retention=0：消费即删，与 Kafka 语义相反！）</span>
+bin/pulsar-admin namespaces set-retention public/default \
+  --retentionTimeInMinutes <span class="nm">10080</span> --retentionSizeInMB <span class="nm">102400</span>
+
+<span class="cm"># backlog（未 ack 积压）上限，超限丢弃最老消息，防止慢消费者撑爆 bookie</span>
+bin/pulsar-admin namespaces set-backlog-quota public/default \
+  --limit production-limit --limitSize <span class="nm">53687091200</span> --policy producer_exception</code></pre>
+
+  <div class="callout warn">
+    <span class="t">⚠️ 生产坑点清单</span>
+    ① bookie 的 journal 与 entry log <strong>必须分盘</strong>（journal 用 NVMe，顺序写延迟决定写入 TPS）；② 客户端连接是复用的，<strong>严禁每条消息 new 一个 producer</strong>；③ 默认 retention=0 表示"消费 ack 后即删"，想重放历史必须显式设置 retention 或用 <em>持久订阅</em>；④ 存量 Kafka 生态可用 <strong>KoP</strong>（Kafka-on-Pulsar）协议层平滑接入，客户端零改造。
+  </div>
+</section>
+
+<!-- ============ 5. 对比与容量规划 ============ -->
+<section class="section">
+  <h2>五、Kafka vs Pulsar：选型对照与容量速算</h2>
+  <table>
+    <tr><th>维度</th><th>Kafka</th><th>Pulsar</th></tr>
+    <tr><td>存储模型</td><td>分区副本存 broker 本地磁盘</td><td class="win">Broker 无状态 + BookKeeper ledger 条带</td></tr>
+    <tr><td>扩容</td><td class="lose">partition reassignment 搬数据</td><td class="win">新 ledger 落新 bookie，老数据不动</td></tr>
+    <tr><td>故障恢复</td><td>leader 选举 + 日志恢复，数据量大时慢</td><td class="win">ownership 秒级切换，数据不动</td></tr>
+    <tr><td>消费模型</td><td class="win">consumer group（分区独占），生态极成熟</td><td>4 种订阅模式（Shared / Key_Shared 差异化）</td></tr>
+    <tr><td>多租户</td><td>弱，靠 topic 命名约定</td><td class="win">原生 tenant/namespace + 配额/ACL</td></tr>
+    <tr><td>Schema / 函数</td><td>外部组件（Schema Registry / Streams）</td><td class="win">内置 Schema Registry、Functions</td></tr>
+    <tr><td>运维复杂度</td><td class="win">单组件，心智负担低</td><td class="lose">broker + bookie + ZK 三组件，链路更长</td></tr>
+  </table>
+
+  <h3>容量规划速算（以 10 万 QPS × 1KB 为例）</h3>
+  <ul>
+    <li>入口流量 ≈ <code>100 MB/s</code>；按 <code>E3-Qw3-Qa2</code> 写 3 副本 → bookie 侧实际写入 <code>300 MB/s</code>，journal 盘必须 NVMe；单 bookie journal 写能力按 150~200MB/s 估，<strong>6 台 bookie 起步</strong>（留 1 台故障冗余）。</li>
+    <li>broker 无状态，主要消耗连接与 batching，<code>4C8G</code> 单台可扛数万 QPS，3 台起步按吞吐线性加。</li>
+    <li>保留 7 天：<code>100MB/s × 86400 × 7 ≈ 57TB</code> × 3 副本 ≈ <code>170TB</code> 原始存储（entry log 压缩后再打折），bookie 水位控制在 70% 以内 → 规划 <code>240TB+</code>。</li>
+  </ul>
+</section>
+
+<!-- ============ 6. 今日要点 ============ -->
+<section class="section">
+  <h2>六、今日要点</h2>
+  <div class="summary-grid">
+    <div class="sum-card"><span class="n">1</span><div class="t">存算分离是根基</div><div class="d">Broker 无状态只管服务，BookKeeper bookie 只管落盘；topic = 无限滚动的 ledger 序列，条带化多副本。</div></div>
+    <div class="sum-card"><span class="n">2</span><div class="t">扩容不搬数据</div><div class="d">扩 bookie 只影响新 ledger 的落点，老 ledger 不动；对比 Kafka reassignment，扩容窗口从小时级降到秒级。</div></div>
+    <div class="sum-card"><span class="n">3</span><div class="t">故障域更小</div><div class="d">broker 挂 → ownership 秒切；bookie 挂 → auto-recovery 后台补副本，恢复时间与数据量基本无关。</div></div>
+    <div class="sum-card"><span class="n">4</span><div class="t">E / Qw / Qa 定权衡</div><div class="d">典型 E3-Qw3-Qa2：3 副本、2 应答。持久性、延迟、成本三者的旋钮全在这三个参数里。</div></div>
+    <div class="sum-card"><span class="n">5</span><div class="t">选型不跟风</div><div class="d">海量 topic / 多租户 / 存储独立扩容 / 秒级恢复 SLA → Pulsar；生态成熟度优先、规模适中 → Kafka 依然是好答案。</div></div>
+  </div>
+</section>
+
+<!-- ============ 7. 思考题 ============ -->
+<section class="section">
+  <h2>七、架构师思考题</h2>
+
+  <details>
+    <summary><span class="q-mark">Q1</span>"Pulsar 扩容不搬数据"真的没有代价吗？请分析老数据分布不均的问题与缓解手段。<span class="chev">▶</span></summary>
+    <div class="answer">
+      <h4>解题方向：从 ledger 生命周期切入，代价藏在"分布均匀性"里</h4>
+      <p><strong>代价一：老 ledger 永远不迁移，数据倾斜是必然的。</strong>新扩的 bookie 只承接新写入的 ledger，如果 topic 写入速率低（ledger roll 周期长），新 bookie 可能数天都分不到数据；反之老 bookie 上堆积着大量热数据与冷数据，磁盘水位不均，监控上会看到"同规格 bookie 水位差 30%+"的告警噪音。</p>
+      <p><strong>代价二：ledger 粒度决定均衡的"最小单元"。</strong>BookKeeper 的均衡以 ledger 为单位搬运，ledger 设得太大（比如按 2GB 切），均衡一次搬的块就太大、太重；设得太小，元数据（ZK 里的 ledger 清单）膨胀，roll 频繁也会抖动。这是一个典型的"块大小权衡"，类似文件系统的 block size 或 LSM 的 SSTable 大小。</p>
+      <p><strong>缓解手段（按优先级）：</strong></p>
+      <ul>
+        <li><strong>Placement 策略</strong>：启用 rack-awareness / region-awareness ensemble placement，让 broker 写新 ledger 时优先选水位低、负载轻的 bookie（BookKeeper 自带 <code>WeightedRandomPlacement</code>，基于 bookie 上报的磁盘利用率与写入速率做加权随机）；</li>
+        <li><strong>调小 ledger roll 阈值</strong>：高写入 topic 用时间阈值（如 10 分钟）而非大空间阈值，让"新数据流向新节点"的收敛更快；</li>
+        <li><strong>auto-recovery 顺势均衡</strong>：对水位过高的 bookie 做计划内下线-补副本，借 rereplication 把数据"顺路"搬到低水位节点——这是有损窗口的主动均衡，要避开高峰；</li>
+        <li><strong>接受不完美</strong>：架构师要向业务方讲清楚"秒级扩容"与"立即均衡"不可兼得，水位倾斜是可接受的稳态，只在超过阈值（如 15%）时干预。</li>
+      </ul>
+      <p><strong>结论</strong>：Pulsar 把 Kafka"扩容时的数据搬迁"转化为"扩容后的渐进均衡"，把 O(全量数据) 的搬迁成本摊薄到后台与时间维度——这不是消灭了代价，而是把代价从关键路径挪到了非关键路径。这个"代价转移"的思维方式值得在所有架构决策里复用。</p>
+    </div>
+  </details>
+
+  <details>
+    <summary><span class="q-mark">Q2</span>你负责的消息平台基于 Kafka，什么信号出现时值得评估迁移 Pulsar？迁移路径如何设计才能把风险压到最低？<span class="chev">▶</span></summary>
+    <div class="answer">
+      <h4>解题方向：先建立"值得迁移"的量化信号，再设计可回滚的灰度路径</h4>
+      <p><strong>第一步：触发信号清单（满足 2 条以上才立项评估，避免为迁移而迁移）：</strong></p>
+      <ul>
+        <li><strong>存储年增速</strong>：数据保留周期不断拉长、存储年增 50%+，Kafka 每次扩容的 reassignment 已造成过线上抖动事故；</li>
+        <li><strong>恢复 SLA</strong>：业务要求 broker 故障恢复分钟级甚至秒级，但 Kafka 大数据量分区恢复动辄半小时；</li>
+        <li><strong>topic 规模</strong>：topic/partition 数逼近十万级（IoT、多租户 SaaS），Kafka broker 启动加载元数据与副本恢复成为瓶颈；</li>
+        <li><strong>多租户刚需</strong>：需要按团队/客户做配额、隔离、独立 retention 策略，在 Kafka 上只能靠命名约定 + 人肉纪律；</li>
+        <li><strong>消费模式需求</strong>：出现"同 key 保序 + 水平扩展"（Key_Shared）或同一份数据多组独立游标回放的需求，Kafka 模型实现别扭。</li>
+      </ul>
+      <p><strong>反信号（出现即暂缓）</strong>：团队没有专职中间件运维；重度依赖 Kafka Connect/Streams/KSQL 生态；当前规模用 Kafka 半年都没出过扩容/恢复事故——此时迁移纯属引入新风险。</p>
+      <p><strong>第二步：低风险迁移路径（KoP 双轨灰度）：</strong></p>
+      <ul>
+        <li><strong>阶段 1 · 兼容试点</strong>：在 Pulsar broker 上启用 KoP（Kafka-on-Pulsar）协议处理器，选 1~2 个非核心 topic，用<strong>原有 Kafka 客户端</strong>直连读写，验证语义（ack、offset 对应 cursor）与性能基线，业务零改造；</li>
+        <li><strong>阶段 2 · 双写切读</strong>：新增消息走"双写"（生产端旁路镜像或 MirrorMaker2 反向同步 Kafka→Pulsar），消费端按团队灰度切到 Pulsar 订阅；出问题秒级切回 Kafka——因为双轨都在，<strong>回滚成本≈改一个开关</strong>；</li>
+        <li><strong>阶段 3 · 收编存量</strong>：老 topic 按保留周期自然过期或用迁移工具搬迁，Kafka 集群缩容下线；此阶段才逐步把客户端从 Kafka 协议换成原生 Pulsar 协议（享受 batching、Schema Registry 等全部红利）；</li>
+        <li><strong>全程护栏</strong>：两侧对账（消息条数/位点延迟监控）+ 书面化回滚预案 + 每阶段观察至少一个完整业务周期（含大促/月末峰值）。</li>
+      </ul>
+      <p><strong>结论</strong>：迁移决策的本质是"现有架构的痛点成本"与"新架构的学习/运维成本"之间的对赌。架构师的价值不在于选最新最潮的技术，而在于把两边的成本都量化清楚，并且始终给自己留一条"便宜的退路"。</p>
+    </div>
+  </details>
+</section>
+
+<div class="footer">
+  <b>每日架构师微课程</b> · 第 12 期 · Apache Pulsar 系列第 1 讲 · 2026-08-27<br>
+  下一讲预告：Topic / Partition / Subscription 模型与游标机制深入
+</div>
+
+</div>
+</body>
+</html>

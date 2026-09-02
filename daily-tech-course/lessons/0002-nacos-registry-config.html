@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日架构师微课程 · Nacos 服务注册与配置中心 · 2026-08-13</title>
+<style>
+  :root {
+    --bg: #0f1419;
+    --bg-card: #1a1f2e;
+    --bg-code: #0d1117;
+    --bg-tag: #2d1b4e;
+    --border: #2a3142;
+    --text: #e6edf3;
+    --text-dim: #8b949e;
+    --text-mute: #6e7681;
+    --accent: #6ea8fe;
+    --accent-2: #ff9e64;
+    --green: #7ee787;
+    --red: #ff7b72;
+    --yellow: #f2cc60;
+    --purple: #d2a8ff;
+    --cyan: #79c0ff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
+    line-height: 1.75;
+    font-size: 16px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap {
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 32px 20px 80px;
+  }
+
+  /* ====== 顶部信息卡 ====== */
+  .header {
+    background: linear-gradient(135deg, #1c2541 0%, #3a506b 100%);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 28px 28px 24px;
+    margin-bottom: 28px;
+    position: relative;
+    overflow: hidden;
+  }
+  .header::before {
+    content: "";
+    position: absolute;
+    top: -50%; right: -20%;
+    width: 400px; height: 400px;
+    background: radial-gradient(circle, rgba(110,168,254,0.15) 0%, transparent 70%);
+    pointer-events: none;
+  }
+  .header .brand {
+    font-size: 13px;
+    color: var(--text-dim);
+    letter-spacing: 2px;
+    margin-bottom: 10px;
+    text-transform: uppercase;
+  }
+  .header h1 {
+    font-size: 26px;
+    line-height: 1.35;
+    margin-bottom: 16px;
+    color: #fff;
+    font-weight: 700;
+  }
+  .meta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 4px;
+  }
+  .tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.15);
+    color: var(--text);
+    padding: 5px 12px;
+    border-radius: 999px;
+    font-size: 13px;
+    backdrop-filter: blur(4px);
+  }
+  .tag.tag-cat { background: rgba(210,168,255,0.18); border-color: rgba(210,168,255,0.4); color: var(--purple); }
+  .tag.tag-date { color: var(--cyan); }
+  .tag.tag-time { color: var(--green); }
+  .tag .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+  /* ====== 章节标题 ====== */
+  section { margin-bottom: 32px; }
+  h2 {
+    font-size: 20px;
+    margin-bottom: 14px;
+    padding-left: 14px;
+    border-left: 4px solid var(--accent);
+    color: var(--text);
+  }
+  h2 .num {
+    color: var(--accent-2);
+    font-family: "JetBrains Mono", Consolas, monospace;
+    margin-right: 8px;
+    font-size: 18px;
+  }
+  h3 {
+    font-size: 16px;
+    color: var(--yellow);
+    margin: 18px 0 10px;
+  }
+  p { margin-bottom: 12px; color: var(--text); }
+  strong { color: #fff; }
+  em { color: var(--accent-2); font-style: normal; }
+
+  /* ====== 卡片 ====== */
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px 20px;
+    margin: 14px 0;
+  }
+  .card.warn { border-left: 3px solid var(--yellow); background: rgba(242,204,96,0.05); }
+  .card.tip { border-left: 3px solid var(--green); background: rgba(126,231,135,0.05); }
+  .card.danger { border-left: 3px solid var(--red); background: rgba(255,123,114,0.05); }
+  .card .label {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+  }
+  .card.warn .label { color: var(--yellow); }
+  .card.tip .label { color: var(--green); }
+  .card.danger .label { color: var(--red); }
+
+  /* ====== 代码块 ====== */
+  pre {
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 18px;
+    overflow-x: auto;
+    margin: 14px 0;
+    font-family: "JetBrains Mono", "Fira Code", Consolas, "Courier New", monospace;
+    font-size: 13.5px;
+    line-height: 1.6;
+  }
+  code { font-family: inherit; }
+  pre code { color: var(--text); }
+  p code, li code {
+    background: var(--bg-code);
+    color: var(--cyan);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.9em;
+    border: 1px solid var(--border);
+  }
+  /* 语法高亮 */
+  .k { color: var(--purple); }     /* 关键字 */
+  .s { color: var(--green); }      /* 字符串 */
+  .c { color: var(--text-mute); font-style: italic; }  /* 注释 */
+  .n { color: var(--accent-2); }   /* 数字/值 */
+  .v { color: var(--cyan); }       /* 变量 */
+  .f { color: var(--accent); }     /* 函数 */
+
+  /* ====== 列表 ====== */
+  ul, ol { margin: 10px 0 14px 22px; }
+  li { margin-bottom: 6px; }
+  li::marker { color: var(--accent); }
+
+  /* ====== 架构图（纯 CSS 绘制） ====== */
+  .arch {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 22px 16px;
+    margin: 18px 0;
+    overflow-x: auto;
+  }
+  .arch-title {
+    text-align: center;
+    font-size: 13px;
+    color: var(--text-dim);
+    margin-bottom: 16px;
+  }
+  .arch-flow {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    min-width: 580px;
+  }
+  .arch-row {
+    display: flex;
+    gap: 14px;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+  .node {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-size: 13px;
+    text-align: center;
+    min-width: 90px;
+    background: var(--bg);
+  }
+  .node.client { border-color: var(--accent); color: var(--accent); }
+  .node.server { border-color: var(--green); color: var(--green); background: rgba(126,231,135,0.08); }
+  .node.nacos { border-color: var(--purple); color: var(--purple); background: rgba(210,168,255,0.1); font-weight: 600; }
+  .node.db { border-color: var(--accent-2); color: var(--accent-2); }
+  .node.down { border-color: var(--red); color: var(--red); opacity: 0.65; text-decoration: line-through; }
+  .arrow {
+    color: var(--text-mute);
+    font-size: 18px;
+    font-family: monospace;
+  }
+  .arch-caption {
+    text-align: center;
+    font-size: 12px;
+    color: var(--text-mute);
+    margin-top: 12px;
+  }
+
+  /* ====== 对比表 ====== */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 14px;
+    display: block;
+    overflow-x: auto;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 10px 12px;
+    text-align: left;
+  }
+  th { background: var(--bg-card); color: var(--yellow); font-weight: 600; }
+  td { background: var(--bg); }
+  td code { font-size: 0.88em; }
+
+  /* ====== 要点总结 ====== */
+  .summary-box {
+    background: linear-gradient(135deg, rgba(110,168,254,0.08), rgba(126,231,135,0.06));
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 22px 24px;
+    margin-top: 32px;
+  }
+  .summary-box h2 { border-left-color: var(--green); margin-top: 0; }
+  .summary-box ul { list-style: none; margin-left: 0; }
+  .summary-box li {
+    padding: 8px 0 8px 28px;
+    position: relative;
+    border-bottom: 1px dashed var(--border);
+  }
+  .summary-box li:last-child { border-bottom: none; }
+  .summary-box li::before {
+    content: "✓";
+    position: absolute;
+    left: 0; top: 8px;
+    color: var(--green);
+    font-weight: 700;
+  }
+
+  /* ====== 思考题 ====== */
+  details {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    margin: 14px 0;
+    overflow: hidden;
+  }
+  summary {
+    padding: 14px 18px;
+    cursor: pointer;
+    font-weight: 600;
+    color: var(--yellow);
+    list-style: none;
+    user-select: none;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    transition: background 0.2s;
+  }
+  summary::-webkit-details-marker { display: none; }
+  summary::before {
+    content: "▶";
+    color: var(--accent);
+    font-size: 12px;
+    transition: transform 0.2s;
+  }
+  details[open] summary::before { transform: rotate(90deg); }
+  summary:hover { background: rgba(255,255,255,0.03); }
+  .answer {
+    padding: 0 18px 16px 38px;
+    color: var(--text);
+    font-size: 14.5px;
+    border-top: 1px solid var(--border);
+    padding-top: 14px;
+  }
+  .answer h4 {
+    color: var(--accent);
+    margin: 14px 0 6px;
+    font-size: 14px;
+  }
+  .answer p { margin-bottom: 8px; color: var(--text-dim); }
+
+  .footer {
+    text-align: center;
+    color: var(--text-mute);
+    font-size: 12px;
+    margin-top: 40px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+  }
+
+  @media (max-width: 600px) {
+    .wrap { padding: 20px 14px 60px; }
+    .header { padding: 20px; }
+    .header h1 { font-size: 21px; }
+    h2 { font-size: 18px; }
+    body { font-size: 15px; }
+    pre { font-size: 12.5px; }
+  }
+</style>
+</head>
+<body>
+<div style="position:fixed;top:14px;left:14px;z-index:9999;">
+<a href="../index.html" style="display:inline-block;padding:6px 14px;border-radius:999px;background:rgba(20,26,38,.88);color:#7da7ff;font-size:13px;text-decoration:none;border:1px solid rgba(90,130,220,.45);backdrop-filter:blur(4px);font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.35);" onmouseover="this.style.background='rgba(30,40,60,.95)'" onmouseout="this.style.background='rgba(20,26,38,.88)'">← 课程目录</a>
+</div>
+
+<div class="wrap">
+
+  <!-- ========== 顶部信息卡 ========== -->
+  <header class="header">
+    <div class="brand">每日架构师微课程 · 全栈技术系列</div>
+    <h1>Nacos 服务注册与配置中心：从选型到生产实战</h1>
+    <div class="meta-row">
+      <span class="tag tag-cat"><span class="dot"></span>Spring Cloud Alibaba</span>
+      <span class="tag tag-date"><span class="dot"></span>2026-08-13 · 第 2 期</span>
+      <span class="tag tag-time"><span class="dot"></span>⏱ 预计阅读 9 分钟</span>
+      <span class="tag"><span class="dot"></span>难度 ★★★☆☆</span>
+    </div>
+  </header>
+
+  <!-- ========== 场景导入 ========== -->
+  <section>
+    <h2><span class="num">01</span>从一个线上事故说起</h2>
+    <p>凌晨两点，订单服务的某个节点因为 FullGC 卡住了 60 秒。健康检查连续失败，但<em>负载均衡器的服务列表 30 秒才刷新一次</em>，上游支付服务依然把请求打到这个"僵尸节点"上，结果 2000 笔交易超时失败。</p>
+    <p>这是典型的<strong>服务发现时效性</strong>问题。在微服务架构里，"谁能告诉我某个实例此刻到底活不活？" 这个看似简单的问题，正是 Nacos 这类注册中心要解决的核心命题。除此之外，<strong>配置如何不重启就生效</strong>、<strong>多环境如何隔离</strong>，也是它一并回答的。</p>
+    <div class="card tip">
+      <div class="label">💡 一句话定位</div>
+      Nacos = Naming + Configuration，它把"服务注册发现"和"动态配置中心"两件事合并成了一个高可用集群，是 Spring Cloud Alibaba 生态的入口级组件。
+    </div>
+  </section>
+
+  <!-- ========== 核心原理 ========== -->
+  <section>
+    <h2><span class="num">02</span>核心原理：注册中心到底在干什么</h2>
+
+    <p>无论 Eureka、Consul 还是 Nacos，注册中心都在做三件事：<strong>注册、发现、健康检查</strong>。但 Nacos 在实现上有几个架构师必须理解的关键点。</p>
+
+    <h3>2.1 数据模型：Namespace → Group → Service → Cluster → Instance</h3>
+    <p>这是 Nacos 区别于 Eureka 最重要的一层抽象。一条服务实例的"地址"由五层定位：</p>
+    <pre><code><span class="c"># 完整定位一个实例的逻辑坐标</span>
+Namespace: <span class="v">prod</span>           <span class="c"># 环境/租户隔离（默认 public）</span>
+  └─ Group: <span class="v">ORDER_GROUP</span>     <span class="c"># 业务分组（默认 DEFAULT_GROUP）</span>
+       └─ Service: <span class="v">order-service</span>
+            └─ Cluster: <span class="v">BJ_IDC</span> <span class="c"># 集群/机房（同机房优先）</span>
+                 └─ Instance: <span class="v">10.0.1.23:8080</span></code></pre>
+    <div class="card warn">
+      <div class="label">⚠️ 选型关键</div>
+      Namespace 用于<strong>环境隔离</strong>（dev/test/prod），<strong>不是用来按业务拆分的</strong>——因为跨 Namespace 互相不可见，调试极其痛苦。按业务隔离请用 Group。
+    </div>
+
+    <h3>2.2 两种健康检查模式</h3>
+    <table>
+      <tr><th>模式</th><th>检测方</th><th>典型协议</th><th>适用场景</th></tr>
+      <tr><td>临时实例（AP）</td><td>客户端心跳</td><td>HTTP/Dubbo</td><td>Spring Cloud 微服务</td></tr>
+      <tr><td>永久实例（CP）</td><td>服务端探测</td><td>TCP/HTTP</td><td>数据库、中间件、裸服务</td></tr>
+    </table>
+    <p>临时实例靠客户端每 <strong>5 秒</strong>发一次心跳，超过 <strong>15 秒</strong>标记不健康，超过 <strong>30 秒</strong>摘除。永久实例则由 Nacos 主动探测，不会因为客户端崩溃而被删除。这一点直接决定了你的容灾策略。</p>
+
+    <h3>2.3 AP 与 CP：Raft 协议下的权衡</h3>
+    <p>Nacos 2.x 默认 AP 模式（Distro 协议，每个节点都能写、最终一致），适合注册发现场景，<em>宁可短暂返回脏数据，也要保证可用</em>。当你需要强一致（比如配置写入必须所有节点立即可见），可以切换到 CP 模式（基于 Raft）。</p>
+    <pre><code><span class="c"># 临时实例默认走 AP；切换服务为 CP 模式</span>
+curl -X PUT <span class="s">'http://nacos:8848/nacos/v1/ns/operator/switches'</span> \
+  -d <span class="s">'entry=forcePushToServerFromClient&value=false'</span></code></pre>
+  </section>
+
+  <!-- ========== 架构图 ========== -->
+  <section>
+    <h2><span class="num">03</span>架构图：一次服务调用的完整链路</h2>
+    <div class="arch">
+      <div class="arch-title">Nacos 在 Spring Cloud Alibaba 中的位置</div>
+      <div class="arch-flow">
+        <div class="arch-row">
+          <div class="node client">order-service<br><small>(消费者)</small></div>
+          <div class="arrow">→</div>
+          <div class="node server">pay-service<br><small>(提供者)</small></div>
+        </div>
+        <div class="arrow">│ &nbsp;&nbsp; ① 注册 &nbsp;&nbsp; │ &nbsp;&nbsp; ② 拉取列表 &nbsp;&nbsp; │ &nbsp;&nbsp; ③ 心跳 5s &nbsp;&nbsp; │ &nbsp;&nbsp; ④ 推送变更</div>
+        <div class="arch-row">
+          <div class="node nacos" style="min-width:160px;">Nacos Cluster<br><small>N1 &nbsp; N2 &nbsp; N3</small></div>
+        </div>
+        <div class="arrow">│</div>
+        <div class="arch-row">
+          <div class="node db">MySQL (主从)<br><small>配置/元数据持久化</small></div>
+          <div class="node db">本地快照<br><small>~/nacos/config</small></div>
+        </div>
+      </div>
+      <div class="arch-caption">消费者订阅 → Nacos 长轮询推送实例变更 → 本地缓存兜底</div>
+    </div>
+    <div class="card tip">
+      <div class="label">💡 架构关键</div>
+      Nacos <strong>不是强依赖</strong>——客户端有本地快照 snapshot。即使 Nacos 集群整体宕机，已订阅的服务列表依然能用一段时间（直到实例本身下线）。这是它能扛住注册中心故障的底气。
+    </div>
+  </section>
+
+  <!-- ========== 实战配置 ========== -->
+  <section>
+    <h2><span class="num">04</span>实战：Spring Boot 接入 Nacos</h2>
+
+    <h3>4.1 服务注册</h3>
+    <pre><code><span class="c">&lt;!-- pom.xml --&gt;</span>
+<span class="k">&lt;dependency&gt;</span>
+    <span class="k">&lt;groupId&gt;</span>com.alibaba.cloud<span class="k">&lt;/groupId&gt;</span>
+    <span class="k">&lt;artifactId&gt;</span>spring-cloud-starter-alibaba-nacos-discovery<span class="k">&lt;/artifactId&gt;</span>
+<span class="k">&lt;/dependency&gt;</span></code></pre>
+    <pre><code><span class="c"># application.yml</span>
+spring:
+  cloud:
+    nacos:
+      discovery:
+        server-addr: <span class="v">${NACOS_ADDR:nacos-1:8848,nacos-2:8848,nacos-3:8848}</span>
+        namespace: <span class="v">${NACOS_NS:prod}</span>          <span class="c"># 环境隔离</span>
+        cluster-name: <span class="v">BJ_IDC</span>                <span class="c"># 同集群优先路由</span>
+        metadata:                       <span class="c"># 自定义元数据，可被路由策略使用</span>
+          <span class="v">version</span>: <span class="s">v2</span>
+          <span class="v">region</span>: <span class="s">bj</span>
+        <span class="v">heart-beat-interval</span>: <span class="n">5000</span>       <span class="c"># 心跳间隔(ms)</span>
+        <span class="v">heart-beat-timeout</span>: <span class="n">15000</span>      <span class="c"># 不健康阈值</span>
+        <span class="v">ip-delete-timeout</span>: <span class="n">30000</span>       <span class="c"># 摘除阈值</span></code></pre>
+
+    <h3>4.2 动态配置：不重启即生效</h3>
+    <pre><code><span class="c">// 配置类，dataId = order-service.yaml</span>
+<span class="k">@RefreshScope</span>            <span class="c">// 关键：配置变更后自动重建 Bean</span>
+<span class="k">@Configuration</span>(prefix = <span class="s">"order.retry"</span>)
+<span class="k">@Data</span>
+<span class="k">public class</span> <span class="f">OrderRetryConfig</span> {
+    <span class="k">private int</span> maxAttempts = <span class="n">3</span>;
+    <span class="k">private long</span> backoffMillis = <span class="n">200</span>;
+    <span class="k">private boolean</span> enableFallback = <span class="k">true</span>;
+}</code></pre>
+    <pre><code><span class="c"># bootstrap.yml —— 必须放在 bootstrap，否则拉取太晚</span>
+spring:
+  application:
+    name: order-service
+  cloud:
+    nacos:
+      config:
+        server-addr: <span class="v">${NACOS_ADDR}</span>
+        namespace: <span class="v">${NACOS_NS}</span>
+        file-extension: yaml
+        <span class="c"># 共享配置：多服务复用的公共配置</span>
+        shared-configs:
+          - data-id: common-db.yaml
+            refresh: <span class="k">true</span>
+          - data-id: common-log.yaml
+            refresh: <span class="k">true</span></code></pre>
+    <div class="card warn">
+      <div class="label">⚠️ 真实坑点</div>
+      <code>@RefreshScope</code> 只对 <strong>之后创建</strong> 的 Bean 生效。如果你的 Bean 在 <code>PostConstruct</code> 里读了一次配置就缓存住了，<strong>配置改了也不会重新执行那段逻辑</strong>。要么监听 <code>RefreshEvent</code>，要么把动态值注入到一个 holder Bean 里。
+    </div>
+  </section>
+
+  <!-- ========== 高可用与容量规划 ========== -->
+  <section>
+    <h2><span class="num">05</span>架构师视角：高可用与容量规划</h2>
+
+    <h3>5.1 集群部署</h3>
+    <p>生产环境最少 <strong>3 节点</strong>（奇数，便于 Raft 选主），跨机房部署，前置 LB。Nacos 1.x 强依赖 MySQL 做配置持久化，2.x 起依然建议外接 MySQL（配置数据），但服务发现数据走 Distro 内存同步。</p>
+    <pre><code><span class="c"># cluster.conf —— 每个节点的列表（保持一致）</span>
+<span class="n">10.0.1.11</span>:<span class="n">8848</span>
+<span class="n">10.0.1.12</span>:<span class="n">8848</span>
+<span class="n">10.0.1.13</span>:<span class="n">8848</span>
+
+<span class="c"># application.properties —— 外置 MySQL</span>
+spring.datasource.platform=mysql
+db.num=<span class="n">1</span>
+db.url.0=jdbc:mysql://mysql-vip:3306/nacos?characterEncoding=utf8
+db.user=nacos
+db.password=<span class="v">${MYSQL_PWD}</span></code></pre>
+
+    <h3>5.2 容量参考（Nacos 官方基准 + 经验值）</h3>
+    <table>
+      <tr><th>指标</th><th>单节点参考</th><th>3 节点集群</th></tr>
+      <tr><td>服务实例数</td><td>~10 万</td><td>~30 万</td></tr>
+      <tr><td>配置数</td><td>~10 万</td><td>受 MySQL 限制</td></tr>
+      <tr><td>QPS（注册/订阅）</td><td>~3 万</td><td>~10 万</td></tr>
+      <tr><td>推送延迟</td><td colspan="2">实例变更 → 客户端感知：<strong>&lt; 1 秒</strong></td></tr>
+    </table>
+
+    <h3>5.3 三大容灾设计</h3>
+    <ol>
+      <li><strong>客户端本地快照</strong>：<code>~/nacos/config/fixed-{addr}_n/snapshot/</code>，注册中心挂了能继续读最近一次配置。</li>
+      <li><strong>多机房集群</strong>：通过 cluster-name + 同集群优先，跨机房故障自动降级到异地。</li>
+      <li><strong>配置版本回滚</strong>：Nacos 控制台保留历史版本，一键回滚，比改 Git 再发布快得多。</li>
+    </ol>
+
+    <div class="card danger">
+      <div class="label">🚨 排障 Top 3</div>
+      <p><strong>1) 服务注册了但调用方发现不了</strong>：90% 是 namespace 或 group 不一致；10% 是 IP 多网卡选错，用 <code>spring.cloud.inetutils.preferred-networks[0]=10.0.</code> 指定。</p>
+      <p><strong>2) 配置改了没生效</strong>：检查 dataId 命名（<code>{应用名}.{file-extension}</code>）、profile 是否匹配、<code>@RefreshScope</code> 是否打在真正读配置的 Bean 上。</p>
+      <p><strong>3) Nacos 频繁 FullGC</strong>：实例数大时调大 JVM（建议 -Xms4g -Xmx4g -Xmn2g），关闭控制台历史版本过多（默认保留 30 天）。</p>
+    </div>
+  </section>
+
+  <!-- ========== 今日要点 ========== -->
+  <section class="summary-box">
+    <h2><span class="num">★</span>今日要点</h2>
+    <ul>
+      <li>Nacos 把"服务发现"和"配置中心"合二为一，是 Spring Cloud Alibaba 的入口组件；AP 模式优先保证可用性，CP 模式用于需要强一致的配置场景。</li>
+      <li>五层数据模型（Namespace/Group/Service/Cluster/Instance）是隔离与路由的核心：<strong>Namespace 做环境隔离，Group 做业务隔离，Cluster 做机房亲和</strong>。</li>
+      <li>临时实例靠客户端心跳（5s/15s/30s），永久实例靠服务端探测——根据服务类型选对模式，才能正确做容灾。</li>
+      <li>动态配置生效依赖 <code>@RefreshScope</code> + bootstrap.yml，且要注意 Bean 初始化时机，<strong>配置刷新不会重跑 <code>@PostConstruct</code></strong>。</li>
+      <li>高可用三件套：3 节点奇数集群 + 外置 MySQL + 客户端本地快照；Nacos 故障≠服务故障，这是它能进生产的关键。</li>
+    </ul>
+  </section>
+
+  <!-- ========== 思考题 ========== -->
+  <section>
+    <h2><span class="num">★</span>架构师思考题</h2>
+
+    <details>
+      <summary>思考题 1：Nacos 集群整体宕机 10 分钟，你的微服务还能正常调用吗？请说明完整链路。</summary>
+      <div class="answer">
+        <h4>解题方向</h4>
+        <p>这是一个考察"对注册中心弱依赖理解深度"的经典题。答案不是简单的"能"或"不能"，而是要分场景分析。</p>
+        <h4>参考答案</h4>
+        <p><strong>场景 A：所有实例都还活着</strong>——能正常调用。因为客户端在订阅时会<strong>把服务列表缓存到本地内存</strong>（Nacos 1.x 的 <code>ServiceInfoHolder</code>，2.x 的 <code>ServiceInfo</code> 缓存），并落盘到 <code>~/nacos/naming/public/snapshot/</code>。即使 Nacos 全挂，客户端依然按缓存列表做负载均衡。</p>
+        <p><strong>场景 B：期间有实例下线</strong>——会出现<strong>部分请求失败</strong>。因为心跳发不出去，Nacos 无法摘除失效实例；客户端拿不到推送，会继续往已死的实例打流量，直到自身重试/熔断（这里正是 <em>Sentinel</em> 接力的时候）。</p>
+        <p><strong>场景 C：有新实例扩容</strong>——<strong>调用方感知不到</strong>，灰度发布、弹性伸缩在此期间"失明"，需要等 Nacos 恢复后重新全量拉取。</p>
+        <h4>架构师结论</h4>
+        <p>注册中心应当被设计为<strong>弱依赖</strong>：能容忍其短暂不可用，但要靠<strong>客户端重试 + 熔断降级（Sentinel）+ 健康检查探针（actuator）</strong> 兜底。同时要做 Nacos 的<strong>跨机房多活</strong>和<strong>MySQL 主备切换演练</strong>，把故障窗口压缩到分钟级。这也是为什么 Nacos 必须配 Sentinel 一起用——它们是容灾的两道防线。</p>
+      </div>
+    </details>
+
+    <details>
+      <summary>思考题 2：某服务有 2000 个实例，单次配置变更推送会让 Nacos 集群 CPU 飙到 90%，怎么优化？</summary>
+      <div class="answer">
+        <h4>解题方向</h4>
+        <p>这是一道"推送风暴"治理题，考察对 Nacos 推送机制和容量边界的理解。</p>
+        <h4>根因分析</h4>
+        <p>Nacos 2.x 用 gRPC 长连接 + <strong>UDP 推送</strong>（兼容 1.x）。一次配置变更会触发所有订阅客户端的重算与重建，<strong>2000 实例 = 2000 次推送 + 2000 次 Bean 重建</strong>。CPU 飙高来自三处：① 推送本身的开销；② 客户端回流确认；③ 控制台历史版本写入 MySQL 的 IO。</p>
+        <h4>分层优化方案</h4>
+        <p><strong>① 推送侧（Nacos）</strong>：开启 <code>nacos.naming.push.pushTaskDelay</code> 做批量合并（默认 500ms 窗口），把短时间内多次变更聚合成一次推送；调大 <code>-Xmn</code> 降低 Young GC 频率。</p>
+        <p><strong>② 客户端侧</strong>：审视 <code>@RefreshScope</code> 的范围，<strong>不要打在频繁构造的 Bean 上</strong>——配置变更会触发整个 Bean 重建。把动态配置收敛到少数 holder Bean，业务 Bean 通过依赖注入读取，避免重建风暴。必要时用 <code>ConfigService.addListener</code> 手动监听，精准控制重建逻辑。</p>
+        <p><strong>③ 架构侧</strong>：把"会频繁变更的运行时参数"（限流阈值、开关）剥离到<strong>独立的配置 dataId</strong>，或迁移到 Apollo（支持 finer-grained 推送和灰度）。Nacos 更适合"启动期 + 低频变更"的配置。</p>
+        <h4>架构师结论</h4>
+        <p>配置中心不是万能的——<strong>高频热更新应走专门通道</strong>（如配置中心 + 客户端 Watch、或自研配置服务），把 Nacos 的推送频率控制在 QPS &lt; 10/秒的量级。容量评估要在压测阶段就把"最大订阅客户端数 × 配置变更频率"算进去。</p>
+      </div>
+    </details>
+  </section>
+
+  <div class="footer">
+    每日架构师微课程 · Spring Cloud Alibaba 系列 · 第 2 期<br>
+    明日预告：MySQL · 执行计划分析与慢查询排查实战
+  </div>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日架构师微课程 · Sentinel 熔断限流实战 | 2026-08-12</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg-card: #161b22;
+    --bg-code: #1f2428;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-dim: #8b949e;
+    --accent: #58a6ff;
+    --accent-2: #3fb950;
+    --warn: #d29922;
+    --danger: #f85149;
+    --purple: #bc8cff;
+    --tag-bg: rgba(56, 139, 253, 0.15);
+    --tag-border: rgba(56, 139, 253, 0.4);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.75;
+    font-size: 16px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .container { max-width: 860px; margin: 0 auto; padding: 28px 20px 60px; }
+
+  /* Header */
+  .header {
+    background: linear-gradient(135deg, rgba(56,139,253,0.10), rgba(188,140,255,0.06));
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 26px 24px;
+    margin-bottom: 28px;
+  }
+  .brand-row {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    margin-bottom: 14px;
+  }
+  .tag {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--tag-bg); color: var(--accent);
+    border: 1px solid var(--tag-border);
+    padding: 4px 12px; border-radius: 999px;
+    font-size: 12.5px; font-weight: 600;
+  }
+  .tag.cat { background: rgba(188,140,255,0.12); color: var(--purple); border-color: rgba(188,140,255,0.4); }
+  .tag.time { background: rgba(63,185,80,0.12); color: var(--accent-2); border-color: rgba(63,185,80,0.4); }
+  .tag.icon { background: rgba(255,160,0,0.12); color: var(--warn); border-color: rgba(255,160,0,0.4); }
+  h1 {
+    font-size: 26px; line-height: 1.35; font-weight: 700;
+    margin-bottom: 10px; letter-spacing: 0.2px;
+  }
+  .subtitle { color: var(--text-dim); font-size: 14.5px; }
+  .meta-row { margin-top: 14px; display: flex; gap: 18px; flex-wrap: wrap; color: var(--text-dim); font-size: 13px; }
+  .meta-row span strong { color: var(--text); }
+
+  /* Section */
+  .section {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 22px 24px;
+    margin-bottom: 18px;
+  }
+  h2 {
+    font-size: 19px; font-weight: 700; color: var(--text);
+    margin-bottom: 14px;
+    padding-left: 12px; border-left: 3px solid var(--accent);
+  }
+  h3 { font-size: 16px; margin: 16px 0 8px; color: var(--accent); font-weight: 600; }
+  p { margin-bottom: 12px; color: #d0d7de; }
+  strong { color: var(--text); font-weight: 600; }
+  ul, ol { padding-left: 22px; margin-bottom: 12px; }
+  li { margin-bottom: 7px; color: #d0d7de; }
+
+  /* Inline code */
+  code {
+    font-family: "JetBrains Mono", "Fira Code", "SF Mono", Consolas, "Courier New", monospace;
+    background: var(--bg-code);
+    color: #79c0ff;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 13.5px;
+  }
+
+  /* Code block */
+  pre {
+    background: #010409;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    overflow-x: auto;
+    margin: 12px 0;
+    font-size: 13.5px;
+    line-height: 1.65;
+  }
+  pre code {
+    background: transparent; color: #c9d1d9;
+    padding: 0; border-radius: 0;
+    font-size: 13.5px;
+  }
+  /* simple token colors */
+  .tok-key { color: #ff7b72; }
+  .tok-str { color: #a5d6ff; }
+  .tok-num { color: #79c0ff; }
+  .tok-com { color: #8b949e; font-style: italic; }
+  .tok-fn  { color: #d2a8ff; }
+  .tok-prop{ color: #79c0ff; }
+  .tok-tag { color: #7ee787; }
+
+  /* Note / Tip boxes */
+  .note {
+    border-left: 3px solid var(--warn);
+    background: rgba(210,153,34,0.08);
+    padding: 12px 16px;
+    border-radius: 6px;
+    margin: 14px 0;
+    font-size: 14.5px;
+  }
+  .note.danger { border-left-color: var(--danger); background: rgba(248,81,73,0.08); }
+  .note.tip { border-left-color: var(--accent-2); background: rgba(63,185,80,0.08); }
+  .note .label { font-weight: 700; color: var(--warn); }
+  .note.danger .label { color: var(--danger); }
+  .note.tip .label { color: var(--accent-2); }
+
+  /* Architecture diagram */
+  .diagram {
+    background: #010409;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 22px 14px;
+    margin: 16px 0;
+    overflow-x: auto;
+  }
+  .diagram svg { display: block; margin: 0 auto; max-width: 100%; height: auto; }
+
+  /* Table */
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--border); padding: 9px 12px; text-align: left; }
+  th { background: #21262d; color: var(--accent); font-weight: 600; }
+  td { color: #d0d7de; }
+  tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+
+  /* Summary list */
+  .summary-list { list-style: none; padding-left: 0; }
+  .summary-list li {
+    position: relative; padding: 10px 0 10px 30px;
+    border-bottom: 1px dashed var(--border);
+  }
+  .summary-list li:last-child { border-bottom: none; }
+  .summary-list li::before {
+    content: "▸"; position: absolute; left: 8px; top: 10px;
+    color: var(--accent-2); font-weight: 700;
+  }
+
+  /* Q&A details */
+  details {
+    background: #010409;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 0;
+    margin: 12px 0;
+    overflow: hidden;
+  }
+  details summary {
+    cursor: pointer;
+    padding: 14px 18px;
+    font-weight: 600;
+    color: var(--accent);
+    list-style: none;
+    display: flex; align-items: center; gap: 10px;
+    transition: background .15s;
+  }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::before {
+    content: "➤"; font-size: 12px; color: var(--warn);
+    transition: transform .2s;
+  }
+  details[open] summary::before { transform: rotate(90deg); }
+  details summary:hover { background: rgba(56,139,253,0.06); }
+  details .answer {
+    padding: 4px 22px 18px;
+    color: #d0d7de; font-size: 14.5px;
+  }
+  details .answer p { margin-bottom: 10px; }
+  details .answer ul { margin: 8px 0 12px; }
+
+  footer {
+    text-align: center; color: var(--text-dim); font-size: 12.5px;
+    margin-top: 30px; padding-top: 18px;
+    border-top: 1px solid var(--border);
+  }
+
+  @media (max-width: 600px) {
+    .container { padding: 16px 12px 40px; }
+    h1 { font-size: 21px; }
+    .header, .section { padding: 18px 16px; }
+    pre { font-size: 12.5px; padding: 12px; }
+  }
+</style>
+</head>
+<body>
+<div style="position:fixed;top:14px;left:14px;z-index:9999;">
+<a href="../index.html" style="display:inline-block;padding:6px 14px;border-radius:999px;background:rgba(20,26,38,.88);color:#7da7ff;font-size:13px;text-decoration:none;border:1px solid rgba(90,130,220,.45);backdrop-filter:blur(4px);font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.35);" onmouseover="this.style.background='rgba(30,40,60,.95)'" onmouseout="this.style.background='rgba(20,26,38,.88)'">← 课程目录</a>
+</div>
+
+<div class="container">
+
+  <!-- Header -->
+  <div class="header">
+    <div class="brand-row">
+      <span class="tag icon">☀️ 微课堂 · 第 1 期</span>
+      <span class="tag cat">Spring Cloud Alibaba</span>
+      <span class="tag time">⏱ 约 9 分钟</span>
+    </div>
+    <h1>Sentinel 熔断限流实战：从"雪崩"到"稳如磐石"</h1>
+    <div class="subtitle">站在架构师视角，理解限流、熔断、降级的本质权衡与生产级配置</div>
+    <div class="meta-row">
+      <span>📅 <strong>2026-08-12</strong></span>
+      <span>👤 面向：架构师 / 高级工程师</span>
+      <span>📦 技术栈：<strong>Spring Cloud Alibaba · Sentinel 1.8.x</strong></span>
+    </div>
+  </div>
+
+  <!-- 1. 场景 -->
+  <div class="section">
+    <h2>一、从一个真实的线上事故说起</h2>
+    <p>某电商大促日，<strong>订单服务</strong>依赖的 <strong>库存服务</strong>因 DB 慢查询导致响应时间从 50ms 飙升到 3s。订单服务的 Tomcat 线程池在 30 秒内被全部占满，进而导致网关线程也耗尽，<strong>整个用户中心、支付服务</strong>全部不可用——这就是典型的<strong>"雪崩"（Cascading Failure）</strong>。</p>
+    <div class="note danger">
+      <span class="label">事故根因：</span>下游一个慢调用，因为没有任何保护机制，像多米诺骨牌一样把整条调用链拖垮。<strong>缺少的正是"熔断 + 限流"</strong>。
+    </div>
+    <p>架构师的核心职责之一，就是<strong>在每个服务调用边界上设置"保险丝"</strong>，让故障被隔离、被消化，而不是被放大。Sentinel 正是阿里巴巴开源的、为这件事而生的组件。</p>
+  </div>
+
+  <!-- 2. 原理 -->
+  <div class="section">
+    <h2>二、Sentinel 的核心模型：资源 + 规则</h2>
+    <p>Sentinel 的设计哲学极其简洁，只有两个核心概念：</p>
+    <ul>
+      <li><strong>资源（Resource）</strong>：你想要保护的东西——一个接口、一个方法、一段代码、甚至一个 SQL。</li>
+      <li><strong>规则（Rule）</strong>：怎么保护——限流（Flow）、熔断降级（Degrade）、系统保护（System）、热点参数（Param）、授权（Authority）。</li>
+    </ul>
+    <p>运行时，所有对资源的访问都会经过一个 <strong>责任链式的 Slot Chain</strong>，依次完成：统计 → 限流判断 → 熔断判断 → 授权判断 → 实际放行。</p>
+
+    <h3>三种"保护手段"的边界要分清</h3>
+    <table>
+      <tr><th>手段</th><th>解决什么问题</th><th>触发条件</th><th>架构语义</th></tr>
+      <tr><td><strong>限流 Flow</strong></td><td>流量超过承载能力</td><td>QPS / 线程数超阈值</td><td>"我忙不过来了，请等等"</td></tr>
+      <tr><td><strong>熔断 Degrade</strong></td><td>下游异常或变慢</td><td>慢调用比例 / 异常比例 / 异常数</td><td>"下游在抽风，我先不调它"</td></tr>
+      <tr><td><strong>降级</strong></td><td>熔断后的兜底</td><td>熔断触发后执行 fallback</td><td>"返回默认值/缓存，保住核心链路"</td></tr>
+    </table>
+    <div class="note tip">
+      <span class="label">架构师洞察：</span>很多人把"熔断"和"降级"混用。准确说，<strong>熔断是"决策"，降级是熔断后采取的"动作"</strong>。没有降级的熔断，对用户来说就是直接报错——这是半成品。
+    </div>
+  </div>
+
+  <!-- 3. 架构图 -->
+  <div class="section">
+    <h2>三、生产级 Sentinel 架构：四个组件各司其职</h2>
+    <p>这是最容易绕晕的地方。Sentinel 不是"一个东西"，而是<strong>四个独立组件</strong>——理解它们的边界，是后续所有配置和排障的基础。先把这张组件归属图刻在脑子里：</p>
+
+    <div class="diagram">
+      <svg viewBox="0 0 720 540" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+        <defs>
+          <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+            <path d="M0,0 L0,6 L9,3 z" fill="#58a6ff"/>
+          </marker>
+          <marker id="arrowG" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+            <path d="M0,0 L0,6 L9,3 z" fill="#3fb950"/>
+          </marker>
+          <marker id="arrowO" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+            <path d="M0,0 L0,6 L9,3 z" fill="#d29922"/>
+          </marker>
+        </defs>
+
+        <text x="360" y="22" text-anchor="middle" fill="#8b949e" font-size="12">实线框 = 必选组件　虚线框 = 可选组件（仅集群限流场景）</text>
+
+        <!-- ===== 第一行：管理面 ===== -->
+        <text x="20" y="58" fill="#bc8cff" font-size="12" font-weight="700">管理面 · Control Plane</text>
+
+        <!-- Dashboard -->
+        <rect x="40" y="70" width="200" height="90" rx="8" fill="#161b22" stroke="#bc8cff" stroke-width="1.8"/>
+        <text x="140" y="94" text-anchor="middle" fill="#bc8cff" font-size="14" font-weight="700">① Sentinel Dashboard</text>
+        <text x="140" y="114" text-anchor="middle" fill="#e6edf3" font-size="11">全局唯一 · 独立部署</text>
+        <text x="140" y="130" text-anchor="middle" fill="#8b949e" font-size="11">sentinel-dashboard.jar</text>
+        <text x="140" y="146" text-anchor="middle" fill="#8b949e" font-size="11">官方打包，java -jar 直跑</text>
+
+        <!-- Nacos -->
+        <rect x="260" y="70" width="180" height="90" rx="8" fill="#161b22" stroke="#d29922" stroke-width="1.8"/>
+        <text x="350" y="94" text-anchor="middle" fill="#d29922" font-size="14" font-weight="700">② Nacos 配置中心</text>
+        <text x="350" y="114" text-anchor="middle" fill="#e6edf3" font-size="11">规则权威存储</text>
+        <text x="350" y="130" text-anchor="middle" fill="#8b949e" font-size="11">动态推送 · 热更新</text>
+        <text x="350" y="146" text-anchor="middle" fill="#8b949e" font-size="11">生产环境的"规则真相源"</text>
+
+        <!-- Prometheus -->
+        <rect x="480" y="70" width="200" height="90" rx="8" fill="#161b22" stroke="#f85149" stroke-width="1.8"/>
+        <text x="580" y="94" text-anchor="middle" fill="#f85149" font-size="14" font-weight="700">③ Prometheus + Grafana</text>
+        <text x="580" y="114" text-anchor="middle" fill="#e6edf3" font-size="11">指标采集 · 告警</text>
+        <text x="580" y="130" text-anchor="middle" fill="#8b949e" font-size="11">监控面（与 Sentinel 解耦）</text>
+        <text x="580" y="146" text-anchor="middle" fill="#8b949e" font-size="11">公司统一监控栈</text>
+
+        <!-- ===== 分隔 ===== -->
+        <line x1="20" y1="185" x2="700" y2="185" stroke="#30363d" stroke-width="1" stroke-dasharray="3,3"/>
+        <text x="20" y="208" fill="#3fb950" font-size="12" font-weight="700">数据面 · Data Plane（SDK 跑在业务进程里，限流/熔断决策都在这里发生）</text>
+
+        <!-- ===== 第二行：业务服务 ===== -->
+        <!-- Gateway -->
+        <rect x="20" y="220" width="120" height="64" rx="8" fill="#1f2428" stroke="#58a6ff" stroke-width="1.5"/>
+        <text x="80" y="244" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="600">Gateway</text>
+        <text x="80" y="262" text-anchor="middle" fill="#8b949e" font-size="11">内嵌 SDK</text>
+        <text x="80" y="276" text-anchor="middle" fill="#8b949e" font-size="10">限流第一道</text>
+
+        <!-- Order Service -->
+        <rect x="160" y="220" width="120" height="64" rx="8" fill="#1f2428" stroke="#3fb950" stroke-width="1.5"/>
+        <text x="220" y="244" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="600">订单服务</text>
+        <text x="220" y="262" text-anchor="middle" fill="#8b949e" font-size="11">内嵌 SDK</text>
+        <text x="220" y="276" text-anchor="middle" fill="#8b949e" font-size="10">app=order</text>
+
+        <!-- Inventory Service -->
+        <rect x="300" y="220" width="120" height="64" rx="8" fill="#1f2428" stroke="#f85149" stroke-width="1.5"/>
+        <text x="360" y="244" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="600">库存服务</text>
+        <text x="360" y="262" text-anchor="middle" fill="#8b949e" font-size="11">内嵌 SDK</text>
+        <text x="360" y="276" text-anchor="middle" fill="#8b949e" font-size="10">易故障点</text>
+
+        <!-- arrows between services -->
+        <line x1="140" y1="252" x2="155" y2="252" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#arrow)"/>
+        <line x1="280" y1="252" x2="295" y2="252" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+        <!-- SDK 与管理面的通信 -->
+        <line x1="220" y1="220" x2="160" y2="165" stroke="#3fb950" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#arrowG)"/>
+        <text x="172" y="195" text-anchor="middle" fill="#3fb950" font-size="10">①注册+长连接</text>
+        <line x1="240" y1="220" x2="320" y2="165" stroke="#d29922" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#arrowO)"/>
+        <text x="300" y="195" text-anchor="middle" fill="#d29922" font-size="10">②拉规则</text>
+        <line x1="280" y1="220" x2="540" y2="165" stroke="#f85149" stroke-width="1" stroke-dasharray="3,3" marker-end="url(#arrow)"/>
+        <text x="450" y="195" text-anchor="middle" fill="#f85149" font-size="10">③暴露metrics</text>
+
+        <!-- ===== Token Server 区域 ===== -->
+        <line x1="20" y1="310" x2="700" y2="310" stroke="#30363d" stroke-width="1" stroke-dasharray="3,3"/>
+        <text x="20" y="333" fill="#d29922" font-size="12" font-weight="700">可选 · 仅集群限流场景　Token Server 与 Dashboard 完全无关，是另一套独立组件</text>
+
+        <!-- Token Server (dashed) -->
+        <rect x="40" y="345" width="220" height="95" rx="8" fill="#1a1410" stroke="#d29922" stroke-width="1.5" stroke-dasharray="5,3"/>
+        <text x="150" y="370" text-anchor="middle" fill="#d29922" font-size="14" font-weight="700">④ Token Server</text>
+        <text x="150" y="390" text-anchor="middle" fill="#e6edf3" font-size="11">全局令牌计数器</text>
+        <text x="150" y="406" text-anchor="middle" fill="#8b949e" font-size="11">sentinel-cluster-server-default</text>
+        <text x="150" y="422" text-anchor="middle" fill="#f85149" font-size="11">官方没打可执行包，需 ~10 行 main</text>
+
+        <!-- Embedded -->
+        <rect x="280" y="345" width="220" height="95" rx="8" fill="#0f1a14" stroke="#3fb950" stroke-width="1.5" stroke-dasharray="5,3"/>
+        <text x="390" y="370" text-anchor="middle" fill="#3fb950" font-size="14" font-weight="700">④' 嵌入式 Token Server</text>
+        <text x="390" y="390" text-anchor="middle" fill="#e6edf3" font-size="11">某实例兼任 Server</text>
+        <text x="390" y="406" text-anchor="middle" fill="#8b949e" font-size="11">spring-cloud-starter-alibaba-sentinel</text>
+        <text x="390" y="422" text-anchor="middle" fill="#3fb950" font-size="11">纯配置，零代码</text>
+
+        <!-- 何时启用 -->
+        <rect x="520" y="345" width="160" height="95" rx="8" fill="#161b22" stroke="#58a6ff" stroke-width="1" stroke-dasharray="3,2"/>
+        <text x="600" y="368" text-anchor="middle" fill="#58a6ff" font-size="12" font-weight="700">何时启用？</text>
+        <text x="600" y="388" text-anchor="middle" fill="#8b949e" font-size="10">· 全局 QPS 配额</text>
+        <text x="600" y="403" text-anchor="middle" fill="#8b949e" font-size="10">· 保护不可扩容的下游</text>
+        <text x="600" y="418" text-anchor="middle" fill="#8b949e" font-size="10">· HPA 频繁伸缩场景</text>
+
+        <!-- 令牌申请箭头 -->
+        <line x1="220" y1="284" x2="150" y2="340" stroke="#d29922" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#arrowO)"/>
+        <line x1="360" y1="284" x2="390" y2="340" stroke="#3fb950" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#arrowG)"/>
+        <text x="155" y="320" fill="#d29922" font-size="10">申请令牌</text>
+        <text x="395" y="320" fill="#3fb950" font-size="10">兼任Server</text>
+
+        <!-- 关系说明 -->
+        <rect x="20" y="460" width="680" height="68" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+        <text x="30" y="482" fill="#e6edf3" font-size="12" font-weight="600">三句话记住关系：</text>
+        <text x="30" y="500" fill="#8b949e" font-size="11">· Dashboard 是「管理面」——全公司一套，看监控、改规则；它<strong style="color:#f85149">不知道 Token Server 的存在</strong>。</text>
+        <text x="30" y="515" fill="#8b949e" font-size="11">· Token Server 是「可选数据面」——只为「集群限流」这一个功能服务，跟 Dashboard <strong style="color:#f85149">互不感知、互不依赖</strong>。</text>
+        <text x="30" y="528" fill="#8b949e" font-size="11">· 不用集群限流 → 直接忽略下半部分；单机限流/熔断完全够用，SDK 自己就跑起来了。</text>
+      </svg>
+    </div>
+
+    <h3>Detailed：Dashboard 是怎么"看到"所有服务的？</h3>
+    <p>关键在于<strong>反向连接</strong>——不是 Dashboard 主动连服务，而是每个 SDK 在本地开一个端口（默认 8719）等 Dashboard 连过来。服务进程启动时拿着 <code>spring.application.name</code> 去 Dashboard 注册，之后保持长连接。Dashboard 左侧栏的"应用列表"就是这么来的：</p>
+    <ul>
+      <li><strong>上行</strong>（服务 → Dashboard）：每秒上报 metrics（QPS、RT、异常数）</li>
+      <li><strong>下行</strong>（Dashboard → 服务）：推送规则修改、拉取某资源的 clusterNode 明细</li>
+    </ul>
+    <p>这么设计是因为 K8s 里 Pod IP 经常变，让 Dashboard 追不现实——所以让服务主动"挂"到 Dashboard 上。</p>
+
+    <div class="note danger">
+      <span class="label">最关键的一个坑：</span>Sentinel Dashboard <strong>默认规则存内存，重启即丢</strong>。生产环境<strong>必须</strong>接 Nacos 做持久化——Dashboard 退化成"可视化编辑器 + 实时监控屏"，<strong>真正权威的规则源是 Nacos</strong>，由应用端通过 <code>datasource</code> 监听拉取。
+    </div>
+
+    <h3>Detailed：Token Server 两种部署模式</h3>
+    <table>
+      <tr><th>模式</th><th>适用场景</th><th>HA 方案</th><th>自己要写的代码</th></tr>
+      <tr>
+        <td><strong>独立部署</strong><br>单独进程</td>
+        <td>大规模、高 QPS、对延迟敏感</td>
+        <td>≥2 节点 + LB，监控降级事件</td>
+        <td>~10 行 main + 规则加载</td>
+      </tr>
+      <tr>
+        <td><strong>嵌入式部署</strong><br>某实例兼任</td>
+        <td>小规模、首次落地、不想加运维</td>
+        <td>Server 挂掉自动降级单机限流</td>
+        <td><strong>零代码</strong>，几个 yaml 开关</td>
+      </tr>
+    </table>
+    <div class="note tip">
+      <span class="label">实战建议：</span>团队第一次上集群限流，<strong>从嵌入式模式起步</strong>——零代码、纯配置，先验证链路通不通。QPS 上去后再切独立部署，那时已经熟悉规则流转，写 10 行 main 也顺手了。
+    </div>
+  </div>
+
+  <!-- 4. 实战 -->
+  <div class="section">
+    <h2>四、实战：三步搞定一个生产级熔断</h2>
+
+    <h3>① 引入依赖（Spring Boot 3.x）</h3>
+<pre><code><span class="tok-com">&lt;!-- Sentinel 核心 + Spring Cloud Alibaba 起步依赖 --&gt;</span>
+&lt;dependency&gt;
+    &lt;groupId&gt;com.alibaba.cloud&lt;/groupId&gt;
+    &lt;artifactId&gt;spring-cloud-starter-alibaba-sentinel&lt;/artifactId&gt;
+&lt;/dependency&gt;
+<span class="tok-com">&lt;!-- 将规则持久化到 Nacos --&gt;</span>
+&lt;dependency&gt;
+    &lt;groupId&gt;com.alibaba.csp&lt;/groupId&gt;
+    &lt;artifactId&gt;sentinel-datasource-nacos&lt;/artifactId&gt;
+&lt;/dependency&gt;</code></pre>
+
+    <h3>② 配置 Nacos 数据源（application.yml）</h3>
+<pre><code><span class="tok-prop">spring</span>:
+  <span class="tok-prop">cloud</span>:
+    <span class="tok-prop">sentinel</span>:
+      <span class="tok-prop">transport</span>:
+        <span class="tok-prop">dashboard</span>: <span class="tok-str">sentinel.internal:8080</span>
+        <span class="tok-prop">port</span>: <span class="tok-num">8719</span>            <span class="tok-com"># 客户端与控制台通信端口</span>
+      <span class="tok-prop">eager</span>: <span class="tok-key">true</span>           <span class="tok-com"># 应用启动立即上报，不等首次请求</span>
+      <span class="tok-prop">datasource</span>:
+        <span class="tok-prop">ds1</span>:                  <span class="tok-com"># 拉取「限流规则」</span>
+          <span class="tok-prop">nacos</span>:
+            <span class="tok-prop">server-addr</span>: <span class="tok-str">${NACOS_ADDR}</span>
+            <span class="tok-prop">dataId</span>: <span class="tok-str">${spring.application.name}-flow-rules.json</span>
+            <span class="tok-prop">groupId</span>: <span class="tok-str">SENTINEL_GROUP</span>
+            <span class="tok-prop">rule-type</span>: <span class="tok-str">flow</span>
+        <span class="tok-prop">ds2</span>:                  <span class="tok-com"># 拉取「熔断规则」</span>
+          <span class="tok-prop">nacos</span>:
+            <span class="tok-prop">server-addr</span>: <span class="tok-str">${NACOS_ADDR}</span>
+            <span class="tok-prop">dataId</span>: <span class="tok-str">${spring.application.name}-degrade-rules.json</span>
+            <span class="tok-prop">rule-type</span>: <span class="tok-str">degrade</span></code></pre>
+
+    <h3>③ 在 Nacos 中配置一条熔断规则（JSON）</h3>
+    <p>场景：库存服务 <code>GET /inventory/{sku}</code> 一旦慢调用比例过高，自动熔断 10 秒。</p>
+<pre><code>[
+  {
+    <span class="tok-prop">"resource"</span>: <span class="tok-str">"GET:/inventory/{sku}"</span>,
+    <span class="tok-prop">"grade"</span>: <span class="tok-num">0</span>,                 <span class="tok-com">// 0=慢调用比例, 1=异常比例, 2=异常数</span>
+    <span class="tok-prop">"count"</span>: <span class="tok-num">500</span>,               <span class="tok-com">// 慢调用阈值：RT &gt; 500ms 视为慢</span>
+    <span class="tok-prop">"slowRatioThreshold"</span>: <span class="tok-num">0.6</span>,  <span class="tok-com">// 慢调用比例 &gt; 60% 即触发</span>
+    <span class="tok-prop">"timeWindow"</span>: <span class="tok-num">10</span>,          <span class="tok-com">// 熔断持续时间 10s</span>
+    <span class="tok-prop">"minRequestAmount"</span>: <span class="tok-num">20</span>,    <span class="tok-com">// 至少 20 个请求才统计，避免误判</span>
+    <span class="tok-prop">"statIntervalMs"</span>: <span class="tok-num">1000</span>     <span class="tok-com">// 1 秒统计窗口</span>
+  }
+]</code></pre>
+
+    <h3>④ 配置降级兜底（fallback）</h3>
+<pre><code><span class="tok-key">@Service</span>
+<span class="tok-key">public class</span> <span class="tok-fn">InventoryService</span> {
+
+    <span class="tok-key">@SentinelResource</span>(value = <span class="tok-str">"GET:/inventory/{sku}"</span>,
+                     blockHandler = <span class="tok-str">"blockHandler"</span>,   <span class="tok-com">// 限流/熔断时走这里</span>
+                     fallback    = <span class="tok-str">"fallback"</span>)       <span class="tok-com">// 业务异常时走这里</span>
+    <span class="tok-key">public</span> Inventory <span class="tok-fn">getInventory</span>(String sku) {
+        <span class="tok-key">return</span> inventoryMapper.selectBySku(sku);
+    }
+
+    <span class="tok-com">// 方法签名必须与原方法一致，且最后追加 BlockException 参数</span>
+    <span class="tok-key">public</span> Inventory <span class="tok-fn">blockHandler</span>(String sku, BlockException ex) {
+        log.warn(<span class="tok-str">"inventory 被熔断/限流，返回本地缓存 sku={}"</span>, sku);
+        <span class="tok-key">return</span> localCache.get(sku);   <span class="tok-com">// 本地缓存兜底</span>
+    }
+
+    <span class="tok-key">public</span> Inventory <span class="tok-fn">fallback</span>(String sku, Throwable t) {
+        log.error(<span class="tok-str">"inventory 业务异常 sku={}"</span>, sku, t);
+        <span class="tok-key">return</span> Inventory.unknown(sku);
+    }
+}</code></pre>
+
+    <div class="note tip">
+      <span class="label">必知坑点：</span><code>blockHandler</code> 处理的是 <strong>Sentinel 抛出的 BlockException</strong>（限流/熔断），而 <code>fallback</code> 处理的是<strong>业务方法本身的异常</strong>。两者各司其职，混用会导致熔断后用户仍然看到 500。
+    </div>
+  </div>
+
+  <!-- 5. 选型与权衡 -->
+  <div class="section">
+    <h2>五、架构师的选型权衡</h2>
+
+    <h3>Sentinel vs Hystrix vs Resilience4j</h3>
+    <table>
+      <tr><th>维度</th><th>Sentinel</th><th>Hystrix（停更）</th><th>Resilience4j</th></tr>
+      <tr><td>熔断策略</td><td>慢调用比例 / 异常比例 / 异常数</td><td>异常比例</td><td>异常比例（参考Hystrix）</td></tr>
+      <tr><td>限流</td><td><strong>原生支持（QPS/线程/热点）</strong></td><td>不支持</td><td>RateLimiter 模块</td></tr>
+      <tr><td>实时监控</td><td>自带 Dashboard</td><td>需对接 Turbine</td><td>需自建</td></tr>
+      <tr><td>规则动态推送</td><td>Nacos/ZK/Apollo</td><td>弱</td><td>弱</td></tr>
+      <tr><td>语言生态</td><td>Java 为主，多语言 SDK 较新</td><td>Java</td><td>Java 8+ 函数式</td></tr>
+    </table>
+    <div class="note tip">
+      <span class="label">选型结论：</span>公司技术栈是 <strong>Spring Cloud Alibaba</strong>，自然首选 Sentinel——它的<strong>限流能力</strong>是 Hystrix/Resilience4j 不具备的，且与 Nacos/Dubbo 无缝集成，运维成本低。如果团队全面函数式且追求轻量，再考虑 Resilience4j。
+    </div>
+
+    <h3>容量规划：阈值怎么定？</h3>
+    <ul>
+      <li><strong>压测先行</strong>：用 wrk/JMeter 压出服务的 QPS 上限和 P99 RT。</li>
+      <li><strong>限流阈值</strong>：取压测峰值的 <strong>70%-80%</strong> 留 buffer，例如峰值 1000 QPS，限流设 800。</li>
+      <li><strong>慢调用阈值</strong>：取正常 P99 RT 的 <strong>2-3 倍</strong>，例如 P99=200ms，慢调用阈值设 500ms。</li>
+      <li><strong>熔断窗口</strong>：10-30s 为佳。太短抖动大，太长恢复慢。</li>
+      <li><strong>minRequestAmount</strong>：必须 ≥ 一定量（如 20），否则低流量下偶发慢调用会误熔断。</li>
+    </ul>
+  </div>
+
+  <!-- 6. 常见坑点 -->
+  <div class="section">
+    <h2>六、生产排障实战：五个高频坑</h2>
+    <ol>
+      <li><strong>规则丢失</strong>：应用重启后规则不见了 → 没接 Nacos 持久化，<strong>必须配 datasource</strong>。</li>
+      <li><strong>资源未生效</strong>：接口加了 <code>@SentinelResource</code> 但限流不触发 → 多半是<strong>资源名拼错</strong>，或方法被 AOP 内部调用绕过（同类 <code>this.xxx()</code> 不走代理）。</li>
+      <li><strong>Dashboard 看不到节点</strong>：检查客户端 <code>spring.cloud.sentinel.transport.dashboard</code> 是否可达，以及 <code>eager:true</code>。</li>
+      <li><strong>熔断后一直不开</strong>：检查 <code>statIntervalMs</code> 与 <code>minRequestAmount</code>，低 QPS 服务要调小阈值。</li>
+      <li><strong>集群限流不准</strong>：Token Server 单点要 HA，否则一旦宕机限流退化为单机模式，容量翻倍。</li>
+    </ol>
+  </div>
+
+  <!-- 7. 今日要点 -->
+  <div class="section">
+    <h2>七、今日要点小结</h2>
+    <ul class="summary-list">
+      <li><strong>限流防"超载"，熔断防"雪崩"，降级保"体验"</strong>——三者各司其职，缺一不可。</li>
+      <li>Sentinel 核心模型：<strong>资源 + 规则</strong>，Slot Chain 责任链式处理。</li>
+      <li>生产环境<strong>规则必须持久化到 Nacos</strong>，控制台只做展示与编辑，不做存储。</li>
+      <li><code>blockHandler</code> 管 Sentinel 异常，<code>fallback</code> 管业务异常——<strong>不要混用</strong>。</li>
+      <li>阈值来自<strong>压测数据</strong>：限流取峰值 70-80%，慢调用取 P99 的 2-3 倍，留足 buffer。</li>
+    </ul>
+  </div>
+
+  <!-- 8. 思考题 -->
+  <div class="section">
+    <h2>八、架构师思考题</h2>
+
+    <details>
+      <summary>思考题 1：某核心接口 P99 RT 突然从 50ms 升到 800ms，但服务本身 CPU、内存都正常。你会如何用 Sentinel 与排障思路定位并止血？</summary>
+      <div class="answer">
+        <p><strong>解题方向（止血优先，根因其次）：</strong></p>
+        <p>① <strong>快速止血</strong>：先确认是下游变慢还是自身 GC/锁竞争。</p>
+        <ul>
+          <li>查看 Sentinel Dashboard 该资源的 RT 曲线、慢调用比例。</li>
+          <li>检查 JVM GC 日志（<code>-Xlog:gc*</code>）——Full GC 会引起整体 STW。</li>
+          <li>用 <code>arthas trace &lt;class&gt; &lt;method&gt;</code> 看每一步耗时，定位到 DB / Redis / RPC。</li>
+        </ul>
+        <p>② <strong>临时兜底</strong>：在 Sentinel 上<strong>临时加一条慢调用熔断规则</strong>（RT=300ms，慢比例 50%，熔断 15s，fallback 走本地缓存或默认值），先把用户感受稳住，避免线程池被打满引发雪崩。</p>
+        <p>③ <strong>根因定位</strong>：</p>
+        <ul>
+          <li>若 DB：检查慢查询日志、连接池是否耗尽、是否走了索引（<code>EXPLAIN</code>）。</li>
+          <li>若下游 RPC：链路追踪（SkyWalking/Sleuth）找到具体 span，联系下游 owner。</li>
+          <li>若自身：锁竞争用 <code>jstack</code> 抓线程栈，定位 BLOCKED 线程。</li>
+        </ul>
+        <p>④ <strong>复盘加固</strong>：把临时规则固化为长期熔断规则，补充 HPA + 告警，并增加该接口的常态化压测。</p>
+      </div>
+    </details>
+
+    <details>
+      <summary>思考题 2：集群限流（Cluster Flow Control）和单机限流该如何选？什么时候必须上集群限流？它的代价是什么？</summary>
+      <div class="answer">
+        <p><strong>核心权衡：精度 vs 复杂度。</strong></p>
+        <p><strong>单机限流</strong>：每个 Pod 独立计数。假设阈值 100 QPS/实例，部署 N 个实例，总上限 = 100×N。优点：零依赖、无单点、延迟低。缺点：<strong>实例数变化时总容量被动变化</strong>；对"全局配额"类限制（如 API 每秒 1 万次）无法精确控制。</p>
+        <p><strong>集群限流</strong>：所有实例向 Token Server 申请令牌，Server 全局统算。优点：精确的全局配额控制。缺点：</p>
+        <ul>
+          <li><strong>引入单点</strong>：Token Server 宕机会退化为单机限流（容量翻倍），所以 Server 必须 HA（至少 2 节点 + LB）。</li>
+          <li><strong>额外一跳网络延迟</strong>：每次取令牌多 1-2ms，对极低延迟场景敏感。</li>
+          <li><strong>Server 容量瓶颈</strong>：单 Server 处理能力有限（万级 QPS），超大规模需分片或 Token Server 集群。</li>
+        </ul>
+        <p><strong>何时必须用集群限流？</strong></p>
+        <ul>
+          <li>开放平台 API 售卖固定 QPS 配额（如"客户 A 全局 500 QPS"）——必须精确全局控制。</li>
+          <li>保护下游<strong>不可水平扩展</strong>的资源（如单实例的老旧系统、第三方付费 API）。</li>
+          <li>HPA 自动伸缩频繁的场景——单机限流会因实例数波动导致总容量不稳。</li>
+        </ul>
+        <p><strong>结论</strong>：常规内部服务用单机限流足够；<strong>涉及"全局配额"或"保护下游稀缺资源"才上集群限流</strong>，并配套 Token Server 的 HA 与监控。</p>
+      </div>
+    </details>
+  </div>
+
+  <footer>
+    ☀️ 每日架构师微课程 · 第 1 期 · Spring Cloud Alibaba 系列<br>
+    明日预告：Spring Cloud Alibaba 之 <strong>Nacos 服务注册与配置中心深度解析</strong>
+  </footer>
+
+</div>
+</body>
+</html>

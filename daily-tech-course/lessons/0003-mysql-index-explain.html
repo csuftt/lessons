@@ -1,0 +1,789 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日架构师微课程 · MySQL 索引优化与执行计划深度分析 | 2026-08-14</title>
+<style>
+  :root {
+    --bg-primary: #0d1117;
+    --bg-secondary: #161b22;
+    --bg-card: #1c2128;
+    --bg-code: #0a0e14;
+    --border-color: #30363d;
+    --text-primary: #e6edf3;
+    --text-secondary: #8b949e;
+    --text-muted: #6e7681;
+    --accent-blue: #58a6ff;
+    --accent-green: #3fb950;
+    --accent-orange: #d29922;
+    --accent-red: #f85149;
+    --accent-purple: #bc8cff;
+    --accent-cyan: #39d2c0;
+    --gradient-hero: linear-gradient(135deg, #1a3a5c 0%, #0d1117 60%, #2d1b4e 100%);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.75;
+    font-size: 16px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .container {
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 0 20px;
+  }
+
+  /* ========== Hero Header ========== */
+  .hero {
+    background: var(--gradient-hero);
+    padding: 48px 0 40px;
+    border-bottom: 1px solid var(--border-color);
+    position: relative;
+    overflow: hidden;
+  }
+
+  .hero::before {
+    content: "";
+    position: absolute;
+    top: -50%; right: -10%;
+    width: 400px; height: 400px;
+    background: radial-gradient(circle, rgba(88,166,255,0.08) 0%, transparent 70%);
+    border-radius: 50%;
+    pointer-events: none;
+  }
+
+  .hero .container { position: relative; z-index: 1; }
+
+  .breadcrumb {
+    color: var(--text-muted);
+    font-size: 13px;
+    letter-spacing: 0.5px;
+    margin-bottom: 16px;
+  }
+
+  .breadcrumb span { color: var(--accent-cyan); }
+
+  .hero h1 {
+    font-size: 32px;
+    font-weight: 700;
+    line-height: 1.3;
+    margin-bottom: 18px;
+    background: linear-gradient(90deg, #e6edf3, #58a6ff);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .meta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+    margin-top: 20px;
+  }
+
+  .tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 12px;
+    border-radius: 16px;
+    font-size: 13px;
+    font-weight: 500;
+    background: rgba(88,166,255,0.12);
+    color: var(--accent-blue);
+    border: 1px solid rgba(88,166,255,0.25);
+  }
+  .tag.cat { background: rgba(188,140,255,0.12); color: var(--accent-purple); border-color: rgba(188,140,255,0.25); }
+  .tag.time { background: rgba(63,185,80,0.12); color: var(--accent-green); border-color: rgba(63,185,80,0.25); }
+  .tag.level { background: rgba(210,153,34,0.12); color: var(--accent-orange); border-color: rgba(210,153,34,0.25); }
+
+  /* ========== Section ========== */
+  section {
+    padding: 36px 0;
+    border-bottom: 1px solid rgba(48,54,61,0.5);
+  }
+
+  h2 {
+    font-size: 22px;
+    font-weight: 600;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--text-primary);
+  }
+
+  h2 .num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px; height: 30px;
+    background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+    color: #fff;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+
+  h3 {
+    font-size: 17px;
+    font-weight: 600;
+    margin: 22px 0 10px;
+    color: var(--accent-cyan);
+  }
+
+  p { margin-bottom: 14px; color: var(--text-primary); }
+
+  strong { color: var(--accent-orange); font-weight: 600; }
+  em { color: var(--accent-purple); font-style: normal; font-weight: 500; }
+
+  ul, ol { margin: 12px 0 16px 24px; }
+  li { margin-bottom: 8px; }
+
+  /* ========== Code Block ========== */
+  .code-block {
+    background: var(--bg-code);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    margin: 16px 0;
+    overflow: hidden;
+    position: relative;
+  }
+
+  .code-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 16px;
+    background: rgba(255,255,255,0.03);
+    border-bottom: 1px solid var(--border-color);
+    font-size: 12px;
+    color: var(--text-muted);
+    font-family: "SF Mono", Monaco, Consolas, monospace;
+  }
+
+  .code-header .lang { color: var(--accent-cyan); }
+
+  pre {
+    margin: 0;
+    padding: 16px;
+    overflow-x: auto;
+    font-family: "SF Mono", Monaco, Consolas, "Courier New", monospace;
+    font-size: 13.5px;
+    line-height: 1.65;
+  }
+
+  code { font-family: "SF Mono", Monaco, Consolas, monospace; }
+
+  /* SQL 语法高亮 */
+  .sql .kw { color: #ff7b72; font-weight: 600; }      /* 关键字 */
+  .sql .fn { color: #d2a8ff; }                          /* 函数 */
+  .sql .str { color: #a5d6ff; }                         /* 字符串 */
+  .sql .num-lit { color: #79c0ff; }                     /* 数字 */
+  .sql .cmt { color: #6e7681; font-style: italic; }     /* 注释 */
+  .sql .tbl { color: #7ee787; }                          /* 表名 */
+  .sql .col { color: #ffa657; }                          /* 列名 */
+  .sql .op { color: #ff7b72; }                            /* 操作符 */
+
+  p > code, li > code {
+    background: rgba(110,118,129,0.2);
+    color: var(--accent-cyan);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 13px;
+  }
+
+  /* ========== Callout ========== */
+  .callout {
+    background: var(--bg-card);
+    border-left: 3px solid var(--accent-blue);
+    border-radius: 0 8px 8px 0;
+    padding: 14px 18px;
+    margin: 18px 0;
+  }
+  .callout.warn { border-left-color: var(--accent-orange); background: rgba(210,153,34,0.06); }
+  .callout.danger { border-left-color: var(--accent-red); background: rgba(248,81,73,0.06); }
+  .callout.tip { border-left-color: var(--accent-green); background: rgba(63,185,80,0.06); }
+  .callout .title {
+    font-weight: 600;
+    font-size: 14px;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .callout.warn .title { color: var(--accent-orange); }
+  .callout.danger .title { color: var(--accent-red); }
+  .callout.tip .title { color: var(--accent-green); }
+  .callout p:last-child { margin-bottom: 0; }
+
+  /* ========== Table ========== */
+  .table-wrap { overflow-x: auto; margin: 16px 0; border-radius: 8px; border: 1px solid var(--border-color); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { padding: 10px 14px; text-align: left; border-bottom: 1px solid var(--border-color); }
+  th { background: var(--bg-card); color: var(--accent-cyan); font-weight: 600; }
+  tr:last-child td { border-bottom: none; }
+  td code { font-size: 12px; }
+
+  /* ========== 架构图（B+Tree） ========== */
+  .bptree-diagram {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 24px;
+    margin: 18px 0;
+    text-align: center;
+    overflow-x: auto;
+  }
+  .bptree-diagram svg { max-width: 100%; height: auto; }
+  .diagram-caption {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-top: 12px;
+    font-style: italic;
+  }
+
+  /* ========== 要点卡 ========== */
+  .summary-card {
+    background: linear-gradient(135deg, rgba(88,166,255,0.08), rgba(188,140,255,0.08));
+    border: 1px solid rgba(88,166,255,0.25);
+    border-radius: 12px;
+    padding: 22px 26px;
+    margin: 20px 0;
+  }
+  .summary-card h3 {
+    margin-top: 0;
+    color: var(--accent-blue);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .summary-card ol { margin-left: 20px; }
+  .summary-card li { margin-bottom: 10px; }
+
+  /* ========== 思考题 ========== */
+  details {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    margin: 14px 0;
+    overflow: hidden;
+    transition: border-color 0.2s;
+  }
+  details[open] { border-color: var(--accent-purple); }
+  details summary {
+    padding: 16px 20px;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 15px;
+    color: var(--accent-purple);
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    user-select: none;
+    transition: background 0.2s;
+  }
+  details summary:hover { background: rgba(188,140,255,0.05); }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::before {
+    content: "▶";
+    font-size: 11px;
+    color: var(--accent-purple);
+    transition: transform 0.2s;
+  }
+  details[open] summary::before { transform: rotate(90deg); }
+  details .answer {
+    padding: 0 20px 18px;
+    border-top: 1px solid var(--border-color);
+    padding-top: 16px;
+  }
+  details .answer h4 {
+    color: var(--accent-green);
+    font-size: 14px;
+    margin: 14px 0 8px;
+  }
+  details .answer p { font-size: 14.5px; }
+
+  /* ========== Footer ========== */
+  footer {
+    padding: 30px 0 50px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 13px;
+  }
+  footer .badge {
+    display: inline-block;
+    padding: 4px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 20px;
+    margin-bottom: 12px;
+  }
+
+  @media (max-width: 640px) {
+    .hero h1 { font-size: 24px; }
+    h2 { font-size: 19px; }
+    pre { font-size: 12px; padding: 12px; }
+    section { padding: 28px 0; }
+    .hero { padding: 36px 0 30px; }
+  }
+</style>
+</head>
+<body>
+<div style="position:fixed;top:14px;left:14px;z-index:9999;">
+<a href="../index.html" style="display:inline-block;padding:6px 14px;border-radius:999px;background:rgba(20,26,38,.88);color:#7da7ff;font-size:13px;text-decoration:none;border:1px solid rgba(90,130,220,.45);backdrop-filter:blur(4px);font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.35);" onmouseover="this.style.background='rgba(30,40,60,.95)'" onmouseout="this.style.background='rgba(20,26,38,.88)'">← 课程目录</a>
+</div>
+
+
+<!-- ========== HERO ========== -->
+<header class="hero">
+  <div class="container">
+    <div class="breadcrumb">每日架构师微课程 · 第 <span>03</span> 期</div>
+    <h1>MySQL 索引优化与执行计划深度分析</h1>
+    <div class="meta-row">
+      <span class="tag cat">🗄️ MySQL</span>
+      <span class="tag">📐 索引优化 · 执行计划 · InnoDB</span>
+      <span class="tag time">⏱️ 约 10 分钟</span>
+      <span class="tag level">🎯 架构师 / 高级工程师</span>
+    </div>
+    <div class="meta-row" style="margin-top: 10px;">
+      <span class="tag" style="background: rgba(57,210,192,0.12); color: var(--accent-cyan); border-color: rgba(57,210,192,0.25);">📅 2026-08-14 周四</span>
+    </div>
+  </div>
+</header>
+
+<div class="container">
+
+<!-- ========== 场景导入 ========== -->
+<section>
+  <h2><span class="num">1</span>从一个线上告警说起</h2>
+  <p>某电商大促前夕，订单中心数据库 CPU 飙到 95%，慢查询日志暴增。开发同学反馈："明明查询字段都加了索引，为什么还这么慢？"</p>
+  <p>这是一道典型的<strong>"伪索引"</strong>陷阱。DBA 排查后发现：<code>SELECT * FROM t_order WHERE user_id = ? AND create_time > '2026-08-01' ORDER BY status</code> 这条语句走了 <code>idx_user_id</code> 索引，但因为<em>返回行数过多</em>，触发了大量回表，最终执行时间 800ms。</p>
+  <p>问题的根源不在于"有没有索引"，而在于<strong>索引是否被正确使用</strong>。这正是架构师必须掌握的核心能力——读懂执行计划，理解索引工作原理，才能在数据库设计阶段就规避性能风险。</p>
+
+  <div class="callout tip">
+    <div class="title">💡 架构师视角</div>
+    <p>索引优化不是 DBA 一个人的事。表结构设计、查询写法、业务模型都决定了索引能否生效。<strong>性能问题 80% 可在设计阶段消除</strong>，而不是等上线后再救火。</p>
+  </div>
+</section>
+
+<!-- ========== B+Tree 原理 ========== -->
+<section>
+  <h2><span class="num">2</span>InnoDB 索引底层：B+ 树原理</h2>
+  <p>要理解为什么某些索引"失效"，必须先搞清楚 InnoDB 的索引结构。InnoDB 的所有索引都是 <strong>B+ 树（B+ Tree）</strong>，它有三个关键特性：</p>
+
+  <ul>
+    <li><strong>非叶子节点只存键值 + 指针</strong>，不存数据，一个节点可以放更多键 → 树更矮 → 磁盘 IO 更少</li>
+    <li><strong>数据全部存在叶子节点</strong>，且叶子节点之间用<em>双向链表</em>连接 → 范围查询极快</li>
+    <li><strong>聚簇索引 vs 二级索引</strong>：聚簇索引的叶子节点存整行数据；二级索引的叶子节点只存主键值，需要<em>回表</em>才能拿到完整行</li>
+  </ul>
+
+  <div class="bptree-diagram">
+    <svg viewBox="0 0 760 360" xmlns="http://www.w3.org/2000/svg">
+      <!-- 根节点 -->
+      <rect x="320" y="20" width="120" height="44" rx="6" fill="#1f6feb" stroke="#58a6ff" stroke-width="1.5"/>
+      <text x="380" y="40" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">根节点</text>
+      <text x="380" y="56" text-anchor="middle" fill="#a5d6ff" font-size="11">[10 | 20 | 30]</text>
+
+      <!-- 连线 根->中 -->
+      <line x1="350" y1="64" x2="200" y2="110" stroke="#30363d" stroke-width="1.5"/>
+      <line x1="380" y1="64" x2="380" y2="110" stroke="#30363d" stroke-width="1.5"/>
+      <line x1="410" y1="64" x2="560" y2="110" stroke="#30363d" stroke-width="1.5"/>
+
+      <!-- 中间节点 -->
+      <rect x="140" y="110" width="120" height="44" rx="6" fill="#238636" stroke="#3fb950" stroke-width="1.5"/>
+      <text x="200" y="130" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">中间节点</text>
+      <text x="200" y="146" text-anchor="middle" fill="#7ee787" font-size="11">[5 | 10]</text>
+
+      <rect x="320" y="110" width="120" height="44" rx="6" fill="#238636" stroke="#3fb950" stroke-width="1.5"/>
+      <text x="380" y="130" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">中间节点</text>
+      <text x="380" y="146" text-anchor="middle" fill="#7ee787" font-size="11">[15 | 20]</text>
+
+      <rect x="500" y="110" width="120" height="44" rx="6" fill="#238636" stroke="#3fb950" stroke-width="1.5"/>
+      <text x="560" y="130" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">中间节点</text>
+      <text x="560" y="146" text-anchor="middle" fill="#7ee787" font-size="11">[25 | 30]</text>
+
+      <!-- 连线 中->叶 -->
+      <line x1="175" y1="154" x2="120" y2="200" stroke="#30363d" stroke-width="1"/>
+      <line x1="225" y1="154" x2="200" y2="200" stroke="#30363d" stroke-width="1"/>
+      <line x1="355" y1="154" x2="300" y2="200" stroke="#30363d" stroke-width="1"/>
+      <line x1="405" y1="154" x2="380" y2="200" stroke="#30363d" stroke-width="1"/>
+      <line x1="535" y1="154" x2="480" y2="200" stroke="#30363d" stroke-width="1"/>
+      <line x1="585" y1="154" x2="560" y2="200" stroke="#30363d" stroke-width="1"/>
+
+      <!-- 叶子节点（数据）-->
+      <rect x="70" y="200" width="100" height="50" rx="6" fill="#6e40c9" stroke="#bc8cff" stroke-width="1.5"/>
+      <text x="120" y="220" text-anchor="middle" fill="#fff" font-size="11" font-weight="600">叶子 [1,5]</text>
+      <text x="120" y="238" text-anchor="middle" fill="#d2a8ff" font-size="10">数据行</text>
+
+      <rect x="190" y="200" width="100" height="50" rx="6" fill="#6e40c9" stroke="#bc8cff" stroke-width="1.5"/>
+      <text x="240" y="220" text-anchor="middle" fill="#fff" font-size="11" font-weight="600">叶子 [6,10]</text>
+      <text x="240" y="238" text-anchor="middle" fill="#d2a8ff" font-size="10">数据行</text>
+
+      <rect x="310" y="200" width="100" height="50" rx="6" fill="#6e40c9" stroke="#bc8cff" stroke-width="1.5"/>
+      <text x="360" y="220" text-anchor="middle" fill="#fff" font-size="11" font-weight="600">叶子 [11,15]</text>
+      <text x="360" y="238" text-anchor="middle" fill="#d2a8ff" font-size="10">数据行</text>
+
+      <rect x="430" y="200" width="100" height="50" rx="6" fill="#6e40c9" stroke="#bc8cff" stroke-width="1.5"/>
+      <text x="480" y="220" text-anchor="middle" fill="#fff" font-size="11" font-weight="600">叶子 [16,20]</text>
+      <text x="480" y="238" text-anchor="middle" fill="#d2a8ff" font-size="10">数据行</text>
+
+      <rect x="550" y="200" width="100" height="50" rx="6" fill="#6e40c9" stroke="#bc8cff" stroke-width="1.5"/>
+      <text x="600" y="220" text-anchor="middle" fill="#fff" font-size="11" font-weight="600">叶子 [21,30]</text>
+      <text x="600" y="238" text-anchor="middle" fill="#d2a8ff" font-size="10">数据行</text>
+
+      <!-- 叶子链表 -->
+      <line x1="170" y1="225" x2="190" y2="225" stroke="#39d2c0" stroke-width="2" stroke-dasharray="4,2"/>
+      <line x1="290" y1="225" x2="310" y2="225" stroke="#39d2c0" stroke-width="2" stroke-dasharray="4,2"/>
+      <line x1="410" y1="225" x2="430" y2="225" stroke="#39d2c0" stroke-width="2" stroke-dasharray="4,2"/>
+      <line x1="530" y1="225" x2="550" y2="225" stroke="#39d2c0" stroke-width="2" stroke-dasharray="4,2"/>
+
+      <!-- 图例 -->
+      <text x="380" y="290" text-anchor="middle" fill="#8b949e" font-size="12">⬅ 虚线 = 叶子节点双向链表（范围查询核心） ➡</text>
+      <text x="380" y="312" text-anchor="middle" fill="#6e7681" font-size="11">三层 B+ 树：千万级数据通常只需 3 次磁盘 IO</text>
+      <text x="380" y="332" text-anchor="middle" fill="#6e7681" font-size="11">根节点常驻内存缓冲池（Buffer Pool），实际 IO 更少</text>
+    </svg>
+    <div class="diagram-caption">图 1：InnoDB B+ 树索引结构示意图</div>
+  </div>
+
+  <div class="callout warn">
+    <div class="title">⚠️ 关键认知</div>
+    <p>一棵 3 层 B+ 树可以索引<strong>约 2000 万行</strong>数据（假设每页 16KB、每个非叶子节点能存 1000+ 个键）。所以"千万级表索引慢"几乎都是<em>使用姿势</em>问题，不是 B+ 树本身的瓶颈。</p>
+  </div>
+</section>
+
+<!-- ========== EXPLAIN ========== -->
+<section>
+  <h2><span class="num">3</span>EXPLAIN：架构师的"X 光片"</h2>
+  <p>拿到一条慢 SQL，第一步永远是 <code>EXPLAIN</code>。它会告诉你 MySQL <strong>实际如何执行</strong>这条语句。我们先看最关键的几个字段：</p>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>字段</th><th>含义</th><th>架构师关注点</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>type</code></td><td>访问类型</td><td>从好到差：<code>system &gt; const &gt; eq_ref &gt; ref &gt; range &gt; index &gt; ALL</code>。生产至少 <code>range</code></td></tr>
+        <tr><td><code>key</code></td><td>实际使用的索引</td><td><code>NULL</code> 表示没用索引！</td></tr>
+        <tr><td><code>rows</code></td><td>预估扫描行数</td><td>越小越好，超过 1 万需警惕</td></tr>
+        <tr><td><code>Extra</code></td><td>额外信息</td><td><code>Using filesort</code> / <code>Using temporary</code> 是危险信号</td></tr>
+        <tr><td><code>key_len</code></td><td>索引使用长度</td><td>判断<em>联合索引用到了几个字段</em></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>实战：诊断一条慢查询</h3>
+  <div class="code-block">
+    <div class="code-header"><span>SQL</span><span class="lang">MySQL 8.0</span></div>
+<pre class="sql"><code><span class="cmt">-- 业务场景：查询某用户近 30 天的订单，按状态排序</span>
+<span class="kw">EXPLAIN</span> <span class="kw">SELECT</span> order_id, user_id, amount, status, create_time
+<span class="kw">FROM</span> <span class="tbl">t_order</span>
+<span class="kw">WHERE</span> user_id <span class="op">=</span> <span class="num-lit">10086</span>
+  <span class="kw">AND</span> create_time <span class="op">&gt;</span> <span class="str">'2026-07-14'</span>
+<span class="kw">ORDER BY</span> status<span class="op">;</span></code></pre>
+  </div>
+
+  <p>现有索引：<code>idx_user_id (user_id)</code>。执行计划输出：</p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>type</th><th>key</th><th>rows</th><th>Extra</th></tr></thead>
+      <tbody>
+        <tr><td><code style="color:#f85149">ref</code></td><td><code>idx_user_id</code></td><td><code style="color:#d29922">12800</code></td><td><code style="color:#f85149">Using filesort</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout danger">
+    <div class="title">🚨 三个红色信号</div>
+    <ul style="margin-bottom:0">
+      <li><code>rows=12800</code>：预估回表 1.28 万次，IO 压力大</li>
+      <li><code>Using filesort</code>：索引无法完成排序，需要额外排序步骤（可能内存或临时文件）</li>
+      <li>只用了 <code>idx_user_id</code> 的 <code>user_id</code> 一个字段，<code>create_time</code> 和 <code>status</code> 都没走索引</li>
+    </ul>
+  </div>
+
+  <h3>优化方案：建立联合索引</h3>
+  <p>根据<strong>最左前缀原则</strong>，设计一个覆盖查询条件和排序字段的联合索引：</p>
+
+  <div class="code-block">
+    <div class="code-header"><span>SQL</span><span class="lang">DDL</span></div>
+<pre class="sql"><code><span class="cmt">-- 联合索引：等值在前，范围在中，排序在后</span>
+<span class="kw">ALTER TABLE</span> <span class="tbl">t_order</span>
+  <span class="kw">ADD INDEX</span> idx_uid_time_status (user_id, create_time, status)<span class="op">;</span>
+
+<span class="cmt">-- 删除冗余的单列索引（已被联合索引覆盖）</span>
+<span class="kw">ALTER TABLE</span> <span class="tbl">t_order</span> <span class="kw">DROP INDEX</span> idx_user_id<span class="op">;</span></code></pre>
+  </div>
+
+  <p>再次 EXPLAIN：</p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>type</th><th>key</th><th>key_len</th><th>rows</th><th>Extra</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code style="color:#3fb950">range</code></td>
+          <td><code>idx_uid_time_status</code></td>
+          <td><code>12</code></td>
+          <td><code style="color:#3fb950">320</code></td>
+          <td><code style="color:#3fb950">Using index condition</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>效果立竿见影：<strong>扫描行数从 12800 降到 320（40 倍提升）</strong>，filesort 消失，执行时间从 800ms 降到 8ms。</p>
+</section>
+
+<!-- ========== 索引失效场景 ========== -->
+<section>
+  <h2><span class="num">4</span>六大常见索引失效场景</h2>
+
+  <h3>① 对索引列使用函数或运算</h3>
+  <div class="code-block">
+    <div class="code-header"><span>反面 vs 正面</span><span class="lang">SQL</span></div>
+<pre class="sql"><code><span class="cmt">-- ❌ 失效：函数包裹索引列</span>
+<span class="kw">WHERE</span> <span class="fn">YEAR</span>(create_time) <span class="op">=</span> <span class="num-lit">2026</span>
+<span class="kw">WHERE</span> <span class="fn">DATE</span>(create_time) <span class="op">=</span> <span class="str">'2026-08-14'</span>
+
+<span class="cmt">-- ✅ 正确：改写为范围查询</span>
+<span class="kw">WHERE</span> create_time <span class="op">&gt;=</span> <span class="str">'2026-01-01'</span> <span class="kw">AND</span> create_time <span class="op">&lt;</span> <span class="str">'2027-01-01'</span>
+<span class="kw">WHERE</span> create_time <span class="op">&gt;=</span> <span class="str">'2026-08-14 00:00:00'</span>
+  <span class="kw">AND</span> create_time <span class="op">&lt;</span>  <span class="str">'2026-08-15 00:00:00'</span></code></pre>
+  </div>
+
+  <h3>② 隐式类型转换</h3>
+  <div class="code-block">
+    <div class="code-header"><span>字符串列的陷阱</span><span class="lang">SQL</span></div>
+<pre class="sql"><code><span class="cmt">-- phone 是 VARCHAR，传入整型 → MySQL 给列加 CAST → 索引失效</span>
+<span class="kw">WHERE</span> phone <span class="op">=</span> <span class="num-lit">13800138000</span>     <span class="cmt">-- ❌ 全表扫描</span>
+
+<span class="cmt">-- 加引号，类型一致，索引生效</span>
+<span class="kw">WHERE</span> phone <span class="op">=</span> <span class="str">'13800138000'</span>  <span class="cmt">-- ✅ 走索引</span></code></pre>
+  </div>
+
+  <h3>③ 最左前缀原则被破坏</h3>
+  <p>对于联合索引 <code>(a, b, c)</code>：</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>查询条件</th><th>能否用索引</th><th>用了哪些字段</th></tr></thead>
+      <tbody>
+        <tr><td><code>WHERE a=?</code></td><td style="color:#3fb950">✅</td><td>a</td></tr>
+        <tr><td><code>WHERE a=? AND b=?</code></td><td style="color:#3fb950">✅</td><td>a, b</td></tr>
+        <tr><td><code>WHERE a=? AND b=? AND c=?</code></td><td style="color:#3fb950">✅</td><td>a, b, c</td></tr>
+        <tr><td><code>WHERE b=? AND c=?</code></td><td style="color:#f85149">❌</td><td>无（缺最左 a）</td></tr>
+        <tr><td><code>WHERE a=? AND c=?</code></td><td style="color:#d29922">⚠️</td><td>只用 a（中间断开）</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>④ LIKE 以通配符开头</h3>
+  <div class="code-block">
+<pre class="sql"><code><span class="kw">WHERE</span> name <span class="kw">LIKE</span> <span class="str">'%张'</span>     <span class="cmt">-- ❌ 索引失效</span>
+<span class="kw">WHERE</span> name <span class="kw">LIKE</span> <span class="str">'%张%'</span>    <span class="cmt">-- ❌ 索引失效</span>
+<span class="kw">WHERE</span> name <span class="kw">LIKE</span> <span class="str">'张%'</span>     <span class="cmt">-- ✅ 走索引（前缀匹配）</span></code></pre>
+  </div>
+  <p><strong>解法</strong>：全文检索（FULLTEXT）、ES、或冗余一个反向字符串列。</p>
+
+  <h3>⑤ OR 条件中存在非索引列</h3>
+  <div class="code-block">
+<pre class="sql"><code><span class="cmt">-- 假设 id 有索引，remark 无索引</span>
+<span class="kw">WHERE</span> id <span class="op">=</span> <span class="num-lit">1</span> <span class="kw">OR</span> remark <span class="op">=</span> <span class="str">'xxx'</span>  <span class="cmt">-- ❌ 整条 SQL 全表扫描</span>
+
+<span class="cmt">-- 改为 UNION ALL，两部分各自走索引</span>
+<span class="kw">SELECT</span> ... <span class="kw">WHERE</span> id <span class="op">=</span> <span class="num-lit">1</span>
+<span class="kw">UNION ALL</span>
+<span class="kw">SELECT</span> ... <span class="kw">WHERE</span> remark <span class="op">=</span> <span class="str">'xxx'</span> <span class="kw">AND</span> id <span class="op">&lt;&gt;</span> <span class="num-lit">1</span></code></pre>
+  </div>
+
+  <h3>⑥ 数据分布严重倾斜</h3>
+  <p>当优化器判断某个值会命中<strong>超过约 30% 的行</strong>时，会主动放弃索引改走全表扫描（因为全表扫描是顺序 IO，比随机回表更快）。这是优化器的聪明之处，但也常让开发者困惑。可以通过 <code>FORCE INDEX</code> 强制，但<strong>通常应相信优化器</strong>。</p>
+
+  <div class="callout tip">
+    <div class="title">💡 排障速查口诀</div>
+    <p><strong>函数包列、类型隐转、最左缺失、左模糊、OR 含非索引、分布倾斜</strong>——遇到慢查询，按这六条逐一排查，命中率 90%+。</p>
+  </div>
+</section>
+
+<!-- ========== 架构权衡 ========== -->
+<section>
+  <h2><span class="num">5</span>架构师视角：索引设计的权衡</h2>
+
+  <h3>选型决策框架</h3>
+  <div class="callout">
+    <div class="title">🎯 建索引前问自己三个问题</div>
+    <ol style="margin-bottom:0">
+      <li><strong>基数（Cardinality）</strong>：该列有多少不同值？性别只有 2 个值，建索引意义不大；订单号唯一，必须建。</li>
+      <li><strong>查询频率</strong>：每天被查 10 万次的字段 vs 每月查一次的字段，优先级天差地别。</li>
+      <li><strong>写读比</strong>：索引加速读但拖慢写。高写入表（如日志）要克制建索引；高读低写表可多建。</li>
+    </ol>
+  </div>
+
+  <h3>容量与成本估算</h3>
+  <p>每增加一个二级索引，会带来：</p>
+  <ul>
+    <li><strong>存储成本</strong>：索引大小约为表数据的 20%-80%（取决于列宽）</li>
+    <li><strong>写入开销</strong>：每次 INSERT/UPDATE/DELETE 都要同步维护所有索引</li>
+    <li><strong>内存占用</strong>：Buffer Pool 需要缓存索引页，过多索引会挤占数据页缓存</li>
+  </ul>
+  <p><strong>经验值</strong>：单表索引数量建议 ≤ 5 个，联合索引字段数 ≤ 5 个。超过这个量级，应该考虑<em>分表或引入搜索引擎</em>。</p>
+
+  <h3>覆盖索引：避免回表的终极武器</h3>
+  <div class="code-block">
+    <div class="code-header"><span>覆盖索引示例</span><span class="lang">SQL</span></div>
+<pre class="sql"><code><span class="cmt">-- 索引 idx_uid_status (user_id, status)</span>
+<span class="cmt">-- 查询只需要的列都在索引里 → 直接从索引树返回，无需回表</span>
+<span class="kw">SELECT</span> user_id, status <span class="kw">FROM</span> <span class="tbl">t_order</span> <span class="kw">WHERE</span> user_id <span class="op">=</span> <span class="num-lit">10086</span><span class="op">;</span>
+<span class="cmt">-- Extra 会显示 "Using index" → 完美</span>
+
+<span class="cmt">-- 反例：SELECT * 必然回表</span>
+<span class="kw">SELECT</span> <span class="op">*</span> <span class="kw">FROM</span> <span class="tbl">t_order</span> <span class="kw">WHERE</span> user_id <span class="op">=</span> <span class="num-lit">10086</span><span class="op">;</span></code></pre>
+  </div>
+  <div class="callout warn">
+    <div class="title">⚠️ 生产铁律</div>
+    <p>线上严禁 <code>SELECT *</code>！这是索引优化中最简单也最容易被忽视的一条。只查需要的列，能走覆盖索引就走覆盖索引，性能差距可能达到 10 倍以上。</p>
+  </div>
+</section>
+
+<!-- ========== 实战检查清单 ========== -->
+<section>
+  <h2><span class="num">6</span>生产实战检查清单</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th width="30%">检查项</th><th>命令 / 做法</th></tr></thead>
+      <tbody>
+        <tr><td>开启慢查询日志</td><td><code>SET GLOBAL slow_query_log = ON; long_query_time = 1;</code></td></tr>
+        <tr><td>定期分析慢日志</td><td><code>pt-query-digest slow.log</code>（Percona Toolkit）</td></tr>
+        <tr><td>查看索引使用情况</td><td><code>SELECT * FROM sys.schema_unused_indexes;</code></td></tr>
+        <tr><td>查找冗余索引</td><td><code>SELECT * FROM sys.schema_redundant_indexes;</code></td></tr>
+        <tr><td>实时查看正在执行的 SQL</td><td><code>SHOW PROCESSLIST;</code> 或 <code>information_schema.processlist</code></td></tr>
+        <tr><td>强制使用特定索引（慎用）</td><td><code>SELECT ... FROM t FORCE INDEX(idx_xxx) WHERE ...</code></td></tr>
+        <tr><td>大表加索引</td><td>使用 <code>ALGORITHM=INPLACE, LOCK=NONE</code>（Online DDL），或 <code>gh-ost</code> / <code>pt-osc</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout danger">
+    <div class="title">🚫 大表加索引的坑</div>
+    <p>千万级表上直接 <code>ALTER TABLE ADD INDEX</code> 在 MySQL 5.6 之前会全程锁表。即使是 MySQL 8.0 的 Online DDL，超大表（亿级）仍建议使用 <strong>gh-ost</strong>（GitHub 开源）或 <strong>pt-online-schema-change</strong>，它们通过 binlog 复制 + 影子表实现零停机变更。</p>
+  </div>
+</section>
+
+<!-- ========== 今日要点 ========== -->
+<section>
+  <div class="summary-card">
+    <h3>📌 今日要点小结</h3>
+    <ol>
+      <li><strong>索引本质是 B+ 树</strong>：3 层可索引 2000 万行，"千万级慢"通常是使用问题，不是结构问题。</li>
+      <li><strong>EXPLAIN 是第一诊断工具</strong>：盯紧 <code>type</code>、<code>key</code>、<code>rows</code>、<code>Extra</code>，<code>Using filesort</code> 和 <code>Using temporary</code> 是红色警报。</li>
+      <li><strong>六大失效场景</strong>：函数包列、隐式类型转换、破坏最左前缀、左模糊、OR 含非索引列、数据分布倾斜。</li>
+      <li><strong>联合索引设计三原则</strong>：等值在前、范围在中、排序在后；遵循最左前缀；尽量覆盖查询。</li>
+      <li><strong>架构师权衡</strong>：单表索引 ≤ 5 个，禁止 <code>SELECT *</code>，高写入表克制建索引，亿级表用 gh-ost 做变更。</li>
+    </ol>
+  </div>
+</section>
+
+<!-- ========== 思考题 ========== -->
+<section>
+  <h2><span class="num">7</span>🧠 架构师思考题</h2>
+  <p>选一两道深入思考，把今天的知识内化为架构判断力。</p>
+
+  <details>
+    <summary>思考题 1：联合索引 (a, b, c) 下，这些查询分别用了索引的哪些字段？为什么？</summary>
+    <div class="answer">
+      <p>给出 5 个查询，逐一分析 <code>key_len</code> 和索引利用情况：</p>
+
+      <h4>查询 A：WHERE a = 1 AND b = 2 AND c = 3</h4>
+      <p><strong style="color:#3fb950">完整使用 a, b, c</strong>。三个字段都是等值匹配，且顺序与索引一致。如果 SELECT 的列也在索引内，会触发<strong>覆盖索引</strong>，Extra 显示 <code>Using index</code>。</p>
+
+      <h4>查询 B：WHERE a = 1 AND c = 3</h4>
+      <p><strong>只使用 a</strong>（中间断了 b）。这是<strong>索引截断</strong>现象。MySQL 8.0.13 之后引入了 <em>Index Skip Scan</em>（跳跃扫描优化），当 a 的不同值很少时（如枚举字段），可能仍能利用 b/c，但这属于优化器的特殊处理，不是通用情况。生产中应避免这种写法，必要时重建索引为 (a, c)。</p>
+
+      <h4>查询 C：WHERE a = 1 AND b &gt; 10 AND c = 3</h4>
+      <p><strong>使用 a 和 b，c 失效</strong>。因为 b 是范围查询，范围查询之后的字段无法走索引（B+ 树无法继续精确定位）。这是<strong>"范围之后失效"</strong>规则，也是为什么联合索引要把范围字段放最后。</p>
+
+      <h4>查询 D：WHERE b = 2 AND c = 3</h4>
+      <p><strong>索引完全失效</strong>（除非 Index Skip Scan）。因为缺少最左列 a，B+ 树无法从根节点定位入口。可改为 <code>UNION</code> 拆分，或为 (b, c) 单独建索引。</p>
+
+      <h4>查询 E：WHERE a = 1 ORDER BY b, c</h4>
+      <p><strong>使用 a 做过滤，b/c 用于排序</strong>，Extra 不会出现 <code>Using filesort</code>。这是联合索引最优雅的用法——<em>把 ORDER BY 字段纳入索引</em>，让 B+ 树天然有序，省去排序步骤。</p>
+
+      <h4>架构师总结</h4>
+      <p>联合索引的设计本质是<strong>为最频繁的查询模式"量身定制"</strong>。拿到一组 SQL 后，先列出所有 WHERE、ORDER BY、GROUP BY 字段，统计出现频率，再用"等值在前、范围在中、排序在后"的原则组合。一个设计良好的联合索引，往往能覆盖 70%+ 的业务查询。</p>
+    </div>
+  </details>
+
+  <details>
+    <summary>思考题 2：一个 5 亿行订单表，按 user_id 查询近一年订单很慢，加索引还是慢，怎么办？</summary>
+    <div class="answer">
+      <p>这是典型的<strong>单表数据量瓶颈</strong>场景，单纯加索引已无法解决，需要从架构层面思考。</p>
+
+      <h4>第一步：确认瓶颈根因</h4>
+      <p>先 EXPLAIN 看 <code>rows</code> 字段。如果即使走了 <code>idx_user_id_create_time</code>，<code>rows</code> 仍然显示几十万，说明<strong>单个用户的订单量本身就很大</strong>（比如大客户一年几十万单），这时索引筛选后仍需大量回表和排序。</p>
+
+      <h4>第二步：分层解决方案（按成本递增）</h4>
+      <p><strong style="color:#3fb950">方案 A · 冷热分离（推荐首选，成本低）</strong></p>
+      <ul style="margin-bottom:12px">
+        <li>按 <code>create_time</code> 分表：<code>t_order_2024</code>、<code>t_order_2025</code>、<code>t_order_2026</code></li>
+        <li>查询时根据时间范围路由到对应表，近一年数据量直接减少 70%+</li>
+        <li>历史冷数据可迁移到 TiDB / ClickHouse，只保留热数据在 MySQL</li>
+      </ul>
+
+      <p><strong style="color:#3fb950">方案 B · ShardingSphere 分库分表</strong></p>
+      <ul style="margin-bottom:12px">
+        <li>分片键选 <code>user_id</code>，按 hash 或 range 分到 N 个库 M 个表</li>
+        <li>注意：<em>分片键一旦确定不可更改</em>，跨片查询（如按 merchant_id 查）会退化为广播查询</li>
+        <li>需要在应用层引入 ShardingSphere-JDBC（无侵入）或 ShardingSphere-Proxy（数据库代理）</li>
+      </ul>
+
+      <p><strong style="color:#3fb950">方案 C · 引入搜索引擎（复杂查询场景）</strong></p>
+      <ul style="margin-bottom:12px">
+        <li>用 Canal 订阅 binlog，把订单数据同步到 Elasticsearch</li>
+        <li>多维度查询（用户、商户、时间、金额范围）交给 ES，MySQL 只做事务写入</li>
+        <li>代价：数据延迟（秒级）、一致性维护成本、运维复杂度上升</li>
+      </ul>
+
+      <p><strong style="color:#d29922">方案 D · TiDB 直接替换（终极方案）</strong></p>
+      <ul>
+        <li>TiDB 兼容 MySQL 协议，分布式架构天然支持水平扩展</li>
+        <li>适合数据量持续爆炸增长（10 亿+）、且不想改业务代码的场景</li>
+        <li>代价：硬件成本高、需要适应分布式事务延迟、运维团队需要学习</li>
+      </ul>
+
+      <h4>架构师决策树</h4>
+      <p>不要盲目选最先进的方案，按<strong>问题严重程度 → 成本 → 团队能力</strong>排序：</p>
+      <ol style="margin-bottom:0">
+        <li>单表 &lt; 2000 万、慢 SQL 偶发 → <strong>先优化索引和 SQL</strong>（今天的主题）</li>
+        <li>单表 2000 万-1 亿、查询模式固定 → <strong>冷热分离 + 分表</strong></li>
+        <li>单表 &gt; 1 亿、查询维度多变 → <strong>ShardingSphere + ES 双写</strong></li>
+        <li>数据量持续爆炸、团队有 DBA → <strong>迁移 TiDB</strong></li>
+      </ol>
+    </div>
+  </details>
+</section>
+
+</div>
+
+<!-- ========== Footer ========== -->
+<footer>
+  <div class="container">
+    <div class="badge">📚 每日架构师微课程 · 第 03 期</div>
+    <p>明日预告：<strong style="color:var(--accent-cyan)">MySQL 主从复制与读写分离架构</strong></p>
+    <p style="margin-top:8px">技术栈轮换：Spring Cloud Alibaba · MySQL · Redis · Pulsar · TDengine · MinIO · K8s · 架构运维</p>
+  </div>
+</footer>
+
+</body>
+</html>

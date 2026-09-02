@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日架构师微课程 · MySQL 主从复制与读写分离架构 | 2026-08-15</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --card: #161b22;
+    --card2: #1c2333;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --accent2: #f78166;
+    --green: #7ee787;
+    --yellow: #e3b341;
+    --purple: #bc8cff;
+    --red: #ff7b72;
+    --code-bg: #0a0e14;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    line-height: 1.75;
+    font-size: 16px;
+  }
+  .container { max-width: 860px; margin: 0 auto; padding: 0 20px 60px; }
+
+  /* ===== 头部 ===== */
+  header {
+    background: linear-gradient(135deg, #161b22 0%, #1a2233 60%, #0f1b2d 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 40px 20px 32px;
+    text-align: center;
+  }
+  .brand { color: var(--muted); font-size: 13px; letter-spacing: 3px; text-transform: uppercase; margin-bottom: 14px; }
+  h1 { font-size: 26px; font-weight: 700; margin-bottom: 16px; }
+  @media (min-width: 640px) { h1 { font-size: 32px; } }
+  .meta { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; align-items: center; }
+  .tag {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 14px; border-radius: 999px; font-size: 13px;
+    border: 1px solid var(--border); background: var(--card);
+  }
+  .tag.db { color: var(--accent); border-color: rgba(88,166,255,.4); }
+  .tag.date { color: var(--muted); }
+  .tag.time { color: var(--yellow); }
+
+  /* ===== 章节卡片 ===== */
+  section.card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 26px 24px;
+    margin-top: 22px;
+  }
+  .step-label {
+    display: inline-block; font-size: 12px; font-weight: 600; letter-spacing: 1px;
+    color: var(--accent); border: 1px solid rgba(88,166,255,.4);
+    padding: 2px 10px; border-radius: 4px; margin-bottom: 10px;
+  }
+  h2 { font-size: 20px; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+  h3 { font-size: 16px; margin: 18px 0 8px; color: var(--purple); }
+  p { margin-bottom: 12px; color: #c9d1d9; }
+  ul, ol { margin: 0 0 12px 22px; color: #c9d1d9; }
+  li { margin-bottom: 6px; }
+  strong { color: var(--text); }
+  .hl { color: var(--accent); }
+  .hl-g { color: var(--green); }
+  .hl-y { color: var(--yellow); }
+  .hl-r { color: var(--red); }
+  .hl-p { color: var(--purple); }
+
+  /* ===== 代码块 ===== */
+  .code-block {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin: 14px 0;
+    overflow: hidden;
+  }
+  .code-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 8px 14px; background: #161b22; border-bottom: 1px solid var(--border);
+    font-size: 12px; color: var(--muted);
+  }
+  .code-header .lang { color: var(--purple); font-weight: 600; }
+  pre {
+    padding: 14px 16px; overflow-x: auto;
+    font-family: "JetBrains Mono", "Fira Code", Consolas, "Courier New", monospace;
+    font-size: 13px; line-height: 1.65;
+  }
+  @media (max-width: 640px) { pre { font-size: 12px; } }
+  code.inline {
+    background: rgba(88,166,255,.12); color: var(--accent);
+    padding: 1px 6px; border-radius: 4px; font-size: 13.5px;
+    font-family: Consolas, "Courier New", monospace;
+  }
+  .cm  { color: #7d8590; }            /* 注释 */
+  .kw  { color: #ff7b72; }            /* 关键字 */
+  .str { color: #a5d6ff; }            /* 字符串 */
+  .num { color: #79c0ff; }            /* 数字 */
+  .fn  { color: #d2a8ff; }            /* 函数/配置项 */
+  .var { color: #ffa657; }            /* 变量/值 */
+
+  /* ===== 架构图 ===== */
+  .diagram {
+    background: var(--code-bg); border: 1px solid var(--border);
+    border-radius: 8px; padding: 18px 12px; margin: 14px 0;
+    overflow-x: auto; text-align: center;
+  }
+  .diagram svg { max-width: 100%; height: auto; }
+
+  /* ===== 提示框 ===== */
+  .callout {
+    border-left: 3px solid var(--accent);
+    background: rgba(88,166,255,.08);
+    border-radius: 0 8px 8px 0;
+    padding: 12px 16px; margin: 14px 0; font-size: 14.5px; color: #c9d1d9;
+  }
+  .callout.warn { border-color: var(--yellow); background: rgba(227,179,65,.08); }
+  .callout.danger { border-color: var(--red); background: rgba(255,123,114,.08); }
+  .callout b { color: var(--text); }
+
+  /* ===== 表格 ===== */
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+  th { background: var(--card2); color: var(--accent); white-space: nowrap; }
+  td { color: #c9d1d9; }
+
+  /* ===== 要点 & 思考题 ===== */
+  .summary-box {
+    background: linear-gradient(135deg, rgba(88,166,255,.08), rgba(188,140,255,.06));
+    border: 1px solid rgba(88,166,255,.35);
+  }
+  .summary-box h2 { color: var(--green); }
+  .think-box { border-color: rgba(188,140,255,.4); }
+  .think-box h2 { color: var(--purple); }
+  details {
+    background: var(--card2); border: 1px solid var(--border);
+    border-radius: 8px; margin: 12px 0; overflow: hidden;
+  }
+  details summary {
+    cursor: pointer; padding: 14px 18px; font-weight: 600;
+    color: var(--purple); list-style: none; user-select: none;
+    display: flex; align-items: center; gap: 10px;
+  }
+  details summary::before { content: "▸"; transition: transform .2s; color: var(--accent); font-size: 15px; }
+  details[open] summary::before { transform: rotate(90deg); }
+  details summary:hover { background: rgba(188,140,255,.06); }
+  details .answer { padding: 4px 18px 16px; color: #c9d1d9; font-size: 14.5px; }
+  details .answer h4 { color: var(--accent); margin: 12px 0 6px; font-size: 14.5px; }
+
+  footer {
+    text-align: center; color: var(--muted); font-size: 13px;
+    padding: 30px 20px 10px; border-top: 1px solid var(--border); margin-top: 40px;
+  }
+</style>
+</head>
+<body>
+<div style="position:fixed;top:14px;left:14px;z-index:9999;">
+<a href="../index.html" style="display:inline-block;padding:6px 14px;border-radius:999px;background:rgba(20,26,38,.88);color:#7da7ff;font-size:13px;text-decoration:none;border:1px solid rgba(90,130,220,.45);backdrop-filter:blur(4px);font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.35);" onmouseover="this.style.background='rgba(30,40,60,.95)'" onmouseout="this.style.background='rgba(20,26,38,.88)'">← 课程目录</a>
+</div>
+
+
+<header>
+  <div class="brand">DAILY ARCHITECT MICRO-COURSE · 每日架构师微课程 · 第 4 期</div>
+  <h1>MySQL 主从复制与读写分离架构<br><span style="font-size:.6em;color:var(--muted);font-weight:400;">从"一台扛不住"到"横向扩展"的架构演进之路</span></h1>
+  <div class="meta">
+    <span class="tag db">🗄️ MySQL 系列 · 主从复制</span>
+    <span class="tag date">📅 2026-08-15</span>
+    <span class="tag time">⏱️ 预计阅读 10 分钟</span>
+  </div>
+</header>
+
+<div class="container">
+
+<!-- ============ 01 场景导入 ============ -->
+<section class="card">
+  <span class="step-label">SCENARIO · 从实际问题出发</span>
+  <h2>🚨 业务量翻了 10 倍，单库先倒下了</h2>
+  <p>某电商系统大促期间，订单库 QPS 从平时的 800 暴涨到 12000。DBA 观察到三个典型症状：</p>
+  <ul>
+    <li><strong>CPU 飙到 95%+</strong>，其中 80% 以上消耗在<code class="inline">SELECT</code>查询上（商品浏览、订单列表、报表统计）；</li>
+    <li><strong>写操作被拖慢</strong>：下单事务等待行锁的时间从 2ms 涨到 300ms；</li>
+    <li><strong>可用性风险</strong>：单点故障即全站不可用，没有灾备能力。</li>
+  </ul>
+  <p>此时垂直拆库、索引优化都已做过，下一步的自然选择是<strong class="hl">主从复制 + 读写分离</strong>：写走主库，读走从库，把 80% 的读流量剥离出去，同时获得一份实时热备数据。这是架构师必须掌握的<strong>第一级横向扩展手段</strong>——比分库分表轻量得多，且对业务代码侵入小。</p>
+</section>
+
+<!-- ============ 02 原理 ============ -->
+<section class="card">
+  <span class="step-label">PRINCIPLE · 原理讲解</span>
+  <h2>📦 主从复制的本质：Binlog 的搬运与重放</h2>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif">
+    <defs>
+      <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+        <path d="M0,0 L0,6 L9,3 z" fill="#58a6ff"/>
+      </marker>
+      <marker id="arrowg" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+        <path d="M0,0 L0,6 L9,3 z" fill="#7ee787"/>
+      </marker>
+    </defs>
+    <!-- 主库 -->
+    <rect x="20" y="40" width="230" height="220" rx="10" fill="#1c2333" stroke="#f78166" stroke-width="1.5"/>
+    <text x="135" y="68" text-anchor="middle" fill="#f78166" font-size="15" font-weight="bold">主库 Master</text>
+    <rect x="45" y="90" width="180" height="42" rx="6" fill="#0a0e14" stroke="#30363d"/>
+    <text x="135" y="116" text-anchor="middle" fill="#e6edf3" font-size="12.5">事务提交 → 写 Binlog</text>
+    <rect x="45" y="150" width="180" height="42" rx="6" fill="#0a0e14" stroke="#30363d"/>
+    <text x="135" y="176" text-anchor="middle" fill="#d2a8ff" font-size="12.5">Binlog Dump 线程</text>
+    <text x="135" y="225" text-anchor="middle" fill="#8b949e" font-size="11.5">IO Thread (slave) 拉取</text>
+    <text x="135" y="245" text-anchor="middle" fill="#8b949e" font-size="11.5">binlog 事件流</text>
+    <!-- 箭头 master -> relay -->
+    <line x1="250" y1="130" x2="360" y2="130" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="305" y="118" text-anchor="middle" fill="#58a6ff" font-size="11">① 拉取</text>
+    <!-- 从库 -->
+    <rect x="365" y="40" width="230" height="220" rx="10" fill="#1c2333" stroke="#7ee787" stroke-width="1.5"/>
+    <text x="480" y="68" text-anchor="middle" fill="#7ee787" font-size="15" font-weight="bold">从库 Slave</text>
+    <rect x="390" y="90" width="180" height="42" rx="6" fill="#0a0e14" stroke="#30363d"/>
+    <text x="480" y="110" text-anchor="middle" fill="#e6edf3" font-size="12">IO Thread</text>
+    <text x="480" y="126" text-anchor="middle" fill="#e6edf3" font-size="12">写入 Relay Log</text>
+    <rect x="390" y="150" width="180" height="42" rx="6" fill="#0a0e14" stroke="#30363d"/>
+    <text x="480" y="176" text-anchor="middle" fill="#d2a8ff" font-size="12.5">SQL Thread 重放</text>
+    <line x1="480" y1="132" x2="480" y2="148" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="390" y="210" width="180" height="36" rx="6" fill="#0a0e14" stroke="#30363d"/>
+    <text x="480" y="233" text-anchor="middle" fill="#e6edf3" font-size="12">数据最终一致</text>
+    <!-- 应用 -->
+    <rect x="620" y="95" width="125" height="50" rx="8" fill="#1c2333" stroke="#58a6ff" stroke-width="1.5"/>
+    <text x="682" y="116" text-anchor="middle" fill="#58a6ff" font-size="12.5" font-weight="bold">应用层</text>
+    <text x="682" y="133" text-anchor="middle" fill="#e3b341" font-size="11">写 Master / 读 Slave</text>
+    <line x1="620" y1="112" x2="595" y2="112" stroke="#7ee787" stroke-width="2" marker-end="url(#arrowg)"/>
+    <rect x="620" y="180" width="125" height="50" rx="8" fill="#1c2333" stroke="#bc8cff" stroke-width="1.5"/>
+    <text x="682" y="201" text-anchor="middle" fill="#bc8cff" font-size="12.5" font-weight="bold">半同步</text>
+    <text x="682" y="218" text-anchor="middle" fill="#8b949e" font-size="11">至少1个从库ACK</text>
+    <line x1="620" y1="196" x2="595" y2="196" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrow)"/>
+  </svg>
+  </div>
+
+  <h3>三线程协作机制</h3>
+  <ol>
+    <li>主库事务提交时写 <strong class="hl">Binlog</strong>（逻辑日志，记录行变更事件）；</li>
+    <li>从库 <strong class="hl">IO Thread</strong> 连接主库，主库 <strong class="hl">Binlog Dump 线程</strong> 推送 binlog 事件；</li>
+    <li>从库把收到的事件写入本地 <strong class="hl">Relay Log（中继日志）</strong>；</li>
+    <li>从库 <strong class="hl">SQL Thread</strong>（或多线程复制 Worker）重放 Relay Log，数据达成一致。</li>
+  </ol>
+
+  <h3>三种复制模式——架构师的关键选型</h3>
+  <table>
+    <tr><th>模式</th><th>数据安全</th><th>延迟</th><th>适用场景</th></tr>
+    <tr><td><b class="hl-g">异步复制</b>（默认）</td><td>主库不等从库，宕机可能丢数据</td><td>最低</td><td>日志、非核心读扩展</td></tr>
+    <tr><td><b class="hl-y">半同步复制</b></td><td>≥1 个从库 ACK 后才提交成功</td><td>中（增加 RTT）</td><td><b>金融/订单等核心链路推荐</b></td></tr>
+    <tr><td><b class="hl-p">组复制 MGR</b></td><td>基于 Paxos 变种，强一致多数派</td><td>较高</td><td>金融高可用集群</td></tr>
+  </table>
+
+  <div class="callout">
+    <b>Binlog 格式选型：</b>生产环境统一使用 <code class="inline">ROW</code> 格式——基于行镜像复制，主从数据一致性最强，且是 MGR/ Canal 等数据订阅生态的前提。<code class="inline">STATEMENT</code> 格式在 <code class="inline">NOW()</code>、<code class="inline">UUID()</code>、自增等场景下会导致主从不一致。
+  </div>
+
+  <h3>并行复制：解决"重放慢"的关键参数</h3>
+  <p>MySQL 5.7+ 引入<strong class="hl">基于组提交的并行复制（LOGICAL_CLOCK）</strong>，8.0 进一步支持 <code class="inline">WRITESET</code> 无冲突判定，让从库 SQL Thread 多线程重放成为可能：</p>
+
+  <div class="code-block">
+    <div class="code-header"><span>从库 my.cnf — 并行复制提速</span><span class="lang">ini</span></div>
+    <pre><span class="var">slave_parallel_type</span>   = <span class="fn">LOGICAL_CLOCK</span>      <span class="cm"># 按事务组并行（而非库级）</span>
+<span class="var">slave_parallel_workers</span> = <span class="num">16</span>                  <span class="cm"># SQL 重放线程数，一般 8~16</span>
+<span class="var">binlog_transaction_dependency_tracking</span> = <span class="fn">WRITESET</span>  <span class="cm"># 8.0: 行级冲突判定，并行度更高</span>
+<span class="var">relay_log_recovery</span>     = <span class="fn">ON</span>                  <span class="cm"># 从库崩溃后自动恢复 relay log</span></pre>
+  </div>
+</section>
+
+<!-- ============ 03 架构设计 ============ -->
+<section class="card">
+  <span class="step-label">ARCHITECTURE · 架构设计思路</span>
+  <h2>🏗️ 读写分离架构：不只是"读走从库"这么简单</h2>
+
+  <h3>容量规划（先算账，再扩容）</h3>
+  <ul>
+    <li>按<strong>读 QPS ÷ 单库读上限（约按 70% 水位）</strong> 确定从库数量：如总读 12000，单库水位上限 5000，则需 12000/5000 ≈ 3 个读实例（含 1 个冗余）；</li>
+    <li>从库与主库<strong>同规格起步</strong>（重放也消耗资源），纯报表类从库可单独降配 + 限定查询；</li>
+    <li><strong>延迟预算</strong>：核心链路要求复制延迟 &lt; 200ms，超过即触发告警。</li>
+  </ul>
+
+  <h3>路由层的三种实现</h3>
+  <table>
+    <tr><th>方案</th><th>代表</th><th>优点</th><th>坑点</th></tr>
+    <tr><td>客户端驱动</td><td>ShardingSphere-JDBC</td><td>无中间件、性能好</td><td>多语言需各自维护</td></tr>
+    <tr><td>代理层</td><td>ShardingSphere-Proxy / MyCat / ProxySQL</td><td>对业务透明、异构语言友好</td><td>多一跳延迟、代理自身高可用</td></tr>
+    <tr><td>代码注解</td><td> dynamic-datasource + @DS</td><td>灵活、可方法级控制</td><td>侵入业务代码</td></tr>
+  </table>
+
+  <h3>最强坑点：读己之写（Read Your Writes）</h3>
+  <p>用户下单后立即查订单列表——写走主库、读走从库，如果复制延迟 500ms，用户会看到"订单消失了"。三种解法按代价排序：</p>
+  <ol>
+    <li><strong class="hl-g">关键字段强制读主</strong>（推荐）：下单后的 N 秒内、或携带 <code class="inline">orderId</code> 的查询路由主库，用注解标记；</li>
+    <li><strong class="hl-y">会话粘性</strong>：写后短时间窗口内该用户请求固定走主库（注意主库压力）；</li>
+    <li><strong class="hl-r">等待 GTID</strong>：记录写事务的 GTID，读前在从库执行 <code class="inline">SELECT WAIT_FOR_EXECUTED_GTID_SET()</code>——最严谨但实现最重。</li>
+  </ol>
+</section>
+
+<!-- ============ 04 实战 ============ -->
+<section class="card">
+  <span class="step-label">PRACTICE · 实战示例</span>
+  <h2>🔧 从零搭建一主一从 + 半同步 + 注解路由</h2>
+
+  <h3>Step 1：主库配置</h3>
+  <div class="code-block">
+    <div class="code-header"><span>主库 my.cnf [mysqld] 段</span><span class="lang">ini</span></div>
+    <pre><span class="var">server-id</span>         = <span class="num">1</span>
+<span class="var">log_bin</span>           = <span class="fn">mysql-bin</span>
+<span class="var">binlog_format</span>     = <span class="fn">ROW</span>          <span class="cm"># 生产强制 ROW</span>
+<span class="var">binlog_row_image</span>  = <span class="fn">FULL</span>         <span class="cm"># 保留完整前后镜像，便于数据闪回</span>
+<span class="var">gtid_mode</span>         = <span class="fn">ON</span>
+<span class="var">enforce_gtid_consistency</span> = <span class="fn">ON</span>
+<span class="var">sync_binlog</span>       = <span class="num">1</span>            <span class="cm"># 每事务刷盘，双一之一</span>
+<span class="var">innodb_flush_log_at_trx_commit</span> = <span class="num">1</span>
+<span class="cm"># 半同步插件（8.0.26+ 改名 rpl_semi_sync）</span>
+<span class="var">rpl_semi_sync_master_enabled</span>  = <span class="fn">ON</span>
+<span class="var">rpl_semi_sync_master_timeout</span>  = <span class="num">3000</span>  <span class="cm"># 3s 超时降级为异步，防雪崩</span></pre>
+  </div>
+
+  <h3>Step 2：建立复制账号并授权</h3>
+  <div class="code-block">
+    <div class="code-header"><span>主库执行</span><span class="lang">sql</span></div>
+    <pre><span class="kw">CREATE USER</span> <span class="str">'repl'</span>@<span class="str">'192.168.10.%'</span> <span class="kw">IDENTIFIED WITH</span> caching_sha2_password <span class="kw">BY</span> <span class="str">'Strong#Pass123'</span>;
+<span class="kw">GRANT</span> REPLICATION SLAVE <span class="kw">ON</span> *.* <span class="kw">TO</span> <span class="str">'repl'</span>@<span class="str">'192.168.10.%'</span>;
+<span class="kw">SHOW</span> MASTER STATUS\G   <span class="cm"># 记下 binlog 文件名与位点（GTID 模式可跳过）</span></pre>
+  </div>
+
+  <h3>Step 3：从库指向主库（GTID 自动定位）</h3>
+  <div class="code-block">
+    <div class="code-header"><span>从库执行</span><span class="lang">sql</span></div>
+    <pre><span class="kw">CHANGE MASTER TO</span>
+  MASTER_HOST     = <span class="str">'192.168.10.11'</span>,
+  MASTER_USER     = <span class="str">'repl'</span>,
+  MASTER_PASSWORD = <span class="str">'Strong#Pass123'</span>,
+  MASTER_AUTO_POSITION = <span class="num">1</span>;        <span class="cm"># GTID 自动找位点，免手工对 binlog 位点</span>
+<span class="kw">START SLAVE</span>;                            <span class="cm"># 8.0.22+ 推荐 START REPLICA</span>
+<span class="kw">SHOW SLAVE STATUS\G</span>  <span class="cm"># 确认两列均为 Yes：</span>
+<span class="cm">#   Slave_IO_Running: Yes / Slave_SQL_Running: Yes</span>
+<span class="cm">#   Seconds_Behind_Master: 0  ← 核心监控指标</span></pre>
+  </div>
+
+  <h3>Step 4：应用层读写分离（dynamic-datasource）</h3>
+  <div class="code-block">
+    <div class="code-header"><span>pom.xml 依赖</span><span class="lang">xml</span></div>
+    <pre>&lt;<span class="fn">dependency</span>&gt;
+  &lt;<span class="var">groupId</span>&gt;com.baomidou&lt;/<span class="var">groupId</span>&gt;
+  &lt;<span class="var">artifactId</span>&gt;dynamic-datasource-spring-boot3-starter&lt;/<span class="var">artifactId</span>&gt;
+  &lt;<span class="var">version</span>&gt;<span class="num">4.3.0</span>&lt;/<span class="var">version</span>&gt;
+&lt;/<span class="fn">dependency</span>&gt;</pre>
+  </div>
+
+  <div class="code-block">
+    <div class="code-header"><span>application.yml — 一主两从 + 读己之写</span><span class="lang">yaml</span></div>
+    <pre><span class="var">spring</span>:
+  <span class="var">datasource</span>:
+    <span class="var">dynamic</span>:
+      <span class="var">primary</span>: <span class="str">master</span>
+      <span class="var">strict</span>: <span class="str">false</span>
+      <span class="var">datasource</span>:
+        <span class="var">master</span>:
+          <span class="var">url</span>: <span class="str">jdbc:mysql://10.0.0.1:3306/Orders?useSSL=true</span>
+          <span class="var">username</span>: <span class="str">app_wr</span>
+        <span class="var">slave_1</span>:
+          <span class="var">url</span>: <span class="str">jdbc:mysql://10.0.0.2:3306/Orders</span>
+        <span class="var">slave_2</span>:
+          <span class="var">url</span>: <span class="str">jdbc:mysql://10.0.0.3:3306/Orders</span>
+      <span class="var">seata</span>: <span class="str">false</span>
+<span class="cm"># Service 层：@DS("slave_1") 走从库；下单后查询加 @DS("master") 保证读己之写</span></pre>
+  </div>
+
+  <div class="code-block">
+    <div class="code-header"><span>OrderService.java — 读己之写落地</span><span class="lang">java</span></div>
+    <pre><span class="cm">// 写：默认主库</span>
+<span class="kw">@Transactional</span>
+<span class="kw">public</span> <span class="fn">Order</span> <span class="fn">createOrder</span>(OrderDTO dto) {
+    Order order = orderMapper.<span class="fn">insert</span>(<span class="fn">buildOrder</span>(dto));
+    <span class="cm">// 下单后 5 秒内的列表查询走主库（读己之写窗口）</span>
+    redisTemplate.<span class="fn">opsForValue</span>().<span class="fn">set</span>(<span class="str">"readmaster:"</span> + dto.getUserId(),
+                          <span class="str">"1"</span>, Duration.<span class="fn">ofSeconds</span>(<span class="num">5</span>));
+    <span class="kw">return</span> order;
+}
+
+<span class="cm">// 读：默认从库，命中读主标记则切主库</span>
+<span class="kw">@DS</span>(<span class="str">"#session.readMaster ? 'master' : 'slave_1'"</span>)
+<span class="kw">public</span> List&lt;Order&gt; <span class="fn">listMyOrders</span>(Long userId) { ... }</pre>
+  </div>
+
+  <h3>Step 5：排障三连（生产必备）</h3>
+  <div class="code-block">
+    <div class="code-header"><span>复制延迟排查命令</span><span class="lang">bash</span></div>
+    <pre><span class="cm"># 1. 看延迟有多大（持续观察优于一次性）</span>
+$ mysql -e <span class="str">"SHOW SLAVE STATUS\G"</span> | grep -E <span class="str">"Seconds_Behind|Slave_.*_Running"</span>
+
+<span class="cm"># 2. 定位是 IO 慢还是 SQL 重放慢</span>
+$ mysql -e <span class="str">"SELECT * FROM performance_schema.replication_applier_status_by_worker\G"</span>
+
+<span class="cm"># 3. 大事务是延迟头号元凶——找出单事务超大 binlog</span>
+$ mysqlbinlog --base64-output=decode-rows -vv mysql-bin.000123 \
+    | grep -c <span class="str">"^###"</span>   <span class="cm"># 事件行数异常多即大事务，须拆批（单事务建议 &lt; 1000 行）</span></pre>
+  </div>
+
+  <div class="callout danger">
+    <b>经典翻车现场：</b>① 从库上直接写数据 → 主键冲突导致 SQL Thread 卡死，复制中断（修复：<code class="inline">set global read_only=ON; super_read_only=ON</code>，并给从库连接串加只读账号）；② 半同步超时未设 → 从库抖动时主库写入全面阻塞（务必设置 <code class="inline">rpl_semi_sync_master_timeout</code> 自动降级）；③ 只监控进程不监控延迟 → IO/SQL 都 Yes 但延迟 30 分钟，报表读到的全是旧数据。
+  </div>
+</section>
+
+<!-- ============ 05 今日要点 ============ -->
+<section class="card summary-box">
+  <span class="step-label" style="color:var(--green);border-color:rgba(126,231,135,.4);">TAKEAWAYS · 今日要点</span>
+  <h2>✅ 今日要点</h2>
+  <ol>
+    <li><strong>复制本质是 Binlog 的异步搬运与重放</strong>（Dump → IO Thread → Relay Log → SQL Thread），性能瓶颈通常出现在 SQL 重放端，用 <code class="inline">LOGICAL_CLOCK + WRITESET</code> 并行复制破解。</li>
+    <li><strong>核心链路用半同步</strong>（设置超时自动降级防雪崩），非核心用异步；金融级强一致直接上 MGR 组复制。</li>
+    <li><strong>容量规划按读 QPS ÷ 单库水位上限</strong> 计算从库数，从库与主库同规格起步，延迟预算纳入 SLO。</li>
+    <li><strong>读写分离最大的坑是"读己之写"</strong>：写后短窗口强制读主是最实用的工程解。</li>
+    <li><strong>监控盯三样</strong>：<code class="inline">Seconds_Behind_Master</code>、两个 Running 状态、大事务 binlog 行数；从库必须 <code class="inline">read_only + super_read_only</code>。</li>
+  </ol>
+</section>
+
+<!-- ============ 06 思考题 ============ -->
+<section class="card think-box">
+  <span class="step-label" style="color:var(--purple);border-color:rgba(188,140,255,.4);">THINK · 架构师思考题</span>
+  <h2>🧠 架构师思考题</h2>
+
+  <details>
+    <summary>思考题一：主库宕机，半同步从库提升为新主库后，如何处理已提交但未复制到新主库的"丢失事务"？如何在架构上把这种丢失概率降到最低？</summary>
+    <div class="answer">
+      <h4>① 先理解丢失是怎么发生的</h4>
+      <p>半同步在超时（如 3s）后会自动降级为异步。若恰好在"降级窗口"内主库宕机，部分已向客户端返回成功的事务只存在于旧主库的 binlog 中——新主库提升后，这些事务对用户来说"凭空消失"。更隐蔽的是，如果老主库恢复后被直接加回集群，它比新主库多出来的事务会造成<strong>主键冲突或数据分叉</strong>。</p>
+      <h4>② 故障恢复时的标准动作</h4>
+      <ul>
+        <li><strong>旧主库先别急着拉回集群</strong>：用 <code class="inline">mysqlbinlog</code> 或 <code class="inline">gtid_executed</code> 对比新旧主的 GTID 集合，找出差集（旧主多出的事务）；</li>
+        <li>差集事务若为合法业务数据：导出后在新主上人工重放（幂等设计此时是救命稻草）；若是脏数据：跳过并记录审计；</li>
+        <li>旧主库以新数据快照重建（从备份 + binlog PITR，或直接从新主克隆），再以从库身份加回。</li>
+      </ul>
+      <h4>③ 架构上降低丢失概率的手段（按层次）</h4>
+      <ul>
+        <li><strong>半同步 + AFTER_SYNC（lossless semi-sync，8.0 默认）</strong>：ACK 发生在引擎提交前，保证不丢已 ACK 事务，优于旧版 AFTER_COMMIT；</li>
+        <li><strong>双一配置</strong> <code class="inline">sync_binlog=1 + innodb_flush_log_at_trx_commit=1</code>：即使宕机也不丢本地 binlog，为恢复提供完整依据；</li>
+        <li><strong>MGR 多数派</strong>： Paxos 保证多数节点确认才提交，单节点故障天然不丢；代价是写性能与网络要求；</li>
+        <li><strong>业务侧兜底</strong>：关键操作幂等 + 本地消息表/事件溯源，即使底层丢事务也能对账补偿。</li>
+      </ul>
+      <h4>④ 一句话结论</h4>
+      <p>半同步降级窗口的丢失风险无法绝对消除，架构师要做的是：<strong>缩短窗口（AFTER_SYNC）+ 保证可恢复（双一 + GTID 对账）+ 业务可补偿（幂等）</strong>，三者叠加把 RPO 逼近于零。</p>
+    </div>
+  </details>
+
+  <details>
+    <summary>思考题二：从库延迟从 0.1s 持续恶化到 60s，你的系统性排查路径是什么？哪些架构层面的"治本"手段？</summary>
+    <div class="answer">
+      <h4>① 先分诊：延迟在 IO 端还是 SQL 端？</h4>
+      <p>看 <code class="inline">SHOW SLAVE STATUS</code> 三个信号：<code class="inline">Seconds_Behind_Master</code> 波动、<code class="inline">Master_Log_File</code> 与 <code class="inline">Relay_Master_Log_File</code> 的差距、<code class="inline">performance_schema.replication_applier_status_by_worker</code> 中各 worker 的 <code class="inline">LAST_APPLIED_TRANSACTION</code>。若 IO 端延迟（relay log 追不上 master binlog）→ 网络或主库 Dump 线程问题；若 SQL 端积压（relay log 堆积）→ 重放能力不足，<strong>90% 的案例在这一端</strong>。</p>
+      <h4>② SQL 端五大元凶逐项排查</h4>
+      <ol>
+        <li><strong>大事务</strong>：单事务百万行 DELETE/UPDATE，SQL Thread 重放数小时 → 拆成 1000 行一批的循环；</li>
+        <li><strong>从库上的慢查询/锁等待</strong>：报表 SQL 打满从库资源，重放线程拿不到 CPU 或被行锁阻塞 → 查 <code class="inline">performance_schema</code> 的锁等待，报表隔离到专用从库；</li>
+        <li><strong>并行度不足</strong>：主库高并发小事务，从库单线程重放天然跟不上 → <code class="inline">WRITESET + slave_parallel_workers=16</code>；</li>
+        <li><strong>从库硬件降配</strong>：机械盘 vs 主库 NVMe，重放 IO 跟不上 → 从库至少与主库同档 IO 能力；</li>
+        <li><strong>长事务导致锁级联</strong>：主库 10 分钟的大事务持有行锁，从库重放同样持锁阻塞后续可并行事务。</li>
+      </ol>
+      <h4>③ 架构层"治本"手段</h4>
+      <ul>
+        <li><strong>读写分组隔离</strong>：核心读从库（强同步要求）与报表/统计从库物理隔离，互不拖累；</li>
+        <li><strong>应用层延迟感知路由</strong>：中间件检查 <code class="inline">Seconds_Behind_Master</code> 超阈值（如 1s）自动把读切回主库，牺牲主库压力换一致性；</li>
+        <li><strong>写入端治理</strong>：事务大小纳入开发规范（单事务 ≤1000 行 / ≤10MB binlog），大任务改用 <code class="inline">pt-archiver</code> 分批；</li>
+        <li><strong>终极形态</strong>：读压力继续增长时，引入二级架构——分库分表（ShardingSphere）或把纯查询下沉到 ES/ClickHouse，让 MySQL 专注事务本身。</li>
+      </ul>
+      <h4>④ 一句话结论</h4>
+      <p>排查遵循<strong>"先定位端（IO/SQL）→ 再找元凶（大事务/锁/并行度/硬件）→ 后治架构（隔离/路由/写入治理）"</strong>；延迟不是 DBA 一个人的战斗，而是写入规范 + 资源规划 + 路由策略的系统性工程。</p>
+    </div>
+  </details>
+</section>
+
+<footer>
+  每日架构师微课程 · MySQL 系列第 2 讲 · 下一期预告：ShardingSphere 分库分表实战<br>
+  内部学习资料 · 仅供交流使用
+</footer>
+
+</div>
+</body>
+</html>

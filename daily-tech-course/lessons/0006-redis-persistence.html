@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 6 期 · Redis 持久化机制：RDB vs AOF 的架构权衡 — 2026-08-17</title>
+<style>
+:root{
+  --bg:#0d1117;
+  --bg-card:#161b22;
+  --bg-card2:#1c2330;
+  --border:#2d333b;
+  --text:#c9d1d9;
+  --text-strong:#e6edf3;
+  --text-muted:#8b949e;
+  --accent:#ff6188;
+  --accent2:#a9dc76;
+  --accent3:#78dce8;
+  --code-bg:#0a0e14;
+  --warn-bg:rgba(255,159,67,.12);
+  --warn-border:#ff9f43;
+  --tip-bg:rgba(169,220,118,.1);
+  --tip-border:#a9dc76;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  background:var(--bg);
+  color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  line-height:1.75;
+  font-size:16px;
+}
+.wrap{max-width:860px;margin:0 auto;padding:24px 16px 64px}
+
+/* ===== Hero ===== */
+.hero{
+  background:linear-gradient(135deg,#1a1016 0%,#161b22 55%,#101820 100%);
+  border:1px solid var(--border);
+  border-radius:16px;
+  padding:36px 28px;
+  margin-bottom:28px;
+  position:relative;
+  overflow:hidden;
+}
+.hero::before{
+  content:"";
+  position:absolute;top:-60px;right:-60px;
+  width:220px;height:220px;border-radius:50%;
+  background:radial-gradient(circle,rgba(255,97,136,.18),transparent 70%);
+}
+.hero .series{color:var(--accent);font-weight:600;font-size:.85rem;letter-spacing:.12em;text-transform:uppercase;margin-bottom:10px}
+.hero h1{color:var(--text-strong);font-size:1.7rem;line-height:1.4;margin-bottom:16px}
+.meta{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.tag{
+  display:inline-flex;align-items:center;gap:6px;
+  background:var(--bg-card2);border:1px solid var(--border);
+  color:var(--text-muted);border-radius:999px;
+  padding:4px 14px;font-size:.82rem;
+}
+.tag b{color:var(--text-strong);font-weight:600}
+.tag.redis{border-color:rgba(255,97,136,.45);color:#ff9db6}
+.tag.redis b{color:#ff9db6}
+
+/* ===== Section ===== */
+.section{
+  background:var(--bg-card);
+  border:1px solid var(--border);
+  border-radius:16px;
+  padding:28px;
+  margin-bottom:22px;
+}
+.section h2{
+  color:var(--text-strong);font-size:1.22rem;
+  padding-left:14px;border-left:4px solid var(--accent);
+  margin-bottom:18px;line-height:1.5;
+}
+.section h3{
+  color:var(--text-strong);font-size:1.02rem;
+  margin:22px 0 10px;
+}
+.section h3::before{content:"◆ ";color:var(--accent);font-size:.8em}
+p{margin-bottom:12px}
+p:last-child{margin-bottom:0}
+strong{color:var(--text-strong)}
+em{color:var(--accent3);font-style:normal}
+a{color:var(--accent3)}
+
+/* ===== Code ===== */
+pre{
+  background:var(--code-bg);
+  border:1px solid var(--border);
+  border-radius:10px;
+  padding:16px 18px;
+  overflow-x:auto;
+  font-size:.84rem;line-height:1.7;
+  margin:14px 0;
+  font-family:"Cascadia Code","JetBrains Mono",Consolas,"Courier New",monospace;
+}
+code{font-family:inherit}
+p code,li code,td code{
+  background:rgba(110,118,129,.18);
+  border-radius:5px;padding:2px 7px;
+  color:var(--accent3);font-size:.86em;
+}
+.cm{color:#7f8c98}          /* comment */
+.kw{color:#ff6188}          /* keyword */
+.st{color:#a9dc76}          /* string */
+.nm{color:#78dce8}          /* number/func */
+.op{color:#ffd580}          /* param/option */
+
+/* ===== Lists ===== */
+ul,ol{padding-left:22px;margin-bottom:12px}
+li{margin-bottom:6px}
+li::marker{color:var(--accent)}
+
+/* ===== Callout ===== */
+.callout{
+  border-radius:12px;padding:16px 18px;
+  margin:16px 0;font-size:.94rem;
+  border-left:4px solid;
+}
+.callout.warn{background:var(--warn-bg);border-color:var(--warn-border)}
+.callout.warn .t{color:#ffb56b}
+.callout.tip{background:var(--tip-bg);border-color:var(--tip-border)}
+.callout.tip .t{color:var(--accent2)}
+.callout .t{font-weight:700;display:block;margin-bottom:6px;font-size:.9rem}
+
+/* ===== Architecture diagram ===== */
+.diagram{
+  background:var(--code-bg);
+  border:1px dashed var(--border);
+  border-radius:12px;padding:20px 14px;
+  margin:16px 0;
+  overflow-x:auto;
+}
+.arch{display:flex;flex-direction:column;gap:14px;min-width:520px}
+.row{display:flex;gap:12px;align-items:stretch}
+.box{
+  flex:1;background:var(--bg-card2);
+  border:1px solid var(--border);border-radius:10px;
+  padding:12px 14px;text-align:center;
+}
+.box .t{font-weight:700;color:var(--text-strong);font-size:.92rem;margin-bottom:4px}
+.box .d{color:var(--text-muted);font-size:.78rem;line-height:1.55}
+.box.hl{border-color:rgba(255,97,136,.55);background:rgba(255,97,136,.08)}
+.box.hl .t{color:#ff9db6}
+.box.gr{border-color:rgba(169,220,118,.5);background:rgba(169,220,118,.07)}
+.box.gr .t{color:var(--accent2)}
+.arrow{color:var(--text-muted);font-size:1.2rem;display:flex;align-items:center;justify-content:center}
+.dlabel{text-align:center;color:var(--text-muted);font-size:.78rem;margin-top:-6px}
+
+/* ===== Comparison table ===== */
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:.88rem}
+th,td{border:1px solid var(--border);padding:10px 12px;text-align:left;vertical-align:top}
+th{background:var(--bg-card2);color:var(--text-strong);font-weight:600}
+td{color:var(--text)}
+tr:nth-child(even) td{background:rgba(255,255,255,.015)}
+td .win{color:var(--accent2);font-weight:600}
+td .lose{color:#ff8a9b}
+
+/* ===== Summary cards ===== */
+.summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:6px}
+.sum-card{
+  background:var(--bg-card2);border:1px solid var(--border);
+  border-radius:12px;padding:16px;
+}
+.sum-card .n{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:26px;height:26px;border-radius:50%;
+  background:rgba(255,97,136,.15);color:var(--accent);
+  font-weight:700;font-size:.85rem;margin-bottom:8px;
+}
+.sum-card .t{color:var(--text-strong);font-weight:600;font-size:.95rem;margin-bottom:6px}
+.sum-card .d{color:var(--text-muted);font-size:.85rem;line-height:1.65}
+
+/* ===== Q&A collapsible ===== */
+details{
+  background:var(--bg-card2);
+  border:1px solid var(--border);
+  border-radius:12px;
+  padding:0;
+  margin-bottom:14px;
+  overflow:hidden;
+}
+details summary{
+  cursor:pointer;padding:16px 20px;
+  color:var(--text-strong);font-weight:600;font-size:.95rem;
+  list-style:none;display:flex;align-items:flex-start;gap:10px;
+  transition:background .15s;
+}
+details summary::-webkit-details-marker{display:none}
+details summary:hover{background:rgba(255,255,255,.03)}
+details summary .q-mark{
+  color:var(--accent);font-weight:800;flex-shrink:0;
+}
+details summary .chev{margin-left:auto;color:var(--text-muted);transition:transform .2s;flex-shrink:0}
+details[open] summary .chev{transform:rotate(90deg)}
+details .answer{
+  padding:4px 20px 18px 42px;
+  border-top:1px dashed var(--border);
+  padding-top:14px;
+  font-size:.92rem;
+}
+details .answer h4{color:var(--accent3);font-size:.9rem;margin:14px 0 6px}
+details .answer p{margin-bottom:10px}
+details .answer ul{margin-bottom:10px}
+
+/* ===== Footer ===== */
+.footer{
+  text-align:center;color:var(--text-muted);
+  font-size:.8rem;margin-top:36px;
+  padding-top:20px;border-top:1px solid var(--border);
+}
+.footer b{color:var(--text)}
+
+/* ===== Responsive ===== */
+@media(max-width:640px){
+  .hero{padding:26px 18px}
+  .hero h1{font-size:1.35rem}
+  .section{padding:20px 16px}
+  pre{font-size:.78rem;padding:12px}
+  table{font-size:.8rem}
+  th,td{padding:8px}
+  .row{flex-direction:row}
+}
+</style>
+</head>
+<body>
+<div style="position:fixed;top:14px;left:14px;z-index:9999;">
+<a href="../index.html" style="display:inline-block;padding:6px 14px;border-radius:999px;background:rgba(20,26,38,.88);color:#7da7ff;font-size:13px;text-decoration:none;border:1px solid rgba(90,130,220,.45);backdrop-filter:blur(4px);font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.35);" onmouseover="this.style.background='rgba(30,40,60,.95)'" onmouseout="this.style.background='rgba(20,26,38,.88)'">← 课程目录</a>
+</div>
+
+<div class="wrap">
+
+<!-- ============ HERO ============ -->
+<header class="hero">
+  <div class="series">每日架构师微课程 · 第 6 期</div>
+  <h1>Redis 持久化机制：RDB vs AOF 的架构权衡</h1>
+  <div class="meta">
+    <span class="tag">📅 <b>2026-08-17</b>（周一）</span>
+    <span class="tag redis">⚡ Redis 系列 · 第 2 讲</span>
+    <span class="tag">⏱ 预计阅读 <b>10 分钟</b></span>
+    <span class="tag">🎯 持久化 / RDB / AOF / 混合持久化</span>
+  </div>
+</header>
+
+<!-- ============ 1. 场景引入 ============ -->
+<section class="section">
+  <h2>一、从一个真实的故障场景说起</h2>
+  <p>凌晨 2 点，某电商平台的缓存集群主节点因宿主机内存故障宕机。哨兵 30 秒内完成了主从切换，业务看似无感。但 5 分钟后，运营侧反馈：<strong>商品详情页的库存计数全部归零</strong>。排查后发现，该集群只开了 RDB 快照，最后一次成功快照是 <em>29 分钟前</em>，切换后从库基于旧快照提供服务，近 30 分钟的库存变更全部丢失。</p>
+  <p>这个案例引出今天要回答的核心问题：</p>
+  <ul>
+    <li><strong>RDB 和 AOF 各自的原理与代价是什么？</strong></li>
+    <li><strong>什么业务场景必须用 AOF，什么场景 RDB 就够？</strong></li>
+    <li><strong>Redis 7 的混合持久化解决了什么问题？</strong></li>
+    <li><strong>作为架构师，如何做容量规划和参数权衡？</strong></li>
+  </ul>
+  <div class="callout warn">
+    <span class="t">⚠️ 架构师的第一性原理</span>
+    Redis 的持久化<em>不是</em>为了替代 MySQL，而是为了<strong>缩短故障后的恢复窗口</strong>。先明确"你能容忍丢多少数据"（RPO），再谈选型——这是所有权衡的出发点。
+  </div>
+</section>
+
+<!-- ============ 2. RDB 原理 ============ -->
+<section class="section">
+  <h2>二、RDB 快照：某一时刻的全量内存镜像</h2>
+  <h3>核心机制：fork + 写时复制（COW）</h3>
+  <p>RDB 通过 <code>BGSAVE</code> 生成紧凑的二进制快照文件。主进程 <code>fork()</code> 出子进程，子进程遍历内存生成 RDB；期间主进程继续服务写请求，依赖操作系统的<em>写时复制</em>（Copy-On-Write）保证父子进程内存隔离。</p>
+
+  <div class="diagram">
+    <div class="arch">
+      <div class="row">
+        <div class="box hl">
+          <div class="t">Redis 主进程</div>
+          <div class="d">持续处理读写命令<br>响应客户端请求</div>
+        </div>
+        <div class="arrow">→ fork() →</div>
+        <div class="box">
+          <div class="t">子进程 bgsave</div>
+          <div class="d">遍历全量数据<br>生成紧凑二进制 RDB</div>
+        </div>
+        <div class="arrow">→ 写入 →</div>
+        <div class="box gr">
+          <div class="t">dump.rdb</div>
+          <div class="d">全量快照文件<br>恢复快 · 文件小</div>
+        </div>
+      </div>
+      <div class="dlabel">写时复制（COW）：主进程修改某页数据时，OS 才复制该内存页 → 子进程看到的是 fork 瞬间的数据视图</div>
+    </div>
+  </div>
+
+  <h3>触发方式与关键配置</h3>
+  <pre><code><span class="cm"># redis.conf — 自动触发条件（任一满足即 BGSAVE）</span>
+<span class="op">save</span> <span class="nm">3600</span> <span class="nm">1</span>      <span class="cm"># 1 小时内至少 1 次修改</span>
+<span class="op">save</span> <span class="nm">300</span> <span class="nm">100</span>    <span class="cm"># 5 分钟内至少 100 次修改</span>
+<span class="op">save</span> <span class="nm">60</span>  <span class="nm">10000</span>  <span class="cm"># 1 分钟内至少 10000 次修改</span>
+
+<span class="op">stop-writes-on-bgsave-error</span> <span class="nm">yes</span>  <span class="cm"># 快照失败时拒绝写入（保护数据一致性的兜底）</span>
+<span class="op">rdbcompression</span> <span class="nm">yes</span>            <span class="cm"># LZF 压缩，CPU 换磁盘空间</span>
+
+<span class="cm"># 手动触发</span>
+<span class="op">redis-cli</span> <span class="nm">BGSAVE</span>   <span class="cm"># 异步，生产环境用这个</span>
+<span class="op">redis-cli</span> <span class="nm">SAVE</span>     <span class="cm"># ⚠️ 同步阻塞主线程，生产禁用</span></code></pre>
+
+  <div class="callout warn">
+    <span class="t">⚠️ 生产坑点：fork 的隐形成本</span>
+    <p><strong>1. fork 瞬间阻塞</strong>：实例越大，页表复制越慢。16GB 实例 fork 耗时约 100~200ms，期间所有请求排队——大实例抖动的常见元凶。</p>
+    <p><strong>2. COW 内存放大</strong>：bgsave 期间若写入量大，被复制的内存页会额外占内存。极端情况下（全量热数据被改写）内存占用翻倍，触发 OOM 或 maxmemory 驱逐。经验值：<em>bgsave 期间预留 20%~30% 内存余量</em>。</p>
+    <p><strong>3. 云上机器关 THP 需谨慎</strong>：透明大页（THP）会让 fork 延迟放大 2~5 倍，但关闭后常规内存操作开销略增，需压测评估。</p>
+  </div>
+</section>
+
+<!-- ============ 3. AOF 原理 ============ -->
+<section class="section">
+  <h2>三、AOF 日志：先执行后记录的命令流</h2>
+  <h3>核心机制：写前执行 + 三种 fsync 策略</h3>
+  <p>AOF 以 RESP 协议格式<em>追加</em>每一条写命令。与传统 WAL（先写日志后执行）相反，Redis 是<strong>先执行命令、成功后才写 AOF</strong>——日志里天然没有语法错误，恢复时逐条重放即可，无需回滚机制。</p>
+
+  <div class="diagram">
+    <div class="arch">
+      <div class="row">
+        <div class="box hl"><div class="t">① 客户端写命令</div><div class="d">SET k v / INCR ctr</div></div>
+        <div class="arrow">→</div>
+        <div class="box"><div class="t">② 主进程执行</div><div class="d">修改内存数据</div></div>
+        <div class="arrow">→</div>
+        <div class="box"><div class="t">③ 追加 aof_buf</div><div class="d">协议格式化后进入缓冲区</div></div>
+        <div class="arrow">→</div>
+        <div class="box gr"><div class="t">④ fsync 策略</div><div class="d">always / everysec / no</div></div>
+      </div>
+      <div class="dlabel">everysec 策略下：后台线程每秒 fsync 一次 → 最多丢 1 秒数据（主线程阻塞时后台线程会主动上报并放弃本次 fsync）</div>
+    </div>
+  </div>
+
+  <pre><code><span class="cm"># redis.conf — AOF 核心配置（Redis 7+ 多文件结构）</span>
+<span class="op">appendonly</span> <span class="nm">yes</span>
+<span class="op">appendfilename</span> <span class="st">"appendonly.aof"</span>
+<span class="op">appenddirname</span> <span class="st">"appendonlydir"</span>   <span class="cm"># Redis 7: manifest + 增量 + 基础文件分目录管理</span>
+
+<span class="op">appendfsync</span> <span class="nm">everysec</span>   <span class="cm"># 生产默认；always 最多丢 0 秒但吞吐降 ~60%</span>
+
+<span class="cm"># AOF 重写（BGREWRITEAOF）触发阈值</span>
+<span class="op">auto-aof-rewrite-percentage</span> <span class="nm">100</span>  <span class="cm"># 当前大小比上次重写后大一倍</span>
+<span class="op">auto-aof-rewrite-min-size</span>     <span class="nm">64mb</span> <span class="cm"># 且至少 64MB，避免小文件频繁重写</span>
+
+<span class="cm"># Redis 7 混合持久化（强烈推荐开启）</span>
+<span class="op">aof-use-rdb-preamble</span> <span class="nm">yes</span>  <span class="cm"># 重写时基础文件 = RDB 格式，增量 = AOF 命令流</span></code></pre>
+
+  <h3>AOF 重写：解决文件无限膨胀</h3>
+  <p>命令追加意味着 AOF 会记录 <code>INCR ctr</code> 十万次——但当前值只是一个数字。BGREWRITEAOF 同样 fork 子进程，<strong>根据当前内存数据生成最小命令集</strong>，把十万条 INCR 压缩成一条 <code>SET ctr 100000</code>。重写期间的新写入存入 <em>aof_rewrite_buf</em>，重写完成后再追加到新文件，保证不丢数据。</p>
+  <div class="callout tip">
+    <span class="t">💡 Redis 7 的多文件 AOF 结构</span>
+    Redis 6.x 及之前，重写期间要同时维护"aof_buf + 重写缓冲区"双缓冲，高写入场景下重写结束后的<em>追加残留命令</em>可能阻塞主线程数百毫秒。Redis 7 改为<strong>manifest 清单 + base 基础文件 + incr 增量文件</strong>：重写期间新命令直接写新的 incr 文件，不再需要"追写"旧数据，彻底消除了这一阻塞点。升级 Redis 7 是解决 AOF 重写抖动的根本手段。
+  </div>
+</section>
+
+<!-- ============ 4. 对比与选型 ============ -->
+<section class="section">
+  <h2>四、架构师视角：对比、选型与容量规划</h2>
+  <table>
+    <tr>
+      <th>维度</th>
+      <th>RDB</th>
+      <th>AOF</th>
+    </tr>
+    <tr>
+      <td><strong>数据安全（RPO）</strong></td>
+      <td><span class="lose">丢失最后一次快照后的全部数据（分钟级）</span></td>
+      <td><span class="win">everysec 最多丢 1 秒；always 丢 0 秒</span></td>
+    </tr>
+    <tr>
+      <td><strong>恢复速度</strong></td>
+      <td><span class="win">直接加载二进制镜像，快（10GB 约 1~2 分钟）</span></td>
+      <td><span class="lose">逐条重放命令，慢（同量级可能 5~10 倍时长）</span></td>
+    </tr>
+    <tr>
+      <td><strong>文件大小</strong></td>
+      <td><span class="win">紧凑压缩，约为内存的 50%~80%</span></td>
+      <td><span class="lose">命令流格式，重写前可达数倍</span></td>
+    </tr>
+    <tr>
+      <td><strong>性能影响</strong></td>
+      <td>fork 瞬间阻塞 + COW 内存放大</td>
+      <td>everysec 几乎无感；always 吞吐下降明显</td>
+    </tr>
+    <tr>
+      <td><strong>可读性 / 可修复性</strong></td>
+      <td>二进制不可读</td>
+      <td><span class="win">文本可读，<code>redis-check-aof --fix</code> 可截断修复</span></td>
+    </tr>
+    <tr>
+      <td><strong>典型场景</strong></td>
+      <td>纯缓存、冷备份、跨机房种子数据</td>
+      <td>计数器、去重、限流、分布式锁等有状态业务</td>
+    </tr>
+  </table>
+
+  <h3>选型决策树</h3>
+  <div class="diagram">
+    <div class="arch">
+      <div class="row">
+        <div class="box hl"><div class="t">问题：数据丢了能从哪找回来？</div><div class="d">先问 RPO，再问恢复时间 RTO</div></div>
+      </div>
+      <div class="row">
+        <div class="box gr"><div class="t">可全量重建（DB 兜底）</div><div class="d">纯缓存场景 → 只开 RDB<br>甚至关持久化 + 主从高可用</div></div>
+        <div class="box gr"><div class="t">可容忍丢 1 秒</div><div class="d">绝大多数有状态业务 →<br>混合持久化 + everysec</div></div>
+        <div class="box gr"><div class="t">1 秒都不能丢</div><div class="d">强一致场景 → AOF always？<br>❌ 应该用 MySQL/事务存储</div></div>
+      </div>
+      <div class="dlabel">架构判断：如果业务要求 RPO = 0，说明数据不该只放在 Redis —— Redis 是缓存/内存数据库，不是系统的唯一事实源</div>
+    </div>
+  </div>
+
+  <h3>生产推荐组合（Redis 7+）</h3>
+  <pre><code><span class="cm"># 有状态业务的标准生产配置</span>
+<span class="op">appendonly</span> <span class="nm">yes</span>
+<span class="op">appendfsync</span> <span class="nm">everysec</span>
+<span class="op">aof-use-rdb-preamble</span> <span class="nm">yes</span>        <span class="cm"># 混合持久化</span>
+<span class="op">save</span> <span class="nm">3600</span> <span class="nm">1</span>                     <span class="cm"># 保留 RDB 用于快速拉起 + 备份</span>
+<span class="op">auto-aof-rewrite-percentage</span> <span class="nm">100</span>
+<span class="op">auto-aof-rewrite-min-size</span> <span class="nm">4gb</span>     <span class="cm"># 大实例调大，降低重写频率</span>
+
+<span class="cm"># 关闭主从复制期间的 AOF 重写互斥（避免复制积压与重写叠加）</span>
+<span class="op">no-appendfsync-on-rewrite</span> <span class="nm">no</span>    <span class="cm"># 保持 no：宁可写延迟抖动也不丢 fsync</span></code></pre>
+
+  <div class="callout warn">
+    <span class="t">⚠️ 容量规划红线</span>
+    <p><strong>磁盘空间</strong>：AOF 目录预留 <em>当前内存大小的 1.5~2 倍</em>（重写期间新旧文件并存）；RDB 预留 1 倍。</p>
+    <p><strong>内存余量</strong>：maxmemory 建议设为物理内存的 <em>60%~70%</em>，为 fork COW、重写、复制缓冲留余量。</p>
+    <p><strong>监控指标</strong>（Prometheus + redis_exporter 重点告警项）：</p>
+    <ul>
+      <li><code>latest_fork_usec</code> 持续 &gt; 50ms → 实例过大，考虑拆分</li>
+      <li><code>aof_delayed_fsync</code> 增长 → 磁盘 IO 瓶颈</li>
+      <li><code>rdb_last_bgsave_status</code> / <code>aof_last_bgrewrite_status</code> 非 OK → 立即告警</li>
+      <li><code>current_cow_size</code> → COW 放大实时监控（Redis 6.0+）</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ 5. 排障实战 ============ -->
+<section class="section">
+  <h2>五、排障实战：三个真实案例的定位路径</h2>
+
+  <h3>案例 1：每隔几小时业务延迟毛刺 200ms</h3>
+  <pre><code><span class="cm"># 1. 查 fork 耗时趋势</span>
+<span class="op">redis-cli</span> <span class="nm">INFO persistence</span> | <span class="nm">grep</span> <span class="st">latest_fork_usec</span>
+<span class="cm"># latest_fork_usec:185000   → 185ms！fork 是元凶</span>
+
+<span class="cm"># 2. 确认是否 COW 放大（Redis 6.0+）</span>
+<span class="op">redis-cli</span> <span class="nm">INFO stats</span> | <span class="nm">grep</span> <span class="st">current_cow_size</span>
+
+<span class="cm"># 3. 处置：实例拆分（大Key治理 + 按业务域拆 4 个 4GB 实例）</span>
+<span class="cm">#    fork 从 185ms 降至 ~40ms，毛刺消失</span></code></pre>
+
+  <h3>案例 2：重启后 AOF 加载数小时未完成</h3>
+  <pre><code><span class="cm"># 加载期间 tail 日志：</span>
+<span class="cm"># * Reading RDB base file on AOF loading... (fast)</span>
+<span class="cm"># * Reading incremental AOF... 持续 3 小时未完成</span>
+
+<span class="cm"># 根因：incr 文件 28GB（长期未重写，命令流膨胀）</span>
+<span class="cm"># 处置（换从库加载验证）：</span>
+<span class="op">redis-check-aof</span> <span class="st">appendonly.aof.1.incr.aof</span>          <span class="cm"># 校验完整性</span>
+<span class="op">redis-check-aof</span> <span class="st">--fix</span> <span class="st">&lt;file&gt;</span>                <span class="cm"># 截断损坏尾部</span>
+<span class="cm"># 之后：开启混合持久化 + 调低 rewrite-min-size，重写后 base=RDB，加载恢复到分钟级</span></code></pre>
+
+  <h3>案例 3：主从切换后从库数据比主库"新"</h3>
+  <p>主库 <code>maxmemory</code> 触发驱逐 → 部分热 Key 被淘汰 → 从库异步复制 <code>DEL</code> 命令晚于本地读取。这是<strong>复制与持久化无关的另一层一致性陷阱</strong>：持久化保住"磁盘上的数据"，但保不住"内存里被策略驱逐的数据"。若 Key 不可丢，用 <code>noeviction</code> + 容量规划，而不是全keys-lru。</p>
+</section>
+
+<!-- ============ 6. 今日要点 ============ -->
+<section class="section">
+  <h2>六、今日要点</h2>
+  <div class="summary-grid">
+    <div class="sum-card">
+      <div class="n">1</div>
+      <div class="t">RDB = 全量镜像，AOF = 命令流</div>
+      <div class="d">RDB 靠 fork+COW 生成紧凑快照，恢复快但丢数据多；AOF 追加写命令，丢得少但恢复慢。两者不是二选一。</div>
+    </div>
+    <div class="sum-card">
+      <div class="n">2</div>
+      <div class="t">RPO 决定选型</div>
+      <div class="d">先问"能容忍丢多少数据"：纯缓存用 RDB（甚至关闭），有状态业务用混合持久化 + everysec，RPO=0 的数据不该只放 Redis。</div>
+    </div>
+    <div class="sum-card">
+      <div class="n">3</div>
+      <div class="t">fork 是隐形成本</div>
+      <div class="d">实例越大 fork 越慢、COW 放大越猛。大实例（&gt;10GB）建议拆分，监控 latest_fork_usec 与 current_cow_size。</div>
+    </div>
+    <div class="sum-card">
+      <div class="n">4</div>
+      <div class="t">混合持久化是生产标配</div>
+      <div class="d">Redis 7 的 aof-use-rdb-preamble：base=RDB（快速加载）+ incr=AOF（秒级丢失窗口），兼得两者优点。</div>
+    </div>
+    <div class="sum-card">
+      <div class="n">5</div>
+      <div class="t">磁盘与内存双预留</div>
+      <div class="d">AOF 目录预留 1.5~2 倍内存空间，maxmemory 设物理内存 60%~70%，为重写和 COW 留余量。</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 7. 思考题 ============ -->
+<section class="section">
+  <h2>七、架构师思考题</h2>
+
+  <details>
+    <summary><span class="q-mark">Q1</span>你的 Redis 集群使用 everysec + 混合持久化，但磁盘 IO 出现周期性打满，导致 <code>aof_delayed_fsync</code> 持续增长。请分析可能的原因，并给出短期止血与长期治理方案。
+      <span class="chev">▶</span></summary>
+    <div class="answer">
+      <h4>定位：为什么 aof_delayed_fsync 会增长</h4>
+      <p>everysec 的后台线程每秒执行 fsync；若上一次 fsync 超过 2 秒仍未完成（磁盘忙），主线程会感知到并记一次 <code>aof_delayed_fsysnc</code>，同时放弃本次写盘（数据仍缓存在 aof_buf，最多丢 2 秒）。所以该指标增长 = <strong>磁盘跟不上写入速率</strong>。</p>
+      <h4>可能原因（按概率排序）</h4>
+      <ul>
+        <li><strong>AOF 重写窗口叠加</strong>：重写期间子进程写新 AOF 与后台线程 fsync 旧 AOF 并发，IO 翻倍，这正是周期性打满的典型模式——周期 ≈ 重写触发间隔。</li>
+        <li><strong>磁盘带宽不足或混部</strong>：Redis 数据目录与 MySQL/日志采集等 IO 大户共盘，或使用低 IOPS 的云盘（如吞吐型而非高 IOPS 型）。</li>
+        <li><strong>写入放大</strong>：大量小命令（INCR/HSET 单字段）使 fsync 的有效数据密度低，元数据开销占比高。</li>
+        <li><strong>操作系统页缓存争用</strong>：dirty page 回写策略（vm.dirty_ratio）过于激进，内核批量刷盘挤占 Redis 的 fsync。</li>
+      </ul>
+      <h4>短期止血</h4>
+      <ul>
+        <li>临时关闭自动重写（<code>auto-aof-rewrite-percentage</code> 设 0），改为业务低峰期手动 <code>BGREWRITEAOF</code>；</li>
+        <li>调小 <code>vm.dirty_bytes</code>（如 64MB）平滑内核刷盘，避免瞬时 IO 风暴；</li>
+        <li>若混部，立即迁移 Redis 到独立云盘（优先 SSD/ESSD PL1 及以上）。</li>
+      </ul>
+      <h4>长期治理</h4>
+      <ul>
+        <li><strong>升 Redis 7+</strong>：多文件 AOF 消除重写期间的双缓冲追写；混合持久化让 base 为 RDB，重写产物更小；</li>
+        <li><strong>重写错峰调度</strong>：多个实例的重写窗口用脚本/平台错开，避免同时 fork + 重写叠加；</li>
+        <li><strong>写入侧优化</strong>：客户端 pipeline/批量命令提升单次 fsync 的数据密度；评估部分业务改写 RDB-only；</li>
+        <li><strong>容量与告警</strong>：对 aof_current_size 增长速率建模，提前扩容 IO；aof_delayed_fsync 增速 &gt; 1 次/分钟即告警。</li>
+      </ul>
+    </div>
+  </details>
+
+  <details>
+    <summary><span class="q-mark">Q2</span>团队争论：缓存场景下"开 AOF 增加成本，不如纯 RDB + 主从 + 快速预热"。你作为架构师如何裁决？什么信号出现时必须补开 AOF？
+      <span class="chev">▶</span></summary>
+    <div class="answer">
+      <h4>裁决框架：先分类数据，再谈统一配置</h4>
+      <p>"缓存场景"往往不是纯缓存——同一个实例里通常混着三类数据：<strong>可重建的缓存数据</strong>（商品信息，DB 有源）、<strong>半状态数据</strong>（计数器、布隆过滤器、去重集合，重建代价高但可近似）、<strong>真状态数据</strong>（分布式锁、令牌、幂等表，丢失即故障）。争论的错误在于用一把尺子量所有数据。</p>
+      <h4>支持"纯 RBD + 主从"的合理性</h4>
+      <ul>
+        <li>若实例内 95% 以上是可从 DB 重建的缓存，AOF 的 everysec fsync 是纯粹的额外成本（IO、重写抖动、运维复杂度）；</li>
+        <li>主从 + 哨兵/Cluster 已覆盖单点故障，RDB 足以支撑冷备与快速拉起；</li>
+        <li>缓存雪崩防护（预热脚本 + 多级缓存）比持久化更对症。</li>
+      </ul>
+      <h4>必须补开 AOF 的信号</h4>
+      <ul>
+        <li><strong>出现无源数据</strong>：任何 Key 的"事实源"只存在于 Redis（如限流窗口、分布式锁的 owner 标记、幂等去重集）——RDB 的分钟级丢失窗口会直接造成超卖/重复请求；</li>
+        <li><strong>重建成本不可接受</strong>：预热需要小时级全表扫描（DB 已是高压），丢 30 分钟数据意味着 DB 要扛住重建风暴；</li>
+        <li><strong>审计/合规要求</strong>：需要证明恢复点精确到秒；</li>
+        <li><strong>出现过切换丢数据事故</strong>：复盘结论指向快照间隔内的丢失。</li>
+      </ul>
+      <h4>推荐落地方案</h4>
+      <ul>
+        <li><strong>物理分离</strong>：纯缓存实例（RDB-only 甚至关闭持久化）与状态数据实例（混合持久化 + everysec）分开部署，互不影响、成本清晰；</li>
+        <li><strong>状态数据下沉</strong>：能搬到 DB/磁盘 KV 的强一致数据不要留在 Redis，Redis 只做加速层——这是比 AOF always 更根本的答案；</li>
+        <li><strong>治理动作</strong>：给"状态 Key"建立命名规范与登记机制（如 <code>state:*</code> 前缀），让数据分类可审计，避免下次再靠争论裁决。</li>
+      </ul>
+    </div>
+  </details>
+</section>
+
+<div class="footer">
+  每日架构师微课程 · 第 6 期 · Redis 系列第 2 讲<br>
+  下期预告：<b>Redis 集群方案</b>——哨兵 vs Cluster 的取舍 · 2026-08-18
+</div>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 13 期 · Apache Pulsar 订阅模型：四种订阅、游标与 Key_Shared 保序 — 2026-08-28</title>
+<style>
+:root{
+  --bg:#0d1117;
+  --bg-card:#161b22;
+  --bg-card2:#1c2330;
+  --border:#2d333b;
+  --text:#c9d1d9;
+  --text-strong:#e6edf3;
+  --text-muted:#8b949e;
+  --accent:#ff6188;
+  --accent2:#a9dc76;
+  --accent3:#78dce8;
+  --code-bg:#0a0e14;
+  --warn-bg:rgba(255,159,67,.12);
+  --warn-border:#ff9f43;
+  --tip-bg:rgba(169,220,118,.1);
+  --tip-border:#a9dc76;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  background:var(--bg);
+  color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  line-height:1.75;
+  font-size:16px;
+}
+.wrap{max-width:860px;margin:0 auto;padding:24px 16px 64px}
+
+/* ===== Hero ===== */
+.hero{
+  background:linear-gradient(135deg,#101a1f 0%,#161b22 55%,#101820 100%);
+  border:1px solid var(--border);
+  border-radius:16px;
+  padding:36px 28px;
+  margin-bottom:28px;
+  position:relative;
+  overflow:hidden;
+}
+.hero::before{
+  content:"";
+  position:absolute;top:-60px;right:-60px;
+  width:220px;height:220px;border-radius:50%;
+  background:radial-gradient(circle,rgba(120,220,232,.16),transparent 70%);
+}
+.hero .series{color:var(--accent3);font-weight:600;font-size:.85rem;letter-spacing:.12em;text-transform:uppercase;margin-bottom:10px}
+.hero h1{color:var(--text-strong);font-size:1.7rem;line-height:1.4;margin-bottom:16px}
+.meta{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.tag{
+  display:inline-flex;align-items:center;gap:6px;
+  background:var(--bg-card2);border:1px solid var(--border);
+  color:var(--text-muted);border-radius:999px;
+  padding:4px 14px;font-size:.82rem;
+}
+.tag b{color:var(--text-strong);font-weight:600}
+.tag.pulsar{border-color:rgba(120,220,232,.45);color:#8ee4ee}
+.tag.pulsar b{color:#8ee4ee}
+
+/* ===== Section ===== */
+.section{
+  background:var(--bg-card);
+  border:1px solid var(--border);
+  border-radius:16px;
+  padding:28px;
+  margin-bottom:22px;
+}
+.section h2{
+  color:var(--text-strong);font-size:1.22rem;
+  padding-left:14px;border-left:4px solid var(--accent3);
+  margin-bottom:18px;line-height:1.5;
+}
+.section h3{
+  color:var(--text-strong);font-size:1.02rem;
+  margin:22px 0 10px;
+}
+.section h3::before{content:"◆ ";color:var(--accent3);font-size:.8em}
+p{margin-bottom:12px}
+p:last-child{margin-bottom:0}
+strong{color:var(--text-strong)}
+em{color:var(--accent);font-style:normal}
+a{color:var(--accent3)}
+
+/* ===== Code ===== */
+pre{
+  background:var(--code-bg);
+  border:1px solid var(--border);
+  border-radius:10px;
+  padding:16px 18px;
+  overflow-x:auto;
+  font-size:.84rem;line-height:1.7;
+  margin:14px 0;
+  font-family:"Cascadia Code","JetBrains Mono",Consolas,"Courier New",monospace;
+}
+code{font-family:inherit}
+p code,li code,td code{
+  background:rgba(110,118,129,.18);
+  border-radius:5px;padding:2px 7px;
+  color:var(--accent3);font-size:.86em;
+}
+.cm{color:#7f8c98}          /* comment */
+.kw{color:#ff6188}          /* keyword */
+.st{color:#a9dc76}          /* string */
+.nm{color:#78dce8}          /* number/func */
+.op{color:#ffd580}          /* param/option */
+
+/* ===== Lists ===== */
+ul,ol{padding-left:22px;margin-bottom:12px}
+li{margin-bottom:6px}
+li::marker{color:var(--accent3)}
+
+/* ===== Callout ===== */
+.callout{
+  border-radius:12px;padding:16px 18px;
+  margin:16px 0;font-size:.94rem;
+  border-left:4px solid;
+}
+.callout.warn{background:var(--warn-bg);border-color:var(--warn-border)}
+.callout.warn .t{color:#ffb56b}
+.callout.tip{background:var(--tip-bg);border-color:var(--tip-border)}
+.callout.tip .t{color:var(--accent2)}
+.callout .t{font-weight:700;display:block;margin-bottom:6px;font-size:.9rem}
+
+/* ===== Diagram ===== */
+.diagram{
+  background:var(--code-bg);
+  border:1px dashed var(--border);
+  border-radius:12px;padding:20px 14px;
+  margin:16px 0;
+  overflow-x:auto;
+}
+.arch{display:flex;flex-direction:column;gap:14px;min-width:560px}
+.row{display:flex;gap:12px;align-items:stretch}
+.box{
+  flex:1;background:var(--bg-card2);
+  border:1px solid var(--border);border-radius:10px;
+  padding:12px 14px;text-align:center;
+}
+.box .t{font-weight:700;color:var(--text-strong);font-size:.92rem;margin-bottom:4px}
+.box .d{color:var(--text-muted);font-size:.78rem;line-height:1.55}
+.box.hl{border-color:rgba(255,97,136,.55);background:rgba(255,97,136,.08)}
+.box.hl .t{color:#ff9db6}
+.box.gr{border-color:rgba(169,220,118,.5);background:rgba(169,220,118,.07)}
+.box.gr .t{color:var(--accent2)}
+.box.bl{border-color:rgba(120,220,232,.5);background:rgba(120,220,232,.07)}
+.box.bl .t{color:var(--accent3)}
+.box.ye{border-color:rgba(255,213,128,.5);background:rgba(255,213,128,.07)}
+.box.ye .t{color:#ffd580}
+.arrow{color:var(--text-muted);font-size:1.2rem;display:flex;align-items:center;justify-content:center}
+.dlabel{text-align:center;color:var(--text-muted);font-size:.78rem;margin-top:-6px}
+
+/* hash range strip */
+.range{display:flex;gap:4px;height:38px;margin-top:6px;min-width:560px}
+.range .seg{
+  flex:1;border-radius:6px;display:flex;align-items:center;justify-content:center;
+  font-size:.74rem;font-weight:700;border:1px solid transparent;
+}
+.s1{background:rgba(255,97,136,.18);color:#ff9db6;border-color:rgba(255,97,136,.4)}
+.s2{background:rgba(169,220,118,.16);color:var(--accent2);border-color:rgba(169,220,118,.4)}
+.s3{background:rgba(120,220,232,.16);color:var(--accent3);border-color:rgba(120,220,232,.4)}
+.s0{background:rgba(110,118,129,.08);color:#4b5563}
+
+/* ===== Table ===== */
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:.88rem}
+th,td{border:1px solid var(--border);padding:10px 12px;text-align:left;vertical-align:top}
+th{background:var(--bg-card2);color:var(--text-strong);font-weight:600}
+td{color:var(--text)}
+tr:nth-child(even) td{background:rgba(255,255,255,.015)}
+td .win{color:var(--accent2);font-weight:600}
+td .lose{color:#ff8a9b}
+
+/* ===== Summary cards ===== */
+.summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:6px}
+.sum-card{
+  background:var(--bg-card2);border:1px solid var(--border);
+  border-radius:12px;padding:16px;
+}
+.sum-card .n{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:26px;height:26px;border-radius:50%;
+  background:rgba(120,220,232,.15);color:var(--accent3);
+  font-weight:700;font-size:.85rem;margin-bottom:8px;
+}
+.sum-card .t{color:var(--text-strong);font-weight:600;font-size:.95rem;margin-bottom:6px}
+.sum-card .d{color:var(--text-muted);font-size:.85rem;line-height:1.65}
+
+/* ===== Q&A collapsible ===== */
+details{
+  background:var(--bg-card2);
+  border:1px solid var(--border);
+  border-radius:12px;
+  padding:0;
+  margin-bottom:14px;
+  overflow:hidden;
+}
+details summary{
+  cursor:pointer;padding:16px 20px;
+  color:var(--text-strong);font-weight:600;font-size:.95rem;
+  list-style:none;display:flex;align-items:flex-start;gap:10px;
+  transition:background .15s;
+}
+details summary::-webkit-details-marker{display:none}
+details summary:hover{background:rgba(255,255,255,.03)}
+details summary .q-mark{
+  color:var(--accent3);font-weight:800;flex-shrink:0;
+}
+details summary .chev{margin-left:auto;color:var(--text-muted);transition:transform .2s;flex-shrink:0}
+details[open] summary .chev{transform:rotate(90deg)}
+details .answer{
+  padding:4px 20px 18px 42px;
+  border-top:1px dashed var(--border);
+  padding-top:14px;
+  font-size:.92rem;
+}
+details .answer h4{color:var(--accent3);font-size:.9rem;margin:14px 0 6px}
+details .answer p{margin-bottom:10px}
+details .answer ul{margin-bottom:10px}
+
+/* ===== Footer ===== */
+.footer{
+  text-align:center;color:var(--text-muted);
+  font-size:.8rem;margin-top:36px;
+  padding-top:20px;border-top:1px solid var(--border);
+}
+.footer b{color:var(--text)}
+
+/* ===== Responsive ===== */
+@media(max-width:640px){
+  .hero{padding:26px 18px}
+  .hero h1{font-size:1.35rem}
+  .section{padding:20px 16px}
+  pre{font-size:.78rem;padding:12px}
+  table{font-size:.8rem}
+  th,td{padding:8px}
+  .row{flex-direction:row}
+}
+</style>
+</head>
+<body>
+<div style="position:fixed;top:14px;left:14px;z-index:9999;">
+<a href="../index.html" style="display:inline-block;padding:6px 14px;border-radius:999px;background:rgba(20,26,38,.88);color:#7da7ff;font-size:13px;text-decoration:none;border:1px solid rgba(90,130,220,.45);backdrop-filter:blur(4px);font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.35);" onmouseover="this.style.background='rgba(30,40,60,.95)'" onmouseout="this.style.background='rgba(20,26,38,.88)'">← 课程目录</a>
+</div>
+
+<div class="wrap">
+
+<!-- ============ HERO ============ -->
+<header class="hero">
+  <div class="series">每日架构师微课程 · 第 13 期</div>
+  <h1>Pulsar 订阅模型深入：四种订阅、游标机制与 Key_Shared 保序</h1>
+  <div class="meta">
+    <span class="tag">📅 <b>2026-08-28</b>（周五）</span>
+    <span class="tag pulsar">🛰 Apache Pulsar 系列 · 第 2 讲</span>
+    <span class="tag">⏱ 预计阅读 <b>10 分钟</b></span>
+    <span class="tag">🎯 Subscription / Cursor / Key_Shared / Backlog</span>
+  </div>
+</header>
+
+<!-- ============ 1. 场景引入 ============ -->
+<section class="section">
+  <h2>一、一次"扩容后状态错乱"的线上事故</h2>
+  <p>某订单履约中心用 Pulsar 消费订单状态流，初期单 consumer 用 <code>Shared</code> 订阅跑得好好的。大促前扩到 6 个 consumer，第二天客服工单爆炸：大量订单出现<em>"已发货 → 待支付"</em>的状态回跳。排查发现：同一订单的两条状态变更被<em>不同 consumer 并发拉取</em>，处理耗时不同导致写入乱序——Shared 订阅根本没有顺序保证。而另一团队更冤：他们把消费组改名上线，结果整个订阅被当成新订阅，<strong>10 万条 backlog 里的消息被重新消费了一遍</strong>，下游幂等没做全，产生了重复扣款。</p>
+  <p>两个事故指向同一个知识点：<strong>Pulsar 的消费模型里，"订阅（Subscription）"才是身份，游标（Cursor）挂在订阅上，而不是像 Kafka 那样挂在 consumer group 上由客户端提交 offset</strong>。理解订阅与游标，是用对 Pulsar 的第一步，也是本讲主题。</p>
+</section>
+
+<!-- ============ 2. 原理 ============ -->
+<section class="section">
+  <h2>二、原理：订阅即游标，一份消息、多份进度</h2>
+  <p>Pulsar 的三层消费结构：<code>Topic → Subscription → Consumer</code>。一个 topic 可以挂<em>多个不同名字的订阅</em>，消息会<strong>向每个订阅都投递一份</strong>（天然广播）；每个订阅内部又可以多 consumer 负载均衡（天然单播）。广播与单播不用建两个 topic，全靠订阅组合——这与 Kafka 用 group 实现单播、无原生广播（须 Mirror/回放）是本质差异。</p>
+  <p><strong>游标（cursor）持久化在 broker 侧的元数据存储中</strong>，记录该订阅已确认（ack）的消息位点。consumer 断线、换机器、重启进程，游标原地不动；谁连上来就从游标处继续推。三个直接推论：</p>
+  <ul>
+    <li><strong>订阅名 = 消费身份</strong>：改名等于新建订阅，按 <code>initialPosition</code>（默认 <code>Latest</code>，即只消费新消息）从头或从尾开始；</li>
+    <li><strong>持久订阅（persistent topic）</strong>：没有 consumer 在线时消息也不丢，全部堆在 backlog 等待，这与 Kafka "没有 group 就没人消费"的模型不同；</li>
+    <li><strong>ack 两种语义</strong>：<code>individual</code>（逐条）与 <code>cumulative</code>（累积确认到某条，此前的全部确认）——注意 <em>Shared / Key_Shared 模式只支持 individual</em>，因为消息散落在不同 consumer 手里，没有全局连续位点。</li>
+  </ul>
+
+  <div class="diagram">
+    <div class="arch">
+      <div class="row">
+        <div class="box hl"><div class="t">orders topic（partitions）</div><div class="d">一份消息流，ledger 存于 BookKeeper</div></div>
+      </div>
+      <div class="dlabel">▼ 向每个订阅独立投递一份（游标各自推进）</div>
+      <div class="row">
+        <div class="box gr"><div class="t">订阅 risk-sub（风控）</div><div class="d">cursor=1205 · Shared · 3 consumers</div></div>
+        <div class="box bl"><div class="t">订阅 dw-sub（数仓）</div><div class="d">cursor=987 · Failover · 1 consumer</div></div>
+        <div class="box ye"><div class="t">订阅 cs-sub（客服）</div><div class="d">cursor=1204 · Key_Shared · 2 consumers</div></div>
+      </div>
+      <div class="dlabel">▼ 订阅内再负载均衡</div>
+      <div class="row">
+        <div class="box"><div class="t">risk-c1/c2/c3</div><div class="d">轮询分发，不保序</div></div>
+        <div class="box"><div class="t">dw-c1（主备）</div><div class="d">分区级严格有序</div></div>
+        <div class="box"><div class="t">cs-c1 / cs-c2</div><div class="d">按 key 黏住，同 key 保序</div></div>
+      </div>
+    </div>
+  </div>
+
+  <h3>四种订阅模式一张图记牢</h3>
+  <ul>
+    <li><code>Exclusive</code>：单 consumer 独占，最简单，顺序保证最强；</li>
+    <li><code>Failover</code>：主备，partition 粒度主从，<strong>顺序 + 高可用</strong>，吞吐上限 = 分区数；</li>
+    <li><code>Shared</code>：轮询分发到任意 consumer，<strong>吞吐水平扩展但不保序</strong>；</li>
+    <li><code>Key_Shared</code>：消息按 key 哈希固定路由到某个 consumer，<strong>同 key 保序 + 水平扩展</strong>——Pulsar 的差异化能力，Kafka 模型做不到。</li>
+  </ul>
+</section>
+
+<!-- ============ 3. Key_Shared 保序原理 ============ -->
+<section class="section">
+  <h2>三、Key_Shared 保序原理与架构权衡</h2>
+  <p>Key_Shared 的实现：broker 把 <code>2^16</code> 个哈希区间（hash range）动态分配给各 consumer。生产端带 key 的消息哈希后落入某个区间 → 落在谁的区间谁消费。consumer 扩缩容时区间<em>再均衡</em>（AUTO_SPLIT 模式），broker 保证切换期间同一 key 的消息不被两个 consumer 同时持有——手段是<strong>阻塞其他区间、等慢 consumer 排空</strong>。</p>
+
+  <div class="diagram">
+    <div class="dlabel">2^16 hash range 动态分配（3 个 consumer）：</div>
+    <div class="range">
+      <div class="seg s1">0 – 21,845 → c1</div>
+      <div class="seg s2">21,846 – 43,690 → c2</div>
+      <div class="seg s3">43,691 – 65,535 → c3</div>
+    </div>
+    <div class="dlabel">key="order-9527" hash→38,201 落在 c2 区间 ⇒ 永远由 c2 处理 ⇒ 同 key 严格有序</div>
+  </div>
+
+  <div class="callout warn">
+    <span class="t">⚠️ Key_Shared 的经典坑：慢 consumer 拖垮全局</span>
+    默认 <code>allowOutOfOrderDelivery=false</code>：区间再均衡时 broker 会<strong>暂停其他 consumer</strong>，等慢 consumer 确认完旧区间才放行——保序严格但吞吐骤降；设为 <code>true</code> 则切换瞬间可能出现短窗口乱序。另有两种权衡：① hash 热点（某 key 写入量独大时该 consumer 独扛）；② consumer 处理能力差异导致区间频繁迁移。吞吐敏感、且业务能用版本号兜底乱序时，开 <code>true</code> 是更稳的选择。
+  </div>
+
+  <h3>订阅模式选型决策（架构师视角）</h3>
+  <ul>
+    <li>全局有序/单分区低吞吐（配置下发、审计）→ <code>Exclusive</code> 或 <code>Failover</code>；</li>
+    <li>实体级保序 + 高吞吐（订单、账户、设备状态）→ <code>Key_Shared</code>，key 选<em>业务实体 ID</em>（非事件 ID），热点 key 单独拆 topic；</li>
+    <li>无序可容忍、追求最大吞吐（日志、埋点、通知）→ <code>Shared</code> + 足够 consumer；</li>
+    <li><strong>容量规划</strong>：Failover 的并行度 ≤ partition 数；Key_Shared/Shared 的并行度 ≤ consumer 数，但单 topic 分区数仍决定写入端并行度，两者别混淆。</li>
+  </ul>
+</section>
+
+<!-- ============ 4. 实战 ============ -->
+<section class="section">
+  <h2>四、实战：代码与 backlog 治理命令</h2>
+
+  <h3>1. Java 客户端：Key_Shared 消费 + 重试/死信</h3>
+<pre><code>Consumer&lt;byte[]&gt; consumer = client.newConsumer()
+    .topic(<span class="st">"persistent://trade/orders/state"</span>)
+    .subscriptionName(<span class="st">"fulfillment-sub</span>")          <span class="cm">// 身份！严禁随手改名</span>
+    .subscriptionType(SubscriptionType.Key_Shared)
+    .subscriptionInitialPosition(SubscriptionInitialPosition.Earliest) <span class="cm">// 新订阅从头消费</span>
+    .ackTimeout(<span class="nm">30</span>, TimeUnit.SECONDS)             <span class="cm">// 处理超时未 ack 自动重投</span>
+    .negativeAckRedeliveryDelay(<span class="nm">1</span>, TimeUnit.SECONDS)
+    .deadLetterPolicy(DeadLetterPolicy.builder()
+        .maxRedeliverCount(<span class="nm">3</span>)                     <span class="cm">// 3 次仍失败 → 进死信</span>
+        .deadLetterTopic(<span class="st">".../state-dlq"</span>)
+        .retryLetterTopic(<span class="st">".../state-retry"</span>)      <span class="cm">// 定时重试队列，延迟重放</span>)
+        .build())
+    .receiverQueueSize(<span class="nm">1000</span>)                     <span class="cm">// Shared/Key_Shared 预取窗口</span>
+    .subscribe();
+<span class="cm">// 乱序兜底：写入前用 version/lastUpdated 乐观锁拒绝旧状态，双保险</span></code></pre>
+
+  <h3>2. 运维命令：订阅与 backlog 体检</h3>
+<pre><code><span class="cm"># 查看订阅列表与积压（msgBacklog=未 ack 条数，backlogSize=占用字节）</span>
+bin/pulsar-admin topics stats persistent://trade/orders/state
+bin/pulsar-admin topics subscriptions persistent://trade/orders/state
+
+<span class="cm"># 不动游标窥探积压消息（排查"卡住"问题第一招）</span>
+bin/pulsar-admin topics peek-messages --subscription fulfillment-sub \
+  --count <span class="nm">5</span> persistent://trade/orders/state
+
+<span class="cm"># 毒消息处置：跳过 N 条（先 peek 确认，再 skip）</span>
+bin/pulsar-admin topics skip --count <span class="nm">100</span> --subscription fulfillment-sub ...
+
+<span class="cm"># 故障回放/灾备演练：把游标回拨到指定时间（幂等前提！）</span>
+bin/pulsar-admin topics reset-cursor --subscription fulfillment-sub \
+  --time <span class="nm">2</span>h persistent://trade/orders/state</code></pre>
+
+  <div class="callout tip">
+    <span class="t">✅ backlog 与 retention 是两笔账</span>
+    backlog = <strong>未 ack</strong> 的堆积（受 backlog quota 策略管控，防慢消费撑爆 bookie）；retention = <strong>已 ack</strong> 之后的保留（供重放，默认 0 即删）。容量公式：<code>峰值入速 × 目标消费延迟 SLA ≈ backlog 规模</code>，再叠加 retention 估算总存储。给每个订阅设积压告警（如 &gt; 10 分钟未追平），比看磁盘水位更早发现问题。
+  </div>
+</section>
+
+<!-- ============ 5. 对比表 ============ -->
+<section class="section">
+  <h2>五、四种订阅模式速查表</h2>
+  <table>
+    <tr><th>维度</th><th>Exclusive</th><th>Failover</th><th>Shared</th><th>Key_Shared</th></tr>
+    <tr><td>顺序保证</td><td class="win">分区级严格有序</td><td class="win">分区级严格有序</td><td class="lose">无</td><td class="win">同 key 严格有序</td></tr>
+    <tr><td>水平扩展</td><td class="lose">单 consumer</td><td>≤ partition 数</td><td class="win">consumer 数即并行度</td><td class="win">consumer 数即并行度</td></tr>
+    <tr><td>ack 语义</td><td>individual / cumulative</td><td>individual / cumulative</td><td>仅 individual</td><td>仅 individual</td></tr>
+    <tr><td>故障切换</td><td class="lose">需人工介入</td><td class="win">自动主备切换</td><td class="win">consumer 掉线即重分配</td><td>hash 区间自动再均衡</td></tr>
+    <tr><td>典型场景</td><td>配置分发、迁移工具</td><td>CDC 同步、审计流</td><td>日志、埋点、通知</td><td>订单/账户状态流</td></tr>
+    <tr><td>主要风险</td><td>单点</td><td>并行度受限</td><td>乱序</td><td>慢 consumer 阻塞 / key 热点</td></tr>
+  </table>
+</section>
+
+<!-- ============ 6. 今日要点 ============ -->
+<section class="section">
+  <h2>六、今日要点</h2>
+  <div class="summary-grid">
+    <div class="sum-card"><span class="n">1</span><div class="t">订阅即身份</div><div class="d">游标持久化在 broker，挂在订阅名上。改订阅名 = 新消费身份，会按 initialPosition 重新消费——上线前把订阅名写进变更单。</div></div>
+    <div class="sum-card"><span class="n">2</span><div class="t">广播与单播同源</div><div class="d">一个 topic 多个订阅各自独立游标，天然广播；订阅内多 consumer 负载均衡，天然单播。不必为多消费方复制数据。</div></div>
+    <div class="sum-card"><span class="n">3</span><div class="t">Key_Shared 保序原理</div><div class="d">hash range 动态分配给 consumer，同 key 永远同 consumer；代价是慢 consumer 可能阻塞全局（默认保序优先）。</div></div>
+    <div class="sum-card"><span class="n">4</span><div class="t">ack 语义有边界</div><div class="d">cumulative 只适用于 Exclusive/Failover；Shared/Key_Shared 只能 individual。毒消息用重试/死信 + skip 治理。</div></div>
+    <div class="sum-card"><span class="n">5</span><div class="t">backlog 与 retention 分账</div><div class="d">backlog 管未 ack 堆积（配 quota 与积压告警），retention 管 ack 后保留（供回放）。容量规划两笔分开算。</div></div>
+  </div>
+</section>
+
+<!-- ============ 7. 思考题 ============ -->
+<section class="section">
+  <h2>七、架构师思考题</h2>
+
+  <details>
+    <summary><span class="q-mark">Q1</span>你的 Key_Shared 消费组出现"一个 consumer 假死，全组吞吐掉 80%"。请分析根因链条，并设计一套不牺牲业务正确性的完整解法。<span class="chev">▶</span></summary>
+    <div class="answer">
+      <h4>解题方向：根因是"保序优先"的阻塞机制，解法要分层：客户端、broker、业务三管齐下</h4>
+      <p><strong>根因链条：</strong>consumer 假死（GC 停顿/下游 RPC 超时但未断连接）→ 它持有的 hash range 上消息无法 ack → broker 触发区间再均衡需要"排空"旧区间 → 默认 <code>allowOutOfOrderDelivery=false</code> 下 broker 暂停其他区间的投递以保证同 key 顺序 → 全组吞吐坍塌。本质是<strong>用全局吞吐换单 key 顺序</strong>的设计选择被一个慢节点放大。</p>
+      <p><strong>分层解法：</strong></p>
+      <ul>
+        <li><strong>客户端层</strong>：缩短 <code>ackTimeout</code>（如 30s）让假死 consumer 尽快被判定失联、触发重投；调小 <code>receiverQueueSize</code> 避免"取走太多排不掉"；处理逻辑里所有外部调用设<em>硬超时</em>，绝不无限等待；</li>
+        <li><strong>broker 层</strong>：吞吐优先的场景开 <code>allowOutOfOrderDelivery=true</code>，接受再均衡瞬间的短窗口乱序；同时监控 <code>CONSUMERS_CONNECTED</code>、各 consumer 的 <code>unackedMessages</code> 分布，发现倾斜立即告警；</li>
+        <li><strong>业务层（关键兜底）</strong>：状态机写入带<strong>版本号或时间戳</strong>，下游对旧版本消息直接丢弃（乐观锁式幂等）。只要这层做实，broker 层的乱序窗口就不构成正确性风险——"传输层尽量有序 + 应用层容忍乱序"才是生产可用的组合拳；</li>
+        <li><strong>key 治理</strong>：复盘是否热点 key 导致某 consumer 独扛大流量（hash 倾斜），必要时对超大 key 单独拆 topic 或在 key 上加盐分片。</li>
+      </ul>
+      <p><strong>结论</strong>：Key_Shared 给的是"尽力而为的传输层有序"，架构师必须把它当作<strong>性能优化而非正确性边界</strong>——正确性永远由业务幂等与版本控制兜底。这个分层思维适用于一切"有序性"诉求。</p>
+    </div>
+  </details>
+
+  <details>
+    <summary><span class="q-mark">Q2</span>同一份订单事件流要供 5 个团队消费：风控要秒级、数仓每天批量回放近 7 天、客服只要近 24h、结算 T+1、搜索近实时。如何设计 topic/订阅/保留策略拓扑，并控制存储成本？<span class="chev">▶</span></summary>
+    <div class="answer">
+      <h4>解题方向：单 topic + 多订阅为骨架，按消费语义选模式，按保留需求分层，而不是复制五份数据</h4>
+      <p><strong>错误方案先排除：</strong>给每个团队建一个 topic 再互相转发——五份存储、五条链路、五个故障点，且新增消费方要改管道。Pulsar 的多订阅模型正是为此而生：<strong>一份 ledger 存储，N 份独立游标</strong>，存储成本只算一份（加副本系数），新增订阅零数据复制。</p>
+      <p><strong>推荐拓扑：</strong></p>
+      <ul>
+        <li><strong>topic 设计</strong>：分区数按写入端吞吐定（如 32，2 倍余量）；所有订阅共用 <code>orders-events</code> 一个 topic；</li>
+        <li><strong>风控/搜索（近实时）</strong>：Key_Shared 或 Shared，consumer 常驻，订阅游标贴近尾部，几乎不产生 backlog；</li>
+        <li><strong>数仓（回放 7 天）</strong>：两种选择——持久订阅 <code>dw-sub</code> 常驻但每天只跑到"今天 0 点"然后等次日（游标滞后最多 24h，backlog 常态化存在，需计入容量）；或<strong>不开订阅</strong>，用 <code>Reader</code> 接口按时间戳直接读 topic（要求 retention ≥ 7 天），游标不占状态、更干净。回放型需求优先 Reader，这是两者边界；</li>
+        <li><strong>客服（近 24h）</strong>：持久订阅 + backlog quota 设 24h 等效上限，超出即告警；若长期不回看，可配 <code>consumer_backlog_eviction</code> 自动丢弃最老堆积，防止慢消费拖垮存储；</li>
+        <li><strong>结算（T+1）</strong>：持久订阅每日全量跑批，跑完 ack 到尾；游标滞后约 24h，与数仓同理计容量。</li>
+      </ul>
+      <p><strong>保留策略与成本账：</strong>retention 取所有消费方上限（本例 ≥ 7 天，由数仓决定）；存储 ≈ <code>日写入量 × 7 × 副本数 + Σ各订阅 backlog 均值</code>。两个省钱开关：数仓回放完的数据在下游落地后，可把 retention 降到"最大故障重放窗口"（如 3 天）；客服订阅开 eviction 后其 backlog 不再计入。监控上给每个订阅定义<strong>独立 SLO</strong>（风控 lag &lt; 5s、数仓 &lt; 25h），告警按订阅而非按 topic 下发，责任边界才清晰。</p>
+      <p><strong>结论</strong>：这套设计的本质是"存储一份、消费多元、策略下沉到订阅"。架构师评审此类需求时，先问"每个消费方的<em>保留窗口</em>与<em>滞后容忍</em>"，这两个数字直接决定 retention、backlog quota 和容量，比讨论 topic 数量重要得多。</p>
+    </div>
+  </details>
+</section>
+
+<div class="footer">
+  <b>每日架构师微课程</b> · 第 13 期 · Apache Pulsar 系列第 2 讲 · 2026-08-28<br>
+  下一讲预告：生产者/消费者调优（batching、flow control、连接与内存模型）
+</div>
+
+</div>
+</body>
+</html>

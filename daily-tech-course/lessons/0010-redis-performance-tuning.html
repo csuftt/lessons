@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 10 期 · Redis 性能调优：慢查询、大 Key、热 Key 与全链路延迟排查 — 2026-08-24</title>
+<style>
+:root{
+  --bg:#0d1117;
+  --bg-card:#161b22;
+  --bg-card2:#1c2330;
+  --border:#2d333b;
+  --text:#c9d1d9;
+  --text-strong:#e6edf3;
+  --text-muted:#8b949e;
+  --accent:#ff6188;
+  --accent2:#a9dc76;
+  --accent3:#78dce8;
+  --code-bg:#0a0e14;
+  --warn-bg:rgba(255,159,67,.12);
+  --warn-border:#ff9f43;
+  --tip-bg:rgba(169,220,118,.1);
+  --tip-border:#a9dc76;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  background:var(--bg);
+  color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  line-height:1.75;
+  font-size:16px;
+}
+.wrap{max-width:860px;margin:0 auto;padding:24px 16px 64px}
+
+/* ===== Hero ===== */
+.hero{
+  background:linear-gradient(135deg,#1a1016 0%,#161b22 55%,#101820 100%);
+  border:1px solid var(--border);
+  border-radius:16px;
+  padding:36px 28px;
+  margin-bottom:28px;
+  position:relative;
+  overflow:hidden;
+}
+.hero::before{
+  content:"";
+  position:absolute;top:-60px;right:-60px;
+  width:220px;height:220px;border-radius:50%;
+  background:radial-gradient(circle,rgba(255,97,136,.18),transparent 70%);
+}
+.hero .series{color:var(--accent);font-weight:600;font-size:.85rem;letter-spacing:.12em;text-transform:uppercase;margin-bottom:10px}
+.hero h1{color:var(--text-strong);font-size:1.7rem;line-height:1.4;margin-bottom:16px}
+.meta{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.tag{
+  display:inline-flex;align-items:center;gap:6px;
+  background:var(--bg-card2);border:1px solid var(--border);
+  color:var(--text-muted);border-radius:999px;
+  padding:4px 14px;font-size:.82rem;
+}
+.tag b{color:var(--text-strong);font-weight:600}
+.tag.redis{border-color:rgba(255,97,136,.45);color:#ff9db6}
+.tag.redis b{color:#ff9db6}
+
+/* ===== Section ===== */
+.section{
+  background:var(--bg-card);
+  border:1px solid var(--border);
+  border-radius:16px;
+  padding:28px;
+  margin-bottom:22px;
+}
+.section h2{
+  color:var(--text-strong);font-size:1.22rem;
+  padding-left:14px;border-left:4px solid var(--accent);
+  margin-bottom:18px;line-height:1.5;
+}
+.section h3{
+  color:var(--text-strong);font-size:1.02rem;
+  margin:22px 0 10px;
+}
+.section h3::before{content:"◆ ";color:var(--accent);font-size:.8em}
+p{margin-bottom:12px}
+p:last-child{margin-bottom:0}
+strong{color:var(--text-strong)}
+em{color:var(--accent3);font-style:normal}
+a{color:var(--accent3)}
+
+/* ===== Code ===== */
+pre{
+  background:var(--code-bg);
+  border:1px solid var(--border);
+  border-radius:10px;
+  padding:16px 18px;
+  overflow-x:auto;
+  font-size:.84rem;line-height:1.7;
+  margin:14px 0;
+  font-family:"Cascadia Code","JetBrains Mono",Consolas,"Courier New",monospace;
+}
+code{font-family:inherit}
+p code,li code,td code{
+  background:rgba(110,118,129,.18);
+  border-radius:5px;padding:2px 7px;
+  color:var(--accent3);font-size:.86em;
+}
+.cm{color:#7f8c98}          /* comment */
+.kw{color:#ff6188}          /* keyword */
+.st{color:#a9dc76}          /* string */
+.nm{color:#78dce8}          /* number/func */
+.op{color:#ffd580}          /* param/option */
+
+/* ===== Lists ===== */
+ul,ol{padding-left:22px;margin-bottom:12px}
+li{margin-bottom:6px}
+li::marker{color:var(--accent)}
+
+/* ===== Callout ===== */
+.callout{
+  border-radius:12px;padding:16px 18px;
+  margin:16px 0;font-size:.94rem;
+  border-left:4px solid;
+}
+.callout.warn{background:var(--warn-bg);border-color:var(--warn-border)}
+.callout.warn .t{color:#ffb56b}
+.callout.tip{background:var(--tip-bg);border-color:var(--tip-border)}
+.callout.tip .t{color:var(--accent2)}
+.callout .t{font-weight:700;display:block;margin-bottom:6px;font-size:.9rem}
+
+/* ===== Architecture diagram ===== */
+.diagram{
+  background:var(--code-bg);
+  border:1px dashed var(--border);
+  border-radius:12px;padding:20px 14px;
+  margin:16px 0;
+  overflow-x:auto;
+}
+.arch{display:flex;flex-direction:column;gap:14px;min-width:520px}
+.row{display:flex;gap:12px;align-items:stretch}
+.box{
+  flex:1;background:var(--bg-card2);
+  border:1px solid var(--border);border-radius:10px;
+  padding:12px 14px;text-align:center;
+}
+.box .t{font-weight:700;color:var(--text-strong);font-size:.92rem;margin-bottom:4px}
+.box .d{color:var(--text-muted);font-size:.78rem;line-height:1.55}
+.box.hl{border-color:rgba(255,97,136,.55);background:rgba(255,97,136,.08)}
+.box.hl .t{color:#ff9db6}
+.box.gr{border-color:rgba(169,220,118,.5);background:rgba(169,220,118,.07)}
+.box.gr .t{color:var(--accent2)}
+.box.bl{border-color:rgba(120,220,232,.5);background:rgba(120,220,232,.07)}
+.box.bl .t{color:var(--accent3)}
+.arrow{color:var(--text-muted);font-size:1.2rem;display:flex;align-items:center;justify-content:center}
+.dlabel{text-align:center;color:var(--text-muted);font-size:.78rem;margin-top:-6px}
+
+/* ===== Timeline ===== */
+.tl{display:flex;flex-direction:column;gap:10px;min-width:560px}
+.tl-row{display:flex;gap:10px;align-items:stretch}
+.tl-step{
+  flex:1;background:var(--bg-card2);
+  border:1px solid var(--border);border-radius:10px;
+  padding:10px 12px;font-size:.78rem;line-height:1.6;
+}
+.tl-step .n{
+  display:inline-block;background:rgba(255,97,136,.15);color:var(--accent);
+  border-radius:6px;padding:0 8px;font-weight:700;font-size:.75rem;margin-bottom:4px;
+}
+.tl-step.gr{border-color:rgba(169,220,118,.5)}
+.tl-step.gr .n{background:rgba(169,220,118,.15);color:var(--accent2)}
+.tl-step.rd{border-color:rgba(255,138,155,.6);background:rgba(255,97,136,.07)}
+.tl-step.rd .n{background:rgba(255,97,136,.2);color:#ff8a9b}
+
+/* ===== Comparison table ===== */
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:.88rem}
+th,td{border:1px solid var(--border);padding:10px 12px;text-align:left;vertical-align:top}
+th{background:var(--bg-card2);color:var(--text-strong);font-weight:600}
+td{color:var(--text)}
+tr:nth-child(even) td{background:rgba(255,255,255,.015)}
+td .win{color:var(--accent2);font-weight:600}
+td .lose{color:#ff8a9b}
+
+/* ===== Summary cards ===== */
+.summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:6px}
+.sum-card{
+  background:var(--bg-card2);border:1px solid var(--border);
+  border-radius:12px;padding:16px;
+}
+.sum-card .n{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:26px;height:26px;border-radius:50%;
+  background:rgba(255,97,136,.15);color:var(--accent);
+  font-weight:700;font-size:.85rem;margin-bottom:8px;
+}
+.sum-card .t{color:var(--text-strong);font-weight:600;font-size:.95rem;margin-bottom:6px}
+.sum-card .d{color:var(--text-muted);font-size:.85rem;line-height:1.65}
+
+/* ===== Q&A collapsible ===== */
+details{
+  background:var(--bg-card2);
+  border:1px solid var(--border);
+  border-radius:12px;
+  padding:0;
+  margin-bottom:14px;
+  overflow:hidden;
+}
+details summary{
+  cursor:pointer;padding:16px 20px;
+  color:var(--text-strong);font-weight:600;font-size:.95rem;
+  list-style:none;display:flex;align-items:flex-start;gap:10px;
+  transition:background .15s;
+}
+details summary::-webkit-details-marker{display:none}
+details summary:hover{background:rgba(255,255,255,.03)}
+details summary .q-mark{
+  color:var(--accent);font-weight:800;flex-shrink:0;
+}
+details summary .chev{margin-left:auto;color:var(--text-muted);transition:transform .2s;flex-shrink:0}
+details[open] summary .chev{transform:rotate(90deg)}
+details .answer{
+  padding:4px 20px 18px 42px;
+  border-top:1px dashed var(--border);
+  padding-top:14px;
+  font-size:.92rem;
+}
+details .answer h4{color:var(--accent3);font-size:.9rem;margin:14px 0 6px}
+details .answer p{margin-bottom:10px}
+details .answer ul{margin-bottom:10px}
+
+/* ===== Footer ===== */
+.footer{
+  text-align:center;color:var(--text-muted);
+  font-size:.8rem;margin-top:36px;
+  padding-top:20px;border-top:1px solid var(--border);
+}
+.footer b{color:var(--text)}
+
+/* ===== Responsive ===== */
+@media(max-width:640px){
+  .hero{padding:26px 18px}
+  .hero h1{font-size:1.35rem}
+  .section{padding:20px 16px}
+  pre{font-size:.78rem;padding:12px}
+  table{font-size:.8rem}
+  th,td{padding:8px}
+  .row{flex-direction:row}
+}
+</style>
+</head>
+<body>
+<div style="position:fixed;top:14px;left:14px;z-index:9999;">
+<a href="../index.html" style="display:inline-block;padding:6px 14px;border-radius:999px;background:rgba(20,26,38,.88);color:#7da7ff;font-size:13px;text-decoration:none;border:1px solid rgba(90,130,220,.45);backdrop-filter:blur(4px);font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.35);" onmouseover="this.style.background='rgba(30,40,60,.95)'" onmouseout="this.style.background='rgba(20,26,38,.88)'">← 课程目录</a>
+</div>
+
+<div class="wrap">
+
+<!-- ============ HERO ============ -->
+<header class="hero">
+  <div class="series">每日架构师微课程 · 第 10 期</div>
+  <h1>Redis 性能调优：慢查询、大 Key、热 Key 与全链路延迟排查</h1>
+  <div class="meta">
+    <span class="tag">📅 <b>2026-08-24</b>（周一）</span>
+    <span class="tag redis">⚡ Redis 系列 · 第 6 讲</span>
+    <span class="tag">⏱ 预计阅读 <b>10 分钟</b></span>
+    <span class="tag">🎯 slowlog / 大 Key / 热 Key / Pipeline / fork 抖动</span>
+  </div>
+</header>
+
+<!-- ============ 1. 场景引入 ============ -->
+<section class="section">
+  <h2>一、一次"P99 从 2ms 飙到 80ms"的线上抖动</h2>
+  <p>某交易日 14:30，交易服务调用 Redis 的 P99 延迟从 <code>2ms</code> 飙到 <code>80ms</code>，上游线程池被超时请求占满，引发局部雪崩。重启大法失效——重启后十分钟又复现。最终定位到两个叠加因素：某开发在管理后台执行了 <code>KEYS order:*</code>（千万级 key，单线程阻塞 4 秒），叠加一个 <code>5MB</code> 的商品详情大 Hash，每次 <code>HGETALL</code> 都要序列化传输几 MB 数据。</p>
+  <p>Redis 性能问题的特殊性在于：<strong>它是单线程执行命令的</strong>（6.0+ 也仅网络 IO 多线程化），任何一条慢命令都会让后面所有命令排队。所以调优的本质不是"优化 Redis"，而是<strong>消灭排队源头</strong>。今天按"定位 → 原理 → 治理"三步走完全链路。</p>
+  <div class="callout tip">
+    <span class="t">💡 架构师视角</span>
+    Redis 官方单实例吞吐可达 10w+ QPS（简单命令），绝大多数"Redis 慢"都不是 Redis 本身算不动，而是<strong>用法不对</strong>：O(N) 命令、大 value、N 次网络往返、fork 抖动。调优顺序永远是：先测量，再动手。
+  </div>
+</section>
+
+<!-- ============ 2. 原理：延迟分层 ============ -->
+<section class="section">
+  <h2>二、原理：一次命令的延迟都花在哪了</h2>
+  <p>客户端发出 <code>GET</code> 到收到响应，总延迟 = <em>网络往返(RTT) + 命令排队 + 命令执行 + 返回数据传输</em>。逐层拆解各自的"病灶"：</p>
+
+  <div class="diagram">
+    <div class="arch">
+      <div class="row">
+        <div class="box bl"><div class="t">① 应用层</div><div class="d">连接池打满、每次新建连接、频繁全量序列化</div></div>
+        <div class="box"><div class="t">② 网络层</div><div class="d">N 次命令 = N×RTT；带宽被打满；跨机房访问</div></div>
+        <div class="box"><div class="t">③ 命令层</div><div class="d">O(N) 命令排队阻塞：KEYS / HGETALL / SMEMBERS / SORT</div></div>
+      </div>
+      <div class="row">
+        <div class="box hl"><div class="t">④ 数据层</div><div class="d">大 Key（传输+主从同步慢）/ 热 Key（单分片 CPU 打满）</div></div>
+        <div class="box hl"><div class="t">⑤ 持久化层</div><div class="d">fork COW 延迟、AOF fsync 刷盘、RDB SAVE 阻塞</div></div>
+        <div class="box gr"><div class="t">⑥ 系统层</div><div class="d">THP 透明大页、Swap、宿主机 CPU 争抢、NUMA</div></div>
+      </div>
+    </div>
+    <div class="dlabel">▲ 延迟六层模型：排查自上而下，治理按收益排序</div>
+  </div>
+
+  <div class="callout warn">
+    <span class="t">⚠️ 三个典型"假象"</span>
+    <strong>定时抖动</strong>（每隔几分钟/整点慢一次）→ 大概率是 RDB fork 或 AOF rewrite；<strong>偶发尖刺但 slowlog 为空</strong> → 排查方向在持久化与系统层；<strong>整体均匀变慢</strong> → 带宽、连接数、CPU 水位问题。先分类再排查，少走弯路。
+  </div>
+</section>
+
+<!-- ============ 3. 排查工具链 ============ -->
+<section class="section">
+  <h2>三、排查工具链：5 分钟定位延迟来源</h2>
+
+  <h3>1. slowlog：抓住慢命令</h3>
+  <pre><code><span class="cm"># 阈值设为 10ms（微秒单位），不要用默认的 10000us=10ms 以外的值拍脑袋</span>
+127.0.0.1:6379&gt; <span class="kw">CONFIG SET</span> slowlog-log-slower-than <span class="nm">10000</span>
+127.0.0.1:6379&gt; <span class="kw">SLOWLOG GET</span> <span class="nm">3</span>
+1) 1) (integer) 14             <span class="cm"># 日志序号</span>
+   2) (integer) 1756012800     <span class="cm"># 发生时间戳</span>
+   3) (integer) <span class="nm">34567</span>          <span class="cm"># 耗时 34.5ms ← 罪证</span>
+   4) 1) <span class="st">"KEYS"</span>  2) <span class="st">"order:*"</span>   <span class="cm"># 命令与参数</span></code></pre>
+
+  <h3>2. latency monitor：捕捉 fork/fsync 尖刺</h3>
+  <pre><code>127.0.0.1:6379&gt; <span class="kw">CONFIG SET</span> latency-monitor-threshold <span class="nm">100</span>  <span class="cm"># 100ms</span>
+127.0.0.1:6379&gt; <span class="kw">LATENCY DOCTOR</span>   <span class="cm"># 自动给出诊断建议</span></code></pre>
+
+  <h3>3. 找大 Key 与热 Key</h3>
+  <pre><code><span class="cm"># 在线扫描大 key（-i 0.1 每次扫描间隔 0.1s，降低对线上影响）</span>
+redis-cli --bigkeys -i 0.1
+
+<span class="cm"># 热 key 探测：要求 maxmemory-policy 为 *lfu 系策略</span>
+redis-cli --hotkeys
+
+<span class="cm"># 网络延迟基线测量（确认不是网络问题）</span>
+redis-cli --latency-history -h &lt;host&gt; -p 6379</code></pre>
+
+  <h3>4. INFO 里的五个黄金指标</h3>
+  <table>
+    <tr><th>指标</th><th>含义</th><th>关注阈值</th></tr>
+    <tr><td><code>latest_fork_usec</code></td><td>最近一次 fork 耗时</td><td class="lose">&gt; 20ms 需治理（内存过大或 THP 未关）</td></tr>
+    <tr><td><code>instantaneous_ops_per_sec</code></td><td>当前 QPS</td><td>持续超过容量水位 70% 即扩容</td></tr>
+    <tr><td><code>mem_fragmentation_ratio</code></td><td>碎片率 = used_memory_rss / used_memory</td><td class="lose">&gt; 1.5 碎片严重；&lt; 1 可能已用 swap</td></tr>
+    <tr><td><code>evicted_keys</code></td><td>因内存满被逐出的 key 数</td><td class="lose">持续增长说明容量不足</td></tr>
+    <tr><td><code>blocked_clients</code></td><td>BLPOP/BRPOP 阻塞连接数</td><td>突增说明下游消费卡顿</td></tr>
+  </table>
+</section>
+
+<!-- ============ 4. 治理实战 ============ -->
+<section class="section">
+  <h2>四、四大治理方向与实战配置</h2>
+
+  <h3>1. 慢命令治理：禁用 + 替换</h3>
+  <pre><code><span class="cm"># redis.conf —— 危险命令直接改名或禁用，从源头杜绝</span>
+<span class="op">rename-command</span> KEYS <span class="st">""</span>
+<span class="op">rename-command</span> FLUSHALL <span class="st">""</span>
+<span class="op">rename-command</span> FLUSHDB <span class="st">""</span>
+<span class="op">rename-command</span> CONFIG <span class="st">"CONFIG_x9y8z7"</span>   <span class="cm"># 运维保留但要改名</span>
+
+<span class="cm"># KEYS 替换为 SCAN 游标渐进式遍历，单次只扫一小片</span>
+127.0.0.1:6379&gt; <span class="kw">SCAN</span> <span class="nm">0</span> <span class="kw">MATCH</span> <span class="st">order:2026-08:*</span> <span class="kw">COUNT</span> <span class="nm">500</span></code></pre>
+  <p>同理：<code>SMEMBERS → SSCAN</code>、<code>HGETALL → HMGET 指定字段</code>、<code>DEL → UNLINK</code>。原则是<strong>任何 O(N) 命令不允许出现在高频代码路径</strong>，通过 code review + 命令审计工具（如 redis-faina 分析 monitor 采样）兜底。</p>
+
+  <h3>2. 大 Key 治理：拆分 + 异步删除</h3>
+  <pre><code><span class="cm"># 大 Hash 按字段哈希拆桶：field1..N → 100 个子 key</span>
+bucket = CRC32(field) % <span class="nm">100</span>
+<span class="kw">HSET</span> <span class="st">user:1001:07</span> field1 v1   <span class="cm"># 单桶控制在 1w 字段以内</span>
+
+<span class="cm"># redis.conf —— lazyfree 全家桶，同步删除变后台异步</span>
+<span class="op">lazyfree-lazy-eviction</span> yes
+<span class="op">lazyfree-lazy-expire</span> yes
+<span class="op">lazyfree-lazy-server-del</span> yes
+<span class="op">replica-lazy-flush</span> yes</code></pre>
+  <p>经验阈值：String 类 value <strong>≤ 10KB</strong>，集合类元素数 <strong>≤ 5000</strong>、总大小 <strong>≤ 1MB</strong>。超限的典型是"把整个对象 JSON 塞成一个 String"——应改为按字段拆 Hash 或压缩后存储。</p>
+
+  <h3>3. 热 Key 治理：本地缓存 + 多副本打散</h3>
+  <pre><code><span class="cm"># 方案 A：客户端 Caffeine 二级缓存（本地 1s + Redis 60s 双层 TTL）</span>
+<span class="cm">// 读路径：本地命中 → 返回；未命中 → 读 Redis → 回填本地</span>
+<span class="nm">cache.get</span>(skuId, k -&gt; redis.get(<span class="st">"sku:"</span>+k));  <span class="cm">// 本地 1s 过期兜底</span>
+
+<span class="cm"># 方案 B：热 key 写多份副本，读随机打散到不同 key</span>
+<span class="kw">SET</span> <span class="st">hot:sku:1001:r1</span> v <span class="kw">EX</span> <span class="nm">60</span>
+<span class="kw">SET</span> <span class="st">hot:sku:1001:r2</span> v <span class="kw">EX</span> <span class="nm">60</span>   <span class="cm"># 读时随机选 r1~r4</span></code></pre>
+  <p>Cluster 模式下热 Key 更致命：<strong>单个分片的 CPU 打满，其他分片却空闲</strong>，且无法靠加分片解决。方案 A 是首选（省一次网络往返），B 用于读 QPS 极高且允许短暂不一致的场景。</p>
+
+  <h3>4. 网络层：Pipeline 把 N×RTT 压成 1×RTT</h3>
+  <pre><code><span class="cm">// 反面：100 个 key = 100 次网络往返（同机房 RTT 0.5ms → 仅网络就 50ms）</span>
+<span class="kw">for</span> (String id : ids) { redis.get(<span class="st">"sku:"</span>+id); }
+
+<span class="cm">// 正面：pipeline 一次发出、一次收回</span>
+List&lt;Object&gt; results = redisTemplate.executePipelined((RedisCallback&lt;Object&gt;) conn -&gt; {
+    <span class="kw">for</span> (String id : ids) {
+        conn.get((<span class="st">"sku:"</span> + id).getBytes());
+    }
+    <span class="kw">return</span> <span class="cm">null</span>;   <span class="cm">// 命令先在客户端缓冲，统一发送</span>
+});</code></pre>
+  <p>能用 <code>MGET/MSET/HMGET</code> 原子批量命令的优先用批量命令；单批 Pipeline 建议<strong>≤ 500 条或 ≤ 1MB</strong>——过大的批量会让响应也变得巨大，阻塞同连接上的其他命令，反而制造新的延迟尖刺。</p>
+
+  <h3>5. 系统层：两个必须检查的内核参数</h3>
+  <pre><code><span class="cm"># ① 关闭透明大页（THP）——fork 延迟的头号元凶</span>
+<span class="kw">echo</span> never &gt; /sys/kernel/mm/transparent_hugepage/enabled
+
+<span class="cm"># ② /etc/sysctl.conf —— 防 fork 失败与 swap</span>
+vm.overcommit_memory = <span class="nm">1</span>    <span class="cm"># 允许 fork 按需分配，避免 OOM 拒绝</span>
+vm.swappiness = <span class="nm">1</span>        <span class="cm"># Redis 数据页一旦换出到 swap，延迟彻底失控</span></code></pre>
+</section>
+
+<!-- ============ 5. 容量规划 ============ -->
+<section class="section">
+  <h2>五、容量规划：让 Redis 永远碰不到天花板</h2>
+  <ul>
+    <li><strong>单实例内存 ≤ 10GB</strong>：fork 耗时与内存成正比（约 10GB ≈ 100ms+），也影响全量同步时长与 RDB 恢复速度。大了就拆分片。</li>
+    <li><strong>水位线 70%</strong>：QPS、内存、CPU、带宽四项任一持续超过 70% 就启动扩容，给峰值与故障转移留 buffer。</li>
+    <li><strong>maxmemory 必须显式设置</strong>并搭配淘汰策略（缓存场景用 <code>allkeys-lfu</code>），否则 OOM 后 Redis 直接拒绝写入。</li>
+    <li><strong>连接数预算</strong>：每个应用实例连接池 ≤ 30，总连接数控制在 <code>maxclients</code>（默认 10000）的 50% 以内，避免突发建连风暴。</li>
+  </ul>
+</section>
+
+<!-- ============ 6. 今日要点 ============ -->
+<section class="section">
+  <h2>今日要点</h2>
+  <div class="summary-grid">
+    <div class="sum-card"><span class="n">1</span><div class="t">排查先分层</div><div class="d">命令层看 slowlog、数据层看 bigkeys/hotkeys、持久化看 latest_fork_usec、系统层查 THP 与 swap。先分类再治理。</div></div>
+    <div class="sum-card"><span class="n">2</span><div class="t">慢命令从源头禁</div><div class="d">KEYS/FLUSHALL 生产禁用，KEYS→SCAN、DEL→UNLINK，任何 O(N) 命令不进高频路径。</div></div>
+    <div class="sum-card"><span class="n">3</span><div class="t">大 Key 热 Key 双治</div><div class="d">大 Key 拆桶 + lazyfree 异步删；热 Key 用本地缓存兜底，Cluster 下热 Key 必须打散。</div></div>
+    <div class="sum-card"><span class="n">4</span><div class="t">批量消灭网络往返</div><div class="d">N 次单命令 = N×RTT；MGET/HMGET/Pipeline 可降一个数量级，单批 ≤500 条或 ≤1MB。</div></div>
+    <div class="sum-card"><span class="n">5</span><div class="t">容量规划留三成</div><div class="d">单实例 ≤10GB、四项水位 70% 触发扩容、显式 maxmemory + allkeys-lfu，别让 Redis 触到系统天花板。</div></div>
+  </div>
+</section>
+
+<!-- ============ 7. 思考题 ============ -->
+<section class="section">
+  <h2>架构师思考题</h2>
+
+  <details>
+    <summary><span class="q-mark">Q1</span>业务反馈 Redis「偶发超时 100ms+，但 slowlog 里只有 2 条记录且都不是业务 key」，作为架构师你如何继续定位？<span class="chev">▶</span></summary>
+    <div class="answer">
+      <h4>解题方向</h4>
+      <p>slowlog 为空说明<strong>命令执行本身不慢</strong>，延迟来自命令执行之外的四类"隐形耗时"。这正是第 2 节六层模型的应用：逐层验证、用排除法收敛。</p>
+      <h4>参考排查路径</h4>
+      <ul>
+        <li><strong>① 持久化尖刺（最常见）</strong>：查 <code>INFO stats</code> 的 <code>latest_fork_usec</code>（&gt;20ms 即异常）与 <code>rdb_last_bgsave_status</code>；开启 <code>latency-monitor-threshold=100</code> 后看 <code>LATENCY DOCTOR</code> 是否报 fork / aof-fsync 事件。对策：内存瘦身、确认 THP 已关、调大 <code>auto-aof-rewrite-percentage</code> 间隔、低峰期触发 rewrite。</li>
+        <li><strong>② AOF fsync 阻塞</strong>：appendfsync=always 时每次写命令都同步刷盘，磁盘抖动直接放大到所有写请求。对策：生产用 everysec，并确认 <code>no-appendfsync-on-rewrite yes</code>（rewrite 期间不强制刷盘）。</li>
+        <li><strong>③ 网络与带宽</strong>：用 <code>redis-cli --latency-history</code> 测纯网络基线；同时看宿主机网卡流量是否打满（大 value 频繁传输的典型症状）。跨机房访问要检查专线抖动。</li>
+        <li><strong>④ 系统资源争抢</strong>：云主机/容器环境查 CPU steal time（宿主机超卖）、swap 使用（<code>vm.swappiness=1</code>）、NUMA 跨节点访问。<code>mem_fragmentation_ratio &lt; 1</code> 是已经用到 swap 的铁证。</li>
+      </ul>
+      <h4>思路总结</h4>
+      <p>偶发尖刺 + slowlog 干净 ≈ 90% 是 <strong>fork/fsync/系统层</strong>问题。定位顺序：latest_fork_usec → LATENCY DOCTOR → 磁盘与网卡 → CPU steal/swap。架构上的根治手段是控制实例内存规模（≤10GB），fork 耗时随内存线性增长，内存瘦身是收益最大的单点优化。</p>
+    </div>
+  </details>
+
+  <details>
+    <summary><span class="q-mark">Q2</span>Pipeline 是批量性能问题的万能药吗？在 Redis Cluster 模式下它为什么会「部分失效」，你会如何设计集群下的批量读取方案？<span class="chev">▶</span></summary>
+    <div class="answer">
+      <h4>Pipeline 的两个边界</h4>
+      <p>其一，Pipeline 只是<strong>攒命令省 RTT</strong>，命令仍逐条执行，不提供原子性（中途某条失败，其余照常执行）；其二，单批过大时，客户端缓冲区、服务端输出缓冲区（client-output-buffer-limit）同时承压，可能触发客户端被断连，自己制造延迟尖刺。</p>
+      <h4>Cluster 下"部分失效"的原理</h4>
+      <p>Cluster 把 key 按 CRC16(slot) % 16384 哈希到 16384 个 slot，再分布到多个分片节点。Jedis/Lettuce 的集群 Pipeline 实现，本质是<strong>按命令的首 key 计算所属节点，把命令分组后发给各自节点</strong>。若 100 个 key 落在 3 个节点上，一次"Pipeline"实际是 3 组并行批量——收益仍在但打折；更糟的是若客户端库未做分组（直接发到错误的节点），会收到 <code>MOVED</code> 重定向错误，批量直接失败。</p>
+      <h4>集群批量方案设计</h4>
+      <ul>
+        <li><strong>方案 A（推荐）：客户端预分组</strong>。用与 Redis 一致的 CRC16 算法把 key 按 slot 分组，每组内再走 Pipeline 发往对应节点；实现上 Lettuce 的 <code>ConnectionProvider</code> 或 Redisson 的 <code>RBatch</code> 已内置该能力，直接用成熟实现而非自己造轮子。</li>
+        <li><strong>方案 B：hash tag 强制同 slot</strong>。key 写成 <code>{order:1001}:detail</code>、<code>{order:1001}:stock</code>，花括号内相同则落同一 slot，可对这组 key 用事务/原生 Pipeline。代价是该组数据无法水平分片，<strong>只适合业务内聚的小 key 组</strong>，且要警惕人为制造数据倾斜。</li>
+        <li><strong>兜底约束</strong>：单节点批量仍控制在 ≤500 条/1MB；对延迟不敏感的全量拉取改用异步任务 + SCAN，避免占用在线连接。</li>
+      </ul>
+      <h4>架构权衡</h4>
+      <p>批量化的终极目标不是"用 Pipeline"，而是<strong>减少 RTT 与命令数</strong>：能合并存储模型（把 N 个 String 改成一个 Hash 用 HMGET）优先改模型，其次用批量命令，最后才是 Pipeline——存储模型优化一次，长期受益且与拓扑无关。</p>
+    </div>
+  </details>
+</section>
+
+<footer class="footer">
+  每日架构师微课程 · 第 10 期 · Redis 系列 第 6 讲 · <b>2026-08-24</b><br>
+  下一讲预告：Redis 内存管理（内存碎片 / 过期策略 / 8 种淘汰算法对比）· 之后进入 Apache Pulsar 系列
+</footer>
+
+</div>
+</body>
+</html>

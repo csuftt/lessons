@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 9 期 · Redis 分布式锁：从 SET NX 到 Redisson 看门狗与 RedLock 争议 — 2026-08-21</title>
+<style>
+:root{
+  --bg:#0d1117;
+  --bg-card:#161b22;
+  --bg-card2:#1c2330;
+  --border:#2d333b;
+  --text:#c9d1d9;
+  --text-strong:#e6edf3;
+  --text-muted:#8b949e;
+  --accent:#ff6188;
+  --accent2:#a9dc76;
+  --accent3:#78dce8;
+  --code-bg:#0a0e14;
+  --warn-bg:rgba(255,159,67,.12);
+  --warn-border:#ff9f43;
+  --tip-bg:rgba(169,220,118,.1);
+  --tip-border:#a9dc76;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  background:var(--bg);
+  color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  line-height:1.75;
+  font-size:16px;
+}
+.wrap{max-width:860px;margin:0 auto;padding:24px 16px 64px}
+
+/* ===== Hero ===== */
+.hero{
+  background:linear-gradient(135deg,#1a1016 0%,#161b22 55%,#101820 100%);
+  border:1px solid var(--border);
+  border-radius:16px;
+  padding:36px 28px;
+  margin-bottom:28px;
+  position:relative;
+  overflow:hidden;
+}
+.hero::before{
+  content:"";
+  position:absolute;top:-60px;right:-60px;
+  width:220px;height:220px;border-radius:50%;
+  background:radial-gradient(circle,rgba(255,97,136,.18),transparent 70%);
+}
+.hero .series{color:var(--accent);font-weight:600;font-size:.85rem;letter-spacing:.12em;text-transform:uppercase;margin-bottom:10px}
+.hero h1{color:var(--text-strong);font-size:1.7rem;line-height:1.4;margin-bottom:16px}
+.meta{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.tag{
+  display:inline-flex;align-items:center;gap:6px;
+  background:var(--bg-card2);border:1px solid var(--border);
+  color:var(--text-muted);border-radius:999px;
+  padding:4px 14px;font-size:.82rem;
+}
+.tag b{color:var(--text-strong);font-weight:600}
+.tag.redis{border-color:rgba(255,97,136,.45);color:#ff9db6}
+.tag.redis b{color:#ff9db6}
+
+/* ===== Section ===== */
+.section{
+  background:var(--bg-card);
+  border:1px solid var(--border);
+  border-radius:16px;
+  padding:28px;
+  margin-bottom:22px;
+}
+.section h2{
+  color:var(--text-strong);font-size:1.22rem;
+  padding-left:14px;border-left:4px solid var(--accent);
+  margin-bottom:18px;line-height:1.5;
+}
+.section h3{
+  color:var(--text-strong);font-size:1.02rem;
+  margin:22px 0 10px;
+}
+.section h3::before{content:"◆ ";color:var(--accent);font-size:.8em}
+p{margin-bottom:12px}
+p:last-child{margin-bottom:0}
+strong{color:var(--text-strong)}
+em{color:var(--accent3);font-style:normal}
+a{color:var(--accent3)}
+
+/* ===== Code ===== */
+pre{
+  background:var(--code-bg);
+  border:1px solid var(--border);
+  border-radius:10px;
+  padding:16px 18px;
+  overflow-x:auto;
+  font-size:.84rem;line-height:1.7;
+  margin:14px 0;
+  font-family:"Cascadia Code","JetBrains Mono",Consolas,"Courier New",monospace;
+}
+code{font-family:inherit}
+p code,li code,td code{
+  background:rgba(110,118,129,.18);
+  border-radius:5px;padding:2px 7px;
+  color:var(--accent3);font-size:.86em;
+}
+.cm{color:#7f8c98}          /* comment */
+.kw{color:#ff6188}          /* keyword */
+.st{color:#a9dc76}          /* string */
+.nm{color:#78dce8}          /* number/func */
+.op{color:#ffd580}          /* param/option */
+
+/* ===== Lists ===== */
+ul,ol{padding-left:22px;margin-bottom:12px}
+li{margin-bottom:6px}
+li::marker{color:var(--accent)}
+
+/* ===== Callout ===== */
+.callout{
+  border-radius:12px;padding:16px 18px;
+  margin:16px 0;font-size:.94rem;
+  border-left:4px solid;
+}
+.callout.warn{background:var(--warn-bg);border-color:var(--warn-border)}
+.callout.warn .t{color:#ffb56b}
+.callout.tip{background:var(--tip-bg);border-color:var(--tip-border)}
+.callout.tip .t{color:var(--accent2)}
+.callout .t{font-weight:700;display:block;margin-bottom:6px;font-size:.9rem}
+
+/* ===== Architecture diagram ===== */
+.diagram{
+  background:var(--code-bg);
+  border:1px dashed var(--border);
+  border-radius:12px;padding:20px 14px;
+  margin:16px 0;
+  overflow-x:auto;
+}
+.arch{display:flex;flex-direction:column;gap:14px;min-width:520px}
+.row{display:flex;gap:12px;align-items:stretch}
+.box{
+  flex:1;background:var(--bg-card2);
+  border:1px solid var(--border);border-radius:10px;
+  padding:12px 14px;text-align:center;
+}
+.box .t{font-weight:700;color:var(--text-strong);font-size:.92rem;margin-bottom:4px}
+.box .d{color:var(--text-muted);font-size:.78rem;line-height:1.55}
+.box.hl{border-color:rgba(255,97,136,.55);background:rgba(255,97,136,.08)}
+.box.hl .t{color:#ff9db6}
+.box.gr{border-color:rgba(169,220,118,.5);background:rgba(169,220,118,.07)}
+.box.gr .t{color:var(--accent2)}
+.box.bl{border-color:rgba(120,220,232,.5);background:rgba(120,220,232,.07)}
+.box.bl .t{color:var(--accent3)}
+.arrow{color:var(--text-muted);font-size:1.2rem;display:flex;align-items:center;justify-content:center}
+.dlabel{text-align:center;color:var(--text-muted);font-size:.78rem;margin-top:-6px}
+
+/* ===== Timeline ===== */
+.tl{display:flex;flex-direction:column;gap:10px;min-width:560px}
+.tl-row{display:flex;gap:10px;align-items:stretch}
+.tl-step{
+  flex:1;background:var(--bg-card2);
+  border:1px solid var(--border);border-radius:10px;
+  padding:10px 12px;font-size:.78rem;line-height:1.6;
+}
+.tl-step .n{
+  display:inline-block;background:rgba(255,97,136,.15);color:var(--accent);
+  border-radius:6px;padding:0 8px;font-weight:700;font-size:.75rem;margin-bottom:4px;
+}
+.tl-step.gr{border-color:rgba(169,220,118,.5)}
+.tl-step.gr .n{background:rgba(169,220,118,.15);color:var(--accent2)}
+.tl-step.rd{border-color:rgba(255,138,155,.6);background:rgba(255,97,136,.07)}
+.tl-step.rd .n{background:rgba(255,97,136,.2);color:#ff8a9b}
+
+/* ===== Comparison table ===== */
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:.88rem}
+th,td{border:1px solid var(--border);padding:10px 12px;text-align:left;vertical-align:top}
+th{background:var(--bg-card2);color:var(--text-strong);font-weight:600}
+td{color:var(--text)}
+tr:nth-child(even) td{background:rgba(255,255,255,.015)}
+td .win{color:var(--accent2);font-weight:600}
+td .lose{color:#ff8a9b}
+
+/* ===== Summary cards ===== */
+.summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:6px}
+.sum-card{
+  background:var(--bg-card2);border:1px solid var(--border);
+  border-radius:12px;padding:16px;
+}
+.sum-card .n{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:26px;height:26px;border-radius:50%;
+  background:rgba(255,97,136,.15);color:var(--accent);
+  font-weight:700;font-size:.85rem;margin-bottom:8px;
+}
+.sum-card .t{color:var(--text-strong);font-weight:600;font-size:.95rem;margin-bottom:6px}
+.sum-card .d{color:var(--text-muted);font-size:.85rem;line-height:1.65}
+
+/* ===== Q&A collapsible ===== */
+details{
+  background:var(--bg-card2);
+  border:1px solid var(--border);
+  border-radius:12px;
+  padding:0;
+  margin-bottom:14px;
+  overflow:hidden;
+}
+details summary{
+  cursor:pointer;padding:16px 20px;
+  color:var(--text-strong);font-weight:600;font-size:.95rem;
+  list-style:none;display:flex;align-items:flex-start;gap:10px;
+  transition:background .15s;
+}
+details summary::-webkit-details-marker{display:none}
+details summary:hover{background:rgba(255,255,255,.03)}
+details summary .q-mark{
+  color:var(--accent);font-weight:800;flex-shrink:0;
+}
+details summary .chev{margin-left:auto;color:var(--text-muted);transition:transform .2s;flex-shrink:0}
+details[open] summary .chev{transform:rotate(90deg)}
+details .answer{
+  padding:4px 20px 18px 42px;
+  border-top:1px dashed var(--border);
+  padding-top:14px;
+  font-size:.92rem;
+}
+details .answer h4{color:var(--accent3);font-size:.9rem;margin:14px 0 6px}
+details .answer p{margin-bottom:10px}
+details .answer ul{margin-bottom:10px}
+
+/* ===== Footer ===== */
+.footer{
+  text-align:center;color:var(--text-muted);
+  font-size:.8rem;margin-top:36px;
+  padding-top:20px;border-top:1px solid var(--border);
+}
+.footer b{color:var(--text)}
+
+/* ===== Responsive ===== */
+@media(max-width:640px){
+  .hero{padding:26px 18px}
+  .hero h1{font-size:1.35rem}
+  .section{padding:20px 16px}
+  pre{font-size:.78rem;padding:12px}
+  table{font-size:.8rem}
+  th,td{padding:8px}
+  .row{flex-direction:row}
+}
+</style>
+</head>
+<body>
+<div style="position:fixed;top:14px;left:14px;z-index:9999;">
+<a href="../index.html" style="display:inline-block;padding:6px 14px;border-radius:999px;background:rgba(20,26,38,.88);color:#7da7ff;font-size:13px;text-decoration:none;border:1px solid rgba(90,130,220,.45);backdrop-filter:blur(4px);font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.35);" onmouseover="this.style.background='rgba(30,40,60,.95)'" onmouseout="this.style.background='rgba(20,26,38,.88)'">← 课程目录</a>
+</div>
+
+<div class="wrap">
+
+<!-- ============ HERO ============ -->
+<header class="hero">
+  <div class="series">每日架构师微课程 · 第 9 期</div>
+  <h1>Redis 分布式锁：从 SET NX 到 Redisson 看门狗与 RedLock 争议</h1>
+  <div class="meta">
+    <span class="tag">📅 <b>2026-08-21</b>（周五）</span>
+    <span class="tag redis">⚡ Redis 系列 · 第 5 讲</span>
+    <span class="tag">⏱ 预计阅读 <b>10 分钟</b></span>
+    <span class="tag">🎯 SET NX PX / Lua 原子释放 / 看门狗 / RedLock</span>
+  </div>
+</header>
+
+<!-- ============ 1. 场景引入 ============ -->
+<section class="section">
+  <h2>一、一场"库存变负数"的经典事故</h2>
+  <p>某秒杀系统库存只剩 1 件，两个应用实例同时收到下单请求，各自执行"<em>查库存 → 扣减</em>"。单机时代 <code>synchronized</code> 能锁住进程内并发，但服务是多实例部署的——两个 JVM 各自加锁互不可见，双双读到"库存=1"，双双扣减成功，库存变成 <code>-1</code>。这就是 <strong>check-then-act 竞态</strong>：读和写不是原子操作，锁的粒度只覆盖了单个进程。</p>
+  <p>解法是把锁从"<strong>进程内</strong>"升级到"<strong>所有实例可见的共享介质</strong>"。Redis 单线程执行命令、延迟低、几乎不额外部署，成了分布式锁最常用的载体。但一行 <code>SETNX</code> 背后藏着四个致命陷阱，今天逐个拆解。</p>
+  <div class="callout warn">
+    <span class="t">⚠️ 分布式锁的正确性边界</span>
+    Redis 锁是<strong>效率优先（efficiency）</strong>的锁：目标是减少重复计算、防止偶发并发，偶尔失效可接受。若业务要求<strong>正确性优先（correctness）</strong>——错一次就资损（扣款、扣库存），必须叠加数据库层兜底（乐观锁 / 唯一约束），不能把 Redis 锁当唯一防线。
+  </div>
+</section>
+
+<!-- ============ 2. 原理讲解 ============ -->
+<section class="section">
+  <h2>二、四个陷阱与对应解法</h2>
+
+  <h3>陷阱 1：加锁不是原子操作</h3>
+  <p>先 <code>SETNX</code> 再 <code>EXPIRE</code> 两条命令之间进程崩溃，锁成为<strong>永不过期的死锁</strong>。正解是一条原子命令：</p>
+  <pre><code><span class="cm"># SET key value NX PX 过期毫秒数 —— NX=不存在才设置，PX=毫秒过期</span>
+<span class="nm">SET</span> lock:order:1001 <span class="st">"uuid-a1b2"</span> <span class="kw">NX</span> <span class="kw">PX</span> <span class="nm">30000</span></code></pre>
+
+  <h3>陷阱 2：误删别人的锁</h3>
+  <p>客户端 A 业务执行超时，锁自动过期；客户端 B 获得锁后，A 缓过来执行 <code>DEL</code>，把 B 的锁删了——C 又能加锁，B、C 并发。所以 value 必须是<strong>每个客户端唯一的标识</strong>（UUID+线程 ID），且"判断 + 删除"必须用 <strong>Lua 脚本</strong>保证原子：</p>
+  <pre><code><span class="cm">-- release.lua：是我的锁才删</span>
+<span class="kw">if</span> redis.call(<span class="st">"GET"</span>, KEYS[<span class="nm">1</span>]) == ARGV[<span class="nm">1</span>] <span class="kw">then</span>
+    <span class="kw">return</span> redis.call(<span class="st">"DEL"</span>, KEYS[<span class="nm">1</span>])
+<span class="kw">else</span>
+    <span class="kw">return</span> <span class="nm">0</span>
+<span class="kw">end</span></code></pre>
+
+  <h3>陷阱 3：过期时间定多少？—— 看门狗机制</h3>
+  <p>设短了业务没执行完锁先过期；设长了持有者崩溃后其他人干等。Redisson 的<strong>看门狗（Watchdog）</strong>解法：不指定 leaseTime 时，锁默认 30s，后台任务每 <code>30/3=10s</code> 检查一次，<strong>业务没执行完就自动续期</strong>；进程崩溃则无人续期，锁最多 30s 后自动释放——两难自解。</p>
+
+  <h3>陷阱 4：主从切换导致锁丢失 —— 最隐蔽的一个</h3>
+  <p>Redis 主从复制是<strong>异步</strong>的。下面这个时序是 RedLock 方案诞生的直接原因：</p>
+  <div class="diagram">
+    <div class="tl">
+      <div class="tl-row">
+        <div class="tl-step"><span class="n">① T1</span>客户端 A 在 <strong>master</strong> 上加锁成功 <code>SET lock NX PX</code> ✅</div>
+        <div class="tl-step"><span class="n">② T2</span>master 还没来得及把锁 key <strong>异步复制</strong>给 slave，master 宕机 💥</div>
+      </div>
+      <div class="tl-row">
+        <div class="tl-step rd"><span class="n">③ T3</span>slave 晋升为新 master，但它<strong>没有这把锁的数据</strong></div>
+        <div class="tl-step rd"><span class="n">④ T4</span>客户端 B 在新 master 上加锁<strong>也成功</strong> → A、B 同时持锁，互斥性被打破 ❌</div>
+      </div>
+    </div>
+    <div class="dlabel">主从切换窗口内锁丢失：异步复制的固有缺陷，单个 Redis 主从架构无解</div>
+  </div>
+</section>
+
+<!-- ============ 3. RedLock 与选型 ============ -->
+<section class="section">
+  <h2>三、RedLock 与业界著名争论</h2>
+  <p>antirez（Redis 作者）提出 <strong>RedLock</strong>：部署 <code>2N+1</code> 个<strong>互相独立</strong>的 Redis 单实例，客户端依次向所有实例加锁（带超时），<strong>多数派（N+1）成功且总耗时小于锁有效期</strong>才算持锁。任何一台宕机、主从切换丢锁，都只影响少数派，互斥性得以维持。代价是：5 套独立实例的运维成本，且丧失了 Redis Cluster 的弹性伸缩能力。</p>
+  <p>分布式系统学者 <strong>Martin Kleppmann</strong>（《DDIA》作者）公开质疑：若客户端在加锁成功后发生<strong>长 GC 停顿 / 时钟跳变</strong>，暂停恢复时锁已过期，客户端却仍以为自己持锁，继续写共享资源——RedLock 这种依赖<em>时间</em>做判断的锁无法防御。他主张用 <strong>fencing token</strong>：锁服务发放单调递增的令牌，存储层拒绝携带旧令牌的写入。antirez 反驳称时钟跳变可控、场景极端。工程界的务实结论：</p>
+  <table>
+    <tr><th>方案</th><th>一致性</th><th>性能</th><th>适用场景</th></tr>
+    <tr><td>单 Redis + Redisson</td><td><span class="lose">AP，可能丢锁</span></td><td class="win">极高（单跳）</td><td>绝大多数效率型场景 + DB 兜底</td></tr>
+    <tr><td>RedLock（多独立实例）</td><td>较强但有时钟依赖</td><td>中（需多数派 RTT）</td><td>无 DB 兜底层、跨系统互斥</td></tr>
+    <tr><td>ZooKeeper / etcd 临时节点</td><td class="win">CP，会话断自动释放</td><td><span class="lose">较低（Raft/ZAB 写放大）</span></td><td>正确性敏感：主备选举、任务分配</td></tr>
+    <tr><td>数据库乐观锁/唯一约束</td><td class="win">强（最终防线）</td><td><span class="lose">低</span></td><td>资损类操作的最后一道闸</td></tr>
+  </table>
+  <div class="callout tip">
+    <span class="t">💡 架构师选型建议</span>
+    默认组合是"<strong>Redisson 看门狗锁 + 数据库层兜底</strong>"：锁负责挡住 99.9% 的并发重复请求（效率），DB 乐观锁 <code>UPDATE stock SET num=num-1 WHERE id=? AND num&gt;0</code> 兜住极端并发（正确性）。RedLock 和 ZK 只在锁失效不可容忍且无法兜底时考虑。
+  </div>
+</section>
+
+<!-- ============ 4. 实战示例 ============ -->
+<section class="section">
+  <h2>四、Redisson 生产级代码</h2>
+  <pre><code><span class="cm">// 1. 配置（生产建议连接哨兵或 Cluster，锁 key 会被 hash 到某槽）</span>
+Config config = <span class="kw">new</span> Config();
+config.useSentinelServers()
+      .addSentinelAddress(<span class="st">"redis://s1:26379"</span>, <span class="st">"redis://s2:26379"</span>)
+      .setMasterName(<span class="st">"mymaster"</span>)
+      .setRetryAttempts(<span class="nm">3</span>).setRetryInterval(<span class="nm">1500</span>);  <span class="cm">// 加锁失败重试</span>
+RedissonClient client = Redisson.create(config);
+RLock lock = client.getLock(<span class="st">"lock:stock:1001"</span>);  <span class="cm">// 锁粒度=单个SKU，不是整张表</span>
+
+<span class="cm">// 2. 推荐姿势：只传 waitTime，不传 leaseTime → 激活看门狗自动续期</span>
+<span class="kw">boolean</span> ok = lock.<span class="nm">tryLock</span>(<span class="nm">3</span>, TimeUnit.SECONDS);  <span class="cm">// 最多等 3s</span>
+<span class="kw">if</span> (!ok) {
+    <span class="kw">throw new</span> BizException(<span class="st">"操作太频繁，请稍后再试"</span>);  <span class="cm">// 快速失败优于无限自旋</span>
+}
+<span class="kw">try</span> {
+    deductStockWithDBGuard(skuId);   <span class="cm">// 3. 核心业务 + DB 乐观锁兜底</span>
+} <span class="kw">finally</span> {
+    <span class="kw">if</span> (lock.isHeldByCurrentThread()) {
+        lock.unlock();               <span class="cm">// 可重入：内层嵌套只计数不减锁</span>
+    }
+}</code></pre>
+  <pre><code><span class="cm">-- 4. 数据库兜底：真正的互斥防线，锁失效也不超卖</span>
+<span class="kw">UPDATE</span> stock <span class="kw">SET</span> num = num - <span class="nm">1</span>
+<span class="kw">WHERE</span> sku_id = <span class="nm">1001</span> <span class="kw">AND</span> num &gt; <span class="nm">0</span>;   <span class="cm">-- 影响行数=0 即扣减失败</span></code></pre>
+  <div class="callout warn">
+    <span class="t">⚠️ 高频踩坑清单</span>
+    <ul>
+      <li><strong>waitTime 设 30s+ 无限等</strong>：高峰期线程全部阻塞在加锁上，把服务拖死。等待应短，失败走降级或 MQ 异步化；</li>
+      <li><strong>锁粒度过粗</strong>：锁"整表"使秒杀退化成串行；应锁到<strong>业务实体 ID</strong>（如单个 SKU）；</li>
+      <li><strong>unlock 前不判断 isHeldByCurrentThread</strong>：锁过期后被他人持有，unlock 抛 IllegalMonitorStateException；</li>
+      <li><strong>忘了 finally</strong>：异常路径锁不释放，只能等看门狗停止后续期、30s 超时——期间所有请求被挡；</li>
+      <li><strong>执行 RLock 方法时传了 leaseTime</strong>：看门狗<strong>立即失效</strong>，退化成固定过期时间，长任务照样裸奔。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ 5. 要点总结 ============ -->
+<section class="section">
+  <h2>五、今日要点</h2>
+  <div class="summary-grid">
+    <div class="sum-card"><span class="n">1</span><div class="t">原子加锁 + Lua 原子释放</div><div class="d"><code>SET key uuid NX PX</code> 一条命令加锁；释放必须 Lua 判断 value 是自己才 DEL，杜绝误删他人锁。</div></div>
+    <div class="sum-card"><span class="n">2</span><div class="t">看门狗解决过期时间两难</div><div class="d">不传 leaseTime 即激活：默认 30s、每 10s 自动续期，进程崩溃无人续期自动过期。注意传了 leaseTime 看门狗就失效。</div></div>
+    <div class="sum-card"><span class="n">3</span><div class="t">主从异步复制会丢锁</div><div class="d">加锁成功但未复制到 slave 时 master 宕机，切换后新 master 无锁数据，两个客户端同时持锁——主从架构的固有缺陷。</div></div>
+    <div class="sum-card"><span class="n">4</span><div class="t">RedLock 不是银弹</div><div class="d">多数派加锁抗单点丢锁，但依赖时钟稳定，防不住 GC 暂停类失效；正确性敏感场景优先 ZK/etcd 或 fencing token。</div></div>
+    <div class="sum-card"><span class="n">5</span><div class="t">Redis 锁管效率，DB 兜底管正确性</div><div class="d">生产标配双保险：Redisson 挡并发 + 数据库乐观锁/唯一约束兜资损，锁失效也不出事故。</div></div>
+  </div>
+</section>
+
+<!-- ============ 6. 思考题 ============ -->
+<section class="section">
+  <h2>六、架构师思考题</h2>
+
+  <details>
+    <summary><span class="q-mark">Q1</span>看门狗模式下，持有锁的客户端发生 30 秒 Full GC，锁和业务会发生什么？给出防御方案。
+      <span class="chev">▶</span>
+    </summary>
+    <div class="answer">
+      <h4>事故推演（时间线）</h4>
+      <p>T0 客户端 A 获得锁（30s TTL），看门狗每 10s 续期；T+2s A 发生 30s Full GC，<strong>业务执行和看门狗续期线程全部冻结</strong>；T+12s、T+22s 两次续期窗口错过，<strong>锁在 T+32s 过期</strong>；T+13s 客户端 B 拿到锁并扣减库存成功；T+32s A 从 GC 恢复，<strong>它对锁已过期毫不知情</strong>（JVM 时间感知不到暂停），继续执行扣减——超卖发生。随后 A 执行 unlock，Lua 校验 value 不匹配（此时是 B 的锁），返回 0 不误删，这是唯一守住的底线。</p>
+      <h4>防御方案（分三层）</h4>
+      <ul>
+        <li><strong>存储层兜底（必选）</strong>：扣减用 <code>UPDATE ... WHERE num&gt;0</code> 或版本号乐观锁，B 已扣减后 A 的 UPDATE 影响行数为 0，操作失败回滚——无论锁如何失效，数据正确性不破；</li>
+        <li><strong>恢复后自检</strong>：写共享资源前重新 <code>GET lock</code> 校验 value 是否仍是自己（或比对 fencing token），不是则放弃本次操作；</li>
+        <li><strong>治理层</strong>：选低停顿 GC（G1/ZGC）、禁止在持锁临界区内做重 IO/大对象分配、JVM 参数 <code>-XX:+UseZGC</code> 压缩 STW 到毫秒级，从源头缩小风险窗口。</li>
+      </ul>
+      <p>结论：看门狗只保证"<strong>活着就续期、死了就过期</strong>"，管不了"<strong>活着但暂停</strong>"——后者只能靠业务侧幂等与 DB 兜底。</p>
+    </div>
+  </details>
+
+  <details>
+    <summary><span class="q-mark">Q2</span>为什么 RedLock 必须要求"多数派加锁成功才视为持锁"？它在时钟跳变场景下如何被攻破？
+      <span class="chev">▶</span>
+    </summary>
+    <div class="answer">
+      <h4>为什么需要多数派（N+1 / 2N+1）</h4>
+      <p>RedLock 的本质是用<strong>多数派一致性</strong>对冲单点故障：任何时刻两个客户端不可能各自在超过半数实例上加锁成功——交集至少有一个实例会被先后访问，后者必然 NX 失败。所以单台实例宕机丢锁、异步复制未完成，都只影响少数派，多数派里至少有一个实例"记得"锁已被谁持有，互斥性得以维持。若只要求"全部实例成功"，任意一台网络抖动就加锁失败，可用性崩塌；若只要少数派成功，两个客户端可各占一半实例，锁形同虚设。5 实例容忍 2 台故障，正是 2N+1 的工程平衡点。</p>
+      <h4>时钟跳变攻破路径</h4>
+      <p>客户端 A 在 5 实例中 3 个加锁成功（TTL=10s）。其中实例 R1 的<strong>NTP 同步发生向后跳变</strong>（或运维手动改时间），R1 本地时钟回退 15s，A 的锁在 R1 上按本地时钟提前判定过期并删除；客户端 B 随后加锁，恰好拿到 R1 + 另外 2 个实例共 3 票——<strong>A、B 各自认为持锁</strong>。antirez 的回应是 Redis 用单调时钟、NTP 渐进同步可避免大跳变，但这把正确性寄托在运维纪律上，正是 Kleppmann 批判的核心：<strong>以时间判断有效性的锁，无法在时钟异常下自证正确</strong>。</p>
+      <h4>改进方向</h4>
+      <ul>
+        <li><strong>fencing token</strong>：锁服务每次发放单调递增令牌（如锁 key 的自增版本），存储层（DB/对象存储）拒绝旧令牌写入——即便客户端持旧锁裸奔，写入也会被拒，防御与锁的时间语义解耦；</li>
+        <li>对时钟强敏感且无兜底层时，直接放弃 RedLock 换 <strong>ZooKeeper/etcd</strong>（临时节点 + 分布式一致性协议，会话断开自动释放，不依赖客户端时钟）；</li>
+        <li>多数派运维纪律：独立部署、禁用大步长 NTP 跳变、各实例时钟监控告警纳入 SLA。</li>
+      </ul>
+    </div>
+  </details>
+</section>
+
+<div class="footer">
+  每日架构师微课程 · 第 9 期 · 2026-08-21 · Redis 系列 第 5 讲（下期预告：Redis 性能调优）<br>
+  <b>WorkBuddy</b> · 全栈技术团队内部学习资料
+</div>
+
+</div>
+</body>
+</html>
