@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · 高可用架构设计：从 99.9% 到故障域 | 2026-09-03</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0017</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0016-k8s-hpa.html">上一期：K8s HPA</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">ARCHITECTURE &amp; OPS · 架构与中间件运维通用 · 第 1 讲</p>
+  <h1>高可用架构设计：别把 99.9% 挂在嘴边</h1>
+  <p class="subtitle">一次机房网络抖动引发的全线雪崩复盘 —— 可用性的数学、故障域与四层冗余模型，以及一套能落地的高可用基线清单。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🏗 架构运维通用</span>
+    <span class="tag-date">📅 2026-09-03 · 第 17 期</span>
+    <span class="tag time">⏱ 预计阅读 10 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>一次 200ms 网络抖动，放倒了 12 个服务</h2>
+  <p>某业务团队的复盘记录：凌晨 2 点，机房一台汇聚交换机固件缺陷引发间歇性 200ms 网络抖动。就这点抖动，15 分钟内 12 个微服务连环雪崩：MySQL 主从复制延迟飙升 → 应用线程池被慢查询占满 → 上游调用无超时兜底全数阻塞 → 网关线程池打满 → 全站 502。交换机 3 分钟后自动恢复，<strong>服务却持续故障了 15 分钟</strong>——因为线程池和连接池没有从"半死"状态里恢复过来。</p>
+  <p>复盘最扎心的结论是：<strong>每个服务单独看都"设计合理"，链路整体却极度脆弱</strong>。根因不在某一处配置，而在架构层面从来没有回答过三个问题：</p>
+  <div class="steps">
+    <div class="step"><span class="step-n">1</span><p>系统的可用性目标是多少？<strong>没有数字，就没有设计</strong>——"高可用"三个字不构成任何约束；</p></div>
+    <div class="step"><span class="step-n">2</span><p>故障会从哪里来、炸多大？<span class="hl">故障域</span>从未被识别，冗余自然无从谈起；</p></div>
+    <div class="step"><span class="step-n">3</span><p>挂掉之后靠什么恢复？没有预设的<span class="hl">故障转移</span>路径，恢复全靠人肉。</p></div>
+  </div>
+  <p>今天这期把这三个问题一次讲透。这是"架构与中间件运维"系列的第一讲，也是后面所有中间件课程（注册中心、缓存、消息、时序库、对象存储、K8s）共用的<strong>总纲</strong>。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：可用性的数学与故障域</h2>
+
+  <h3>可用性是乘法，而微服务在疯狂做乘法</h3>
+  <p>可用性等级的通用换算：</p>
+  <table>
+    <tr><th>等级</th><th>年不可用时间</th><th>大致对应</th></tr>
+    <tr><td>99%（2 个 9）</td><td>3.65 天</td><td>传统单机应用</td></tr>
+    <tr><td>99.9%（3 个 9）</td><td>8.76 小时</td><td>多数内部系统的现实水平</td></tr>
+    <tr><td>99.99%（4 个 9）</td><td>52.6 分钟</td><td>需要全链路冗余 + 自动故障转移</td></tr>
+    <tr><td>99.999%（5 个 9）</td><td>5.26 分钟</td><td>电信级，改一次配置的窗口都快不够了</td></tr>
+  </table>
+  <p>关键在下一行公式。串联链路的可用性是<strong>各环节相乘</strong>：</p>
+  <pre><code><span class="c-com"># 一条请求链路：网关 → 订单 → 库存 → MySQL 主库，各 99.9%</span>
+0.999 × 0.999 × 0.999 × 0.999 ≈ <span class="hl-r">99.6%</span>  <span class="c-com"># 年不可用 ≈ 35 小时</span>
+
+<span class="c-com"># 微服务拆到 10 个环节串联，仍各 99.9%</span>
+0.999^10 ≈ <span class="hl-r">99.0%</span>  <span class="c-com"># 每个服务都"三个9"，整体只剩"两个9"</span></code></pre>
+  <p>这是微服务架构的<strong>第一性矛盾</strong>：拆分越多，串联环节越多，整体可用性越差。<strong>高可用架构的全部工作，本质上就是在对抗这个乘法</strong>——用冗余提升单环节可用性，用并行依赖与降级把乘法变回加法。</p>
+
+  <h3>错误预算：把"不可用"变成资源</h3>
+  <p>SLO 定为 99.9%，意味着每年有 8.76 小时<strong>允许</strong>故障。这笔"错误预算"可以花在发版、重启、混沌演练上。预算有结余 → 放心迭代；预算烧光 → 冻结变更、优先稳定性。这样"稳定性 vs 迭代速度"的扯皮就变成了查账。<span class="term">SLO / SLI / 错误预算</span>是 Google SRE 方法论的基石，也是后续监控告警一讲的主角。</p>
+
+  <h3>故障域：先知道会炸多大，再谈冗余</h3>
+  <p><strong>故障域 = 一次故障能波及的最大范围（爆炸半径）</strong>。识别方法很朴素：把共享的底层资源画出来——同一个 Pod、同一台宿主机、同一个机架/交换机、同一个机房、同一个云区域，每一层都是一个故障域。冗余设计只有一条铁律：</p>
+  <div class="callout">
+    <span class="callout-title">冗余设计铁律</span>
+    <p>多副本必须落在<strong>不同的故障域</strong>里。两个 Redis 主从放在同一台宿主机、同一个机房，可用性等于没有冗余——故障域没隔开，副本数只是心理安慰。</p>
+  </div>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：四层冗余模型与权衡</h2>
+  <p>按故障域从小到大，冗余投资分四层，<strong>成本递增、收益递减</strong>，绝大多数系统止步于第三层：</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 320" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <text x="380" y="24" text-anchor="middle" fill="var(--muted)" font-size="13">四层冗余模型：故障域越大，冗余越贵，做的人越少</text>
+
+    <!-- L1 -->
+    <rect x="20" y="50" width="165" height="120" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="102" y="76" text-anchor="middle" fill="var(--accent)" font-size="13.5" font-weight="700">L1 实例级</text>
+    <text x="102" y="99" text-anchor="middle" fill="var(--ink)" font-size="11">多副本 + K8s 反亲和</text>
+    <text x="102" y="118" text-anchor="middle" fill="var(--ink)" font-size="11">健康探针自动摘除</text>
+    <text x="102" y="137" text-anchor="middle" fill="var(--ink)" font-size="11">HPA + PDB</text>
+    <text x="102" y="159" text-anchor="middle" fill="var(--ok)" font-size="10.5">成本 +0%~30% · 必做</text>
+
+    <!-- L2 -->
+    <rect x="205" y="50" width="165" height="120" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="287" y="76" text-anchor="middle" fill="var(--accent)" font-size="13.5" font-weight="700">L2 中间件级</text>
+    <text x="287" y="99" text-anchor="middle" fill="var(--ink)" font-size="11">Nacos 3 节点集群</text>
+    <text x="287" y="118" text-anchor="middle" fill="var(--ink)" font-size="11">Redis 哨兵/Cluster</text>
+    <text x="287" y="137" text-anchor="middle" fill="var(--ink)" font-size="11">MySQL MHA/MGR · Pulsar BK</text>
+    <text x="287" y="159" text-anchor="middle" fill="var(--ok)" font-size="10.5">成本 +50%~100% · 必做</text>
+
+    <!-- L3 -->
+    <rect x="390" y="50" width="165" height="120" rx="10" fill="var(--card)" stroke="var(--accent-3)" stroke-width="1.5"/>
+    <text x="472" y="76" text-anchor="middle" fill="var(--accent-3)" font-size="13.5" font-weight="700">L3 机房级（同城双活）</text>
+    <text x="472" y="99" text-anchor="middle" fill="var(--ink)" font-size="11">两机房对等部署</text>
+    <text x="472" y="118" text-anchor="middle" fill="var(--ink)" font-size="11">数据库半同步 + 自动切换</text>
+    <text x="472" y="137" text-anchor="middle" fill="var(--ink)" font-size="11">单元化路由 / 双写</text>
+    <text x="472" y="159" text-anchor="middle" fill="var(--accent-3)" font-size="10.5">成本 ×2 · 核心系统做</text>
+
+    <!-- L4 -->
+    <rect x="575" y="50" width="165" height="120" rx="10" fill="var(--card)" stroke="var(--bad)" stroke-width="1.5" stroke-dasharray="6 3"/>
+    <text x="657" y="76" text-anchor="middle" fill="var(--bad)" font-size="13.5" font-weight="700">L4 区域级（异地多活）</text>
+    <text x="657" y="99" text-anchor="middle" fill="var(--ink)" font-size="11">异地容灾 / 多活单元</text>
+    <text x="657" y="118" text-anchor="middle" fill="var(--ink)" font-size="11">数据异步复制，RPO&gt;0</text>
+    <text x="657" y="137" text-anchor="middle" fill="var(--ink)" font-size="11">单元化改造 + 流量调度</text>
+    <text x="657" y="159" text-anchor="middle" fill="var(--bad)" font-size="10.5">成本 ×3+ · 极少数做</text>
+
+    <!-- 箭头带 -->
+    <line x1="185" y1="110" x2="203" y2="110" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar)"/>
+    <line x1="370" y1="110" x2="388" y2="110" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar)"/>
+    <line x1="555" y1="110" x2="573" y2="110" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar)"/>
+
+    <!-- 底部：RPO/RTO -->
+    <rect x="20" y="200" width="720" height="92" rx="10" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="380" y="228" text-anchor="middle" fill="var(--muted)" font-size="12">度量这两把尺子：RPO（能丢多少数据） / RTO（多久能恢复）</text>
+    <text x="70" y="256" fill="var(--ink)" font-size="11.5">L1/L2：RPO=0，RTO 秒级（自动切换）</text>
+    <text x="70" y="278" fill="var(--ink)" font-size="11.5">L3：RPO=0~秒级（半同步），RTO 分钟级</text>
+    <text x="430" y="256" fill="var(--ink)" font-size="11.5">L4：RPO=分钟级（异步复制），RTO 分钟~小时级</text>
+    <text x="430" y="278" fill="var(--ink)" font-size="11.5">SLO 决定做几层：99.9% 做到 L2，99.99% 才需要 L3+</text>
+  </svg>
+  </div>
+
+  <h3>四个必须当面对冲的权衡</h3>
+  <ul>
+    <li><strong>可用性 vs 一致性：</strong>多机房双活必然引入复制延迟，追 RPO=0 就要半同步/强一致，写延迟上升；追低延迟就接受 RPO&gt;0。<span class="hl">这两个 9 不能都要满</span>，按业务定（交易可对账补偿，浏览可容忍旧数据）；</li>
+    <li><strong>冗余 vs 成本：</strong>L3 直接翻倍。正确姿势是<strong>分层设 SLO</strong>——交易核心链路 99.99%，内部管理后台 99.5%，把钱花在刀刃上；</li>
+    <li><strong>自动切换 vs 误切：</strong>自动故障转移是双刃剑，脑裂比单点故障更难排查。MySQL MHA、Redis 哨兵都要配法定多数（quorum）与 fencing；</li>
+    <li><strong>容量规划：</strong>N+1 原则——<strong>任意一个实例/节点挂掉，剩余容量仍能以 ≤70% 水位扛住峰值</strong>。即集群容量 ≥ 峰值 ÷ 70% × (N+1)/N，留出故障时的降级余量。</li>
+  </ul>
+
+  <div class="note"><span class="label">调用侧韧性是另一半</span>冗余解决"有备份"，还要解决"快速切过去"：超时（比下游 P99 略宽）→ 熔断（连续失败快速失败）→ 重试（<strong>仅幂等操作、有限次数、带退避和抖动</strong>）→ 降级（读走缓存、写进队列）。开篇事故里，这四件事一件都没做，200ms 抖动才演变成 15 分钟雪崩。具体熔断限流实现见 <a href="0001-sentinel-circuit-breaking.html">第 1 期 Sentinel</a>。</div>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：一套 Spring Cloud 微服务的高可用基线</h2>
+  <p>以下配置可直接作为评审清单用——每一项都对应上面某个故障域。</p>
+
+  <h3>① 注册中心：Nacos 至少 3 节点，客户端带容灾</h3>
+  <pre><code><span class="c-com"># application.yml —— 关键是 server-addr 列出全部节点 + 本地容灾开关</span>
+spring:
+  cloud:
+    nacos:
+      server-addr: <span class="st">"10.0.0.11:8848,10.0.0.12:8848,10.0.0.13:8848"</span>  <span class="c-com"># 3 节点跨机部署</span>
+      discovery:
+        namespace: <span class="st">prod</span>
+      config:
+        file-extension: yaml
+<span class="c-com"># Nacos 客户端默认会把服务列表快照落盘（JM.SNAPSHOT），</span>
+<span class="c-com"># 集群整体不可用时仍可用本地快照启动 —— 不要关闭该机制</span></code></pre>
+
+  <h3>② 调用链：超时 + 有界重试，一个都不能少</h3>
+  <pre><code><span class="c-com"># OpenFeign 超时与重试（必须配合服务端幂等）</span>
+spring:
+  cloud:
+    openfeign:
+      client:
+        config:
+          default:
+            connect-timeout: <span class="nm">1000</span>   <span class="c-com"># 连接 1s：快速发现"实例不可达"</span>
+            read-timeout: <span class="nm">3000</span>      <span class="c-com"># 读 3s：按下游 P99=800ms 放宽到 3 倍多</span>
+            retryer: <span class="kw">com</span>.xxx.config.FeignRetryConfig  <span class="c-com"># Retryer.NEVER(1, 1s, 3)</span>
+<span class="c-com"># 原则：只有幂等接口才重试；次数 ≤3；退避加随机抖动，</span>
+<span class="c-com"># 否则重试风暴会把下游剩余健康实例也压垮（雪崩放大器）</span></code></pre>
+
+  <h3>③ 部署层：K8s 反亲和 + 预算保护</h3>
+  <pre><code><span class="c-com"># 把副本打散到不同节点（故障域隔离） + 滚动更新时保住容量下限</span>
+<span class="kw">spec:</span>
+  <span class="v">topologySpreadConstraints:</span>
+    - <span class="v">maxSkew:</span> <span class="nm">1</span>
+      <span class="v">topologyKey:</span> <span class="st">kubernetes.io/hostname</span>   <span class="c-com"># 同一服务的副本不挤在同一宿主机</span>
+      <span class="v">whenUnsatisfiable:</span> <span class="st">DoNotSchedule</span>
+<span class="kw">---</span>
+<span class="kw">apiVersion:</span> <span class="st">policy/v1</span>
+<span class="kw">kind:</span> <span class="st">PodDisruptionBudget</span>
+<span class="kw">spec:</span>
+  <span class="v">minAvailable:</span> <span class="nm">2</span>          <span class="c-com"># 驱逐/更新期间至少保 2 副本在岗</span></code></pre>
+
+  <h3>④ 验证：可用性是演练出来的，不是画出来的</h3>
+  <div class="steps">
+    <div class="step"><span class="step-n">1</span><p><strong>故障注入常态化：</strong>在预发环境定期"拔插头"——<code>kubectl delete pod</code>、kill -9 MySQL 主库、断开机房间链路，观测 RTO 是否达标；</p></div>
+    <div class="step"><span class="step-n">2</span><p><strong>告警盯"剩余健康度"：</strong>监控不报"挂了 1 个节点"（这是设计内的正常故障），报"剩余容量水位 &gt; 70%"——前者制造疲劳，后者才需要人介入；</p></div>
+    <div class="step"><span class="step-n">3</span><p><strong>每季度跑一次全链路故障演练</strong>，把"切换是否自动、业务是否无感、数据是否对账一致"三个问题重新回答一遍。</p></div>
+  </div>
+
+  <div class="card card-tip">
+    <h4>✅ 高可用基线清单（拿去对表）</h4>
+    <p>☐ 无状态服务 ≥2 副本且跨节点 　☐ 无任何单点（连 Nacos/Redis/MySQL/MQ/定时任务都算）　☐ 所有外部调用有超时 　☐ 幂等 + 有界重试 　☐ 核心链路有降级预案 　☐ 中间件集群跨故障域部署 　☐ PDB/反亲和就位 　☐ 故障演练本季度跑过</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>串联可用性相乘</strong>：10 个 99.9% 的服务串联只剩 99.0%。微服务拆得越细，越要用冗余、并行依赖和降级对冲乘法。</li>
+    <li><strong>先定 SLO 再做设计</strong>：99.9% 做到实例级+中间件级冗余即可，99.99% 才值得上同城双活。错误预算用来平衡稳定性与迭代速度。</li>
+    <li><strong>冗余的唯一铁律是隔开故障域</strong>：副本数不等于可用性，同宿主机/同机房的多副本只是心理安慰。</li>
+    <li><strong>容量规划用 N+1</strong>：挂任何一个节点，剩余容量仍 ≤70% 水位扛住峰值，才是合格的冗余。</li>
+    <li><strong>可用性是演练出来的</strong>：RPO/RTO 不进监控、不做混沌验证的方案，都只是 PPT 高可用。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目一：你们计划把一个单体应用拆成 8 个微服务，各服务可用性 99.95%。CTO 问："拆完之后系统是不是更稳了？"请给出定量分析与架构建议。<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 定量分析：乘法先算账</h4>
+      <p>最坏情况是 8 个服务全串联：0.9995^8 ≈ 99.60%，年不可用 ≈ <strong>35 小时</strong>。而拆分前的单体是 99.95%，年不可用 ≈ 4.4 小时。<strong>若链路形态不变，拆分让整体可用性下降了约 8 倍</strong>——这是微服务架构反直觉但必须直面的事实。但拆分同时带来两个补偿性收益：故障隔离（一个服务的故障不再全站瘫痪，可按调用方分级熔断）与独立冗余/部署（每个服务可单独多副本、灰度、回滚）。所以答案不是"更稳"或"更不稳"，而是<strong>取决于拆分后是否补齐了韧性配套</strong>。</p>
+      <h4>✅ 架构建议</h4>
+      <ul>
+        <li><strong>减少串联深度</strong>：能并行的并行（如订单确认时库存/优惠券/风控三调用并行化）；强串联依赖考虑本地缓存 + 失败降级，把"必须可用"的环节从 8 个降到 3~4 个；</li>
+        <li><strong>逐环节提升单点可用性</strong>：每个服务 2+ 副本跨节点 + 无单点中间件，单服务从 99.95% 提到 99.99% 后，0.9999^8 ≈ 99.92%，加上降级兜底，整体可以反超单体；</li>
+        <li><strong>非核心链路异步化</strong>：积分、通知、日志类依赖改走消息队列（Pulsar），链路从同步串联中摘除——同步链路只留"交易成败必需"的环节；</li>
+        <li><strong>给 CTO 的正确表述</strong>：拆分买来的是隔离性和演进速度，代价是链路复杂度；配套（超时/熔断/降级/冗余）没做完之前，可用性不升反降。拆分计划应与韧性建设同批交付。</li>
+      </ul>
+    </div>
+  </details>
+
+  <details class="q-card">
+    <summary>题目二：业务 SLO 定为 99.99%（年不可用 52.6 分钟），你主导设计同城双活方案。数据库用 MySQL，缓存 Redis，消息 Pulsar。请给出整体架构与关键取舍，并说明为什么不用异地多活。<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 目标拆解</h4>
+      <p>99.99% 意味着单次机房级故障的 RTO 必须 ≤ 5 分钟且全年只允许发生数次——人工决策切换不可能达标，<strong>切换必须自动化</strong>。方案核心：两个同机房域对等部署，正常按单元化路由分流，故障时一键（自动）切流。</p>
+      <h4>✅ 参考架构</h4>
+      <ul>
+        <li><strong>接入层：</strong>智能 DNS/GSLB + 网关双活，两机房各承担 50% 流量，健康检查失败自动摘除；</li>
+        <li><strong>应用层：</strong>两机房对等部署全量服务（K8s 集群各一套，副本数按 60%~70% 峰值容量配，单机房要能临时扛 100%）；</li>
+        <li><strong>MySQL：</strong>机房 A 主 + 机房 B 半同步从（after_sync，RPO=0），配合 MHA/Orchestrator 自动切换；半同步退化超时要设保护（rpl_semi_sync_master_timeout），避免从库抖动拖垮主库写入——<strong>这是 RPO=0 与写延迟之间的核心取舍点</strong>；</li>
+        <li><strong>Redis：</strong>两机房各自集群，<strong>不跨机房主从</strong>（复制延迟 + 脑裂风险）；缓存以"可重建"为原则，切流后直接回源预热，用短暂穿透换架构简单；</li>
+        <li><strong>Pulsar：</strong>Bookie 与 Broker 双机房混布，机架感知 placement（bookkeeper ensemble 覆盖两机房），消息天然多副本，无需双写；</li>
+        <li><strong>单元化路由：</strong>按用户 ID 哈希分单元，写操作落在数据归属机房，避免双写冲突；跨单元调用只允许读。</li>
+      </ul>
+      <h4>⚖️ 为什么止步于同城双活</h4>
+      <p>同城（&lt;10ms 延迟）可以用半同步保 RPO=0；异地延迟 30ms+，强同步写入不可接受，只能异步复制（RPO=分钟级）——99.99% 的 SLO 允许的年故障预算是 52 分钟，<strong>数据丢失对交易类业务是不可接受的第二种故障</strong>，而异地多活的单元化改造 + 流量调度 + 数据对账成本要再翻一倍以上。正确路径：同城双活保 SLO，异地做"备份级"容灾（异步复制 + 定期演练切换），业务量级到了再演进多活。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>Google SRE Workbook《Implementing SLOs》—— 错误预算与 SLO 落地的原始方法论（官方免费在线）：<br>
+    <a href="https://sre.google/workbook/implementing-slos/" target="_blank" rel="noopener">https://sre.google/workbook/implementing-slos/</a></p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0016-k8s-hpa.html">← 上一期：Kubernetes HPA 自动伸缩</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 17 期 · 架构与中间件运维通用系列 · 下一期预告：Spring Cloud Alibaba —— Seata 分布式事务</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
