@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · Seata 分布式事务：下单链路的终极自救 | 2026-09-04</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0018</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0017-arch-ha-overview.html">上一期：高可用架构设计</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">SPRING CLOUD ALIBABA · Spring Cloud Alibaba 系列 · 第 1 讲</p>
+  <h1>Seata 分布式事务：下单链路的终极自救</h1>
+  <p class="subtitle">订单成功了、库存扣了、积分没加 —— 当一个业务动作横跨三个数据库，谁来保证"要么全成、要么全不发生"？聊聊 Seata 的四种模式与架构师最该警惕的事务边界。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🍃 Spring Cloud Alibaba</span>
+    <span class="tag-date">📅 2026-09-04 · 第 18 期</span>
+    <span class="tag time">⏱ 预计阅读 10 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>一次没有回滚的下单事故</h2>
+  <p>电商下单链路，三个服务三个库：订单服务创建订单（MySQL-A）→ 库存服务扣减库存（MySQL-B）→ 积分服务增加积分（MySQL-C）。某天促销大促，积分服务所在节点 GC 抖动，调用超时。结果：</p>
+  <ul>
+    <li>订单库：<strong>订单已创建，状态"待支付"</strong>；</li>
+    <li>库存库：<strong>库存已扣减</strong>（本地事务早就提交了）；</li>
+    <li>积分库：<strong>积分没加</strong>（调用根本没到达）。</li>
+  </ul>
+  <p>用户没看到积分，投诉进来；运营对账，发现"扣了库存、没加积分"的脏数据上千条。更糟的是这批订单已经流转到下游仓储，<strong>人工修复要横跨三个系统，改哪个库都心惊胆战</strong>。</p>
+  <p>问题的本质：每个服务用自己的本地事务（ACID），保证了<strong>单库一致性</strong>；但跨库的业务原子性——一个业务动作里的 N 个本地事务要么全提交、要么全回滚——<strong>没有任何机制保证</strong>。这就是分布式事务问题。解决它的思路历史上只有两个方向：</p>
+  <div class="steps">
+    <div class="step"><span class="step-n">1</span><p><strong>刚性事务（强一致）：</strong>XA / 二阶段提交（2PC）。所有参与者锁定资源直到全局提交，一致性强但性能差、可用性差；</p></div>
+    <div class="step"><span class="step-n">2</span><p><strong>柔性事务（最终一致）：</strong>TCC、Saga、本地消息表等。放弃隔离性、用补偿换性能，让数据"短暂不一致、最终对齐"。</p></div>
+  </div>
+  <p>Seata 的价值在于：把这两类方案的公共部分（全局事务管理、分支注册、锁管理、网络通信）做成了<strong>中间件</strong>，业务方按场景挑模式、少写基础设施代码。今天把四种模式一次讲清，重点是 AT 模式的"零侵入"到底是怎么做到的。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：全局事务是怎么跑起来的</h2>
+
+  <h3>三个角色一张图</h3>
+  <div class="diagram">
+  <svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar18" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <text x="380" y="24" text-anchor="middle" fill="var(--muted)" font-size="13">Seata 架构：TC 独立部署，TM/RM 以 SDK 形态嵌在应用里</text>
+
+    <!-- TC -->
+    <rect x="290" y="46" width="180" height="74" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="380" y="74" text-anchor="middle" fill="var(--accent)" font-size="13.5" font-weight="700">TC · 事务协调器</text>
+    <text x="380" y="96" text-anchor="middle" fill="var(--ink)" font-size="11">独立部署 · 维护全局事务/分支状态</text>
+
+    <!-- TM -->
+    <rect x="40" y="170" width="180" height="74" rx="10" fill="var(--card)" stroke="var(--accent-3)" stroke-width="1.5"/>
+    <text x="130" y="198" text-anchor="middle" fill="var(--accent-3)" font-size="13.5" font-weight="700">TM · 事务发起方</text>
+    <text x="130" y="220" text-anchor="middle" fill="var(--ink)" font-size="11">订单服务：开启/提交/回滚全局事务</text>
+
+    <!-- RM x2 -->
+    <rect x="290" y="170" width="180" height="74" rx="10" fill="var(--card)" stroke="var(--accent-2)" stroke-width="1.5"/>
+    <text x="380" y="198" text-anchor="middle" fill="var(--accent-2)" font-size="13.5" font-weight="700">RM · 资源管理器</text>
+    <text x="380" y="220" text-anchor="middle" fill="var(--ink)" font-size="11">库存/积分服务：管理分支事务</text>
+
+    <rect x="540" y="170" width="180" height="74" rx="10" fill="var(--card)" stroke="var(--accent-2)" stroke-width="1.5"/>
+    <text x="630" y="198" text-anchor="middle" fill="var(--accent-2)" font-size="13.5" font-weight="700">RM（可嵌多个库）</text>
+    <text x="630" y="220" text-anchor="middle" fill="var(--ink)" font-size="11">一个服务连多库 = 多个分支</text>
+
+    <!-- 箭头 -->
+    <line x1="200" y1="170" x2="270" y2="112" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar18)"/>
+    <text x="212" y="146" fill="var(--muted)" font-size="10">① ② ⑦</text>
+    <line x1="380" y1="170" x2="380" y2="124" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar18)"/>
+    <text x="388" y="146" fill="var(--muted)" font-size="10">③ ⑥</text>
+    <line x1="630" y1="170" x2="470" y2="112" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar18)"/>
+    <text x="560" y="146" fill="var(--muted)" font-size="10">④ ⑤</text>
+
+    <!-- 底部流程 -->
+    <rect x="20" y="272" width="720" height="42" rx="10" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="380" y="298" text-anchor="middle" fill="var(--ink)" font-size="11.5">① TM 向 TC 开启全局事务（拿到 XID） → ② XID 随调用链透传 → ③④ RM 向 TC 注册分支 → ⑤ 分支本地提交（AT 一阶段） → ⑥ TC 通知各分支提交/回滚 → ⑦ TM 决定 outcome</text>
+  </svg>
+  </div>
+
+  <p>三角色分工：<strong>TC（Transaction Coordinator）</strong>独立部署，是全局事务的"大脑"，维护状态机；<strong>TM（Transaction Manager）</strong>是发起全局事务的那个服务（通常是入口服务），只负责 begin/commit/rollback 三个动作；<strong>RM（Resource Manager）</strong>管分支事务，每个操作数据库的服务都是 RM。<span class="term">XID</span>（全局事务 ID）由 TC 生成，随 RPC 调用链透传（HTTP header / Dubbo attachment），每个 RM 用 XID 向 TC 注册分支。这就是"一阶段提交 + TC 驱动二阶段"的骨架。</p>
+
+  <h3>AT 模式：一行注解背后发生了什么</h3>
+  <p>AT（Automatic Transaction）是 Seata 的招牌：业务 SQL 不用改，加个 <code>@GlobalTransactional</code> 注解就拥有回滚能力。魔法在代理数据源——它解析业务 SQL，在本地事务提交<strong>前后</strong>各做一件事：</p>
+  <div class="steps">
+    <div class="step"><span class="step-n">1</span><p><strong>解析 SQL，查"前镜像"：</strong>按 WHERE 条件把将被修改的行<strong>修改前的值</strong>查出来存进 undo_log；</p></div>
+    <div class="step"><span class="step-n">2</span><p><strong>执行业务 SQL，查"后镜像"：</strong>同一批行修改后的值也存进 undo_log，与业务数据在<strong>同一个本地事务里提交</strong>；</p></div>
+    <div class="step"><span class="step-n">3</span><p><strong>一阶段直接提交本地事务</strong>，并向 TC 上报分支状态；连接立刻释放，不长期锁资源；</p></div>
+    <div class="step"><span class="step-n">4</span><p><strong>二阶段：</strong>全局提交 → 异步删 undo_log（极快）；全局回滚 → 用前镜像生成反向 SQL 补偿（update 回旧值），提交前会校验后镜像与当前数据一致，防止"脏写"。</p></div>
+  </div>
+  <p>所以 AT 的本质是<strong>自动补偿</strong>：一阶段就提交、不持锁等待（只记录行级锁供 TC 全局仲裁），回滚靠 undo_log 反向 SQL。对比 XA：XA 二阶段前资源一直被锁，AT 一阶段即提交，吞吐高一个量级；代价是<strong>隔离性弱化</strong>——回滚期间若被别的全局事务改了同一行，后镜像校验会失败，需要人工介入。</p>
+
+  <h3>四种模式一张表</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>模式</th><th>侵入性</th><th>一致性/性能</th><th>适用场景</th></tr>
+    <tr>
+      <td><strong>AT</strong></td>
+      <td>零侵入（注解+代理数据源）</td>
+      <td>最终一致 · 一阶段提交，性能最好</td>
+      <td>大多数内部微服务；不愿写补偿逻辑的团队首选</td>
+    </tr>
+    <tr>
+      <td><strong>TCC</strong></td>
+      <td>高（手写 Try/Confirm/Cancel 三方法）</td>
+      <td>最终一致 · 不依赖 undo_log，资源预留制</td>
+      <td>资金类核心链路；需要对"冻结"语义精细控制</td>
+    </tr>
+    <tr>
+      <td><strong>Saga</strong></td>
+      <td>中（写正向服务+补偿服务，状态机编排）</td>
+      <td>最终一致 · 长事务友好，无全局锁</td>
+      <td>跨企业调用、流程长（分钟/天级）、参与者非本地库</td>
+    </tr>
+    <tr>
+      <td><strong>XA</strong></td>
+      <td>低（依赖数据库 XA 协议）</td>
+      <td>强一致 · 二阶段锁资源，性能最差</td>
+      <td>传统多库同构、强一致刚需、并发量不大</td>
+    </tr>
+  </table>
+  </div>
+  <div class="note"><span class="label">TCC 三方法语义</span>Try：<strong>预留资源</strong>（如冻结库存 100 中的 10）；Confirm：<strong>确认扣减</strong>（冻结转真实扣，必须幂等）；Cancel：<strong>释放预留</strong>（解冻，必须幂等）。空回滚（Try 没到、Cancel 先到）、悬挂（Cancel 之后 Try 才到）、幂等是 TCC 三大坑，Seata 通过事务日志表帮忙兜了一部分，但<strong>业务语义只有你自己清楚</strong>。</div>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：选型、部署与容量</h2>
+
+  <h3>选型决策树</h3>
+  <div class="steps">
+    <div class="step"><span class="step-n">?</span><p><strong>第一步，先问"要不要分布式事务"：</strong>能靠<strong>规避</strong>就不引入——把强关联的数据收敛到一个库/一个服务（拆分时的边界设计）；非核心链路用<strong>本地消息表/事务消息（Pulsar）最终一致</strong>。分布式事务是最后手段，不是默认选项；</p></div>
+    <div class="step"><span class="step-n">?</span><p><strong>第二步，确定刚性还是柔性：</strong>强一致刚需且并发低 → XA；其余绝大多数 → 柔性；</p></div>
+    <div class="step"><span class="step-n">?</span><p><strong>第三步，柔性里挑：</strong>内部服务、能改表结构、想要省事 → AT；资金核心、要资源预留语义 → TCC；链路长、参与者异构（含第三方接口）→ Saga。</p></div>
+  </div>
+
+  <h3>TC 的部署形态</h3>
+  <p>TC 是全局事务的大脑，本身必须按<strong>高可用</strong>部署（呼应上一期的 L2 中间件层）：</p>
+  <ul>
+    <li><strong>存储三选一：</strong>file 模式（单机，只适合开发）→ db 模式（MySQL，多数生产选择，全局事务状态、分支状态、全局锁三张表）→ redis/raft 模式（新版，性能与可用性更优）；</li>
+    <li><strong>多实例 + 注册中心：</strong>TC 多实例注册到 Nacos，客户端按集群名连接，一个挂了自动切；</li>
+    <li><strong>网络与超时：</strong>TC 与 RM 之间是高频心跳 + 状态上报，跨机房部署时 RTT 会直接放大全局事务时延，<strong>TC 尽量与应用同机房</strong>。</li>
+  </ul>
+
+  <div class="callout">
+    <span class="callout-title">AT 模式容量规划要点</span>
+    <p>① undo_log 表与业务同库同事务写入，<strong>写放大约 2~3 倍</strong>（前镜像+后镜像+业务 SQL），扣减类热点表的 QPS 容量要按此打折；② 全局锁在 TC 侧串行化同行竞争，热点行冲突高时全局事务的提交会被拉长，<strong>热点账户/爆款 SKU 这类场景 AT 并发上限明显</strong>，考虑 TCC 或队列串行化；③ 全局事务超时（默认 60s）务必按链路 P99 调整，超时会被 TC 主动回滚。</p>
+  </div>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：把下单链路接进 Seata</h2>
+
+  <h3>① TC Server（db 模式）+ Nacos 注册</h3>
+  <pre><code><span class="c-com"># file.conf —— TC 存储改 db，事务状态落 MySQL，支持多实例高可用</span>
+store {
+  mode = <span class="st">"db"</span>
+  db {
+    datasource = <span class="st">"hikari"</span>
+    url = <span class="st">"jdbc:mysql://10.0.0.21:3306/seata?useSSL=false"</span>
+    user = <span class="st">"seata"</span>
+    password = <span class="st">"***"</span>
+  }
+}
+<span class="c-com"># registry.conf —— TC 注册到 Nacos，客户端按集群名寻址</span>
+registry {
+  type = <span class="st">"nacos"</span>
+  nacos {
+    serverAddr = <span class="st">"10.0.0.11:8848,10.0.0.12:8848,10.0.0.13:8848"</span>
+    cluster = <span class="st">"default"</span>
+  }
+}</code></pre>
+  <p>每个业务库执行 <code>undo_log.sql</code> 建表；TC 库执行 <code>global_table / branch_table / lock_table</code> 三张表脚本（发行包 script 目录自带）。</p>
+
+  <h3>② 应用侧接入（订单服务 = TM）</h3>
+  <pre><code><span class="c-com">&lt;!-- Spring Cloud 应用只需两个依赖：seata-spring-boot-starter + nacos 注册发现 --&gt;</span>
+<span class="kw">&lt;dependency&gt;</span>
+  <span class="kw">&lt;groupId&gt;</span>io.seata<span class="kw">&lt;/groupId&gt;</span>
+  <span class="kw">&lt;artifactId&gt;</span>seata-spring-boot-starter<span class="kw">&lt;/artifactId&gt;</span>
+<span class="kw">&lt;/dependency&gt;</span>
+
+<span class="c-com"># application.yml —— 数据源代理自动开启，XID 经 Feign 拦截器透传</span>
+seata:
+  enabled: <span class="nm">true</span>
+  application-id: <span class="st">${spring.application.name}</span>
+  tx-service-group: <span class="st">order_tx_group</span>          <span class="c-com"># 逻辑事务组 → 映射 TC 集群</span>
+  service:
+    vgroup-mapping:
+      order_tx_group: <span class="st">default</span>                    <span class="c-com"># default = registry.conf 里的 cluster</span>
+  config:
+    type: nacos
+    registry:
+      type: nacos
+
+<span class="c-com">// 发起全局事务：一个注解，XID 自动透传到库存/积分服务</span>
+<span class="kw">@GlobalTransactional</span>(timeoutMills = <span class="nm">30000</span>, name = <span class="st">"create-order"</span>)
+<span class="kw">public</span> OrderDO <span class="fn">createOrder</span>(OrderRequest req) {
+    orderMapper.insert(buildOrder(req));      <span class="c-com">// 分支①：MySQL-A</span>
+    stockClient.deduct(req.getSkuId(), req.getQty());   <span class="c-com">// 分支②：MySQL-B（Feign 透传 XID）</span>
+    pointClient.add(req.getUserId(), req.getPoints());  <span class="c-com">// 分支③：MySQL-C</span>
+    <span class="kw">return</span> order;
+}</code></pre>
+
+  <h3>③ 出问题时的排查路径</h3>
+  <div class="steps">
+    <div class="step"><span class="step-n">1</span><p><strong>查全局事务：</strong>TC 控制台/全局表里拿 XID，看状态（Begin/Commit/Rollback/RollbackRetrying），RollbackRetrying 说明反向 SQL 执行失败，重点查 undo_log；</p></div>
+    <div class="step"><span class="step-n">2</span><p><strong>查分支与镜像：</strong>branch_table 定位分支，业务库 undo_log 看前后镜像是否完整；<code>hasUndoImage</code> 缺失多为代理数据源没生效（检查 seata.enabled 与数据源是否被代理）；</p></div>
+    <div class="step"><span class="step-n">3</span><p><strong>脏写告警：</strong>回滚时后镜像校验失败（数据已被别的全局事务改动），Seata 会重试并告警——这是 AT 隔离性弱化的典型现场，需要人工对账修正。</p></div>
+  </div>
+
+  <div class="card card-tip">
+    <h4>✅ Seata 接入检查清单</h4>
+    <p>☐ 每个业务库已建 undo_log　☐ tx-service-group 与 TC 端 vgroup-mapping 一致　☐ XID 透传链路完整（Feign/Dubbo 拦截器）　☐ 全局事务超时 &gt; 链路 P99×2　☐ 热点表评估过 undo_log 写放大　☐ TC 多实例 + db/raft 存储　☐ 回滚失败告警有人接手</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>分布式事务是设计问题，不是框架问题</strong>：先靠服务边界收敛与事务消息规避，最后才引入 Seata——框架解决的是"不得不用"的那部分。</li>
+    <li><strong>AT = 自动补偿</strong>：一阶段直接提交本地事务（前/后镜像进 undo_log），二阶段提交只删日志、回滚用反向 SQL；性能好，但隔离性弱化，脏写需人工兜底。</li>
+    <li><strong>TCC 是资金类唯一正解</strong>：Try 预留 / Confirm 确认 / Cancel 释放，绕开 undo_log 依赖；三大坑——空回滚、悬挂、幂等——必须逐个处理。</li>
+    <li><strong>Saga 留给长事务</strong>：跨企业、分钟级以上流程、参与者异构（含第三方 HTTP 接口），用状态机编排正向与补偿服务。</li>
+    <li><strong>TC 按中间件标准部署</strong>：db/raft 存储 + 多实例 + Nacos 注册 + 与应用同机房；它是新的单点候选，别让它裸奔。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目一：账户余额扣减（A 转 B 100 元，两账户在两个库），团队想直接用 AT 模式。你会批准吗？给出分析与替代方案。<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 为什么不批</h4>
+      <p>资金场景的硬约束：<strong>任何时刻都不能出现"凭空多钱/少钱"，且热点账户并发极高</strong>。AT 的两个特性正好撞枪口上：① AT 没有 XA 那样的隔离性——一阶段就提交，回滚前中间态对外可见（B 已到账、A 的回滚还在路上），对账系统与用户都可能读到"转账成功又失败"的中间态；② 回滚依赖 undo_log 反向 SQL，若出现脏写（另一个全局事务改了同一行），后镜像校验失败后<strong>钱就停在中间态等人救</strong>——资金系统里这是事故级事件。另外大 V 账户是热点行，TC 侧全局锁的串行化会让冲突事务排队，吞吐塌方。</p>
+      <h4>✅ 替代方案（TCC 为骨架）</h4>
+      <ul>
+        <li><strong>TCC 资源预留：</strong>Try 冻结 A 账户 100 元（available_balance -100，frozen +100），Confirm 把冻结额真正划走，Cancel 解冻。中间态语义显式（"冻结中"），不依赖 undo_log，回滚确定性高；</li>
+        <li><strong>幂等/空回滚/悬挂三件套：</strong>事务控制表记录 xid+分支状态，Cancel 先查 Try 是否到达（空回滚直接成功），Try 后到发现已有 Cancel 记录则拒绝执行（防悬挂），Confirm/Cancel 用状态机保证幂等；</li>
+        <li><strong>热点账户再叠加两招：</strong>账户影子表拆分（一个账户拆 N 个子账户分片削峰）或异步入账（转账拆"扣款事务 + 入账消息"，B 侧消费消息加钱，秒级到账变最终一致——需要业务接受）；</li>
+        <li><strong>底线对账：</strong>无论哪种方案，资金链路必须有每日对账 + 差错处理流程，补偿机制永远要假设"会有补偿失败的那一天"。</li>
+      </ul>
+    </div>
+  </details>
+
+  <details class="q-card">
+    <summary>题目二：全局事务回滚时，订单服务（分支①）自己收到异常走了本地 try-catch 把异常吞了，Seata 还能回滚它的分支吗？由此谈谈 @GlobalTransactional 的正确用法与 XID 透传失效的排查思路。<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 机制拆解</h4>
+      <p>能回滚，但路径不同。分支①是在<strong>同一个 JVM 里</strong>：方法抛异常 → TM 侧拦截器感知 → 向 TC 发起全局回滚 → TC 通知所有分支回滚 → 分支①用 undo_log 反向补偿。即使你在订单服务内部 catch 了远程调用（分支②③）的异常，只要异常最终冲出 <code>@GlobalTransactional</code> 方法，全局回滚照样触发——<strong>真正危险的是把异常吞到方法内部不重新抛出</strong>：TM 认为一切正常发起全局提交，分支②③（若它们自身也没报错）全部提交，数据不一致。所以铁律是：<code>@GlobalTransactional</code> 方法内 catch 了异常必须 rethrow（或手动调 <code>GlobalTransactionContext.rollback()</code>）。</p>
+      <h4>✅ 正确用法与排查清单</h4>
+      <ul>
+        <li><strong>注解加在入口方法</strong>（TM 所在服务），下游服务不需要重复标注——它们是 RM，靠 XID 注册分支；给内部服务也加注解等于嵌套全局事务，多数场景是误解；</li>
+        <li><strong>异常类型要匹配：</strong>默认只回滚 RuntimeException 与 Error，受检异常（如自定义 BusinessException extends Exception）不会触发回滚，需配置 <code>rollbackFor = Exception.class</code>——这是最常见的"为什么不回滚"事故源；</li>
+        <li><strong>XID 透传失效排查：</strong>现象是下游分支没注册（branch_table 里查不到）。按链路查：Feign 拦截器是否被排除（seata-http 依赖缺失）、网关/新建线程池是否断了上下文（异步场景要手动传 XID）、下游数据源是否被代理（没代理 = 不注册分支、不写 undo_log，等于游离在全局事务之外）；</li>
+        <li><strong>超时与重试：</strong>全局超时默认 60s，链路里混了个慢接口就会被 TC 强制回滚；回滚本身有重试上限，配合告警把 RollbackRetrying 状态的事务捞出来人工处理。</li>
+      </ul>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>Seata 官方文档 · AT 模式原理（两阶段提交与 undo_log 机制原文）：<br>
+    <a href="https://seata.apache.org/docs/user/mode/at-mode/" target="_blank" rel="noopener">https://seata.apache.org/docs/user/mode/at-mode/</a></p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0017-arch-ha-overview.html">← 上一期：高可用架构设计</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 18 期 · Spring Cloud Alibaba 系列 · 下一期预告：MySQL —— 执行计划与索引失效实战</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
