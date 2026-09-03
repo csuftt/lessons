@@ -247,6 +247,31 @@ footer {
   .course-nav { display: none; }
   pre, .diagram, .arch-wrap, .arch, .tl { background: #f6f8fa !important; color: #24292f; }
 }
+
+/* ---- 移动端修复（375px 防横向滚动） ---- */
+html, body { overflow-x: hidden; max-width: 100vw; }
+pre { max-width: 100% !important; overflow-x: auto; }
+pre > code { display: block; min-width: max-content; }
+code { overflow-wrap: break-word; }
+table { display: block; max-width: 100%; overflow-x: auto; }
+.tbl-wrap, .table-wrap { max-width: 100%; overflow-x: auto; }
+.hero .meta, .meta-row, .brand-row, .meta { flex-wrap: wrap; }
+.tag, .badge { max-width: 100%; white-space: normal; }
+p, li, summary, .d, .answer { overflow-wrap: break-word; }
+.diagram, .arch-wrap { max-width: 100%; overflow-x: auto; }
+.arch { min-width: 0; max-width: 100%; overflow-x: auto; }
+.arch .row, .tl-row, .bk-row { flex-wrap: wrap; }
+.box, .stage, .node, .tl-step { min-width: 0; max-width: 100%; }
+section, .section, details, .callout, .note, .tip, .warn, .danger { min-width: 0; max-width: 100%; }
+.sum-card, .summary-box { min-width: 0; max-width: 100%; }
+.summary-grid { grid-template-columns: 1fr; }
+@media (max-width: 640px) {
+  .wrap { padding: 1rem .9rem 3rem; }
+  .section { padding: 1rem 1rem; border-radius: 10px; }
+  pre { font-size: .78rem; }
+  table { font-size: .8rem; }
+  .summary-grid { gap: .5rem; }
+}
 </style>
 </head>
 <body>

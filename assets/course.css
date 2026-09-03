@@ -463,6 +463,16 @@ details.q-card .answer { padding-top: 0; }
 .hero h1 { font-size: 1.55rem; margin: .2rem 0 .5rem; }
 .hero .issue { color: var(--accent); font-size: .8rem; letter-spacing: .15em; font-weight: 700; }
 
+/* --- 移动端防横向溢出（全站通用） --- */
+pre { max-width: 100%; overflow-x: auto; }
+pre code { display: block; min-width: max-content; }
+.tbl-wrap, .table-wrap { max-width: 100%; overflow-x: auto; }
+.hero .meta, .meta-row, .brand-row { flex-wrap: wrap; }
+.tag, .badge { max-width: 100%; white-space: normal; }
+p, li, summary { overflow-wrap: break-word; }
+.diagram svg { max-width: 100%; }
+section, .section, details, .callout, .note, .tip, .warn, .danger, .card { min-width: 0; max-width: 100%; }
+
 /* 打印 */
 @media print {
   body { max-width: none; padding: 0; background: white; color: black; font-size: 11pt; }
