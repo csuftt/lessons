@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · 缓存与数据库一致性：从延迟双删到 Binlog 订阅 | 2026-09-08</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0020</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0019-mysql-explain-index-failure.html">上一期：MySQL 执行计划与索引失效</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">REDIS · Redis 系列进阶</p>
+  <h1>价格改了，页面就是不变：缓存与数据库一致性架构</h1>
+  <p class="subtitle">缓存和数据库是两个独立存储，任何"两步写"都逃不开并发窗口。今天把 Cache-Aside 的标准姿势、延迟双删的补救逻辑、binlog 订阅的终态方案一次讲清，并给出不一致窗口的时序分析与兜底设计。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧰 Redis</span>
+    <span class="tag-date">📅 2026-09-08 · 第 20 期</span>
+    <span class="tag time">⏱ 预计阅读 10 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>一次"改价不生效"的资损事故</h2>
+  <p>运营把爆款商品价格从 199 改到 99，改价服务日志显示 DB 已提交、缓存也删了，但商品详情页在之后近一小时里仍显示 199，用户按旧价下单，产生资损。代码是这样写的——"直觉上先删缓存更安全"：</p>
+  <pre><code><span class="c-com">// 改价服务（事故版本）</span>
+redis.delete(key);          <span class="c-com">// ① 先删缓存</span>
+productMapper.update(p);    <span class="c-com">// ② 再更新 DB</span></code></pre>
+  <p>问题出在 ①② 之间的<strong>并发读</strong>：详情页高并发下，一个读请求恰好在"已删缓存、DB 还没提交"的瞬间未命中缓存，回源 MySQL 读到<strong>旧值 199</strong>；写请求随后提交了 DB 并以为自己"已经删过缓存"；读请求再把这个旧值 <code>SET</code> 回缓存，TTL 一小时——旧价格就此"锁"了近一个小时。删除动作发生在了旧值回填<strong>之前</strong>，等于白删。这不是代码 bug，而是<strong>架构问题</strong>：两个独立存储之间不存在原子操作，一致性设计的本质不是"消灭窗口"，而是"把窗口压到多小 + 靠什么兜底"。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：三种写顺序，谁踩坑谁安全</h2>
+  <p>缓存一致性方案的所有争论，几乎都浓缩在"写请求到底按什么顺序动这两个存储"。三种朴素策略的结局：</p>
+  <ul>
+    <li><strong>先删缓存，后更新 DB：</strong>01 节的事故。删完到 DB 提交之间的任何一次并发读，都会把旧值捞回来。单用必错；</li>
+    <li><strong>先更新 DB，后删缓存（Cache-Aside 标准姿势）：</strong>窗口最小、工程默认选择。但仍有一个<strong>极端时序</strong>会让旧值活下来——见下图；</li>
+    <li><strong>更新 DB 的同时"更新"缓存：</strong>看似一步到位，实则两宗罪：并发双写时网络乱序会让缓存停在<strong>先写的旧值</strong>上（永久不一致），且写多读少场景全是无效写（写放大）。结论：<strong>删除优于更新</strong>——删除幂等、天然 lazy loading，用到时再算。</li>
+  </ul>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 348" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar20" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar20b" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--bad)"/>
+      </marker>
+    </defs>
+    <text x="380" y="20" text-anchor="middle" fill="var(--muted)" font-size="13">"先更新 DB 再删缓存"的极端时序：旧值如何活下来</text>
+
+    <!-- 生命线头部 -->
+    <g font-size="12" font-weight="700">
+      <rect x="55"  y="30" width="90" height="26" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <text x="100" y="47" text-anchor="middle" fill="var(--ink)">读请求 R</text>
+      <rect x="245" y="30" width="90" height="26" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <text x="290" y="47" text-anchor="middle" fill="var(--ink)">写请求 W</text>
+      <rect x="465" y="30" width="90" height="26" rx="6" fill="var(--card)" stroke="var(--line)"/>
+      <text x="510" y="47" text-anchor="middle" fill="var(--ink)">MySQL</text>
+      <rect x="615" y="30" width="90" height="26" rx="6" fill="var(--card)" stroke="var(--line)"/>
+      <text x="660" y="47" text-anchor="middle" fill="var(--ink)">Redis</text>
+    </g>
+    <!-- 生命线 -->
+    <g stroke="var(--line)" stroke-dasharray="4 4">
+      <line x1="100" y1="56" x2="100" y2="250"/>
+      <line x1="290" y1="56" x2="290" y2="250"/>
+      <line x1="510" y1="56" x2="510" y2="250"/>
+      <line x1="660" y1="56" x2="660" y2="250"/>
+    </g>
+
+    <!-- 事件 -->
+    <g font-size="11">
+      <line x1="100" y1="76" x2="652" y2="76" stroke="var(--muted)" marker-end="url(#ar20)"/>
+      <text x="140" y="70" fill="var(--muted)">① GET price → 未命中</text>
+
+      <line x1="100" y1="112" x2="502" y2="112" stroke="var(--muted)" marker-end="url(#ar20)"/>
+      <text x="140" y="106" fill="var(--muted)">② SELECT → 读到旧值 199</text>
+
+      <line x1="290" y1="148" x2="502" y2="148" stroke="var(--ok)" stroke-width="1.6" marker-end="url(#ar20)"/>
+      <text x="310" y="142" fill="var(--ok)">③ UPDATE price=99（已提交）</text>
+
+      <line x1="290" y1="184" x2="652" y2="184" stroke="var(--ok)" stroke-width="1.6" marker-end="url(#ar20)"/>
+      <text x="330" y="178" fill="var(--ok)">④ DEL 删除的只是"当前缓存"</text>
+
+      <line x1="100" y1="220" x2="652" y2="220" stroke="var(--bad)" stroke-width="1.8" marker-end="url(#ar20b)"/>
+      <text x="140" y="214" fill="var(--bad)">⑤ SET 199 —— ② 的旧值此刻才回填</text>
+    </g>
+
+    <!-- 结论框 -->
+    <rect x="20" y="266" width="720" height="30" rx="8" fill="var(--warn-bg)" stroke="var(--bad)"/>
+    <text x="380" y="286" text-anchor="middle" fill="var(--ink)" font-size="11.5">读 DB 的快照发生在写之前、回填发生在删除之后 → 旧值存活，直到 TTL 到期或下一次写入</text>
+    <rect x="20" y="306" width="720" height="30" rx="8" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="380" y="326" text-anchor="middle" fill="var(--ink)" font-size="11.5">为什么说它"极端"：一次读要同时慢过"整个写事务 + 删除"，概率低但不为零——TTL 与 binlog 兜底就是为它准备的</text>
+  </svg>
+  </div>
+
+  <h3>延迟双删：低成本补救</h3>
+  <p>针对旧值回填，最便宜的补刀是<strong>延迟双删</strong>：写完 DB 后，延迟一段时间再删第二次，把窗口内被回填的旧值清掉：</p>
+  <div class="steps">
+    <div class="step"><span class="step-n">1</span><p><strong>第一删：</strong>更新 DB 前先删一次（或直接走标准姿势省略这步），拦截马上要发生的旧值回填；</p></div>
+    <div class="step"><span class="step-n">2</span><p><strong>更新 DB：</strong>事务提交，真实状态落库；</p></div>
+    <div class="step"><span class="step-n">3</span><p><strong>第二删（延迟）：</strong>延迟取值 = 业务读链路 p99 耗时 + <strong>主从延迟</strong>（读走从库时必须算上，否则删了个寂寞）+ 缓冲，典型 500ms~1s。第二删必须<strong>可重试、可观测</strong>——它失败的那一刻，兜底就只剩 TTL 了。</p></div>
+  </div>
+</section>
+
+<!-- ================= 03 选型 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构选型：五种方案一张表</h2>
+  <p>方案没有最好，只有与业务容忍度、写入口数量、团队能力匹配。先看全景再下结论：</p>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>方案</th><th>不一致窗口</th><th>业务侵入</th><th>运维成本</th><th>适用场景</th></tr>
+    <tr>
+      <td><strong>Cache-Aside + 短 TTL</strong></td>
+      <td>≤ TTL（分钟级）</td>
+      <td>极低</td>
+      <td>极低</td>
+      <td>默认选择；所有方案的必叠底层</td>
+    </tr>
+    <tr>
+      <td><strong>+ 延迟双删</strong></td>
+      <td>≈ 延迟值（秒级）</td>
+      <td>低（写路径改造）</td>
+      <td>低</td>
+      <td>写入口收敛在应用内、可接受秒级窗口</td>
+    </tr>
+    <tr>
+      <td><strong>binlog 订阅删除</strong>（canal / Flink CDC）</td>
+      <td>消费延迟（百 ms~秒级）</td>
+      <td><strong>零侵入</strong></td>
+      <td>中（多一条链路要维护）</td>
+      <td>中大型系统终态；写入口多（含 DBA/批处理）</td>
+    </tr>
+    <tr>
+      <td><strong>删除 + 异步重建</strong></td>
+      <td>小（重建期间）</td>
+      <td>中（需消息队列）</td>
+      <td>中</td>
+      <td>缓存值计算昂贵的聚合数据</td>
+    </tr>
+    <tr>
+      <td><strong>强一致</strong>（分布式锁 / 版本号 CAS）</td>
+      <td>≈ 0</td>
+      <td>高</td>
+      <td>高</td>
+      <td>金融余额、库存扣减等不可出错的少量关键数据</td>
+    </tr>
+  </table>
+  </div>
+  <div class="note"><span class="label">选型三问（架构评审必答）</span>① 业务能容忍多久不一致？——答案就是 TTL 与方案档位的分界线；② 写入口有几个？只有应用写 → 双删够用；DBA 改数、定时任务、多系统共写库 → 只有 binlog 订阅能全覆盖；③ 读走不走从库？走从库时，双删的延迟、binlog 消费都要把<strong>主从延迟</strong>算进窗口，否则一切兜底都会被从库旧快照击穿。</div>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：双删代码与 binlog 链路</h2>
+
+  <h3>延迟双删（Spring 写法，含重试）</h3>
+  <pre><code><span class="c-kw">@Service</span>
+<span class="c-kw">public class</span> <span class="c-fn">ProductCacheService</span> {
+    <span class="c-kw">private final</span> RedisTemplate&lt;String, Product&gt; redis;
+    <span class="c-kw">private final</span> ProductMapper productMapper;
+
+    <span class="c-kw">public void</span> <span class="c-fn">updateProduct</span>(Product p) {
+        String key = <span class="c-str">"product:"</span> + p.getId();
+        redis.delete(key);                            <span class="c-com">// ① 第一删</span>
+        productMapper.update(p);                      <span class="c-com">// ② 更新 DB（事务提交）</span>
+        <span class="c-com">// ③ 第二删：读 p99 500ms + 主从延迟 300ms + 缓冲 200ms</span>
+        CompletableFuture.delayedExecutor(<span class="c-num">1000</span>, TimeUnit.MILLISECONDS)
+            .execute(() -&gt; retryableDelete(key, <span class="c-num">3</span>));
+    }
+
+    <span class="c-kw">void</span> <span class="c-fn">retryableDelete</span>(String key, <span class="c-kw">int</span> retries) {
+        <span class="c-kw">try</span> { redis.delete(key); }
+        <span class="c-kw">catch</span> (Exception e) {
+            <span class="c-kw">if</span> (retries &gt; <span class="c-num">0</span>) retryableDelete(key, retries - <span class="c-num">1</span>);
+            <span class="c-kw">else</span> deadLetterQueue.offer(key);       <span class="c-com">// 死信队列 + 告警，别静默吞掉</span>
+        }
+    }
+}</code></pre>
+  <div class="warn"><span class="h">⚠️ 两个常踩的坑</span>延迟双删的"延迟"不是拍脑袋常数：读走从库而延迟小于主从延迟时，第二删删完，从库还没同步，读请求照样回填旧值。另外第二删别用固定线程池 <code>Thread.sleep</code> 阻塞实现——高写入下线程池会被拖垮，用调度线程池或 MQ 延迟消息。</div>
+
+  <h3>binlog 订阅：终态架构</h3>
+  <div class="diagram">
+  <svg viewBox="0 0 760 250" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar20c" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <text x="380" y="20" text-anchor="middle" fill="var(--muted)" font-size="13">binlog 订阅架构：删缓存的责任从业务代码中剥离</text>
+
+    <g font-size="11">
+      <!-- 写入口 -->
+      <rect x="20" y="48" width="120" height="24" rx="5" fill="var(--accent-soft)" stroke="var(--accent-2)"/>
+      <text x="80" y="64" text-anchor="middle" fill="var(--ink)">应用 / DBA / 批任务</text>
+
+      <line x1="140" y1="60" x2="182" y2="60" stroke="var(--muted)" marker-end="url(#ar20c)"/>
+
+      <!-- MySQL -->
+      <rect x="186" y="42" width="110" height="36" rx="6" fill="var(--card)" stroke="var(--line)"/>
+      <text x="241" y="58" text-anchor="middle" fill="var(--ink)">MySQL</text>
+      <text x="241" y="72" text-anchor="middle" fill="var(--muted)" font-size="10">binlog（ROW）</text>
+
+      <line x1="296" y1="60" x2="338" y2="60" stroke="var(--muted)" marker-end="url(#ar20c)"/>
+
+      <!-- canal -->
+      <rect x="342" y="42" width="110" height="36" rx="6" fill="var(--card)" stroke="var(--line)"/>
+      <text x="397" y="58" text-anchor="middle" fill="var(--ink)">canal</text>
+      <text x="397" y="72" text-anchor="middle" fill="var(--muted)" font-size="10">伪装 slave 拉取</text>
+
+      <line x1="452" y1="60" x2="494" y2="60" stroke="var(--muted)" marker-end="url(#ar20c)"/>
+
+      <!-- Kafka -->
+      <rect x="498" y="42" width="110" height="36" rx="6" fill="var(--card)" stroke="var(--line)"/>
+      <text x="553" y="58" text-anchor="middle" fill="var(--ink)">Kafka</text>
+      <text x="553" y="72" text-anchor="middle" fill="var(--muted)" font-size="10">按 表+主键 分区保序</text>
+
+      <line x1="608" y1="60" x2="648" y2="60" stroke="var(--muted)" marker-end="url(#ar20c)"/>
+
+      <!-- invalidator -->
+      <rect x="520" y="130" width="150" height="36" rx="6" fill="var(--accent-soft)" stroke="var(--accent-3)"/>
+      <text x="595" y="146" text-anchor="middle" fill="var(--ink)">cache-invalidator</text>
+      <text x="595" y="160" text-anchor="middle" fill="var(--muted)" font-size="10">重试删除 / 消费延迟监控</text>
+
+      <path d="M608,78 Q640,100 615,126" fill="none" stroke="var(--muted)" marker-end="url(#ar20c)"/>
+
+      <!-- Redis -->
+      <rect x="330" y="130" width="120" height="36" rx="6" fill="var(--card)" stroke="var(--line)"/>
+      <text x="390" y="146" text-anchor="middle" fill="var(--ink)">Redis DEL</text>
+      <text x="390" y="160" text-anchor="middle" fill="var(--muted)" font-size="10">以 DB 真实状态为准</text>
+
+      <line x1="518" y1="148" x2="454" y2="148" stroke="var(--bad)" stroke-width="1.6" marker-end="url(#ar20b)"/>
+
+      <!-- 读路径 -->
+      <rect x="100" y="200" width="150" height="24" rx="5" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <text x="175" y="216" text-anchor="middle" fill="var(--ink)">业务读：Cache-Aside</text>
+      <line x1="250" y1="212" x2="326" y2="212" stroke="var(--muted)" marker-end="url(#ar20c)"/>
+      <text x="290" y="206" text-anchor="middle" fill="var(--muted)" font-size="10">GET</text>
+    </g>
+  </svg>
+  </div>
+  <p>删除逻辑从所有业务写路径中剥离，统一由 binlog 消费者执行。要点：canal 挂在<strong>从库</strong>上拉 binlog（别给主库添乱）；Kafka 分区键用 <code>表名+主键</code>，同一行的变更保序消费；消费者幂等（重复 DEL 无害）；上线前做<strong>全量预热</strong>，避免缓存冷启动打穿 DB。监控三件套：binlog 消费延迟、删除失败率、低峰期<strong>抽样比对</strong>（随机抽 key 比对缓存值与 DB 值，不一致率超阈值告警）——这是唯一能证明"一致性真的成立"的手段。</p>
+
+  <div class="card card-tip">
+    <h4>✅ 一致性设计检查清单</h4>
+    <p>☐ 写顺序 = 先更新 DB 再删缓存（绝不用"更新缓存"）　☐ 所有缓存必设 TTL（最终兜底）　☐ 延迟双删的延迟 ≥ 读 p99 + 主从延迟　☐ 第二删有重试 + 死信告警　☐ 写入口 &gt; 1 个就上 binlog 订阅　☐ 消费延迟与删除失败率有监控　☐ 有抽样比对巡检　☐ 金融级数据不走缓存或加版本号校验</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>一致性问题的本质：</strong>两个独立存储无原子操作，任何"两步写"都有并发窗口。目标是把窗口压到业务可容忍的范围，而不是消灭它——先问业务"能忍多久"，再选方案。</li>
+    <li><strong>标准姿势 = 先更新 DB 再删缓存，删除优于更新：</strong>删除幂等、天然 lazy loading；"更新缓存"有并发写乱序（永久不一致）和写放大两宗罪，默认不用。</li>
+    <li><strong>延迟双删是低成本补救：</strong>延迟取值 = 读链路 p99 + 主从延迟 + 缓冲（典型 500ms~1s）；第二删必须可重试、可观测，失败进死信队列。</li>
+    <li><strong>binlog 订阅是终态方案：</strong>业务零侵入、覆盖应用/DBA/批处理所有写入口、以 DB 真实状态为准；代价是一条要维护和监控的链路（消费延迟、删除失败率）。</li>
+    <li><strong>TTL 永远是最后防线：</strong>所有方案都要叠加 TTL 兜底，再配抽样比对巡检证明一致性成立；金融余额类数据要么不进缓存，要么加版本号 CAS。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目一：团队里有人说"我们用了先更新 DB 再删缓存的标准姿势，所以不需要 TTL 了，缓存可以永久有效"。这个论断哪里站不住？如果要彻底堵死旧值回填，你会怎么设计？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 为什么标准姿势也离不开 TTL</h4>
+      <p>02 节的时序图已经给出反例：读请求 ② 在写事务 ③ 之前读了旧值，而它的回填 ⑤ 发生在删除 ④ 之后——这次 DEL 删的是"回填前"的缓存，旧值是在删除之后才落地的。这个时序要求一次读操作同时"起跑早于整个写事务、回填晚于删除"，概率很低，但<strong>在高 QPS 长期运行下必然发生</strong>（概率 × 时间 = 必然）。一旦发生且无 TTL，旧值将<strong>永久存活</strong>——不是"晚到的一致"，是"永不到的一致"。所以 TTL 不是可选项，它是把不一致窗口从"无限"压到"有上界"的唯一保证；标准姿势只是让"TTL 到期前"的窗口尽量小。</p>
+      <h4>✅ 彻底堵死的三层设计</h4>
+      <ul>
+        <li><strong>第一层（缩短窗口）：延迟双删。</strong>第二删把绝大多数窗口内回填的旧值清掉，延迟按"读 p99 + 主从延迟"取值，覆盖常规时序；</li>
+        <li><strong>第二层（兜底极端时序）：binlog 订阅。</strong>DB 的 binlog 是<strong>最终真实状态</strong>：即便旧值回填成功，它对应的 UPDATE 事件也会再触发一次 DEL——除非 binlog 消费挂了，否则旧值活不过消费延迟。这一层与业务代码时序完全解耦，所以能覆盖应用侧无法预知的并发交错；</li>
+        <li><strong>第三层（保险丝）：TTL + 抽样比对巡检。</strong>TTL 保证前两层全失效时窗口仍有上界；低峰期随机抽 key 比对 DB 与缓存值，不一致率异常说明前两层出了问题——它是整个体系的"体检"手段，没有它你永远不知道一致性是否真的成立。</li>
+      </ul>
+      <p><strong>结论：</strong>"标准姿势"解决的是概率，TTL 解决的是上界，binlog 解决的是确定性，巡检解决的是可证性——四者是互补关系，不是替代关系。</p>
+    </div>
+  </details>
+
+  <details class="q-card">
+    <summary>题目二：为什么约定是"删除缓存"而不是"更新缓存"？构造一个并发双写场景，说明"更新缓存"如何导致永久不一致，并解释删除为什么天然免疫这个问题。<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 并发双写的乱序事故</h4>
+      <p>设商品价格初始为 100，两个运营几乎同时改价：A 改成 150，B 改成 120。DB 层面两个 UPDATE 都加行锁，最终落库顺序是 A 先 B 后，DB 终值 = 120（后写覆盖，正确）。但缓存走的是各自应用进程的网络请求，<strong>DB 提交顺序 ≠ 缓存写入到达 Redis 的顺序</strong>：完全可能出现"B 的 SET 120 先到、A 的 SET 150 后到"——缓存终值 = 150，DB 终值 = 120，<strong>永久不一致</strong>，且没有任何报错。更糟的是：回填读请求也可能参与竞争（读到 120 回填，覆盖 A 刚写的 150），三方乱序后你甚至无法推断缓存里现在是什么。</p>
+      <h4>✅ 删除为什么免疫</h4>
+      <ul>
+        <li><strong>幂等性：</strong>DEL 执行一次和执行三次结果相同。A 删、B 删、A 再删——缓存始终是"没有值"，下一个读请求回源 DB 拿到的一定是行锁串行化后的<strong>已提交终值</strong>。删除操作没有"值"这个竞争资源，乱序无意义；</li>
+        <li><strong>lazy loading：</strong>删除意味着"用到时再算"，写多读少场景下大量被更新的缓存根本没人读——更新缓存是纯浪费的写放大，删除则什么都不做；</li>
+        <li><strong>复杂度：</strong>缓存值常是多表聚合计算的结果（商品页 = 商品 + 库存 + 价格 + 活动），"更新缓存"要把这套计算逻辑搬到写路径里，链路越长越容易和 DB 计算漂移；删除让读路径独占这套逻辑，单一事实来源。</li>
+      </ul>
+      <p><strong>唯一例外：</strong>写后立刻要读的热点 key（比如首页榜单），删除会带来一次回源毛刺，此时用"删除 + 延迟异步重建"或 binlog 驱动的"订阅更新"（由单一消费者串行执行，天然保序）来兼顾——但这是对删除语义的工程增强，不是回到"业务代码各自更新缓存"。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>Redis 官方文档 · Client-side Caching（服务端辅助的客户端缓存，另一种"更贴近数据源"的一致性思路，可与本期方案对照）：<br>
+    <a href="https://redis.io/docs/latest/develop/client-side-caching/" target="_blank" rel="noopener">https://redis.io/docs/latest/develop/client-side-caching/</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 系列前置阅读</h4>
+    <p>读侧防护（穿透 / 击穿 / 雪崩）见存档期 <a href="0008-redis-cache-patterns.html">0008 · Redis 缓存设计模式</a>，强一致场景的锁基础见 <a href="0009-redis-distributed-lock.html">0009 · Redis 分布式锁</a>。本期聚焦写侧一致性，与 0008 的读侧防护互补；内存与淘汰策略见 <a href="0011-redis-memory-management.html">0011 · Redis 内存管理</a>。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0019-mysql-explain-index-failure.html">← 上一期：MySQL 执行计划与索引失效</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 20 期 · Redis 系列 · 下一期预告：Apache Pulsar —— 消息可靠性全链路</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
