@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · Pulsar 消息可靠性全链路：一条都不丢的正确姿势 | 2026-09-09</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0021</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0020-cache-db-consistency.html">上一期：Redis 缓存与数据库一致性</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">APACHE PULSAR · Pulsar 系列进阶</p>
+  <h1>消息到底丢在哪：消息可靠性全链路</h1>
+  <p class="subtitle">"消息丢了"很少是集群的锅——中间件只对已经到达它的消息负责。今天把生产端送达确认、BookKeeper 落盘副本（E/Qw/Qa）、消费端 ack 时机与重试/死信机制串成一条链，讲清"丢"与"重"各自的堵法。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧰 Apache Pulsar</span>
+    <span class="tag-date">📅 2026-09-09 · 第 21 期</span>
+    <span class="tag time">⏱ 预计阅读 10 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>一次"一边丢、一边重"的压测复盘</h2>
+  <p>大促压测第二天，两个工单同时进来：<strong>库存组</strong>说有三万条"订单取消"消息没消费到，库存一直被占着，从超卖变成了少卖；<strong>营销组</strong>说同一场压测里，一批用户的优惠券发了两次。一边丢、一边重，两组都怀疑 Pulsar 集群出了问题，但 broker 指标一切正常。排查结论：</p>
+  <ul>
+    <li><strong>丢失侧：</strong>生产者用了 <code>sendAsync()</code> 但回调里什么都不做（fire-and-forget），压测高峰待发队列打满，一批发送异常被静默吞掉——消息根本没到 broker；</li>
+    <li><strong>重复侧：</strong>消费者处理完业务、发 ack 前进程被重启，消息按规则重投，而消费逻辑没有幂等——第二次投递又发了一遍券。</li>
+  </ul>
+  <p>这两件事共同指向一个认知：<strong>消息系统的可靠性是三段链路共同决定的</strong>——生产端（把消息安全送达）、存储端（确认过的消息不丢）、消费端（处理成功才确认、失败能重投）。中间件只承诺中间那段，前后两段都是你的代码说了算。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：三段链路，五个风险点</h2>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 360" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar21" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar21d" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <text x="380" y="20" text-anchor="middle" fill="var(--muted)" font-size="13">消息可靠性三段链路：五个风险点，一段一段堵</text>
+
+    <!-- ④ 重试回环 -->
+    <path d="M138,66 C168,30 60,24 58,62" fill="none" stroke="var(--accent-3)" stroke-dasharray="5 4" marker-end="url(#ar21d)"/>
+    <text x="112" y="30" fill="var(--accent-3)" font-size="10.5">超时重试 ④</text>
+
+    <!-- ack 回传曲线 -->
+    <path d="M556,62 C520,14 470,14 434,58" fill="none" stroke="var(--accent-3)" stroke-dasharray="5 4" marker-end="url(#ar21d)"/>
+    <text x="497" y="12" fill="var(--accent-3)" font-size="10.5">ack 确认（异步）⑤</text>
+
+    <!-- 生产者 -->
+    <rect x="20" y="66" width="130" height="46" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="85" y="86" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">业务应用</text>
+    <text x="85" y="102" text-anchor="middle" fill="var(--muted)" font-size="10">生产端 send</text>
+
+    <line x1="150" y1="89" x2="212" y2="89" stroke="var(--muted)" marker-end="url(#ar21)"/>
+    <circle cx="181" cy="76" r="9" fill="var(--bad)"/>
+    <text x="181" y="80" text-anchor="middle" fill="var(--card)" font-size="10.5" font-weight="700">①</text>
+
+    <!-- Broker -->
+    <rect x="216" y="58" width="150" height="62" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="291" y="80" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">Pulsar Broker</text>
+    <text x="291" y="98" text-anchor="middle" fill="var(--muted)" font-size="10">服务层 · 订阅游标</text>
+
+    <!-- 投递箭头 -->
+    <line x1="366" y1="89" x2="428" y2="89" stroke="var(--muted)" marker-end="url(#ar21)"/>
+    <circle cx="397" cy="76" r="9" fill="var(--bad)"/>
+    <text x="397" y="80" text-anchor="middle" fill="var(--card)" font-size="10.5" font-weight="700">③</text>
+
+    <!-- 消费者 -->
+    <rect x="432" y="66" width="130" height="46" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="497" y="86" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">业务应用</text>
+    <text x="497" y="102" text-anchor="middle" fill="var(--muted)" font-size="10">消费端 receive</text>
+
+    <!-- broker → bookies -->
+    <line x1="291" y1="120" x2="291" y2="168" stroke="var(--muted)" marker-end="url(#ar21)"/>
+    <circle cx="316" cy="146" r="9" fill="var(--bad)"/>
+    <text x="316" y="150" text-anchor="middle" fill="var(--card)" font-size="10.5" font-weight="700">②</text>
+
+    <rect x="216" y="172" width="150" height="86" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="291" y="192" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">BookKeeper</text>
+    <text x="291" y="210" text-anchor="middle" fill="var(--muted)" font-size="10">Bookie A / B / C</text>
+    <text x="291" y="228" text-anchor="middle" fill="var(--muted)" font-size="10">E / Qw / Qa 副本策略</text>
+    <text x="291" y="246" text-anchor="middle" fill="var(--muted)" font-size="10">journal fsync 后才回 ack</text>
+
+    <!-- 图例 -->
+    <rect x="402" y="140" width="338" height="118" rx="8" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="414" y="160" fill="var(--bad)" font-size="11" font-weight="700">🔴 丢失点</text>
+    <text x="414" y="178" fill="var(--ink)" font-size="10.5">① 发送回调吞异常 / 待发队列打满被拒</text>
+    <text x="414" y="196" fill="var(--ink)" font-size="10.5">② Qa 落盘窗口：确认时副本尚未写满</text>
+    <text x="414" y="214" fill="var(--ink)" font-size="10.5">③ 处理前 ack / 消息卡死不重投 / DLT 无人消费</text>
+    <text x="414" y="234" fill="var(--accent-3)" font-size="11" font-weight="700">🟠 重复点</text>
+    <text x="414" y="252" fill="var(--ink)" font-size="10.5">④ 超时重试时消息其实已写入 ⑤ ack 失败触发重投</text>
+
+    <!-- 结论条 -->
+    <rect x="20" y="282" width="720" height="30" rx="8" fill="var(--warn-bg)" stroke="var(--bad)"/>
+    <text x="380" y="302" text-anchor="middle" fill="var(--ink)" font-size="11.5">丢与重是同一枚硬币：堵丢失靠"逐段确认"，堵重复靠"消费幂等"——两者都要做，缺一个就出 01 节的事故</text>
+    <rect x="20" y="320" width="720" height="30" rx="8" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="380" y="340" text-anchor="middle" fill="var(--ink)" font-size="11.5">责任分界：生产端 = 送达确认 · 存储端 = 确认后不丢 · 消费端 = 处理成功才确认</text>
+  </svg>
+  </div>
+
+  <h3>投递语义：先选边，再谈实现</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>语义</th><th>典型做法</th><th>丢失</th><th>重复</th><th>适用</th></tr>
+    <tr>
+      <td><strong>at-most-once</strong></td>
+      <td>发送即忘 / 处理前先 ack</td>
+      <td>可能丢</td>
+      <td>不会重</td>
+      <td>日志、指标采样，丢一条无所谓</td>
+    </tr>
+    <tr>
+      <td><strong>at-least-once</strong></td>
+      <td>发送等确认 + 处理成功后 ack</td>
+      <td>链路配齐则不丢</td>
+      <td>可能重</td>
+      <td>绝大多数业务消息</td>
+    </tr>
+    <tr>
+      <td><strong>effectively-once</strong></td>
+      <td>at-least-once + 消费幂等</td>
+      <td>不丢</td>
+      <td>重复被幂等吸收</td>
+      <td>订单、库存、资金类</td>
+    </tr>
+  </table>
+  </div>
+  <p>为什么没有"裸的 exactly-once"？发送超时的<strong>二义性</strong>决定了：超时那一刻你无法探知消息到底写没写进去，重试则可能重、放弃则可能丢——端到端必须选边。工程上的答案是 <strong>at-least-once + 幂等 = 有效一次</strong>。</p>
+
+  <h3>存储端：BookKeeper 的 E / Qw / Qa</h3>
+  <p>Broker 收到消息后写入 BookKeeper ledger（存算分离架构详见<a href="0012-pulsar-vs-kafka.html">0012 期</a>）。三个参数决定一条消息怎么落盘：<code>ensembleSize(E)</code> ledger 分布在几台 bookie 上；<code>writeQuorum(Qw)</code> 每条消息写几个副本；<code>ackQuorum(Qa)</code> 几个副本落盘后才向生产者确认。约束 Qa ≤ Qw ≤ E，默认 3/3/2。bookie 的 journal 就像 MySQL 的 redo log——<strong>默认先 fsync 再回 ack</strong>，保证"确认过的消息重启不丢"（这个开关别乱关）。</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 250" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar21b" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <text x="380" y="20" text-anchor="middle" fill="var(--muted)" font-size="13">Qw=3 / Qa=2 落盘时序：确认发生在一台副本还没写完时</text>
+
+    <rect x="40" y="96" width="120" height="46" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="100" y="115" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">Broker</text>
+    <text x="100" y="132" text-anchor="middle" fill="var(--muted)" font-size="10">写入 entry E</text>
+
+    <line x1="160" y1="108" x2="376" y2="52" stroke="var(--muted)" marker-end="url(#ar21b)"/>
+    <line x1="160" y1="119" x2="376" y2="122" stroke="var(--muted)" marker-end="url(#ar21b)"/>
+    <line x1="160" y1="130" x2="376" y2="192" stroke="var(--muted)" stroke-dasharray="5 4" marker-end="url(#ar21b)"/>
+
+    <text x="230" y="44" fill="var(--muted)" font-size="10">t1</text>
+    <text x="230" y="114" fill="var(--muted)" font-size="10">t2</text>
+    <text x="230" y="180" fill="var(--muted)" font-size="10">t3</text>
+
+    <rect x="380" y="32" width="230" height="40" rx="8" fill="var(--card)" stroke="var(--ok)"/>
+    <text x="495" y="49" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">Bookie A</text>
+    <text x="495" y="65" text-anchor="middle" fill="var(--ok)" font-size="10">journal fsync 完成 → ack ✓</text>
+
+    <rect x="380" y="102" width="230" height="40" rx="8" fill="var(--card)" stroke="var(--ok)"/>
+    <text x="495" y="119" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">Bookie B</text>
+    <text x="495" y="135" text-anchor="middle" fill="var(--ok)" font-size="10">journal fsync 完成 → ack ✓（Qa=2 满足，向生产者确认）</text>
+
+    <rect x="380" y="172" width="230" height="40" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="495" y="189" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">Bookie C</text>
+    <text x="495" y="205" text-anchor="middle" fill="var(--muted)" font-size="10">尚未写入……（t2～t3 之间的窗口）</text>
+
+    <rect x="20" y="220" width="720" height="26" rx="8" fill="var(--warn-bg)" stroke="var(--bad)"/>
+    <text x="380" y="238" text-anchor="middle" fill="var(--ink)" font-size="11">t2～t3 之间若 A、B 同时永久损毁（掉盘/报废）→ E 丢失。Qa=Qw=3 可堵死窗口，代价是确认延迟由最慢副本决定</text>
+  </svg>
+  </div>
+</section>
+
+<!-- ================= 03 选型 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构选型：副本组合与语义档位</h2>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>组合（E/Qw/Qa）</th><th>确认条件</th><th>丢消息条件</th><th>写延迟</th><th>适用</th></tr>
+    <tr>
+      <td><strong>3 / 3 / 2</strong>（默认）</td>
+      <td>3 副本写，2 台落盘即确认</td>
+      <td>确认后第三台未写完期间，两台已确认 bookie 同时永久损毁</td>
+      <td>由第 2 快的决定</td>
+      <td>在线业务通用</td>
+    </tr>
+    <tr>
+      <td><strong>3 / 3 / 3</strong></td>
+      <td>3 台全部落盘才确认</td>
+      <td>需三台同时损毁才丢</td>
+      <td>由最慢一台决定</td>
+      <td>金融、计费、审计</td>
+    </tr>
+    <tr>
+      <td><strong>6 / 3 / 2</strong>（E&gt;Qw）</td>
+      <td>条带化摊到 6 台，单条仍 3 副本</td>
+      <td>同 3/3/2</td>
+      <td>低（负载更均衡）</td>
+      <td>大吞吐流量的 bookie 横向扩容</td>
+    </tr>
+  </table>
+  </div>
+  <div class="note"><span class="label">可靠性选型三问（评审必答）</span>① 丢一条代价多大？——决定副本档位与生产端兜底投入；② 重复一次后果多严重？——决定幂等档次：去重表、状态机还是加锁串行；③ 谁来消费 DLT？——没有 DLT 消费者和告警，等于把"丢失"改名叫"死信"，问题没消失，只是换了仓库。</div>
+  <p><strong>容量规划要点：</strong>Qw 决定 bookie 端写放大——磁盘写入量 ≈ 消息量 × Qw。3/3/2 就是 3 倍写放大，盘容量按 3 倍数据量规划，再留 20%~30% 水位缓冲；bookie 尽量<strong>机架/机房感知</strong>放置，把"两台同时损毁"的概率从同机架拉到跨机房级别。</p>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：把三段链路逐段堵死</h2>
+
+  <h3>生产端：确认送达 + 兜底落库</h3>
+  <pre><code><span class="c-kw">Producer</span>&lt;OrderEvent&gt; producer = client.newProducer(JSONSchema.of(OrderEventSchema.class))
+    .topic(<span class="c-str">"persistent://oms/core/order-event"</span>)
+    .producerName(<span class="c-str">"oms-cancel-1"</span>)          <span class="c-com">// 配合 broker 端去重</span>
+    .sendTimeout(<span class="c-num">3</span>, TimeUnit.SECONDS)
+    .enableBatching(<span class="c-kw">true</span>)
+    .blockIfQueueFull(<span class="c-kw">true</span>)              <span class="c-com">// 队满阻塞而非直接报错（默认 false）</span>
+    .create();
+
+producer.newMessage()
+    .key(event.getOrderId())                     <span class="c-com">// 同订单路由到同分区，保序交给订阅模式</span>
+    .value(event)
+    .sendAsync()
+    .whenComplete((id, ex) -&gt; {
+        <span class="c-kw">if</span> (ex != <span class="c-kw">null</span>) {
+            <span class="c-com">// 客户端内部重试耗尽仍失败：落本地事件表（Outbox），对账任务补偿重发</span>
+            outbox.saveForRetry(event, ex);      <span class="c-com">// 千万别只打一行日志了事</span>
+        }
+    });</code></pre>
+  <div class="warn"><span class="h">⚠️ 两个高频坑</span>① <code>sendAsync()</code> 不处理回调 = fire-and-forget，任何失败都静默蒸发，这是生产端丢消息的第一大成因；② sendTimeout 触发存在二义性——超时 ≠ 失败，消息可能已写入，所以兜底重发必须配 <strong>broker 端去重</strong>或业务幂等，否则把"可能丢"修成"可能重"。</div>
+
+  <h3>消费端：处理成功才 ack + 重试队列 + 死信</h3>
+  <pre><code>DeadLetterPolicy dlp = DeadLetterPolicy.builder()
+    .maxRedeliverCount(<span class="c-num">16</span>)
+    .retryLetterTopic(<span class="c-str">"persistent://oms/core/order-event-retry"</span>)
+    .deadLetterTopic(<span class="c-str">"persistent://oms/core/order-event-dlt"</span>)
+    .build();
+
+Consumer&lt;OrderEvent&gt; consumer = client.newConsumer(JSONSchema.of(OrderEventSchema.class))
+    .topic(<span class="c-str">"persistent://oms/core/order-event"</span>)
+    .subscriptionName(<span class="c-str">"stock-service"</span>)
+    .subscriptionType(SubscriptionType.Shared)   <span class="c-com">// 注意：Shared 只能逐条 ack，累计确认仅限 Exclusive/Failover</span>
+    .ackTimeout(<span class="c-num">30</span>, TimeUnit.SECONDS)          <span class="c-com">// 防"静默卡死"：默认 0 = 未 ack 永不重投</span>
+    .enableRetry(<span class="c-kw">true</span>)                     <span class="c-com">// 启用重试队列</span>
+    .deadLetterPolicy(dlp)
+    .subscribe();
+
+<span class="c-kw">while</span> (<span class="c-kw">true</span>) {
+    Message&lt;OrderEvent&gt; msg = consumer.receive(<span class="c-num">5</span>, TimeUnit.SECONDS);
+    <span class="c-kw">if</span> (msg == <span class="c-kw">null</span>) <span class="c-kw">continue</span>;
+    <span class="c-kw">try</span> {
+        <span class="c-kw">if</span> (!dedup.tryFirst(msg.getValue())) {     <span class="c-com">// ① 幂等检查：重复消息直接放行确认</span>
+            consumer.acknowledge(msg);
+            <span class="c-kw">continue</span>;
+        }
+        stockService.releaseStock(msg.getValue()); <span class="c-com">// ② 业务处理</span>
+        consumer.acknowledge(msg);                <span class="c-com">// ③ 成功后才 ack —— 顺序不能反</span>
+    } <span class="c-kw">catch</span> (Exception e) {
+        consumer.reconsumeLater(msg, backoff(msg)); <span class="c-com">// 带退避进重试队列，超限自动进 DLT 并在原 topic ack</span>
+    }
+}</code></pre>
+
+  <h3>幂等：用业务键，不是 messageId</h3>
+  <pre><code><span class="c-com">// 幂等键 = 业务唯一键（订单号 + 事件类型），绝不是 messageId</span>
+<span class="c-com">// —— 生产端超时重发会产生新 entry、新 messageId，messageId 防不住这种重复</span>
+Boolean first = redis.opsForValue().setIfAbsent(
+    <span class="c-str">"dedup:stock:"</span> + event.getOrderId() + <span class="c-str">":"</span> + event.getType(),
+    <span class="c-str">"1"</span>, Duration.ofHours(<span class="c-num">24</span>));
+<span class="c-kw">return</span> Boolean.TRUE.equals(first);</code></pre>
+
+  <h3>Namespace 级副本与去重策略</h3>
+  <pre><code><span class="c-com"># namespace 级持久化策略（金融核心域用 3/3/3）</span>
+pulsar-admin namespaces set-persistence oms/core -e <span class="c-num">3</span> -wq <span class="c-num">3</span> -qa <span class="c-num">2</span>
+
+<span class="c-com"># 开启 broker 端生产去重：按 producerName + sequenceId 丢弃重复写入</span>
+pulsar-admin namespaces set-deduplication oms/core --enable</code></pre>
+  <p>DLT 治理三件套：DLT 消费 lag <strong>告警</strong>（它是业务异常的影子库）、死信处理台（人工修数后重放）、DLT 消息按 subscription 隔离（同名订阅才能消费对应死信）。订阅模型与游标细节见<a href="0013-pulsar-subscription-models.html">0013 期</a>，吞吐与延迟调优见<a href="0014-pulsar-prod-cons-tuning.html">0014 期</a>。</p>
+
+  <div class="card card-tip">
+    <h4>✅ 可靠性体检清单</h4>
+    <p>☐ 异步发送都处理了回调失败　☐ blockIfQueueFull=true 且 sendTimeout 已设　☐ 兜底 = Outbox 落库 + 对账重发　☐ Qa 档位与业务价值匹配（金融 3/3/3）　☐ bookie 机架感知部署、journal 刷盘未关　☐ ack 在业务成功之后　☐ ackTimeout 非零 + 重试队列 + DLT　☐ DLT 有 lag 告警与处理流程　☐ 消费幂等用业务键　☐ 有"消息不丢"的端到端对账</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>可靠性是三段链路的合取：</strong>生产端送达确认、存储端副本落盘、消费端"处理成功才 ack"，任何一段掉链子，整体就是不可靠的——先分段归因，再谈方案。</li>
+    <li><strong>丢与重是同一枚硬币：</strong>所有"确认"机制（发送重试、ack 失败重投、消费者崩溃重投）在堵住丢失的同时都制造重复。目标不是消灭重复，而是用幂等把它吸收掉。</li>
+    <li><strong>E/Qw/Qa 决定存储端档位：</strong>默认 3/3/2 覆盖绝大多数场景；金融级 3/3/3 把"确认后双 bookie 同灭"的窗口堵死，代价是确认延迟由最慢副本决定、写放大 3 倍。</li>
+    <li><strong>消费端三大铁律：</strong>ack 永远在业务成功之后；ackTimeout 必须显式设置（默认 0 = 未 ack 消息静默卡死）；重试队列 + DLT 必须配监控和处理流程，否则死信就是改了名的丢失。</li>
+    <li><strong>effectively-once = at-least-once + 业务键幂等：</strong>幂等键用订单号等业务唯一键，不用 messageId——生产端重发会产生新的 messageId，防不住。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目一：评审会上有同学说："我们要求一条都不能丢也不能重，直接上 Pulsar 事务 API 就实现了 exactly-once。"这个论断哪里站不住？你会给出怎样的落地组合拳？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 裸 exactly-once 为什么不存在</h4>
+      <p>根子在<strong>ACK 超时的二义性</strong>：生产者发出消息后超时，这一刻它无法区分"broker 没收到"和"broker 收到了、确认报文丢了"。重试 → 可能重复写入；放弃 → 可能丢失。这不是 Pulsar 的缺陷，而是不可靠网络上分布式确认的原罪（两将军问题的变体）。所以任何消息系统的端到端投递语义只能选边：at-most-once 或 at-least-once。</p>
+      <h4>🔍 Pulsar 事务真正覆盖的范围</h4>
+      <p>事务 API 解决的是<strong>consume-transform-produce 的原子提交</strong>：一个事务里消费的消息 ack 与产出的消息写入同生共死，还提供读偏序隔离。但它<strong>管不到外部副作用</strong>——你在处理逻辑里写了 MySQL、调了第三方接口、发了短信，这些都不在事务边界内，失败了事务照提交不了也回滚不了外部世界。而真实业务的消息消费恰恰几乎都带外部副作用。所以"上了事务 = 不丢不重"是把工具的适用范围想大了。</p>
+      <h4>✅ 落地组合拳</h4>
+      <ul>
+        <li><strong>底座：全链路 at-least-once。</strong>生产端发送确认 + Outbox 兜底，存储端 3/3/2 或 3/3/3，消费端成功后 ack + ackTimeout + DLT；</li>
+        <li><strong>去重层一：broker 端生产去重。</strong>producerName + sequenceId，把"同生产者超时重发"这类重复在入口就挡掉；</li>
+        <li><strong>去重层二：消费幂等（关键）。</strong>幂等键必须用业务唯一键（订单号+事件类型），因为生产端重发会产生新 entry、新 messageId，messageId 防不住；实现上 Redis SETNX 或唯一索引去重表 + 24h 窗口，严格场景再加状态机校验（"已取消"的订单再收到取消事件直接忽略）；</li>
+        <li><strong>事务按需使用：</strong>只有"消费 A 主题 → 处理 → 生产 B 主题"这种纯消息链路的原子性需求才值得上事务，且要评估吞吐代价；涉及数据库的，用"本地消息表 + 事务"自己保证原子。</li>
+      </ul>
+      <p><strong>一句话：</strong>exactly-once 是营销话术，effectively-once（at-least-once + 幂等）才是工程真相。</p>
+    </div>
+  </details>
+
+  <details class="q-card">
+    <summary>题目二：3/3/2 被称为"安全默认值"，请构造一个它仍然丢消息的完整时序；journal fsync 在其中扮演什么角色？金融级为什么改 3/3/3，代价是什么，什么时候 3/3/2 就够？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 丢消息时序（t1～t4）</h4>
+      <p>t1：Broker 把 entry E 并行写给 Bookie A/B/C，A 的 journal fsync 完成、回 ack；t2：B 也 fsync 完成并回 ack —— Qa=2 满足，Broker 向生产者确认"E 已持久化"，但<strong>C 此刻还没写入</strong>；t3：A、B 所在的两台机器同时永久损毁（掉盘、主板烧毁，不是重启）；t4：E 在世界上只剩"C 上未完成的那份"，实际丢失——而生产者手里握着一条"已确认"。窗口就是 t2～t3：确认达成于第三副本落盘之前。</p>
+      <h4>🔍 journal fsync 的角色</h4>
+      <p>它保证的是"<strong>已经回过 ack 的 bookie 不因为宕机重启而丢数据</strong>"——先 fsync 到 journal 再回 ack，重启后从 journal 恢复。注意它挡住的是"确认后单机故障"，挡不住"确认后两台同时永久性损毁"——那个窗口属于 Qa 的选择问题。所以 fsync 是必要条件，不是充分条件；反过来说，任何人提议关闭 journal 刷盘换吞吐，等于把"确认"两个字变成谎言，直接否决。</p>
+      <h4>✅ 档位决策</h4>
+      <ul>
+        <li><strong>3/3/3：</strong>三台全部落盘才确认，任意两台同时损毁也不丢（除非三台全灭）。代价：确认延迟从"第 2 快的 bookie"变成"最慢的那台"决定，长尾延迟上抬；bookie 写入吞吐压力增加（每条都要等最慢者）。金融、计费、审计域值得；</li>
+        <li><strong>3/3/2 + 部署纪律：</strong>机架/机房感知放置让"两台同时损毁"需要跨机架/跨机房级别的灾难，概率被压到与业务风险匹配的水平——在线业务够用，这是吞吐、延迟与可靠性的甜点；</li>
+        <li><strong>再往上：</strong>真正的金融核心再加"跨机房副本 + 定期快照备份 + 演练"，把 3/3/3 的单集群可靠性升级为架构级容灾——副本参数只是容灾的一层，不是全部。</li>
+      </ul>
+      <p><strong>一句话：</strong>Qa 决定"确认时敢信几台"，部署分布决定"几台同时坏要多大的灾"，两者合起来才是存储端的真实丢损概率。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>Apache Pulsar 官方文档 · Messaging Concepts（订阅与确认机制、重试与死信队列的权威定义，值得精读 ack 与 DLT 两节）：<br>
+    <a href="https://pulsar.apache.org/docs/3.3.x/concepts-messaging/" target="_blank" rel="noopener">https://pulsar.apache.org/docs/3.3.x/concepts-messaging/</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 系列前置阅读</h4>
+    <p>存储层为什么长成这样：见存档期 <a href="0012-pulsar-vs-kafka.html">0012 · Pulsar 存算分离架构与 Kafka 对比</a>；四种订阅、游标与 Key_Shared 保序见 <a href="0013-pulsar-subscription-models.html">0013 · Pulsar 订阅模型</a>；生产消费吞吐与延迟调优见 <a href="0014-pulsar-prod-cons-tuning.html">0014 · Pulsar 生产者/消费者调优</a>。本期聚焦投递语义，与三期互补。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0020-cache-db-consistency.html">← 上一期：Redis 缓存与数据库一致性</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 21 期 · Apache Pulsar 系列 · 下一期预告：TDengine —— 时序数据写入与查询性能优化</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
