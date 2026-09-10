@@ -397,10 +397,27 @@ details.q-card summary {
   cursor: pointer; padding: .9rem 1.1rem; font-weight: 650;
   color: var(--accent-3); list-style: none;
   display: flex; align-items: baseline; gap: .5rem;
+  flex-wrap: wrap;
 }
 details.q-card summary::-webkit-details-marker { display: none; }
+details.q-card summary .chev {
+  margin-left: auto; flex: none;
+  white-space: nowrap;
+  font-size: .75rem; font-weight: 500;
+  color: var(--muted);
+  background: var(--bg-accent);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: .12rem .65rem;
+}
+details.q-card summary:hover .chev { border-color: var(--accent); color: var(--accent); }
+details.q-card[open] summary .chev {
+  background: var(--accent-soft); color: var(--accent); border-color: var(--accent);
+}
+details.q-card summary:has(.chev)::after { content: none; }  /* 胶囊已含箭头，去冗余 */
 details.q-card summary::after {
-  content: '▸'; margin-left: auto; color: var(--muted); transition: transform .15s;
+  content: '▸'; margin-left: .4rem; color: var(--muted);
+  transition: transform .15s; flex: none; align-self: center;
 }
 details.q-card[open] summary::after { transform: rotate(90deg); }
 details.q-card[open] summary { border-bottom: 1px solid var(--line); }
@@ -470,6 +487,7 @@ pre code { display: block; min-width: max-content; }
 .hero .meta, .meta-row, .brand-row { flex-wrap: wrap; }
 .tag, .badge { max-width: 100%; white-space: normal; }
 p, li, summary { overflow-wrap: break-word; }
+summary .chev { white-space: nowrap; }   /* 展开按钮文本禁止折行（防竖排） */
 .diagram svg { max-width: 100%; }
 section, .section, details, .callout, .note, .tip, .warn, .danger, .card { min-width: 0; max-width: 100%; }
 
