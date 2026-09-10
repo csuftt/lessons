@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · TDengine 时序数据写入与查询性能优化 | 2026-09-10</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0022</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0021-pulsar-message-reliability.html">上一期：Pulsar 消息可靠性全链路</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">TDENGINE · TDengine 系列第 2 讲（性能篇）</p>
+  <h1>写得进、查得快：时序数据写入与查询性能优化</h1>
+  <p class="subtitle">时序库的快是"追加写 + 列式压缩"给的，慢多半是姿势不对：单条 insert、NOW() 互相覆盖、CACHEMODEL 用默认值、报表现场扫明细。今天把写入路径与读路径两头讲透——批量与相邻性、乱序的代价、标签过滤下推、SMA 与流计算降采样，最后给一套能直接抄的建库参数与改造清单。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">📊 TDengine</span>
+    <span class="tag-date">📅 2026-09-10 · 第 22 期</span>
+    <span class="tag time">⏱ 预计阅读 10 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>一个"资源不缺、姿势不对"的性能复盘</h2>
+  <p>智能电表平台 8 万块表上线半年，两件事同时爆出来：<strong>写入侧</strong>，晚间批量上报时段写入 TPS 只有 3000（目标是 5 万），vnode 写队列堆积，写延迟 p99 飙到秒级；<strong>查询侧</strong>，运营大屏翻一页"每块表最新读数"要 3~5 秒，月度报表直接超时。DBA 看监控更困惑：CPU 30%、磁盘 IO 40%——资源明明不缺。</p>
+  <p>复盘出的三个根因，每一个都和 TDengine 的设计假设背道而驰：</p>
+  <ul>
+    <li><strong>写入端：</strong>开发图省事，逐条 <code>insert</code> + 自动建表 + 用 <code>NOW()</code> 取时间戳——单条往返把网络 RTT 打成了主成本；更糟的是同一条 SQL 里多个 <code>NOW()</code> 会被解析成<strong>同一个时间戳</strong>，批量数据自己覆盖自己，成功条数永远小于发送条数；</li>
+    <li><strong>查询端：</strong>CACHEMODEL 用默认值 <code>none</code>，大屏每个"最新值"都在打磁盘随机读；月报表对 3 个月原始数据现场聚合，亿级行参与运算；</li>
+    <li><strong>架构侧：</strong>没有降采样层——大屏、报表、告警三类负载全压在明细数据上。</li>
+  </ul>
+  <p>结论一句话：<strong>时序数据库为"批量、有序、追加"的写入模式和"最近值 + 预聚合"的查询模式而生</strong>，偏离这个假设，它的性能优势就兑现不了。建模基础（超级表/子表/标签）见<a href="0015-tdengine-supertable.html">0015 期</a>，今天专讲性能。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：写入路径与读路径各发生了什么</h2>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 360" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar22" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar22d" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <text x="380" y="20" text-anchor="middle" fill="var(--muted)" font-size="13">写入路径：为什么"批量"是第一杠杆</text>
+
+    <!-- 顶排链路 -->
+    <rect x="20" y="46" width="120" height="48" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="80" y="66" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">设备接入</text>
+    <text x="80" y="83" text-anchor="middle" fill="var(--muted)" font-size="10">8 万采集点</text>
+
+    <line x1="140" y1="70" x2="172" y2="70" stroke="var(--muted)" marker-end="url(#ar22)"/>
+
+    <rect x="176" y="46" width="180" height="48" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="266" y="66" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">写入端攒批器 ①②</text>
+    <text x="266" y="83" text-anchor="middle" fill="var(--muted)" font-size="10">同子表同线程 · 1000 行 / 200ms</text>
+
+    <line x1="356" y1="70" x2="388" y2="70" stroke="var(--muted)" marker-end="url(#ar22)"/>
+
+    <rect x="392" y="46" width="130" height="48" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="457" y="66" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">连接器 ③</text>
+    <text x="457" y="83" text-anchor="middle" fill="var(--muted)" font-size="10">预建子表 · 多连接</text>
+
+    <line x1="522" y1="70" x2="554" y2="70" stroke="var(--muted)" marker-end="url(#ar22)"/>
+
+    <rect x="558" y="46" width="182" height="48" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="649" y="66" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">VGroup（vnode×N）</text>
+    <text x="649" y="83" text-anchor="middle" fill="var(--muted)" font-size="10">vgroups = CPU 核数 × 2</text>
+
+    <!-- vnode 内部 -->
+    <line x1="649" y1="94" x2="649" y2="126" stroke="var(--muted)" marker-end="url(#ar22)"/>
+    <rect x="358" y="130" width="382" height="104" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="549" y="150" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">Vnode 内部：为什么"看起来写得飞快"</text>
+    <text x="374" y="172" fill="var(--ink)" font-size="10.5">① WAL 追加写（先落日志保崩溃恢复）</text>
+    <text x="374" y="190" fill="var(--ink)" font-size="10.5">② 写入内存池 BUFFER（默认 256MB/vnode）→ 立即返回成功</text>
+    <text x="374" y="208" fill="var(--ink)" font-size="10.5">③ 异步成块刷盘 .data：顺序 IO + 列式压缩（典型 ~1/10）</text>
+    <text x="374" y="226" fill="var(--accent-3)" font-size="10.5">同时间戳 → 版本号覆盖：后写胜出（3.0 无 update 参数）</text>
+
+    <!-- 乱序支路 -->
+    <path d="M266,94 C266,120 236,130 236,156" fill="none" stroke="var(--accent-3)" stroke-dasharray="5 4" marker-end="url(#ar22d)"/>
+    <text x="288" y="122" fill="var(--accent-3)" font-size="10">乱序 / 补报数据 ⑤</text>
+    <rect x="130" y="160" width="212" height="74" rx="8" fill="var(--code-bg)" stroke="var(--accent-3)" stroke-dasharray="5 4"/>
+    <text x="236" y="182" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">STT 乱序小文件</text>
+    <text x="236" y="200" text-anchor="middle" fill="var(--muted)" font-size="10">不丢数据，但读时需多路归并：</text>
+    <text x="236" y="216" text-anchor="middle" fill="var(--muted)" font-size="10">时间戳 ASC + 版本号 DESC，代价在读放大</text>
+
+    <!-- 五开关图例 -->
+    <rect x="20" y="252" width="720" height="62" rx="8" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="34" y="272" fill="var(--ink)" font-size="11" font-weight="700">写入性能五开关（官方高效写入要点）</text>
+    <text x="34" y="290" fill="var(--ink)" font-size="10.5">① 批量：单条 SQL 攒多行多表（上限 1MB）　② 相邻性：同批尽量同一子表　③ 预建表：免存在性检查、免带 TAGS</text>
+    <text x="34" y="306" fill="var(--ink)" font-size="10.5">④ 多连接并发：每线程独立连接　⑤ 保序：同子表按时间升序提交，乱序 = STT + 归并代价</text>
+
+    <rect x="20" y="324" width="720" height="28" rx="8" fill="var(--warn-bg)" stroke="var(--bad)"/>
+    <text x="380" y="343" text-anchor="middle" fill="var(--ink)" font-size="11.5">单条 insert 把"追加写+顺序IO+列压缩"三大优势全丢掉——网络往返成了主成本；NOW() 同语句同值，批量自覆盖</text>
+  </svg>
+  </div>
+
+  <h3>重复时间戳：不是报错，是覆盖</h3>
+  <p>TDengine 3.0 彻底移除了 2.0 的 <code>update</code> 参数：子表内<strong>时间戳是主键</strong>，写入相同时间戳的数据不会报错，而是按<strong>版本号</strong>处理——后写入的胜出（NORMAL/NULL 取高版本，未赋值列取低版本，天然实现部分列更新）。这带来了两个高频坑：一是同一条 INSERT 里多个 <code>NOW()</code> 解析为同一时间戳，批量互相覆盖；二是采集端用"服务器当前时间"而非"设备采样时间"做时间戳，重传/补发时旧数据被新到达时间"顶掉"。正确姿势：时间戳永远用<strong>设备侧时间</strong>，批量内保证升序。</p>
+
+  <h3>读路径：查询慢在哪</h3>
+  <div class="diagram">
+  <svg viewBox="0 0 760 320" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <text x="380" y="20" text-anchor="middle" fill="var(--muted)" font-size="13">查询路径：同样的需求，慢姿势 vs 快姿势</text>
+
+    <text x="195" y="48" text-anchor="middle" fill="var(--bad)" font-size="12" font-weight="700">❌ 慢姿势</text>
+    <text x="565" y="48" text-anchor="middle" fill="var(--ok)" font-size="12" font-weight="700">✅ 快姿势</text>
+
+    <rect x="30" y="60" width="330" height="70" rx="8" fill="var(--card)" stroke="var(--bad)"/>
+    <text x="195" y="82" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">大屏"每表最新读数"</text>
+    <text x="195" y="100" text-anchor="middle" fill="var(--muted)" font-size="10">CACHEMODEL none → 每次打磁盘随机读</text>
+    <text x="195" y="116" text-anchor="middle" fill="var(--muted)" font-size="10">无标签过滤 → 全部 8 万子表参与扫描</text>
+
+    <rect x="400" y="60" width="330" height="70" rx="8" fill="var(--card)" stroke="var(--ok)"/>
+    <text x="565" y="82" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">缓存命中 + 标签下推</text>
+    <text x="565" y="100" text-anchor="middle" fill="var(--muted)" font-size="10">CACHEMODEL last_row/both → 内存直接返回</text>
+    <text x="565" y="116" text-anchor="middle" fill="var(--muted)" font-size="10">WHERE 标签条件 → 先裁剪子表集合再扫块</text>
+
+    <rect x="30" y="150" width="330" height="86" rx="8" fill="var(--card)" stroke="var(--bad)"/>
+    <text x="195" y="172" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">月度报表：现场扫明细聚合</text>
+    <text x="195" y="190" text-anchor="middle" fill="var(--muted)" font-size="10">90 天 × 8 万子表 ≈ 数十亿行参与运算</text>
+    <text x="195" y="206" text-anchor="middle" fill="var(--muted)" font-size="10">每次查询重复同样的聚合 → 超时</text>
+    <text x="195" y="224" text-anchor="middle" fill="var(--muted)" font-size="10">原始数据无限期保留，冷热混存</text>
+
+    <rect x="400" y="150" width="330" height="86" rx="8" fill="var(--card)" stroke="var(--ok)"/>
+    <text x="565" y="172" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">预聚合：SMA + 流计算降采样</text>
+    <text x="565" y="190" text-anchor="middle" fill="var(--muted)" font-size="10">流计算写小时表：720 万行/月，毫秒级</text>
+    <text x="565" y="206" text-anchor="middle" fill="var(--muted)" font-size="10">SMA 块级预计算：聚合查询跳过读原始块</text>
+    <text x="565" y="224" text-anchor="middle" fill="var(--muted)" font-size="10">原始数据 KEEP 限寿（90~180 天）自动清理</text>
+
+    <rect x="20" y="260" width="720" height="44" rx="8" fill="var(--bg-accent)" stroke="var(--accent)"/>
+    <text x="380" y="278" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">查询设计三原则</text>
+    <text x="380" y="296" text-anchor="middle" fill="var(--ink)" font-size="11">大屏查缓存 · 报表查降采样表 · 明细才扫原始表——先把查询路径设计对，加硬件是最后手段</text>
+  </svg>
+  </div>
+
+  <p><strong>标签过滤下推</strong>是超级表查询的第一道闸门：带标签条件的查询会先在元数据层筛出目标子表集合，再只碰这些子表的数据块；没有标签条件就是全子表广播。所以"查询慢先看 WHERE 有没有标签条件"应该写进团队的 SQL 规范。<strong>CACHEMODEL</strong> 决定"最新值"查不查磁盘；<strong>SMA</strong>（建表时对聚合列声明）把 min/max/sum 等块级统计预计算好；<strong>流计算</strong>则把降采样表在写入侧持续物化——这是 3.0 对 2.x 连续查询的重写，乱序数据也能触发结果修正。</p>
+</section>
+
+<!-- ================= 03 架构 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：容量规划与选型</h2>
+
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>写入方式</th><th>相对效率</th><th>慢在哪</th><th>适用</th></tr>
+    <tr>
+      <td><strong>参数绑定（stmt）</strong></td>
+      <td>最快</td>
+      <td>——</td>
+      <td>高吞吐采集通道</td>
+    </tr>
+    <tr>
+      <td><strong>SQL + 预建表</strong></td>
+      <td>快</td>
+      <td>SQL 解析开销</td>
+      <td>绝大多数业务写入</td>
+    </tr>
+    <tr>
+      <td><strong>SQL + 自动建表</strong></td>
+      <td>较慢</td>
+      <td>每批检查表是否存在</td>
+      <td>原型验证</td>
+    </tr>
+    <tr>
+      <td><strong>无模式（schemaless）</strong></td>
+      <td>慢</td>
+      <td>自动建表 + 动态改 schema</td>
+      <td>协议直通（InfluxDB 行协议迁移）</td>
+    </tr>
+  </table>
+  </div>
+
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>CACHEMODEL</th><th>缓存内容</th><th>加速</th><th>场景</th></tr>
+    <tr><td><code>none</code>（默认）</td><td>不缓存</td><td>—</td><td>几乎不该用于生产</td></tr>
+    <tr><td><code>last_row</code></td><td>每子表最近一行</td><td>LAST_ROW</td><td>设备当前状态大屏</td></tr>
+    <tr><td><code>last_value</code></td><td>每列最近非 NULL 值</td><td>无过滤/分组的 LAST</td><td>仪表盘"最近有效值"</td></tr>
+    <tr><td><code>both</code></td><td>两者都缓存</td><td>LAST + LAST_ROW</td><td>内存富余时的稳妥选择</td></tr>
+  </table>
+  </div>
+
+  <div class="note"><span class="label">容量规划三笔账（建库前必算）</span>
+  ① <strong>vgroups：</strong>官方建议 CPU 核数 × 2 起步——注意 <u>vgroups 建库时定死、事后不可修改</u>，只能新建库迁移，宁可在容量评估时一次定准；② <strong>内存：</strong>≈ vgroups × (BUFFER 256MB + 元数据缓存 + CACHEMODEL 缓存)，16 核 32 vgroups 约 8~9GB；③ <strong>磁盘：</strong>行宽 × 日增行数 ÷ 压缩比（典型 10:1），再留 30% 水位。<strong>副本</strong>默认 1，核心库 replica 3（写放大 3 倍），且 2 副本仅企业版支持。</div>
+
+  <p><strong>两级查询架构</strong>是时序平台的标准形态：原始层（秒级明细，KEEP 90~180 天，服务排障与明细下钻）+ 降采样层（流计算写小时/天表，KEEP 长期，服务大屏、报表、告警）。这样三类读负载互不干扰，原始层还能激进地限寿清理。Schema 层面记得：超级表加列会级联到全部子表，亿级子表场景的 schema 变更要走低峰窗口，并在发布流程里显式审批。</p>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：建库参数、攒批写入与查询改造</h2>
+
+  <h3>建库：一次定准（vgroups 不可改）</h3>
+  <pre><code><span class="c-kw">CREATE DATABASE</span> iot_power
+  <span class="c-kw">PRECISION</span> <span class="c-str">'ms'</span>        <span class="c-com">-- ms 足够；us/ns 空间翻倍，别无脑上</span>
+  <span class="c-kw">VGROUPS</span>  <span class="c-num">32</span>            <span class="c-com">-- 16 核 → 32；建库定死，事后不可改！</span>
+  <span class="c-kw">BUFFER</span>   <span class="c-num">256</span>           <span class="c-com">-- 每 vnode 写内存池（默认 256MB）</span>
+  <span class="c-kw">WAL_LEVEL</span> <span class="c-num">1</span>           <span class="c-com">-- 1=写 WAL 不强制 fsync（默认）；计费级用 2</span>
+  <span class="c-kw">KEEP</span>     <span class="c-num">90</span>            <span class="c-com">-- 原始明细留 90 天，过期自动清理</span>
+  <span class="c-kw">CACHEMODEL</span> <span class="c-str">'both'</span>    <span class="c-com">-- 大屏高频取最新值必开（默认 none 是坑）</span>
+  <span class="c-kw">CACHESIZE</span> <span class="c-num">16</span>;          <span class="c-com">-- 每 vnode 缓存上限（默认仅 1MB，通常要调大）</span>
+
+<span class="c-com">-- 预建子表：写入免存在性检查，也不必每批带 TAGS</span>
+<span class="c-kw">CREATE TABLE</span> d2140a01 <span class="c-kw">USING</span> meters <span class="c-kw">TAGS</span>(<span class="c-str">'厂区A'</span>, <span class="c-num">214</span>);</code></pre>
+
+  <h3>SQL 批量：一条语句写多表多行</h3>
+  <pre><code><span class="c-com">-- 单条 SQL 上限 1MB：攒到数百~上千行再发，通常差一个数量级的吞吐</span>
+<span class="c-kw">INSERT INTO</span>
+  d2140a01 <span class="c-kw">VALUES</span> (<span class="c-str">'2026-09-10 09:00:00.000'</span>, <span class="c-num">220.3</span>, <span class="c-num">1.10</span>)
+                   (<span class="c-str">'2026-09-10 09:00:10.000'</span>, <span class="c-num">220.4</span>, <span class="c-num">1.08</span>)
+  d2140a02 <span class="c-kw">VALUES</span> (<span class="c-str">'2026-09-10 09:00:00.000'</span>, <span class="c-num">219.8</span>, <span class="c-num">0.96</span>)
+                   (<span class="c-str">'2026-09-10 09:00:10.000'</span>, <span class="c-num">219.9</span>, <span class="c-num">0.99</span>);</code></pre>
+
+  <h3>采集端：按子表哈希分线程 + 攒批 flush</h3>
+  <pre><code><span class="c-com">// 核心：同子表的数据永远进同一个写入线程 → 天然按时间升序，乱序为零</span>
+<span class="c-kw">int</span> idx = Math.floorMod(tableName.hashCode(), WRITER_THREADS);
+queues[idx].offer(point);                       <span class="c-com">// 无锁入队，攒批交给写入线程</span>
+
+<span class="c-kw">class</span> Writer <span class="c-kw">implements</span> Runnable {        <span class="c-com">// 每线程独立连接，避免连接竞争</span>
+    <span class="c-kw">void</span> drain() <span class="c-kw">throws</span> SQLException {
+        List&lt;Point&gt; buf = queue.pollBatch(<span class="c-num">1000</span>, Duration.ofMillis(<span class="c-num">200</span>));
+        <span class="c-kw">if</span> (buf.isEmpty()) <span class="c-kw">return</span>;
+        buf.stream().collect(groupingBy(Point::table)).forEach((tbl, pts) -&gt; {
+            stmt.execute(buildInsert(tbl, pts)); <span class="c-com">// 同子表拼一条多值 INSERT</span>
+        });
+    }
+}
+<span class="c-com">// 时间戳一律用设备采样时间（升序），绝不用 NOW()——同语句同值会自覆盖</span>
+<span class="c-com">// 更高吞吐可换参数绑定（stmt 绑定），免 SQL 解析；采集源多而碎时，用队列先汇聚再攒批</span></code></pre>
+
+  <h3>降采样：流计算 + SMA</h3>
+  <pre><code><span class="c-com">-- 流计算：秒级原始 → 小时表，窗口关闭自动触发，写入侧持续物化</span>
+<span class="c-kw">CREATE STREAM</span> s_hourly <span class="c-kw">INTO</span> meters_hourly_st <span class="c-kw">AS</span>
+  <span class="c-kw">SELECT</span> _wstart, <span class="c-kw">AVG</span>(voltage) v_avg, <span class="c-kw">MAX</span>(current) i_max, <span class="c-kw">COUNT</span>(*) n
+  <span class="c-kw">FROM</span> meters <span class="c-kw">PARTITION BY</span> tbname <span class="c-kw">INTERVAL</span>(<span class="c-num">1h</span>);
+
+<span class="c-com">-- SMA：建表时对聚合列声明，块级统计预计算，AVG/SUM 类查询跳过读原始块</span>
+<span class="c-kw">CREATE STABLE</span> meters (ts <span class="c-kw">TIMESTAMP</span>, current <span class="c-kw">FLOAT</span>, voltage <span class="c-kw">FLOAT</span>, ...)
+  <span class="c-kw">TAGS</span> (location <span class="c-kw">BINARY</span>(<span class="c-num">32</span>), gid <span class="c-kw">INT</span>) <span class="c-kw">SMA</span>(current, voltage);</code></pre>
+
+  <h3>查询改造：前后对比</h3>
+  <pre><code><span class="c-com">-- 慢：无标签条件 → 8 万子表全参与；CACHEMODEL none → 打磁盘</span>
+<span class="c-kw">SELECT LAST_ROW</span>(*) <span class="c-kw">FROM</span> meters;
+
+<span class="c-com">-- 快：标签过滤下推裁剪子表 + last_row 命中缓存</span>
+<span class="c-kw">SELECT LAST_ROW</span>(ts, current, voltage) <span class="c-kw">FROM</span> meters
+ <span class="c-kw">WHERE</span> location = <span class="c-str">'厂区A'</span> <span class="c-kw">AND</span> gid = <span class="c-num">214</span>;
+
+<span class="c-com">-- 快：报表查降采样表（90 天明细 → 每子表 2160 行/小时表），再按天聚合</span>
+<span class="c-kw">SELECT</span> _wstart, <span class="c-kw">AVG</span>(v_avg) <span class="c-kw">FROM</span> meters_hourly_st
+ <span class="c-kw">WHERE</span> ts &gt;= <span class="c-kw">NOW</span> - <span class="c-num">90d</span> <span class="c-kw">AND</span> location = <span class="c-str">'厂区A'</span>
+ <span class="c-kw">INTERVAL</span>(<span class="c-num">1d</span>);</code></pre>
+
+  <div class="card card-tip">
+    <h4>✅ 性能体检清单</h4>
+    <p>☐ 单条 SQL 攒批（多行多表），不逐条 insert　☐ 时间戳用设备采样时间，禁 NOW() 批量　☐ 同子表同线程，天然升序　☐ 预建子表，不用自动建表　☐ vgroups 按 CPU×2 建库前定准（不可改）　☐ CACHEMODEL 匹配"最新值"查询，CACHESIZE 别留默认 1MB　☐ 大表聚合走 SMA/降采样表　☐ 原始数据 KEEP 限寿　☐ 监控 STT 文件数、vnode 写队列水位、WAL 落盘延迟</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>批量是写入的第一杠杆：</strong>时序库的快来自"追加写 + 顺序 IO + 列式压缩"，单条 insert 把优势全丢掉。单条 SQL 攒多行（上限 1MB）、同批同子表、预建表、参数绑定——四招通常拿回一个数量级。</li>
+    <li><strong>乱序不是错，但贵：</strong>乱序/补报数据落 STT 小文件、读时按"时间戳 ASC + 版本号 DESC"多路归并。按子表哈希到固定写入线程，让数据天生有序，是零成本的优化。</li>
+    <li><strong>同时间戳 = 版本覆盖：</strong>3.0 没有 update 参数，后写胜出；同一条 SQL 里多个 NOW() 解析为同一时间戳，批量写入用它等于自己覆盖自己。时间戳永远用设备侧时间。</li>
+    <li><strong>读侧三板斧：</strong>标签过滤下推裁剪子表、CACHEMODEL 缓存最新值（默认 none 是生产坑）、SMA/流计算预聚合。口诀：大屏查缓存、报表查降采样表、明细才扫原始表。</li>
+    <li><strong>vgroups 建库定死：</strong>官方建议 CPU 核数 × 2 起步，内存按 vgroups × (BUFFER + 缓存) 预算，磁盘按行宽×行数÷10 压缩比估算——三笔账都在建库前算清，事后改不了。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目一：8 万块电表中 2000 块因基站故障断线 3 小时，网关缓存了这批数据，恢复后要补进去。网关开发说"数据都在，按到达顺序原样写入就行"。这个方案会发生什么？请给出你的补报通道设计。<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 "原样写入"的三层后果</h4>
+      <p><strong>正确性层面反而没事</strong>——这是很多同学的意外点：补报数据时间戳落在 3 小时前，属于乱序写入，TDengine 3.0 不会拒绝，落 STT 文件、查询时按时间戳+版本号多路归并，时间戳是设备侧时间的话数据一条不丢、不错（这正是版本号机制的设计意图）。</p>
+      <p><strong>性能层面有事：</strong>3 小时 × 2000 子表的乱序数据集中涌入，STT 小文件瞬间堆积，读放大上升，期间所有查询变慢——乱序的代价全在读侧兑现，而且由全部查询共同买单。</p>
+      <p><strong>边界与下游：</strong>① 若库的 KEEP=90 而缓存数据更久远（超过 now − KEEP），会被直接拒写——补报窗口必须小于 KEEP；② 依赖窗口关闭触发的流计算，晚到的数据可能错过触发时机，小时表"少算"，需要补算；③ 若时间戳误用了"到达时间"而非采样时间，历史数据被顶掉——这才是真正的丢数据。</p>
+      <h4>✅ 补报通道设计</h4>
+      <ul>
+        <li><strong>双通道隔离：</strong>补报数据走独立队列/独立写入线程组（或独立 topic），与实时流互不挤占；网关侧先按"设备 + 时间"排序再发，把乱序压到单文件内；</li>
+        <li><strong>低峰回放 + 限速：</strong>补报速率限流，避开上报高峰；回放期间监控 STT 文件数与合并进度，堆积告警；</li>
+        <li><strong>下游补偿：</strong>回放完成后，对受影响时间区间显式补算降采样表（重跑区间聚合或临时触发流计算），再刷新报表缓存；</li>
+        <li><strong>对账兜底：</strong>按"设备 × 小时"比对源端计数与落库行数，缺数重放——补报通道没有对账，等于没闭环。</li>
+      </ul>
+    </div>
+  </details>
+
+  <details class="q-card">
+    <summary>题目二：新项目：1 万台设备、10 秒一条、每条 8 个 float 列；查询需求 = 大屏 1 秒刷新最新值 + 月度报表；单机 8 核 32G。请给出 vgroups/BUFFER/CACHEMODEL 的取值与月报表的查询路径，并算出依据。<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 三笔账</h4>
+      <p><strong>容量：</strong>日增 = 1 万设备 × 8640 条/天 = 8640 万行；行宽 ≈ 8×4B + 8B(ts) ≈ 40B → 原始约 3.2GB/天，列压缩 ~1/10 → <strong>落盘约 350MB/天、月增 ~10GB</strong>——单机完全装得下，瓶颈根本不在容量，别为"存不下"过度设计。</p>
+      <p><strong>写入：</strong>稳态 1000 行/s，峰值按 ×3~5 也只有 5k 行/s，对 8 核是小意思。<strong>vgroups = 8 × 2 = 16</strong>（官方建议；注意不是越多越好——vnode 过多反而制造资源竞争），BUFFER 默认 256MB 不动。<strong>内存预算：16 × 256MB = 4GB 写池 + 元数据 + 读缓存，约 5GB</strong>，32G 机器宽裕，甚至可以反问"为什么不拆双节点做 replica 2/3"。</p>
+      <p><strong>读取：</strong>大屏 1s 刷最新值 → <strong>CACHEMODEL 至少 last_row，稳妥选 both</strong>；CACHESIZE 从默认 1MB/vnode 提到 16MB（16 vnode 也只多占 256MB，便宜得很）。</p>
+      <h4>✅ 月报表路径</h4>
+      <ul>
+        <li><strong>绝不现场扫明细：</strong>90 天 × 8640 万行/天 ≈ 78 亿行参与运算，必然超时；</li>
+        <li><strong>建 1 小时降采样流：</strong>小时表每月 = 1 万子表 × 720 行 ≈ 720 万行，月报在小时表上再按天聚合，毫秒~秒级返回；聚合列同时声明 SMA，明细层的偶发查询也受益；</li>
+        <li><strong>原始层 KEEP 90~180 天</strong>限寿，服务排障下钻；降采样表 KEEP 长期——两级生命周期，冷热天然分层。</li>
+      </ul>
+      <p><strong>一句话：</strong>先把"写路径有序批量、读路径预聚合"设计进去，这套需求在单机上只是热身——容量规划的意义不是买大机器，而是证明不需要买。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>TDengine 官方文档 · 高效写入（批量/并发/相邻性/预建表/避免乱序的权威建议，附完整示例程序，值得对照自己的采集端逐条核对）：<br>
+    <a href="https://docs.taosdata.com/3.4.0/develop/high/" target="_blank" rel="noopener">https://docs.taosdata.com/3.4.0/develop/high/</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 系列前置阅读</h4>
+    <p>超级表/子表/标签的数据建模基础与"一设备一子表"的设计理由，见存档期 <a href="0015-tdengine-supertable.html">0015 · TDengine 超级表与子表数据建模</a>。本期聚焦性能路径，与 0015 互补。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0021-pulsar-message-reliability.html">← 上一期：Pulsar 消息可靠性全链路</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 22 期 · TDengine 系列 · 下一期预告：MinIO —— 分布式部署与纠删码</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
