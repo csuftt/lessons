@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · MinIO 分布式部署与纠删码 | 2026-09-14</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0023</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0022-tdengine-write-read-performance.html">上一期：TDengine 写入与查询性能优化</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">MINIO · MinIO 系列第 1 讲（部署与 EC 篇）</p>
+  <h1>磁盘坏 4 块也不怕：分布式部署与纠删码</h1>
+  <p class="subtitle">对象存储的可靠性不是靠"多复制几份"堆出来的。今天讲透 MinIO 的看家本领——纠删码：N=K+M 的分片数学、读仲裁与写仲裁、M=N/2 时的 K+1 防脑裂设计、坏几块盘会发生什么的降级梯子，以及拓扑为什么"初始化后定死"。最后补一课 2025 年 10 月起的社区版分发变局——这次事件本身就是给所有架构师上的供应链风险管理课。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🪣 MinIO</span>
+    <span class="tag-date">📅 2026-09-14 · 第 23 期</span>
+    <span class="tag time">⏱ 预计阅读 10 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>一个"三份方案都过不了评审"的选型复盘</h2>
+  <p>影像审计平台扩容评审会，需求很朴素：每天新增 800GB 影像与日志，保留 3 年，全量约 900TB，要求任意单点故障不影响业务、坏盘换盘不丢数据。三个方案全被拍回来：</p>
+  <ul>
+    <li><strong>方案一 NFS + RAID6：</strong>16 块 8TB 盘的 RAID6 只容忍 2 块盘故障，而大容量盘重建要 1~2 天——重建窗口里再坏一块盘就整卷丢失。评审意见：容错窗口太脆弱；</li>
+    <li><strong>方案二 双副本存储：</strong>900TB 数据存两份，裸容量直接 1800TB 起。评审意见：存储预算翻倍，pass；</li>
+    <li><strong>方案三 云对象存储：</strong>审计数据出域有合规问题。pass。</li>
+  </ul>
+  <p>最终落地 MinIO 分布式集群：<strong>纠删码 EC:4</strong>——900TB 数据按 12/16 的存储效率落盘，裸容量约 1200TB 拿下；任意坏 4 块盘业务无感，换盘后自动修复；连"盘静默坏字节"都有每分片的校验和兜底。比双副本省 1/3 容量，比 RAID6 容错能力翻倍且重建以对象为单位、粒度细得多。</p>
+  <p>这期就把这套方案的底层机制讲清楚：<strong>纠删码到底怎么切数据、坏几块盘会怎样、拓扑怎么规划、2025 年之后社区版怎么部署</strong>。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：一次 PUT 在 16 块盘上发生了什么</h2>
+
+  <p>MinIO 把<strong>每个服务器池（Server Pool）里的盘分成若干大小相同的纠删集（Erasure Set），每个纠删集 2~16 块盘</strong>。4 节点 × 4 盘 = 16 块盘，正好组成一个纠删集——这是官方最经典的最小生产拓扑。写入时，对象被切成<strong>数据分片（K）+ 校验分片（M）</strong>，满足公式：</p>
+
+  <div class="callout">
+    <p class="callout-title">核心公式</p>
+    <p><strong>N（纠删集盘数）= K（数据分片）+ M（校验分片）</strong>，M 可取 0 ~ N/2。16 盘纠删集配 EC:4，即切成 12 个数据分片 + 4 个校验分片（Reed-Solomon 编码），存储效率 12/16 = 75%。校验分片是对象的数学变换——任意凑齐 K 个分片（不区分数据还是校验）就能完整还原对象。</p>
+  </div>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar23" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <text x="380" y="20" text-anchor="middle" fill="var(--muted)" font-size="13">写入路径：EC:4 · 16 盘纠删集（4 节点 × 4 盘）</text>
+
+    <rect x="20" y="40" width="150" height="58" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="95" y="64" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">PUT 对象 100MB</text>
+    <text x="95" y="84" text-anchor="middle" fill="var(--muted)" font-size="10">S3 API · 单对象多段并行</text>
+
+    <line x1="170" y1="69" x2="210" y2="69" stroke="var(--muted)" marker-end="url(#ar23)"/>
+
+    <rect x="214" y="40" width="190" height="58" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="309" y="62" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">切分：12 数据 + 4 校验</text>
+    <text x="309" y="84" text-anchor="middle" fill="var(--muted)" font-size="10">Reed-Solomon · 每分片附 HighwayHash</text>
+
+    <line x1="404" y1="69" x2="444" y2="69" stroke="var(--muted)" marker-end="url(#ar23)"/>
+
+    <rect x="448" y="40" width="292" height="58" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="594" y="62" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">16 个分片并行派发到 16 块盘</text>
+    <text x="594" y="84" text-anchor="middle" fill="var(--accent-3)" font-size="10">≥K=12 块盘确认成功，PUT 才返回成功</text>
+
+    <!-- 4 节点盘排布 -->
+    <g font-size="10">
+      <rect x="60" y="130" width="150" height="86" rx="8" fill="var(--code-bg)" stroke="var(--line)"/>
+      <text x="135" y="150" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">节点 1</text>
+      <rect x="76" y="160" width="26" height="20" rx="4" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <rect x="108" y="160" width="26" height="20" rx="4" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <rect x="140" y="160" width="26" height="20" rx="4" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <rect x="172" y="160" width="26" height="20" rx="4" fill="var(--warn-bg)" stroke="var(--accent-3)"/>
+      <text x="135" y="196" text-anchor="middle" fill="var(--muted)" font-size="9.5">3 数据 + 1 校验</text>
+
+      <rect x="235" y="130" width="150" height="86" rx="8" fill="var(--code-bg)" stroke="var(--line)"/>
+      <text x="310" y="150" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">节点 2</text>
+      <rect x="251" y="160" width="26" height="20" rx="4" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <rect x="283" y="160" width="26" height="20" rx="4" fill="var(--warn-bg)" stroke="var(--accent-3)"/>
+      <rect x="315" y="160" width="26" height="20" rx="4" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <rect x="347" y="160" width="26" height="20" rx="4" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <text x="310" y="196" text-anchor="middle" fill="var(--muted)" font-size="9.5">3 数据 + 1 校验</text>
+
+      <rect x="410" y="130" width="150" height="86" rx="8" fill="var(--code-bg)" stroke="var(--line)"/>
+      <text x="485" y="150" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">节点 3</text>
+      <rect x="426" y="160" width="26" height="20" rx="4" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <rect x="458" y="160" width="26" height="20" rx="4" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <rect x="490" y="160" width="26" height="20" rx="4" fill="var(--warn-bg)" stroke="var(--accent-3)"/>
+      <rect x="522" y="160" width="26" height="20" rx="4" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <text x="485" y="196" text-anchor="middle" fill="var(--muted)" font-size="9.5">3 数据 + 1 校验</text>
+
+      <rect x="585" y="130" width="150" height="86" rx="8" fill="var(--code-bg)" stroke="var(--line)"/>
+      <text x="660" y="150" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">节点 4</text>
+      <rect x="601" y="160" width="26" height="20" rx="4" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <rect x="633" y="160" width="26" height="20" rx="4" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <rect x="665" y="160" width="26" height="20" rx="4" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <rect x="697" y="160" width="26" height="20" rx="4" fill="var(--warn-bg)" stroke="var(--accent-3)"/>
+      <text x="660" y="196" text-anchor="middle" fill="var(--muted)" font-size="9.5">3 数据 + 1 校验</text>
+    </g>
+    <text x="380" y="240" text-anchor="middle" fill="var(--muted)" font-size="10">■ 蓝块=数据分片　■ 黄块=校验分片（每节点混布，单节点离线最多丢每纠删集 4 块盘里的 4 个分片）</text>
+
+    <rect x="20" y="258" width="720" height="56" rx="8" fill="var(--bg-accent)" stroke="var(--accent)"/>
+    <text x="34" y="278" fill="var(--ink)" font-size="11" font-weight="700">两条仲裁规则（决定了坏盘时的行为）</text>
+    <text x="34" y="296" fill="var(--ink)" font-size="10.5">读仲裁 = K：任意 K 个存活分片即可还原对象　　写仲裁 = K（全 16 盘都写，K 是成功阈值）；M 恰为 N/2 时写仲裁 = K+1（防脑裂）</text>
+  </svg>
+  </div>
+
+  <h3>坏几块盘会发生什么：降级梯子</h3>
+  <p>把"仲裁规则"代入 16 盘 EC:4（K=12）逐个推演，就得到这张降级梯子——它应该贴在每个对象存储运维的工位上：</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 250" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <text x="380" y="20" text-anchor="middle" fill="var(--muted)" font-size="13">16 盘纠删集 · EC:4（K=12）：离线盘数 → 读写能力</text>
+
+    <rect x="30" y="40" width="330" height="70" rx="8" fill="var(--card)" stroke="var(--ok)"/>
+    <text x="195" y="62" text-anchor="middle" fill="var(--ok)" font-size="12" font-weight="700">离线 0 ~ 3 块：读写全功能</text>
+    <text x="195" y="80" text-anchor="middle" fill="var(--muted)" font-size="10.5">在线 ≥13 &gt; K=12：读、写、heal 全部正常</text>
+    <text x="195" y="98" text-anchor="middle" fill="var(--muted)" font-size="10.5">写入时 MinIO 把离线盘按校验位处理，等效临时升校验</text>
+
+    <rect x="400" y="40" width="330" height="70" rx="8" fill="var(--note-bg)" stroke="var(--accent-3)"/>
+    <text x="565" y="62" text-anchor="middle" fill="var(--accent-3)" font-size="12" font-weight="700">离线 4 块：读写压线维持</text>
+    <text x="565" y="80" text-anchor="middle" fill="var(--muted)" font-size="10.5">在线 12 = K：恰好满足读仲裁与写仲裁</text>
+    <text x="565" y="98" text-anchor="middle" fill="var(--muted)" font-size="10.5">再坏 1 块即失能——换盘窗口要按"紧急"处理</text>
+
+    <rect x="30" y="130" width="330" height="70" rx="8" fill="var(--warn-bg)" stroke="var(--bad)"/>
+    <text x="195" y="152" text-anchor="middle" fill="var(--bad)" font-size="12" font-weight="700">离线 5 块：纠删集内对象不可读写</text>
+    <text x="195" y="170" text-anchor="middle" fill="var(--muted)" font-size="10.5">在线 11 &lt; K=12：失去读仲裁，对象存在但暂时不可还原</text>
+    <text x="195" y="188" text-anchor="middle" fill="var(--muted)" font-size="10.5">盘恢复后自动找回，无需人工干预</text>
+
+    <rect x="400" y="130" width="330" height="70" rx="8" fill="var(--card)" stroke="var(--ok)"/>
+    <text x="565" y="152" text-anchor="middle" fill="var(--ok)" font-size="12" font-weight="700">换盘后：对象级自动 heal</text>
+    <text x="565" y="170" text-anchor="middle" fill="var(--muted)" font-size="10.5">只要读仲裁在，任意损坏分片都可由其余分片重建</text>
+    <text x="565" y="188" text-anchor="middle" fill="var(--muted)" font-size="10.5">比 RAID 整盘重建粒度细：一次只 heal 受影响的对象</text>
+
+    <rect x="20" y="214" width="720" height="28" rx="8" fill="var(--warn-bg)" stroke="var(--bad)"/>
+    <text x="380" y="233" text-anchor="middle" fill="var(--ink)" font-size="11">运维红线：M 就是同时能坏的盘数；生产建议 EC ≥ 3，因为换盘 / 维护窗口会先吃掉 1 个容错额度，剩余容错太少就是在裸奔</text>
+  </svg>
+  </div>
+
+  <p>还有一个容易忽略的细节：<strong>对象写入时用的 EC 配置会记进对象元数据，之后修改纠删集校验配置只影响新写入的对象，老对象不回溯迁移</strong>。所以 storage class 要在放量之前一次定准。另外，每个分片落盘时都附带 <strong>HighwayHash 校验和</strong>（bitrot 防护）——读取时先验哈希再使用，静默坏字节（磁盘电容故障、线缆干扰的常见产物）会被拦截并用好分片重建，这是 RAID6 给不了的保障。</p>
+</section>
+
+<!-- ================= 03 架构 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：拓扑、档位与 2025 年的分发变局</h2>
+
+  <h3>拓扑三原则</h3>
+  <ul>
+    <li><strong>节点数 ≥ 4，每节点盘数一致：</strong>纠删集跨节点混布分片，单节点离线最多吃掉纠删集里"每节点盘数"个分片。4 节点×4 盘时单节点离线 = 纠删集丢 4 个分片，恰好被 EC:4 兜住；如果 2 节点×8 盘，单节点离线就丢 8 个分片，EC:4 直接击穿；</li>
+    <li><strong>盘独立直挂（JBOD），不做 RAID，MinIO 独占：</strong>冗余由 EC 负责，盘只提供裸容量；混用 RAID 等于双层冗余浪费一倍空间，共享盘还会破坏"独占盘"的修复模型；</li>
+    <li><strong>拓扑初始化后不可改：</strong>纠删集的数量与大小在服务器池初始化时定死。扩容的正确姿势是<strong>加新的服务器池</strong>（新数据优先落新池），而不是往老纠删集里塞盘——这是和"加盘扩容"直觉相反、必须提前规划的一点。</li>
+  </ul>
+
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>校验档位（16 盘纠删集）</th><th>存储效率</th><th>容错盘数</th><th>定位</th></tr>
+    <tr><td><code>EC:2</code></td><td>87.5%</td><td>2</td><td>开发测试；生产不建议</td></tr>
+    <tr><td><code>EC:3</code></td><td>81%</td><td>3</td><td>生产最低线</td></tr>
+    <tr><td><strong><code>EC:4</code></strong></td><td><strong>75%</strong></td><td><strong>4</strong></td><td><strong>多数生产场景的甜点位</strong></td></tr>
+    <tr><td><code>EC:8</code></td><td>50%</td><td>8</td><td>极端可靠需求（等效开销已追平双副本）</td></tr>
+  </table>
+  </div>
+
+  <div class="note"><span class="label">容量规划一笔账</span>
+  可用容量 = 裸容量 × K/N。裸容量按"计划采购的盘数 × 单盘容量"算，别忘预留水位（建议 ≤80%）与元数据、版本化对象的开销。反过来：需求容量 ÷ (K/N) ÷ 0.8 = 要买的裸容量。<strong>注意对比"同效率下的容错"：</strong>EC:4/16 盘与三副本（效率 33%）相比，用一半的容量换来了"坏 4 块盘"的容错；与 RAID6（效率 87.5% 但只容 2 块、整盘重建）相比，多花 12.5% 容量买到双倍容错与对象级修复。</div>
+
+  <div class="warn"><span class="label">⚠ 2025-10 起的社区版分发变局（选型必读）</span>
+  MinIO 社区版自 2025 年 10 月起转为<strong>仅源码分发</strong>：不再发布预编译二进制与官方 Docker 镜像（历史版本仍可下载但不再维护更新）；Web 控制台的管理功能被大幅精简（最后的功能完整版本为 <code>RELEASE.2025-04-22</code>），管理操作回归 <code>mc</code> 命令行；社区文档并入商业版文档站。许可证方面 AGPLv3 的"网络服务即分发"条款需要法务评估（仅内部使用一般风险可控，二次封装对外提供 S3 服务则有开源义务）。<strong>架构师应对：</strong>① 锁定版本 + 自建镜像流水线（Dockerfile 源码构建），把 CVE 跟踪纳入自己的流程；② 运维体系一律以 mc / API / Prometheus 为准，不依赖 Web 控制台；③ 每年重评估一次替代项（Ceph RGW、Garage、SeaweedFS 等兼容 S3 的开源方案，或商业版），把退出成本控制在"数据是标准 S3 语义、可整体迁移"的边界内。</div>
+
+  <p>高可用再往上走一层是<strong>站点复制（Site Replication）</strong>：两个机房各一套集群互为副本，适合容灾要求高于 EC 本地容错的场景——注意它是整站复制，容量开销回到"双份"量级，一般只给核心 bucket 开。监控侧，MinIO 原生暴露 Prometheus 指标（磁盘离线数、heal 队列深度、节点在线数），把"离线盘数 ≥ M-1"设为高危告警——离写仲裁只差一步的时刻，必须有人知道。</p>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：从源码构建到拔盘演练</h2>
+
+  <h3>安装（2025-10 后的正确姿势）</h3>
+  <pre><code><span class="c-com"># 方式一：源码直装（官方推荐，需要 Go 工具链）</span>
+go install github.com/minio/minio@<span class="c-str">RELEASE.2026-XX-XX</span>   <span class="c-com"># 锁定版本，别用 latest</span>
+
+<span class="c-com"># 方式二：Dockerfile 自建镜像（纳入自己的 CI 与 CVE 扫描流水线）</span>
+<span class="c-com"># 官方仓库提供 Dockerfile，构建后推到内部镜像仓库，禁止再拉公网 lastest</span></code></pre>
+
+  <h3>4 节点 × 4 盘集群（systemd 托管）</h3>
+  <pre><code><span class="c-com"># /etc/default/minio —— 四个节点同一份配置</span>
+MINIO_VOLUMES=<span class="c-str">"http://node{1...4}/data{1...4}"</span>   <span class="c-com"># 拓扑在此声明，初始化后不可改</span>
+MINIO_OPTS=<span class="c-str">"--console-address :9001"</span>
+MINIO_ROOT_USER=<span class="c-str">minioadmin</span>
+MINIO_ROOT_SECRET_KEY=<span class="c-str">********</span>            <span class="c-com"># 新版已从 PASSWORD 更名为 SECRET_KEY</span>
+MINIO_SERVER_URL=<span class="c-str">"https://minio.internal:9000"</span>  <span class="c-com"># 对外统一入口（LB 后面四节点）</span>
+
+<span class="c-com"># 每节点启动（盘为裸 XFS 直挂，无 RAID 无 LVM）</span>
+minio server $MINIO_VOLUMES $MINIO_OPTS
+
+<span class="c-com"># mc 初始化：设置纠删档位（只影响新写入对象！）</span>
+mc alias set cluster https://minio.internal:9000
+mc admin config set cluster storage_class <span class="c-kw">standard=EC:4</span>   <span class="c-com"># 写前定准，避免新老对象档位混杂</span>
+mc admin service restart cluster</code></pre>
+
+  <h3>验收：三件事 + 一次拔盘演练</h3>
+  <pre><code>mc admin info cluster          <span class="c-com"># ① 4 节点 16 盘全在线，显示纠删集拓扑</span>
+mc mb cluster/audit-img       <span class="c-com"># ② 建桶 + 试写试读一个对象</span>
+mc admin prometheus generate cluster  <span class="c-com"># ③ 接入监控：盘离线 / heal 队列 / 节点数</span>
+
+<span class="c-com"># 拔盘演练（上线前必做，测试环境）：</span>
+<span class="c-com">#   拔 1 块盘 → 读写正常，heal 队列开始工作</span>
+<span class="c-com">#   插回新盘 → mc admin heal 触发，受影响对象逐个重建</span>
+mc admin heal -r cluster/audit-img   <span class="c-com"># 手动兜底，日常后台 heal 会自动做</span></code></pre>
+
+  <div class="card card-tip">
+    <h4>✅ 上线体检清单</h4>
+    <p>☐ 节点数 ≥ 4 且每节点盘数一致　☐ 盘 JBOD 直挂、XFS、MinIO 独占　☐ storage_class 写入前定准（EC ≥ 3）　☐ 版本锁定 + 自建镜像 + CVE 跟踪入流程　☐ 运维全走 mc/API，不依赖 Web 控制台　☐ Prometheus 告警：离线盘数 ≥ M-1 高危、heal 队列积压　☐ 拔盘演练通过　☐ 扩容预案明确"加服务器池"而非加盘　☐ 法务对 AGPL 的使用边界出具过结论</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>纠删码的本质是用数学换容量：</strong>N=K+M，任意 K 个分片可还原对象；EC:4/16 盘 = 75% 存储效率 + 容忍任意 4 块盘故障，比双副本省一半容量、比 RAID6 容错翻倍且按对象修复。</li>
+    <li><strong>两条仲裁规则决定一切降级行为：</strong>读仲裁 = K，写仲裁 = K（M 恰为 N/2 时 = K+1 防脑裂）。16 盘 EC:4 坏 0~3 块全功能、4 块压线、5 块对象不可读写；换盘窗口必须当紧急事件处理。</li>
+    <li><strong>拓扑是"一次性决定"：</strong>纠删集数量与大小初始化后定死，扩容 = 加服务器池（新数据落新池）；节点数 ≥ 4、每节点盘数一致、盘独立直挂是三条铁律。</li>
+    <li><strong>EC 配置跟着对象走：</strong>改 storage_class 只影响新写入，老对象不迁移——放量之前定准档位，别让集群里两代 EC 混居。</li>
+    <li><strong>2025-10 分发变局是供应链风险课：</strong>社区版 source-only、控制台精简、AGPL 边界——锁版本自建镜像、运维去控制台化、保留 S3 语义的可迁移性，是三条底线动作。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目一：测试环境为省机器，用 2 节点 × 4 盘部署了 MinIO（单纠删集 8 盘，EC:4）。某天两节点之间的网络中断（进程都活着，各自还能服务各自的客户端）。这个集群此时能读吗？能写吗？会不会出现"两边各自写入、数据分叉"的脑裂？为什么官方坚持最小生产拓扑用 4 节点？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 推演过程</h4>
+      <p>先算参数：8 盘纠删集，EC:4 → K = 8 − 4 = 4，M = 4 恰好等于 N/2。网络中断后两侧各剩 4 块盘：</p>
+      <ul>
+        <li><strong>读：</strong>读仲裁 = K = 4，两侧各有 4 个分片，恰好满足——<strong>两侧都能读</strong>（注意能读到的是"中断前"的一致视图）；</li>
+        <li><strong>写：</strong>因为 M = N/2，写仲裁升级为 <strong>K+1 = 5</strong>，两侧都只有 4 块盘 → <strong>两侧都拒绝写</strong>。集群整体退化为"只读"，不会分叉。</li>
+      </ul>
+      <p>这正是 K+1 规则的设计意图：<strong>把纠删集对半劈开时，数学上保证任何一半都无法独立满足写条件</strong>。若没有 K+1，两侧各 4 盘 = 各自满足 K=4 的写仲裁，同一个对象就能在两半各写出一个版本，网络恢复后谁覆盖谁？——脑裂了。K+1 用"多要一票"掐灭了这种可能。</p>
+      <h4>✅ 为什么最小生产拓扑是 4 节点</h4>
+      <ul>
+        <li>2 节点部署把"单节点故障"放大为"纠删集丢一半分片"：4 盘×EC:4 压线、EC:3 直接失能；而 4 节点×4 盘时单节点离线只丢 4/16 个分片，EC:4 下集群读写 heal 全不受影响——<strong>节点数决定了"单故障域吃掉纠删集的比例"</strong>；</li>
+        <li>同理，每节点盘数也要克制：16 盘纠删集配 8 节点×2 盘（单节点离线丢 2 分片）比 2 节点×8 盘（丢 8 分片）健康得多。省机器的正确位置在"盘的容量"，不在"节点数量"；</li>
+        <li>运维推论：测试环境 2 节点可以，但要写进架构决策记录——<strong>该拓扑读可用但写脆弱，且任何对半分区都是全只读</strong>，别把测试环境的省机器方案带进生产。</li>
+      </ul>
+    </div>
+  </details>
+
+  <details class="q-card">
+    <summary>题目二：影像平台 3 年全量 900TB（净数据）。你提的方案是 8 节点 × 8 盘 × 16TB。请算出：纠删集数量、EC:4 下的可用容量、这个配置能不能撑住 3 年；如果能再加 4 节点扩容，容量和数据分布会发生什么，老数据要不要迁？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 第一笔账：初始方案根本不够</h4>
+      <p>8×8 = 64 块盘，纠删集大小 16 → <strong>64 / 16 = 4 个纠删集</strong>。裸容量 64 × 16TB = 1024TB；EC:4 可用 = 1024 × 12/16 = <strong>768TB</strong>；再按 80% 水位算安全可用到 <strong>~614TB &lt; 900TB</strong>——不够。若退到 EC:2 换 87.5% 效率（896TB × 0.8 ≈ 717TB）仍不够，且 EC:2 低于生产线，直接排除。<strong>纠删码的容量账必须写进采购评审，下单前算，不是上线后算。</strong></p>
+      <h4>✅ 正确姿势：按需求反推盘数</h4>
+      <p>900TB ÷ 0.8 水位 ÷ (12/16) = 1500TB 裸容量 → 96 块 16TB 盘（12 节点 × 8 盘，6 个纠删集）或等价拓扑；可用 1152TB，水位 78%，达标。另一个方向是压单盘容量需求：冷数据走 ILM 分层到更廉价的纠删集/池——但那是优化项，不是达标项。</p>
+      <h4>🔍 第二笔账：扩容加 4 节点之后</h4>
+      <p>假设初始就上了 8 节点（768TB 可用），一年后加 4 节点 × 8 盘 = 新服务器池（512TB 裸，同样 4 个纠删集）：</p>
+      <ul>
+        <li><strong>容量：</strong>集群总可用 = 768 + 512 × 12/16 = <strong>1152TB</strong>，按池加权，立即可用；</li>
+        <li><strong>数据分布：</strong><strong>老对象不会自动迁移</strong>——扩容不改老池的纠删集（拓扑定死），新写入优先落新池，老数据原地不动直到生命周期策略处理；想要均衡需要主动迁移：测试侧用双写灰度切换，存量用 <code>mc mirror</code> 搬到新池 bucket，校验对象数与 etag 后切换别名——本质是一次数据搬迁项目，要有窗口与回滚预案；</li>
+        <li><strong>别忘元数据一致性：</strong>迁移期间写放大的对象要处理版本（开启 versioning 的桶 mirror 要带 <code>--versions</code>），断点续传与校验是迁移工具链的必备能力。</li>
+      </ul>
+      <p><strong>一句话：</strong>纠删码集群的扩容语义是"加池不加盘"——容量立即并网、数据不自动重排；把"什么时候必须整体搬迁"想清楚再动手，是这类系统容量治理的核心。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>MinIO 官方文档 · Erasure Coding（纠删集/分片公式/读写仲裁/防脑裂 K+1 规则的权威表述；2025-10 后社区文档已并入该文档站，中文社区镜像 zhdoc.min-io.com.cn 可对照）：<br>
+    <a href="https://docs.min.io/aistor/operations/core-concepts/erasure-coding/" target="_blank" rel="noopener">https://docs.min.io/aistor/operations/core-concepts/erasure-coding/</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>MinIO 在数据平台里常与时序库、消息队列搭配（原始文件落对象存储、指标落 TDengine、事件走 Pulsar）。时序侧容量与性能设计见 <a href="0022-tdengine-write-read-performance.html">0022 · TDengine 写入与查询性能优化</a>，消息可靠性见 <a href="0021-pulsar-message-reliability.html">0021 · Pulsar 消息可靠性全链路</a>。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0022-tdengine-write-read-performance.html">← 上一期：TDengine 写入与查询性能优化</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 23 期 · MinIO 系列 · 下一期预告：Kubernetes —— Ingress 与 Service 流量链路</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
