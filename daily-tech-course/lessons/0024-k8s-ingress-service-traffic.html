@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · Kubernetes 流量入口：Service、Ingress 与 Gateway API | 2026-09-16</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0024</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0023-minio-erasure-coding.html">上一期：MinIO 分布式部署与纠删码</a> · <a href="https://www.bilibili.com/video/BV16Gex6fEue" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">KUBERNETES · Kubernetes 系列第 2 讲（流量链路篇）</p>
+  <h1>流量进集群的三道门：Service、Ingress 与 Gateway API</h1>
+  <p class="subtitle">一个请求从公网到 Pod，要过四层负载均衡、七层入口网关、Service 集群内转发三道门。今天把整条链路拆开讲：EndpointSlice 如何维护"就绪名单"、iptables 为什么会在 Service 上千后拖慢发布、滚动发布 502 的真正根因，以及 2026 年 3 月起 ingress-nginx 正式退役后，入口选型该怎么重做。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">☸️ Kubernetes</span>
+    <span class="tag-date">📅 2026-09-16 · 第 24 期</span>
+    <span class="tag time">⏱ 预计阅读 10 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>一次"发布就 502、扩容更卡、审计还红了"的复盘</h2>
+  <p>小程序商城平台大促演练夜，三个报警先后爆出来：</p>
+  <ul>
+    <li><strong>发布侧：</strong>每次滚动发布，网关 5xx 错误率都会尖刺 20~30 秒——明明是"无损"的滚动策略，监控里却像掉了一波机器；</li>
+    <li><strong>集群侧：</strong>平台上线一年，Service 数量涨到 3000+，每次发布后流量规则要好几秒才收敛，发布高峰节点 CPU 系统态（sys）飙到 40%；</li>
+    <li><strong>审计侧：</strong>安全扫描直接亮红灯——集群入口用的社区版 ingress-nginx 控制器已于 <strong>2026 年 3 月正式退役</strong>（仓库归档只读、不再有安全补丁），它还是整个集群唯一直接暴露在公网的组件。</li>
+  </ul>
+  <p>这三个问题分别落在流量链路的三层：<strong>入口层</strong>（Ingress/Gateway 的选型与治理）、<strong>转发层</strong>（Service 与 kube-proxy 的规则机制）、<strong>发布协同层</strong>（EndpointSlice 与网关的信息同步）。今天自上而下把这条链路讲透。容量弹性（Pod 怎么扩缩）见<a href="0016-k8s-hpa.html">0016 期 HPA</a>，本期专注"流量怎么进来、怎么找到 Pod"。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：南北向流量的五跳链路</h2>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 350" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar24" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar24d" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <text x="380" y="20" text-anchor="middle" fill="var(--muted)" font-size="13">南北向流量五跳：每一跳解决一个"不稳定"</text>
+
+    <!-- 第一跳 用户 -->
+    <rect x="20" y="46" width="100" height="52" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="70" y="68" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">用户</text>
+    <text x="70" y="86" text-anchor="middle" fill="var(--muted)" font-size="10">DNS 解析</text>
+    <line x1="120" y1="72" x2="150" y2="72" stroke="var(--muted)" marker-end="url(#ar24)"/>
+
+    <!-- 第二跳 四层 LB -->
+    <rect x="154" y="46" width="130" height="52" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="219" y="68" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">四层负载均衡</text>
+    <text x="219" y="86" text-anchor="middle" fill="var(--muted)" font-size="10">节点级分发 · 健康检查摘节点 ①</text>
+    <line x1="284" y1="72" x2="314" y2="72" stroke="var(--muted)" marker-end="url(#ar24)"/>
+
+    <!-- 第三跳 入口网关 -->
+    <rect x="318" y="46" width="150" height="52" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="393" y="68" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">入口网关（L7）</text>
+    <text x="393" y="86" text-anchor="middle" fill="var(--muted)" font-size="10">DaemonSet + hostNetwork ②</text>
+    <line x1="468" y1="72" x2="498" y2="72" stroke="var(--muted)" marker-end="url(#ar24)"/>
+
+    <!-- 第四跳 Service -->
+    <rect x="502" y="46" width="120" height="52" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="562" y="68" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">Service</text>
+    <text x="562" y="86" text-anchor="middle" fill="var(--muted)" font-size="10">稳定 ClusterIP ③</text>
+    <line x1="622" y1="72" x2="652" y2="72" stroke="var(--muted)" marker-end="url(#ar24)"/>
+
+    <!-- 第五跳 Pod -->
+    <rect x="656" y="40" width="86" height="64" rx="8" fill="var(--card)" stroke="var(--ok)"/>
+    <text x="699" y="62" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">业务 Pod</text>
+    <text x="699" y="78" text-anchor="middle" fill="var(--muted)" font-size="10">多副本</text>
+    <text x="699" y="93" text-anchor="middle" fill="var(--muted)" font-size="10">IP 随调度漂移</text>
+
+    <!-- EndpointSlice 控制带 -->
+    <rect x="154" y="130" width="588 " height="58" rx="8" fill="var(--code-bg)" stroke="var(--accent-3)"/>
+    <text x="448" y="152" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">EndpointSlice：Service → 就绪 Pod 的"真实名单"（真相源）</text>
+    <text x="448" y="172" text-anchor="middle" fill="var(--muted)" font-size="10.5">端点控制器 watch Pod 的就绪条件增删地址 · 网关与 kube-proxy 都订阅它 · 传播是异步的（1~2 秒）④</text>
+    <path d="M393,98 C393,114 400,122 420,128" fill="none" stroke="var(--accent-3)" stroke-dasharray="5 4" marker-end="url(#ar24d)"/>
+    <path d="M562,98 C562,114 540,122 500,128" fill="none" stroke="var(--accent-3)" stroke-dasharray="5 4" marker-end="url(#ar24d)"/>
+
+    <!-- 底部要点 -->
+    <rect x="20" y="208" width="720" height="60" rx="8" fill="var(--bg-accent)" stroke="var(--accent)"/>
+    <text x="34" y="230" fill="var(--ink)" font-size="11" font-weight="700">每一跳的职责一句话</text>
+    <text x="34" y="250" fill="var(--ink)" font-size="10.5">① LB 摘的是"节点"（网关进程健康检查）　② 网关做 TLS 终止/Host·Path 路由，控制器自己维护后端列表　③ Service 摘掉"机器"概念，ClusterIP 稳定不变　④ EndpointSlice 决定"这一刻谁能接流量"——就绪探针说了算</text>
+
+    <rect x="20" y="280" width="720" height="52" rx="8" fill="var(--warn-bg)" stroke="var(--bad)"/>
+    <text x="34" y="300" fill="var(--ink)" font-size="11" font-weight="700">排障入口顺序（从外到内）</text>
+    <text x="34" y="320" fill="var(--ink)" font-size="10.5">curl 网关 IP 通不通（LB/网关层）→ 网关日志里 upstream 地址对不对（名单层）→ 直接 curl Pod:端口（应用层）→ 三段各验一遍，502/超时/拒绝三种错各归各层</text>
+  </svg>
+  </div>
+
+  <p><strong>Service 提供稳定地址，EndpointSlice 提供真实名单</strong>——这是理解链路的钥匙。Pod IP 随调度漂移、随发布更替，Service 用一个不变的 ClusterIP 把"找谁"的问题接走；而"此刻有哪些 Pod 已就绪"由 EndpointSlice 对象维护：端点控制器 watch 每个 Pod 的就绪条件，就绪则加地址，失联/退出则摘除。网关和 kube-proxy 都是这份名单的订阅者。注意最后半句：<strong>订阅是异步的</strong>——这正是滚动发布 502 的伏笔。</p>
+
+  <h3>kube-proxy 三种模式：iptables 为什么会"越用越慢"</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>模式</th><th>转发机制</th><th>复杂度</th><th>适用</th></tr>
+    <tr><td>userspace</td><td>用户态进程中转</td><td>—</td><td>历史产物，已淘汰</td></tr>
+    <tr><td><strong>iptables（默认）</strong></td><td>内核规则链，顺序匹配 + DNAT</td><td>线性 O(规则数)</td><td>中小规模集群</td></tr>
+    <tr><td><strong>ipvs</strong></td><td>内核哈希表 + 调度算法</td><td>查找 O(1)</td><td>Service 上千 / 高频发布</td></tr>
+  </table>
+  </div>
+
+  <p>iptables 模式的规则量 ≈ <strong>Service 数 × 每个 Service 的后端数 × 2~3 条规则</strong>，且每次端点变更都要<strong>全量重建</strong>规则链。3000 个 Service、平均 3 个后端就是两三万条规则——发布高峰端点频繁增删，规则同步排队、CPU sys 飙高就是这么来的。ipvs 模式把后端表放进内核哈希结构，查找常数时间、更新增量进行，还自带轮询/最少连接/源地址哈希等调度算法。<strong>经验阈值：Service 超过 ~1000 个或发布频繁的大集群，切 ipvs</strong>（注意先确认内网 CNI 与 conntrack 配置兼容，留好回滚预案）。</p>
+
+  <h3>滚动发布 502：一个 1~2 秒的窗口</h3>
+  <div class="diagram">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar24b" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <text x="380" y="20" text-anchor="middle" fill="var(--muted)" font-size="13">滚动发布时序：502 出现在"名单传播窗口"里</text>
+
+    <!-- 时间轴 -->
+    <line x1="60" y1="60" x2="700" y2="60" stroke="var(--line)" stroke-width="2" marker-end="url(#ar24b)"/>
+    <text x="380" y="46" text-anchor="middle" fill="var(--muted)" font-size="10">时间</text>
+
+    <!-- t0 -->
+    <circle cx="120" cy="60" r="7" fill="var(--accent)"/>
+    <text x="120" y="40" text-anchor="middle" fill="var(--accent)" font-size="10.5" font-weight="700">t0</text>
+    <rect x="52" y="84" width="170" height="74" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="137" y="106" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">Deployment 删除旧 Pod</text>
+    <text x="137" y="124" text-anchor="middle" fill="var(--muted)" font-size="10">SIGTERM → 应用 0.2s 内退出</text>
+    <text x="137" y="142" text-anchor="middle" fill="var(--bad)" font-size="10">进程已死，端口已关</text>
+
+    <line x1="240" y1="121" x2="268" y2="121" stroke="var(--muted)" marker-end="url(#ar24b)"/>
+
+    <!-- t0+1~2s -->
+    <circle cx="330" cy="60" r="7" fill="var(--accent-3)"/>
+    <text x="330" y="40" text-anchor="middle" fill="var(--accent-3)" font-size="10.5" font-weight="700">t0 + 1~2s</text>
+    <rect x="272" y="84" width="196" height="74" rx="8" fill="var(--code-bg)" stroke="var(--accent-3)"/>
+    <text x="370" y="106" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">摘除事件还在传播路上</text>
+    <text x="370" y="124" text-anchor="middle" fill="var(--muted)" font-size="10">EndpointSlice 更新 → watch 推送</text>
+    <text x="370" y="142" text-anchor="middle" fill="var(--muted)" font-size="10">→ 网关刷新后端列表（异步）</text>
+
+    <line x1="470" y1="121" x2="498" y2="121" stroke="var(--muted)" marker-end="url(#ar24b)"/>
+
+    <!-- 502 -->
+    <circle cx="560" cy="60" r="7" fill="var(--bad)"/>
+    <text x="560" y="40" text-anchor="middle" fill="var(--bad)" font-size="10.5" font-weight="700">窗口期内</text>
+    <rect x="502" y="84" width="236" height="74" rx="8" fill="var(--warn-bg)" stroke="var(--bad)"/>
+    <text x="620" y="106" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">新请求仍按旧名单投递</text>
+    <text x="620" y="124" text-anchor="middle" fill="var(--muted)" font-size="10">打到已死进程 → 网关报 502</text>
+    <text x="620" y="142" text-anchor="middle" fill="var(--muted)" font-size="10">持续到网关名单收敛为止</text>
+
+    <!-- 三板斧 -->
+    <rect x="20" y="196" width="720" height="86" rx="8" fill="var(--bg-accent)" stroke="var(--accent)"/>
+    <text x="380" y="220" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">无损发布三板斧（三个一起上，窗口才关得死）</text>
+    <text x="60" y="244" fill="var(--ink)" font-size="10.5">① readinessProbe 就绪门槛：没通过探针的 Pod 不进名单——防"半启动就接流量"</text>
+    <text x="60" y="262" fill="var(--ink)" font-size="10.5">② preStop sleep 10~15s：进程先"赖着"活十几秒，等名单摘干净再退出——弥合传播窗口</text>
+    <text x="60" y="280" fill="var(--ink)" font-size="10.5">③ 网关连接排空（draining）：摘除后存量连接服务完再关，新连接不打——长连接（WebSocket）场景必配</text>
+  </svg>
+  </div>
+
+  <p>另一个 502 变种正好相反：<strong>新 Pod 还没就绪就接流量</strong>——应用进程起来了但依赖没连上（数据库、注册中心），请求进来照样 5xx。这就是 readinessProbe 没配或配得过松的代价。两道保险一个管"退出侧"、一个管"进入侧"，缺一不可。</p>
+</section>
+
+<!-- ================= 03 架构 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：2026 年的入口选型</h2>
+
+  <div class="warn"><span class="label">⚠ 必须面对的事实：ingress-nginx 已于 2026-03 退役</span>
+  Kubernetes SIG Network 与安全响应委员会于 2025-11 公告：社区维护的 <code>kubernetes/ingress-nginx</code> 进入 best-effort 维护，<strong>2026 年 3 月起停止一切发布、修复与安全补丁，仓库转为只读</strong>。根因是长期维护者枯竭（仅一两名志愿者），叠加 snippets 类注解允许注入任意 NGINX 配置、成为安全负债（IngressNightmare CVE-2025-1974 直接暴露了这个问题）；原定接棒的 InGate 项目也未成熟、一并退役。<strong>注意三个"不是"：</strong>Ingress API 本身没有被移除（仍可用但功能冻结）；NGINX 软件本身不受影响；F5 维护的 <code>nginxinc/kubernetes-ingress</code> 是另一个项目、仍在维护。已有部署不会立刻故障，但"无补丁的公网暴露面"每天都在积累风险。</div>
+
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>路线</th><th>做法</th><th>优点</th><th>代价</th></tr>
+    <tr>
+      <td><strong>A. Gateway API（推荐）</strong></td>
+      <td>GatewayClass / Gateway / HTTPRoute 三层资源 + 一个实现（Envoy Gateway、Istio、Cilium、NGINX Gateway Fabric 等）</td>
+      <td>社区主推方向；角色分离适合多团队；流量切分/重写/跨命名空间授权是标准字段；CRD 已 GA（L4 Route 亦转正）</td>
+      <td>清单需重写（<code>ingress2gateway</code> 可自动转换 30+ 常用注解）；少量长尾注解要人工设计</td>
+    </tr>
+    <tr>
+      <td>B. 换维护中的 Ingress 控制器</td>
+      <td>Traefik / HAProxy / F5 nginxinc 等，继续用 Ingress API</td>
+      <td>改动最小，Ingress 清单基本不动</td>
+      <td>nginx 系注解要手工翻译；Ingress API 功能冻结，将来大概率二次迁移</td>
+    </tr>
+    <tr>
+      <td>C. 云上七层入口</td>
+      <td>ALB / Application Gateway 等托管 L7</td>
+      <td>免运维、有 SLA</td>
+      <td>绑定云厂商；自建机房不可用</td>
+    </tr>
+  </table>
+  </div>
+
+  <p><strong>决策建议：</strong>新集群直接 Gateway API 起步；存量集群把网关并行双跑（两套入口共存，按 Host/路径逐业务灰度切流），用 <code>ingress2gateway print</code> 生成初版清单再人工核对长尾注解；集群只剩一年寿命且路由极简，可以选 B 过渡——但要写进架构决策记录，明确"这是还债不是终点"。</p>
+
+  <p><strong>入口层的高可用与容量要点：</strong></p>
+  <ul>
+    <li><strong>网关多副本 + 反亲和：</strong>入口控制器至少 2 副本打散在故障域（节点/可用区）；DaemonSet + hostNetwork 是自建机房的经典形态，四层 LB 对节点 80/443 做健康检查，节点挂了流量自动摘——入口自身不成为单点；</li>
+    <li><strong>证书与域名解耦：</strong>cert-manager 管 TLS 生命周期，external-dns 管解析，网关只声明"我要什么"；</li>
+    <li><strong>连接容量：</strong>网关节点的 conntrack 表与文件句柄要按"长连接数 × 每连接开销"预留（WebSocket 密集场景尤其），单节点十万级长连接前先压测内核参数；</li>
+    <li><strong>边界提示：</strong>Gateway API 也能建模东西向（服务间）流量（GAMMA initiative），但那是 Service Mesh 的领地——Istio 流量治理留给"云原生前沿"系列展开，本期只管南北向。</li>
+  </ul>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：从 Ingress 注解到 HTTPRoute</h2>
+
+  <h3>老写法：Ingress + 私有注解（ingress-nginx 风格）</h3>
+  <pre><code><span class="c-kw">apiVersion:</span> networking.k8s.io/v1
+<span class="c-kw">kind:</span> Ingress
+<span class="c-kw">metadata:</span>
+  <span class="c-kw">name:</span> mall-api
+  <span class="c-kw">annotations:</span>
+    nginx.ingress.kubernetes.io/rewrite-target: <span class="c-str">/$2</span>   <span class="c-com"># ← 控制器私有注解，换实现就失效</span>
+<span class="c-kw">spec:</span>
+  <span class="c-kw">ingressClassName:</span> nginx
+  <span class="c-kw">rules:</span>
+  - <span class="c-kw">host:</span> <span class="c-str">api.mall.example.com</span>
+    <span class="c-kw">http:</span>
+      <span class="c-kw">paths:</span>
+      - <span class="c-kw">path:</span> <span class="c-str">/v1(/|$)(.* )</span>
+        <span class="c-kw">pathType:</span> ImplementationSpecific
+        <span class="c-kw">backend:</span> { <span class="c-kw">service:</span> { <span class="c-kw">name:</span> mall-api, <span class="c-kw">port:</span> { <span class="c-kw">number:</span> <span class="c-num">80</span> } } }</code></pre>
+
+  <h3>新写法：Gateway + HTTPRoute（标准字段，金丝雀切分原生支持）</h3>
+  <pre><code><span class="c-com"># 运维侧：网关实例（一个 Gateway = 一个负载均衡实体）</span>
+<span class="c-kw">apiVersion:</span> gateway.networking.k8s.io/v1
+<span class="c-kw">kind:</span> Gateway
+<span class="c-kw">metadata:</span> { <span class="c-kw">name:</span> public-gw, <span class="c-kw">namespace:</span> gateway-infra }
+<span class="c-kw">spec:</span>
+  <span class="c-kw">gatewayClassName:</span> envoy
+  <span class="c-kw">listeners:</span>
+  - <span class="c-kw">name:</span> https
+    <span class="c-kw">port:</span> <span class="c-num">443</span>
+    <span class="c-kw">protocol:</span> HTTPS
+    <span class="c-kw">tls:</span> { <span class="c-kw">mode:</span> Terminate, <span class="c-kw">certificateRefs:</span> [{ <span class="c-kw">name:</span> mall-tls }] }
+    <span class="c-kw">allowedRoutes:</span>                       <span class="c-com"># 哪些命名空间的路由能挂上来</span>
+      <span class="c-kw">namespaces:</span> { <span class="c-kw">from:</span> Selector, <span class="c-kw">selector:</span> { <span class="c-kw">matchLabels:</span> { gw-access: <span class="c-str">"true"</span> } } }
+---
+<span class="c-com"># 业务侧：路由规则写在业务自己的命名空间</span>
+<span class="c-kw">apiVersion:</span> gateway.networking.k8s.io/v1
+<span class="c-kw">kind:</span> HTTPRoute
+<span class="c-kw">metadata:</span> { <span class="c-kw">name:</span> mall-api, <span class="c-kw">namespace:</span> mall }
+<span class="c-kw">spec:</span>
+  <span class="c-kw">parentRefs:</span> [{ <span class="c-kw">name:</span> public-gw, <span class="c-kw">namespace:</span> gateway-infra }]
+  <span class="c-kw">hostnames:</span> [<span class="c-str">"api.mall.example.com"</span>]
+  <span class="c-kw">rules:</span>
+  - <span class="c-kw">matches:</span> [{ <span class="c-kw">path:</span> { <span class="c-kw">type:</span> PathPrefix, <span class="c-kw">value:</span> <span class="c-str">/v1</span> } }]
+    <span class="c-kw">filters:</span>
+    - <span class="c-kw">type:</span> URLRewrite                        <span class="c-com"># 路径重写是标准字段，不再靠注解</span>
+      <span class="c-kw">urlRewrite:</span> { <span class="c-kw">path:</span> { <span class="c-kw">type:</span> ReplacePrefixMatch, <span class="c-kw">replacePrefix:</span> <span class="c-str">/</span> } }
+    <span class="c-kw">backendRefs:</span>
+    - { <span class="c-kw">name:</span> mall-api,        <span class="c-kw">port:</span> <span class="c-num">80</span>, <span class="c-kw">weight:</span> <span class="c-num">90</span> }   <span class="c-com"># 金丝雀：90% 稳定版</span>
+    - { <span class="c-kw">name:</span> mall-api-canary, <span class="c-kw">port:</span> <span class="c-num">80</span>, <span class="c-kw">weight:</span> <span class="c-num">10</span> }   <span class="c-com"># 10% 灰度版</span></code></pre>
+
+  <h3>无损发布三板斧（Deployment 侧）</h3>
+  <pre><code><span class="c-kw">readinessProbe:</span>                    <span class="c-com"># 进入侧：没就绪不进名单</span>
+  <span class="c-kw">httpGet:</span> { <span class="c-kw">path:</span> <span class="c-str">/actuator/health/readiness</span>, <span class="c-kw">port:</span> <span class="c-num">8080</span> }
+  <span class="c-kw">periodSeconds:</span> <span class="c-num">5</span>
+<span class="c-kw">lifecycle:</span>
+  <span class="c-kw">preStop:</span>                          <span class="c-com"># 退出侧：等名单摘干净再死</span>
+    <span class="c-kw">exec:</span> { <span class="c-kw">command:</span> [<span class="c-str">"sleep"</span>, <span class="c-str">"15"</span>] }
+<span class="c-kw">terminationGracePeriodSeconds:</span> <span class="c-num">30</span></code></pre>
+
+  <h3>kube-proxy 切 ipvs + 排障命令</h3>
+  <pre><code><span class="c-com"># 切换（kubeadm 集群）：</span>
+kubectl -n kube-system edit cm kube-proxy     <span class="c-com"># mode: "ipvs"</span>
+kubectl -n kube-system rollout restart ds kube-proxy
+ipvsadm -Ln | head                            <span class="c-com"># 验证：能看到 Service 的虚拟服务表</span>
+
+<span class="c-com"># 排障三件套：</span>
+kubectl get svc mall-api -o wide              <span class="c-com"># ① ClusterIP 是否在</span>
+kubectl get endpointslices -l kubernetes.io/service-name=mall-api
+                                              <span class="c-com"># ② 就绪地址数对不对（0 = 全部未就绪）</span>
+kubectl -n mall exec deploy/mall-api -- curl -s localhost:8080/actuator/health
+                                              <span class="c-com"># ③ 应用自己健康吗</span></code></pre>
+
+  <div class="card card-tip">
+    <h4>✅ 入口链路体检清单</h4>
+    <p>☐ 网关 ≥2 副本且反亲和 / LB 健康检查指向节点端口　☐ ingress-nginx 退役风险已有迁移决策（目标与时间表落纸）　☐ readinessProbe + preStop sleep + 连接排空三件齐　☐ Service 上千的集群评估过 ipvs 模式　☐ EndpointSlice 就绪数接入监控与告警　☐ cert-manager/external-dns 接管证书与解析　☐ 网关节点 conntrack / fd 容量按长连接压测过　☐ 演练过"摘一个网关节点""杀一个 Pod"两类故障</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>链路的钥匙是"两个对象"：</strong>Service 提供稳定 ClusterIP，EndpointSlice 维护"此刻哪些 Pod 就绪"的真实名单；网关与 kube-proxy 都是名单的异步订阅者——异步，就是 502 的窗口。</li>
+    <li><strong>iptables 随规模线性恶化：</strong>规则量 ≈ Service × 后端 × 2~3 且端点变更全量重建；Service 上千或高频发布的集群切 ipvs（内核哈希 + 调度算法），留回滚预案。</li>
+    <li><strong>无损发布三板斧缺一不可：</strong>readinessProbe 管进入侧、preStop sleep 弥合名单传播窗口、网关连接排空保长连接——只配一个都不叫无损。</li>
+    <li><strong>ingress-nginx 已于 2026-03 退役：</strong>仓库只读、无安全补丁，而它是公网暴露面。新集群直接 Gateway API；存量双跑灰度迁移（ingress2gateway 自动转换 + 长尾注解人工设计）。</li>
+    <li><strong>Gateway API 的本质是角色分离：</strong>GatewayClass 归平台、Gateway 归运维、HTTPRoute 归业务团队，跨命名空间用引用授权——多团队协作的边界从"约定"变成"API 权限"。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目一：你们的入口网关是 DaemonSet + hostNetwork 部署，四层 LB 后面挂着全部 6 个节点。某天凌晨一个网关节点内核崩溃。① 此时正在 established 状态的长连接（WebSocket）会怎样？② 流量多久能恢复？③ 如果老板问"能不能做到用户完全无感"，你的改造方案是什么？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>存量长连接全部断开。</strong>四层 LB 的健康检查摘除只影响"新连接"的分配；已经建立在崩溃节点上的 TCP 连接随内核一起消失，客户端会收到 RST 或直接超时——WebSocket 客户端的自动重连逻辑此时是唯一救命的稻草，所以它必须是客户端标配而不是可选项；</p>
+      <p>② <strong>新流量恢复时间 = 健康检查检测周期。</strong>LB 摘节点要等"连续 N 次探测失败"（典型配置 3 次 × 5 秒间隔 ≈ 15 秒内）。要压缩这个窗口：探测间隔与阈值调紧、探测目标从节点端口改为网关健康端点（区分"节点活着"和"网关能服务"）；</p>
+      <p>③ <strong>"单节点完全无感"在四层摘除模型下做不到，但可以把影响压到"重连一次"：</strong></p>
+      <ul>
+        <li>客户端：指数退避自动重连 + 会话恢复（令牌重附着），把"断"变成毫秒级的抖动；</li>
+        <li>接入层：LB 摘除提速之外，给网关加一层 DNS 级多入口（双 LB VIP + 健康解析），抗"整套 LB 故障"这一层；</li>
+        <li>更彻底的是<strong>连接层不落在单点</strong>：长连接密集业务把接入下沉到有连接迁移能力的方案（如云厂商的接入层、或客户端多路复用/自动选路），那已经是接入架构的重新设计，不是配置调优；</li>
+        <li><strong>架构师要诚实：</strong>高可用是"故障影响的有界化"，不是"故障不存在"。把 RTO（上面 ~15 秒）、长连接断开范围（单节点上的那部分）写进 SLO，比承诺"无感"更专业。</li>
+      </ul>
+    </div>
+  </details>
+
+  <details class="q-card">
+    <summary>题目二：集群里 5000 个 Service、平均每 Service 3 个后端，iptables 模式。发布高峰 kube-proxy 规则同步出现秒级排队、节点 CPU sys 飙高。① 估算规则量级并解释为什么"每次发布"都全量重建；② 切 ipvs 为什么能解决？③ 切换本身有什么风险，你的实施步骤是什么？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 第一问：规则量的账</h4>
+      <p>每个"Service-后端"对大约产生 2~3 条规则（DNAT + 概率匹配/统计链），5000 × 3 × 2~3 ≈ <strong>3~4.5 万条</strong>，叠加 Service 自己的链与跳转规则。iptables 的匹配是<strong>逐条线性</strong>的，更要命的是 kube-proxy 的更新模型：<strong>任何端点变化 = 整张表加锁重写</strong>（iptables 无增量 API）。发布高峰每个 Deployment 的 Pod 更替都触发重建，多次重建排队叠加，就表现为规则同步延迟与 CPU sys 飙高——规则的"全量重建"是设计使然，不是配置失误。</p>
+      <h4>✅ 第二问：ipvs 为什么快</h4>
+      <p>ipvs 是内核里的虚拟服务表：查找走<strong>哈希</strong>（常数时间，与表大小无关），更新走<strong>增量修改</strong>（只动变化的虚拟服务/后端项，不用重写整表），并且原生提供轮询、加权轮询、最少连接等调度算法（iptables 模式的"随机式均衡"靠概率规则模拟，代价就是上面的规则量）。两个痛点——查找慢、更新贵——同时解掉。</p>
+      <h4>⚠ 第三问：切换的风险与步骤</h4>
+      <ul>
+        <li><strong>风险点：</strong>① nodeLocalDNS/某些 CNI 的流量拦截方式与 ipvs 的兼容性要确认；② 会话保持语义变化（ipvs 的会话保持与 conntrack 的行为有差异，依赖"同一客户端永远同一后端"的业务要验证）；③ 切换瞬间存量连接的处理（建议逐节点滚动，不要一次全切）；④ 少数依赖 iptables 规则做网络策略的旧组件需要回归测试；</li>
+        <li><strong>实施步骤：</strong>测试集群全量验证 → 生产挑一个低峰、先切一小批节点（kube-proxy 是 DaemonSet，可以按节点分批）→ 观察规则同步耗时、CPU sys、连接错误率三个指标 → 全量切换 → 保留"改回 iptables + 滚动重启 kube-proxy"的回滚剧本；</li>
+        <li><strong>顺带的架构提醒：</strong>ipvs 解决的是"转发规则"的规模问题；如果真实瓶颈是 Service 数量本身的膨胀（微服务拆分过细、每个都建 Service），先做一次 Service 治理（合并、ExternalName、去掉无谓的抽象）可能比换模式更治本——<strong>先量化，再动手，是容量治理的通用姿势</strong>。</li>
+      </ul>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>Kubernetes Gateway API 官方文档（GatewayClass/Gateway/HTTPRoute 资源模型、跨命名空间引用授权、各实现对照与迁移指南的权威出处；ingress-nginx 退役后的官方推荐路径）：<br>
+    <a href="https://gateway-api.sigs.k8s.io/" target="_blank" rel="noopener">https://gateway-api.sigs.k8s.io/</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>容量弹性与伸缩指标设计见 <a href="0016-k8s-hpa.html">0016 · Kubernetes HPA 自动伸缩</a>；ingress-nginx 退役公告原文见 Kubernetes 官方博客（kubernetes.io 博客 2025-11 "Ingress NGINX Retirement"）。集群内东西向流量治理（Service Mesh/Istio）属于"云原生前沿"系列，后续展开。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0023-minio-erasure-coding.html">← 上一期：MinIO 分布式部署与纠删码</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 24 期 · Kubernetes 系列 · 下一期预告：AI 大模型应用（新系列首期）—— RAG 检索增强架构</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
