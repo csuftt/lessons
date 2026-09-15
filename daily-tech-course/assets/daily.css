@@ -1,1 +1,24 @@
 @import url("../../assets/course.css");
+
+/* ===== daily-tech-course 定制（覆盖共享 course.css 部分基准） =====
+   PC：正文栏 46rem → 60rem，大屏两侧留白收窄、页面长度约省 1/4；
+   手机：字号 15px、行距 1.68、留白收紧，减少长文滚屏。 */
+
+:root { --max-width: 60rem; }
+html body { max-width: var(--max-width); }
+body .wrap { max-width: var(--max-width); margin: 0 auto; }
+
+@media (max-width: 640px) {
+  html body { font-size: 15px; line-height: 1.68; padding: 1.2rem .95rem 2.5rem; }
+  html body .lesson-head { margin-bottom: 1rem; padding-bottom: .7rem; }
+  html body .hero { padding: 1rem .95rem; margin-bottom: 1rem; }
+  html body .hero h1 { font-size: 1.28rem; }
+  html body .hero .subtitle { font-size: .88rem; margin-bottom: .8rem; }
+  html body h1 { font-size: 1.45rem; }
+  html body h2 { font-size: 1.18rem; }
+  html body h3 { font-size: 1.05rem; }
+  body .wrap h2 { font-size: 1.18rem; }
+  body .wrap h3 { font-size: 1.05rem; }
+  html body section, html body .card { margin-bottom: 1.1rem; }
+  html body pre, body .wrap pre { font-size: .78rem; }
+}
