@@ -292,6 +292,7 @@ section, .section, details, .callout, .note, .tip, .warn, .danger { min-width: 0
 <!-- ============ 01 场景导入 ============ -->
 <section class="card">
   <span class="step-label">SCENARIO · 从实际问题出发</span>
+  <p><em>上一讲 MySQL 第一轮主线告一段落；从本讲起进入 Redis，先解决最基础的问题——同样的数据，到底该怎么存。</em></p>
   <h2>🚨 全部用 String 存 JSON，一台 64G 的 Redis 被塞满了</h2>
   <p>某电商 App 需要五类缓存能力：购物车、商品销量计数、大促排行榜、每日签到、活动页 UV 统计。初期团队图省事，<strong>所有数据都用 String 存 JSON 字符串</strong>。三个月后问题集中爆发：</p>
   <ul>
