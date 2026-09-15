@@ -13,3 +13,9 @@
 
 # 个人行程类文件（仅本地使用）
 tech-manager-training/reference/prep-checklist.html
+
+# 视频课程本地产物（音视频/帧图/音频体积大且含本机信息，只上站 HTML 图文版）
+daily-tech-course/output/
+daily-tech-course/.*.log
+daily-tech-course/.*.py
+daily-tech-course/.published-backup-*/
