@@ -273,27 +273,42 @@ section, .section, details, .callout, .note, .tip, .warn, .danger { min-width: 0
   .summary-grid { gap: .5rem; }
 }
 </style>
+<style>/* 页头统一补丁：palette 对齐 assets/course.css，覆盖内嵌旧页头样式 */
+body .lesson-head, body .hero { --ink:#24292f; --ink-soft:#57606a; --muted:#57606a; --line:#dcd8cd; --card:#fff; --accent:#0969da; --accent-soft:#e7eef7; --accent-2:#1a7f37; --font-mono:"JetBrains Mono","SF Mono",Consolas,"Courier New",monospace; }
+body .lesson-head { display:flex; gap:.8rem; align-items:baseline; flex-wrap:wrap; margin-bottom:1.6rem; padding-bottom:1rem; border-bottom:2px solid var(--ink); font-size:.85rem; color:var(--ink-soft); }
+body .lesson-head .num { font-family:var(--font-mono); font-size:.78rem; letter-spacing:.15em; color:var(--muted); text-transform:uppercase; flex-shrink:0; white-space:nowrap; background:transparent; border:0; padding:0; display:inline; width:auto; height:auto; min-width:0; }
+body .lesson-head > span:last-child { min-width:0; }
+body .lesson-head a { color:var(--accent); text-decoration:none; }
+body .hero { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:1.4rem 1.5rem; margin-bottom:1.4rem; }
+body .hero .issue { color:var(--accent); font-size:.8rem; letter-spacing:.15em; font-weight:700; margin:0; }
+body .hero h1 { font-size:1.55rem; margin:.2rem 0 .5rem; color:var(--ink); line-height:1.3; }
+body .hero .subtitle { color:var(--muted); font-size:.95rem; margin:0 0 1.1rem; line-height:1.75; }
+body .hero .lesson-meta { display:flex; gap:.8rem; align-items:center; flex-wrap:wrap; font-size:.85rem; margin:0; }
+body .hero .lesson-meta .tag, body .hero .lesson-meta .tag-date { display:inline-flex; align-items:center; gap:.3rem; padding:.12rem .6rem; border-radius:999px; font-size:.74rem; font-weight:600; border:1px solid var(--line); background:var(--card); color:var(--muted); }
+body .hero .lesson-meta .tag.cat { background:var(--accent-soft); color:var(--accent); }
+body .hero .lesson-meta .tag.time { background:color-mix(in srgb, var(--accent-2) 12%, transparent); color:var(--accent-2); }
+</style>
 </head>
 <body>
-<div class="course-nav"><a href="../index.html">← 课程目录</a> <a style="margin-left:8px" href="https://www.bilibili.com/video/BV1CQYk6VEmE" target="_blank" rel="noopener">▶ B站视频版</a></div>
 
 <div class="wrap">
 
   <!-- Header -->
-  <div class="header">
-    <div class="brand-row">
-      <span class="tag icon">☀️ 微课堂 · 第 1 期</span>
-      <span class="tag cat">Spring Cloud Alibaba</span>
-      <span class="tag time">⏱ 约 9 分钟</span>
-    </div>
-    <h1>Sentinel 熔断限流实战：从"雪崩"到"稳如磐石"</h1>
-    <div class="subtitle">站在架构师视角，理解限流、熔断、降级的本质权衡与生产级配置</div>
-    <div class="meta-row">
-      <span>📅 <strong>2026-08-12</strong></span>
-      <span>👤 面向：架构师 / 高级工程师</span>
-      <span>📦 技术栈：<strong>Spring Cloud Alibaba · Sentinel 1.8.x</strong></span>
-    </div>
+  <header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0001</span>
+  <span><a href="../index.html">课程目录</a> · <a href="https://www.bilibili.com/video/BV1CQYk6VEmE" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">Spring Cloud Alibaba · 第 1 期</p>
+  <h1>Sentinel 熔断限流实战：从"雪崩"到"稳如磐石"</h1>
+  <p class="subtitle">站在架构师视角，理解限流、熔断、降级的本质权衡与生产级配置</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧰 Spring Cloud Alibaba</span>
+    <span class="tag-date">📅 2026-08-12 · 第 1 期</span>
+    <span class="tag time">⏱ 预计阅读 9 分钟</span>
   </div>
+</div>
 
   <!-- 1. 场景 -->
   <div class="section">
