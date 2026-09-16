@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · RAG 检索增强架构：给大模型外挂一个可随时更换的教科书 | 2026-09-17</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0025</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0024-k8s-ingress-service-traffic.html">上一期：Kubernetes 流量入口三道门</a> · <a href="https://www.bilibili.com/video/BV1imeK6PE9c" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">AI · AI 大模型应用系列第 1 讲（RAG 架构篇）</p>
+  <h1>给大模型外挂一个可随时更换的教科书：RAG 检索增强架构</h1>
+  <p class="subtitle">大模型的知识固化在训练参数里——像是闭卷考试，教不了它你公司上周才改的退货政策。RAG（检索增强生成）的思路很朴素：考试时允许翻书。今天把这条"翻书"链路拆成离线索引与在线检索两条管线讲清楚：切块为什么决定上限、向量与关键词为什么要混检、重排器在堵什么洞、四把质量标尺怎么用，以及 RAG 与微调的选型账。这是 AI 大模型应用系列的第一讲。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🤖 AI 大模型应用</span>
+    <span class="tag-date">📅 2026-09-17 · 第 25 期</span>
+    <span class="tag time">⏱ 预计阅读 10 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>一个"演示惊艳、上线翻车"的企业知识库复盘</h2>
+  <p>某集团要上线"制度问答助手"，覆盖 5 万份制度文档、产品手册与运维手册。Demo 当天效果惊艳，全员鼓掌；两周试运行，工单系统里堆了三类投诉：</p>
+  <ul>
+    <li><strong>答非所问型：</strong>用户问"XR-7500 的额定功率是多少"，助手把 XR-7000、XR-7500S 的参数各抄了一段混在一起——型号差一个字符，语义向量看来几乎一样；</li>
+    <li><strong>知识过期型：</strong>用户问"现在的差旅报销标准"，助手引用的是三年前就废止的旧制度——源文档早就更新了，向量索引里躺的还是旧版本切片；</li>
+    <li><strong>东拉西扯型：</strong>概念类问题（"预算管理的总体原则是什么"）检索回来 10 段毫不相关的碎片，上下文被污染，模型开始一本正经地胡说。</li>
+  </ul>
+  <p>复盘结论扎心：<strong>大模型本身没有变差，坏的是"翻书"的每一环</strong>。型号匹配失败是精确匹配缺位（该配关键词检索）；旧制度复活是索引更新链路缺失；上下文污染是排序与过滤粗糙。三类故障分别对应检索质量的三把标尺——<strong>召回率、精确率、排序质量</strong>。这一讲就沿着"书怎么切、怎么查、怎么摆到模型面前"把整条链路讲透。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：离线生产"书页"，在线完成"翻书"</h2>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 400" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar25" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar25d" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <text x="380" y="20" text-anchor="middle" fill="var(--muted)" font-size="13">两条管线：离线按天跑批生产索引，在线按请求实时检索</text>
+
+    <!-- 离线管线 -->
+    <rect x="20" y="38" width="348" height="26" rx="6" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="194" y="55" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">离线索引管线（Ingestion · 天级/事件驱动）</text>
+    <rect x="20" y="72" width="100" height="46" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="70" y="91" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">文档源</text>
+    <text x="70" y="108" text-anchor="middle" fill="var(--muted)" font-size="9.5">PDF/HTML/表格</text>
+    <line x1="120" y1="95" x2="142" y2="95" stroke="var(--muted)" marker-end="url(#ar25)"/>
+    <rect x="146" y="72" width="100" height="46" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="196" y="91" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">解析清洗</text>
+    <text x="196" y="108" text-anchor="middle" fill="var(--muted)" font-size="9.5">抽取正文/表格</text>
+    <line x1="246" y1="95" x2="268" y2="95" stroke="var(--muted)" marker-end="url(#ar25)"/>
+    <rect x="272" y="72" width="96" height="46" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="320" y="91" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">切块</text>
+    <text x="320" y="108" text-anchor="middle" fill="var(--muted)" font-size="9.5">Chunking</text>
+
+    <rect x="400" y="38" width="340" height="26" rx="6" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="570" y="55" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">双索引（检索的"书页"仓库）</text>
+    <rect x="400" y="72" width="158" height="46" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="479" y="91" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">向量索引</text>
+    <text x="479" y="108" text-anchor="middle" fill="var(--muted)" font-size="9.5">Embedding 语义近邻</text>
+    <rect x="582" y="72" width="158" height="46" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="661" y="91" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">关键词索引</text>
+    <text x="661" y="108" text-anchor="middle" fill="var(--muted)" font-size="9.5">BM25 倒排·精确匹配</text>
+    <path d="M368,95 C390,95 392,95 398,95" fill="none" stroke="var(--muted)" marker-end="url(#ar25)"/>
+    <path d="M470,72 C455,50 430,48 372,60" fill="none" stroke="var(--muted)" stroke-dasharray="4 3"/>
+    <path d="M640,72 C660,45 700,42 740,46" fill="none" stroke="var(--muted)" stroke-dasharray="4 3"/>
+
+    <!-- 在线管线 -->
+    <rect x="20" y="160" width="720" height="26" rx="6" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="380" y="177" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">在线检索管线（Retrieval · 每请求实时执行）</text>
+    <rect x="20" y="196" width="100" height="46" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="70" y="215" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">用户提问</text>
+    <text x="70" y="232" text-anchor="middle" fill="var(--muted)" font-size="9.5">口语/错别字</text>
+    <line x1="120" y1="219" x2="142" y2="219" stroke="var(--muted)" marker-end="url(#ar25)"/>
+    <rect x="146" y="196" width="104" height="46" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="198" y="215" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">查询改写</text>
+    <text x="198" y="232" text-anchor="middle" fill="var(--muted)" font-size="9.5">补主语/扩同义词</text>
+    <line x1="250" y1="219" x2="272" y2="219" stroke="var(--muted)" marker-end="url(#ar25)"/>
+    <rect x="276" y="196" width="118" height="46" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="335" y="215" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">混合检索</text>
+    <text x="335" y="232" text-anchor="middle" fill="var(--muted)" font-size="9.5">向量 ∪ BM25 · 召 Top50</text>
+    <line x1="394" y1="219" x2="416" y2="219" stroke="var(--muted)" marker-end="url(#ar25)"/>
+    <rect x="420" y="196" width="104" height="46" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="472" y="215" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">重排序</text>
+    <text x="472" y="232" text-anchor="middle" fill="var(--muted)" font-size="9.5">Cross-Encoder 精排</text>
+    <line x1="524" y1="219" x2="546" y2="219" stroke="var(--muted)" marker-end="url(#ar25)"/>
+    <rect x="550" y="196" width="86" height="46" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="593" y="215" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">上下文</text>
+    <text x="593" y="232" text-anchor="middle" fill="var(--muted)" font-size="9.5">拼装+裁剪</text>
+    <line x1="636" y1="219" x2="658" y2="219" stroke="var(--muted)" marker-end="url(#ar25)"/>
+    <rect x="662" y="196" width="78" height="46" rx="8" fill="var(--card)" stroke="var(--ok)"/>
+    <text x="701" y="215" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">LLM</text>
+    <text x="701" y="232" text-anchor="middle" fill="var(--muted)" font-size="9.5">答案+引用</text>
+
+    <!-- 双索引供给混合检索 -->
+    <path d="M479,118 C479,150 400,170 370,194" fill="none" stroke="var(--accent-3)" stroke-dasharray="5 4" marker-end="url(#ar25d)"/>
+    <path d="M661,118 C661,150 480,175 396,194" fill="none" stroke="var(--accent-3)" stroke-dasharray="5 4" marker-end="url(#ar25d)"/>
+
+    <!-- 底部要点 -->
+    <rect x="20" y="270" width="720" height="54" rx="8" fill="var(--bg-accent)" stroke="var(--accent)"/>
+    <text x="34" y="292" fill="var(--ink)" font-size="11" font-weight="700">开卷考试心智模型</text>
+    <text x="34" y="312" fill="var(--ink)" font-size="10.5">裸 LLM=闭卷考试（知识固化在参数里）· RAG=开卷考试（现场翻书+页码引用）· 微调=考前刷题（改变考生本人）——翻书快、可换书、可溯源，是 RAG 成为企业知识场景默认架构的三个理由</text>
+
+    <rect x="20" y="336" width="720" height="50" rx="8" fill="var(--warn-bg)" stroke="var(--bad)"/>
+    <text x="34" y="356" fill="var(--ink)" font-size="11" font-weight="700">第 01 节三类故障在图上的落点</text>
+    <text x="34" y="374" fill="var(--ink)" font-size="10.5">型号匹配失败→关键词索引缺位　旧制度复活→离线管线没有增量更新　上下文污染→重排序缺位或 Top-K 太大——先定位环节，再动手优化</text>
+  </svg>
+  </div>
+
+  <p><strong>离线管线生产"书页"，在线管线完成"翻书"</strong>——这是 RAG 的总纲。离线侧：文档解析清洗后<strong>切块（Chunking）</strong>，每个块经 Embedding 模型编码成向量写入向量索引，同时建关键词倒排索引（BM25）；在线侧：用户问题先做查询改写（补主语、扩同义词），然后<strong>双路并发检索</strong>，RRF 倒数排名融合成候选集，再用 Cross-Encoder 重排出最相关的少数几块，拼进提示词交给 LLM 生成带引用的答案。</p>
+
+  <h3>切块：决定检索上限的第一道工序</h3>
+  <p>为什么不把整篇文档直接丢给模型？三个原因：Embedding 模型有输入长度上限（几百到几千 token）；整篇文档的向量是"全文平均语义"，查询词的信号被稀释——<strong>块越大语义越糊，块越小上下文越碎</strong>；上下文窗口是按 token 计费的稀缺资源。经验起点：<strong>按文档结构递归切分，目标块 300~800 token、相邻块重叠 10%~20%</strong>（防止关键句正好被切断）。表格、代码这类结构化内容尽量不切断，并把章节标题、文档元数据（版本、生效日期）附在每个块上——第 01 节"旧制度复活"的毛病，一半要靠元数据过滤来治。</p>
+
+  <h3>混合检索与重排：宽召回、严排序</h3>
+  <p>向量检索（稠密）懂语义但认不了"XR-7500"这种精确符号；BM25（稀疏）擅长精确匹配但不懂"预算管理"约等于"费用管控"。<strong>两路各取 Top 20~50，用 RRF 融合</strong>——公式很朴素：每路按排名贡献 1/(k+名次) 的分数（k 取 60），两路都靠前的块胜出，且<strong>不需要调融合权重</strong>。候选集出来后，Cross-Encoder 重排器把"问题+块"拼在一起过一遍精算，管住最后几名的精确率——代价是每块 10~50 毫秒，所以只对 Top 50 精排，不做全库。生产经验：混检+重排对纯向量方案的提升普遍在 15%~25%，<strong>这已经是 2025 年后生产级 RAG 的默认形态</strong>，不再是加分项。</p>
+
+  <h3>四把质量标尺</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>指标</th><th>量什么</th><th>坏了的典型症状</th><th>先动哪里</th></tr>
+    <tr><td><strong>召回率 Recall</strong></td><td>该查到的块查到没有</td><td>答不出库里明明有的问题</td><td>块大小/查询改写/Top-K</td></tr>
+    <tr><td><strong>精确率 Precision</strong></td><td>查回来的块有多少相关</td><td>东拉西扯、上下文污染</td><td>重排/降 Top-K</td></tr>
+    <tr><td><strong>nDCG</strong></td><td>相关的块排没排前面</td><td>答案引用了次相关的段落</td><td>重排模型/融合策略</td></tr>
+    <tr><td><strong>忠实度 Faithfulness</strong></td><td>答案是否只依据上下文</td><td>检索对了仍一本正经胡说</td><td>提示词约束/换模型</td></tr>
+  </table>
+  </div>
+  <p><strong>排查必须先量指标再动手</strong>：答案不好时，先判断是检索坏（前三把尺子）还是生成坏（第四把）——这是 RAG 排障的第一岔路口，评测框架（RAGAS 等）就是把这四把尺子自动化，留到本系列评测专题展开。</p>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：选型、容量与高可用</h2>
+
+  <h3>切块策略选型</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>策略</th><th>原理</th><th>适用</th><th>代价</th></tr>
+    <tr><td><strong>递归分块</strong></td><td>按标题/段落/句子层级优先切</td><td>通用默认起点</td><td>几乎为零</td></tr>
+    <tr><td><strong>语义分块</strong></td><td>相邻句向量相似度骤降处切开</td><td>主题跳变多的长文</td><td>入库成本×3~5</td></tr>
+    <tr><td><strong>父子分块</strong></td><td>子块（小）做检索，父块（大）做上下文</td><td>制度/合同等结构化文档</td><td>双索引+指针，存储约翻倍</td></tr>
+  </table>
+  </div>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 190" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar25b" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <text x="380" y="20" text-anchor="middle" fill="var(--muted)" font-size="13">父子分块（small-to-big）：小块定位，大块供上下文</text>
+    <rect x="30" y="40" width="360" height="56" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="210" y="62" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">父块 · 1000~2000 token</text>
+    <text x="210" y="82" text-anchor="middle" fill="var(--muted)" font-size="10">完整条款/章节：生成阶段的上下文单元</text>
+    <rect x="60" y="118" width="140" height="46" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="130" y="137" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">子块1 · 200~400</text>
+    <text x="130" y="153" text-anchor="middle" fill="var(--muted)" font-size="9.5">检索单元·语义聚焦</text>
+    <rect x="220" y="118" width="140" height="46" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="290" y="137" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">子块2 · 200~400</text>
+    <text x="290" y="153" text-anchor="middle" fill="var(--muted)" font-size="9.5">指针指回父块</text>
+    <path d="M130,118 C130,100 160,96 190,98" fill="none" stroke="var(--accent-3)" stroke-dasharray="4 3" marker-end="url(#ar25b)"/>
+    <path d="M290,118 C290,100 260,96 230,98" fill="none" stroke="var(--accent-3)" stroke-dasharray="4 3" marker-end="url(#ar25b)"/>
+    <rect x="440" y="60" width="290" height="86" rx="8" fill="var(--bg-accent)" stroke="var(--accent)"/>
+    <text x="454" y="84" fill="var(--ink)" font-size="10.5" font-weight="700">解决的是"块大小两难"</text>
+    <text x="454" y="103" fill="var(--ink)" font-size="10">检索要小块（语义聚焦、命中准）</text>
+    <text x="454" y="120" fill="var(--ink)" font-size="10">生成要大块（上下文完整、不片段化）</text>
+    <text x="454" y="137" fill="var(--ink)" font-size="10">两全代价 = 存储约翻倍 + 双索引维护</text>
+  </svg>
+  </div>
+
+  <h3>RAG 还是微调？</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>维度</th><th>RAG</th><th>微调</th></tr>
+    <tr><td>知识更新</td><td>换文档重索引，分钟级生效</td><td>重新训练，天级起步</td></tr>
+    <tr><td>可溯源</td><td>答案带引用出处</td><td>知识熔进权重，无法引用</td></tr>
+    <tr><td>擅长</td><td>事实型问答、多文档汇总</td><td>风格/格式/领域语感</td></tr>
+    <tr><td>单位成本</td><td>检索+推理按次计费</td><td>训练一次性投入大</td></tr>
+  </table>
+  </div>
+  <p><strong>决策口诀：知识用 RAG，行为用微调，两者可叠加。</strong>让模型"知道新退货政策"是知识问题，走 RAG；让模型"用客服口吻按固定 JSON 模板回复"是行为问题，走微调。分不清时先上 RAG——成本曲线平缓得多，而且 RAG 的检索质量数据（哪些问题没召回）反过来是微调数据集的最佳来源。</p>
+
+  <h3>容量与高可用要点</h3>
+  <ul>
+    <li><strong>向量容量账：</strong>5 万文档 × 平均 10 块 × 768 维 × float32 ≈ 50 万向量、原始向量约 1.4GB——再乘 HNSW 索引开销 2~3 倍估内存；可用标量量化（int8）再省 3/4，精度损失通常可接受。百万级以内 PGVector 够用，亿级或高 QPS 再上 Milvus 集群（选型细节留到向量库专题）；</li>
+    <li><strong>延迟预算：</strong>端到端 P99 预算 3~5 秒的话——检索 50ms、重排 100~300ms、LLM 生成 1~3s，大头永远在生成；先卡 LLM 的流式首 token，再优化检索；</li>
+    <li><strong>索引生命周期：</strong>知识库版本化（蓝绿索引），重建走新索引、原子切别名，回滚 = 切回旧索引；文档变更走增量同步（源系统事件驱动），别攒全量；</li>
+    <li><strong>降级路径：</strong>向量库故障时降级为"仅 BM25 + 免责声明"，检索整体故障时直接 LLM 作答但明确提示"未查阅知识库"——<strong>检索链路也是依赖，要有兜底，别让问答机器人整体宕机</strong>。</li>
+  </ul>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：Spring AI 搭一条最小可用链路</h2>
+
+  <h3>离线入库（Ingestion）</h3>
+  <pre><code><span class="c-kw">var</span> doc = <span class="c-kw">new</span> <span class="c-fn">TikaDocumentReader</span>(resource).<span class="c-fn">read</span>().get(0);   <span class="c-com">// 解析 PDF/Word</span>
+<span class="c-kw">var</span> chunks = <span class="c-kw">new</span> <span class="c-fn">TokenTextSplitter</span>(          <span class="c-com">// 递归切块</span>
+        <span class="c-kw">new</span> <span class="c-fn">TokenTextSplitterConfig</span>()          <span class="c-com">// 默认约 800 token</span>
+            .<span class="c-fn">withKeepFormulas</span>(<span class="c-kw">true</span>), <span class="c-num">20</span>, <span class="c-num">200</span>, <span class="c-num">10</span>).<span class="c-fn">apply</span>(doc);
+chunks.<span class="c-fn">forEach</span>(c -&gt; c.getMetadata().<span class="c-fn">put</span>(<span class="c-str">"version"</span>, <span class="c-str">"2026-09"</span>)); <span class="c-com">// 块级元数据：版本/生效期</span>
+vectorStore.<span class="c-fn">add</span>(chunks);                                   <span class="c-com">// Embedding + 写入向量库</span></code></pre>
+
+  <h3>在线问答（混合检索 + RAG 顾问）</h3>
+  <pre><code><span class="c-com">// 1. 混合检索：向量 Top20 ∪ 全文检索 Top20，RRF 融合</span>
+<span class="c-kw">var</span> req = SearchRequest.<span class="c-fn">query</span>(question)
+        .<span class="c-fn">withTopK</span>(<span class="c-num">20</span>).<span class="c-fn">withSimilarityThreshold</span>(<span class="c-num">0.5</span>)
+        .<span class="c-fn">withFilterExpression</span>(<span class="c-str">"version == '2026-09'"</span>);      <span class="c-com">// 元数据过滤挡旧版本</span>
+<span class="c-kw">var</span> docs = vectorStore.<span class="c-fn">similaritySearch</span>(req);               <span class="c-com">// 与 BM25 结果做 RRF 合并</span>
+
+<span class="c-com">// 2. RAG 顾问：拼提示词（"仅依据以下资料回答，未命中就明说"）→ LLM</span>
+ChatClient.<span class="c-fn">create</span>(chatModel).prompt()
+        .advisors(<span class="c-kw">new</span> <span class="c-fn">QuestionAnswerAdvisor</span>(vectorStore, req))
+        .user(question).call().content();</code></pre>
+
+  <div class="card card-tip">
+    <h4>✅ 上线体检清单</h4>
+    <p>☐ 块带元数据（来源/版本/生效期）且检索默认带版本过滤　☐ 关键词索引与向量索引双路齐开（精确型号类查询有 BM25 兜底）　☐ Top-K 与相似度阈值压测过（上下文别超预算）　☐ 文档变更有事件驱动的增量重索引　☐ 建过评测集（问题+标准答案+相关块）并接入 CI　☐ 检索链路有降级预案　☐ 答案强制带引用且抽查过出处真实性　☐ 记录每次问答的"检索了什么"日志（排障生命线）</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>RAG = 开卷考试：</strong>离线管线切块建索引生产"书页"，在线管线混合检索+重排完成"翻书"；可换书（分钟级更新）、可溯源（带引用），是企业知识场景的默认架构。</li>
+    <li><strong>切块决定上限：</strong>递归分块 300~800 token、重叠 10%~20% 是起点；结构化文档上父子分块（小块检索、大块供上下文）解决"块大小两难"；元数据随块入库是版本治理的前提。</li>
+    <li><strong>混检+重排是生产标配：</strong>向量懂语义、BM25 认精确符号，RRF 免调权融合，Cross-Encoder 只精排 Top50——对纯向量方案普遍提升 15%~25%。</li>
+    <li><strong>四把尺子分开量：</strong>召回/精确/nDCG 量检索，忠实度量生成；答案不好先判断坏在哪一段，评测集是 RAG 的"单元测试"。</li>
+    <li><strong>选型口诀：</strong>知识用 RAG、行为用微调、可叠加；容量先算向量账（数量×维度×字节×索引系数），高可用靠索引版本化与检索降级路径。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目一：你们的知识库问答上线后收到两类投诉：A 类"问 XR-7500 的参数，答案混进了 7500S"；B 类"问总体原则这类概念题，答案东拉西扯"。① 两类故障分别对应哪把质量标尺坏了？② 各自怎么修？③ 为什么"统一调大 Top-K"对两类都是反作用？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>A 类是精确率问题，B 类表象是"答案质量差"，根子常在召回+排序两处。</strong>A 类：相关块（XR-7500 专属页）其实检索到了，但<em>不相关的相似型号块</em>也混进上下文，模型无法区分——精确率坏了。B 类：概念题的查询向量本身模糊，召回的块良莠不齐且最相关的没排到前面——召回质量与 nDCG 都可疑。判断手段：抽查问答日志里"实际检索回的块"，人工标注相关性，分别统计两类问题的召回率/精确率——<strong>没有这个日志，一切优化都是盲调</strong>。</p>
+      <p>② <strong>A 类修法（治精确）：</strong>补 BM25 路（型号是精确符号，倒排索引天生治这个）；块元数据加"型号"字段做检索前过滤（filter product == "XR-7500"）；重排器管最后一公里。<strong>B 类修法（治召回与排序）：</strong>查询改写环节把口语问题扩写成带同义词的规范查询；概念题改走"父子分块"（子块命中、父块给完整论述）；确认 Top-K 与相似度阈值没有把次相关块放进来。</p>
+      <p>③ <strong>调大 Top-K 是"喂更多上下文碰运气"：</strong>对 A 类，更多相似型号块涌进来，精确率进一步恶化，模型更分不清；对 B 类，噪声块稀释注意力，东拉西扯更严重。Top-K 调大只在"召回不足且排序足够好"时有效——这正说明<strong>先量指标定位环节，再动参数</strong>：指标不清时动任何旋钮都可能在对症的反方向用力。</p>
+    </div>
+  </details>
+
+  <details class="q-card">
+    <summary>题目二：知识库要扩到 20 万份文档（约 200 万块、768 维向量），且制度文档每季度集中修订一次。① 估算向量存储与内存量级，PGVector 还扛得住吗？② 季度修订 5 万份文档，全量重建还是增量更新？给出你的索引更新方案。③ 重建期间线上问答怎么不受影响？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>算账：</strong>200 万向量 × 768 维 × 4 字节（float32）≈ 5.5GB 原始向量；HNSW 索引开销按 2~3 倍估 → <strong>内存 11~17GB</strong>；若用 int8 标量量化可压到 1/4（精度损失一般在 1~3 个点，需评测验证）。PGVector 用 HNSW 时索引必须放内存，200 万向量单实例已接近舒适区上限（还要给 PG 的共享缓冲、连接池留量），<strong>可以扛但很挤</strong>：低 QPS 内部场景可继续（分区+量化+读副本），高并发或持续增长就该迁 Milvus 集群——迁移别急着做，先量化 QPS 与增长曲线再决策。</p>
+      <p>② <strong>增量为主，全量为兜：</strong>修订是文档级的，5 万份修订 ≠ 200 万块重算——按"文档 ID 删旧块、插新块"增量更新，重索引量直接降一个数量级。前提是入库时块带文档 ID 与内容哈希：内容没变的块哈希相同，直接跳过。每半年或索引碎片化明显时做一次全量重建（顺带切换 Embedding 模型版本——模型不能混用，新旧向量不在同一空间）。</p>
+      <p>③ <strong>蓝绿索引 + 原子切别名：</strong>新版本写进 index_v3，构建完成后把服务查询的别名从 v2 原子切换到 v3——切换是一瞬间，问答请求无感知；出问题切回 v2 即回滚。增量更新期间新旧块共存于同一索引（靠版本元数据过滤），只要检索默认带 version 过滤，就不会出现"新旧制度混答"。另有脏数据兜底：修订期间给"生效日期"打标，答案引用时展示"依据 2026-Q3 版制度"，让用户看得见知识版本。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>LangChain 官方文档（RAG 教程与切块/检索/重排组件的权威参考，本系列代码示例的口径来源）：<br>
+    <a href="https://python.langchain.com/docs/introduction/" target="_blank" rel="noopener">https://python.langchain.com/docs/introduction/</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>上一讲见 <a href="0024-k8s-ingress-service-traffic.html">0024 · Kubernetes 流量入口三道门</a>。本系列后续展开：向量库选型（Milvus vs PGVector）、切块与召回重排进阶、RAG 评测（RAGAS）、Spring AI 与 Java 栈集成、vLLM 私有化推理等专题。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0024-k8s-ingress-service-traffic.html">← 上一期：Kubernetes 流量入口三道门</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 25 期 · AI 大模型应用系列 · 下一期预告：架构与中间件运维通用 —— Prometheus + Grafana 监控体系</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
