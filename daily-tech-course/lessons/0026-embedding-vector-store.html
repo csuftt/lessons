@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · Embedding 与向量库选型：替语义建一座图书馆（Milvus vs PGVector）| 2026-09-18</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0026</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0025-rag-retrieval-augmented-generation.html">上一期：RAG 检索增强架构</a> · <a href="https://www.bilibili.com/video/BV1TUer6nEdX" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">AI · AI 大模型应用系列第 2 讲（向量库篇）</p>
+  <h1>替语义建一座图书馆：Embedding 与向量库选型（Milvus vs PGVector）</h1>
+  <p class="subtitle">上一讲把 RAG 的翻书链路拆完了，这一讲往下挖一层：书页上的"语义坐标"是怎么来的，又该存进哪座图书馆。Embedding 模型负责给每块文本一个坐标系里的位置，语义越近、向量夹角越小；向量库负责在这个坐标系里毫秒级找到最近的一批邻居。今天讲透三件事：HNSW 为什么快但吃内存、PGVector 与 Milvus 背后是两种形态哲学（数据库里的一个扩展 vs 为向量而生的独立基础设施）、以及"百万向量分水岭"这道选型题怎么算——最后给出不停机迁移的蓝绿方案。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🤖 AI 大模型应用</span>
+    <span class="tag-date">📅 2026-09-18 · 第 26 期</span>
+    <span class="tag time">⏱ 预计阅读 10 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>一次"POC 很香、推广被否"的向量库选型复盘</h2>
+  <p>智能客服项目 POC 阶段，知识库 10 万块向量跑在 PGVector 上，检索又快又省事——向量就住在业务库的 PostgreSQL 里，一个扩展、几行 SQL，连新服务都不用部署。业务看到效果后全面推广：知识库扩到 300 万块、检索峰值数百 QPS、三条业务线都要接入。扩容评审会上，三张否决票接连拍下：</p>
+  <ul>
+    <li><strong>DBA 的容量票：</strong>300 万块 × 1024 维 × 4 字节 ≈ 12GB 原始向量，HNSW 索引开销 2~3 倍就是 25~35GB 内存——和业务表、连接池、共享缓冲挤同一台 PG 实例，扩容等于整套数据库升配，又贵又影响业务；</li>
+    <li><strong>压测组的性能票：</strong>高并发下检索 P99 延迟抖动明显——向量索引的内存访问和业务查询在缓冲池里互相踩踏，大促期间业务库 CPU 本就报警，再叠一层检索流量是火上浇油；</li>
+    <li><strong>SRE 的运维票：</strong>向量检索成了核心链路后，需要独立扩缩容、独立监控、按业务线做租户隔离——混在业务库里，这些一样都做不到。</li>
+  </ul>
+  <p>复盘结论：<strong>不是 PGVector 不好，而是它被用在了超出舒适区的阶段</strong>——POC 阶段它就是最优解：零新增运维、SQL 一把梭、事务与 JOIN 白拿。向量库选型的本质是一道时机题：<strong>什么时候该把向量检索从数据库里拆出来，升级成独立基础设施</strong>。要答对这道题，得先看清 Embedding 和向量索引到底在做什么、各自的账怎么算。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：语义坐标系与它的图书馆</h2>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 380" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar26" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar26a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <text x="380" y="20" text-anchor="middle" fill="var(--muted)" font-size="13">左：Embedding 把语义变成坐标 · 右：HNSW 在坐标里快速找邻居</text>
+
+    <!-- 左：语义空间 -->
+    <rect x="20" y="36" width="348" height="278" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="194" y="58" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">语义空间（高维投影示意）</text>
+    <ellipse cx="105" cy="105" rx="58" ry="38" fill="var(--accent-soft)" opacity=".7"/>
+    <text x="105" y="102" text-anchor="middle" fill="var(--ink)" font-size="9.5">退货政策</text>
+    <text x="105" y="115" text-anchor="middle" fill="var(--muted)" font-size="8.5">相似句聚簇</text>
+    <ellipse cx="290" cy="100" rx="55" ry="36" fill="var(--accent-soft)" opacity=".7"/>
+    <text x="290" y="97" text-anchor="middle" fill="var(--ink)" font-size="9.5">预算管理</text>
+    <text x="290" y="110" text-anchor="middle" fill="var(--muted)" font-size="8.5">与费用管控近邻</text>
+    <ellipse cx="180" cy="250" rx="62" ry="38" fill="var(--accent-soft)" opacity=".7"/>
+    <text x="180" y="247" text-anchor="middle" fill="var(--ink)" font-size="9.5">服务器部署</text>
+    <text x="180" y="260" text-anchor="middle" fill="var(--muted)" font-size="8.5">与退货政策远隔</text>
+    <circle cx="235" cy="175" r="5" fill="var(--accent-3)"/>
+    <text x="245" y="172" fill="var(--ink)" font-size="9.5" font-weight="700">查询向量</text>
+    <text x="245" y="185" fill="var(--muted)" font-size="8.5">"退货运费谁出"</text>
+    <line x1="232" y1="172" x2="150" y2="128" stroke="var(--accent-3)" stroke-width="1.5" marker-end="url(#ar26a)"/>
+    <text x="160" y="140" fill="var(--ink)" font-size="8.5">夹角小=语义近</text>
+    <text x="36" y="300" fill="var(--ink)" font-size="9.5">检索 = 找夹角最小的 K 个邻居（KNN）</text>
+    <text x="36" y="314" fill="var(--muted)" font-size="8.5">百万级向量逐个算距离毫秒级扛不住 → ANN 近似最近邻</text>
+
+    <!-- 右：HNSW 分层 -->
+    <rect x="392" y="36" width="348" height="278" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="566" y="58" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">HNSW：多层"高速公路+小路"</text>
+    <line x1="412" y1="70" x2="612" y2="70" stroke="var(--line)"/>
+    <circle cx="450" cy="88" r="7" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <circle cx="510" cy="88" r="7" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <circle cx="570" cy="88" r="7" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <line x1="457" y1="88" x2="503" y2="88" stroke="var(--muted)" stroke-width="1.2"/>
+    <line x1="517" y1="88" x2="563" y2="88" stroke="var(--muted)" stroke-width="1.2"/>
+    <text x="625" y="92" fill="var(--muted)" font-size="8.5">顶层：稀疏长边</text>
+    <text x="625" y="104" fill="var(--muted)" font-size="8.5">跨簇快速定位</text>
+    <line x1="412" y1="118" x2="612" y2="118" stroke="var(--line)"/>
+    <circle cx="435" cy="136" r="6" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <circle cx="485" cy="136" r="6" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <circle cx="540" cy="136" r="6" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <circle cx="595" cy="136" r="6" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="625" y="140" fill="var(--muted)" font-size="8.5">中层：逐层收窄</text>
+    <line x1="412" y1="164" x2="612" y2="164" stroke="var(--line)"/>
+    <g fill="var(--code-bg)" stroke="var(--line)">
+      <circle cx="425" cy="182" r="5"/><circle cx="455" cy="182" r="5"/><circle cx="485" cy="182" r="5"/>
+      <circle cx="515" cy="182" r="5"/><circle cx="545" cy="182" r="5"/><circle cx="575" cy="182" r="5"/>
+      <circle cx="440" cy="202" r="5"/><circle cx="470" cy="202" r="5"/><circle cx="500" cy="202" r="5"/>
+      <circle cx="530" cy="202" r="5"/><circle cx="560" cy="202" r="5"/><circle cx="590" cy="202" r="5"/>
+    </g>
+    <text x="625" y="186" fill="var(--muted)" font-size="8.5">底层：稠密短边</text>
+    <text x="625" y="198" fill="var(--muted)" font-size="8.5">邻域精确找近邻</text>
+    <path d="M450,88 L510,88 L540,136 L500,182" fill="none" stroke="var(--accent-3)" stroke-width="1.8" marker-end="url(#ar26a)"/>
+    <rect x="410" y="232" width="312" height="70" rx="8" fill="var(--warn-bg)" stroke="var(--bad)"/>
+    <text x="424" y="252" fill="var(--ink)" font-size="10" font-weight="700">代价：图为快速查找而生 → 必须整体常驻内存</text>
+    <text x="424" y="268" fill="var(--ink)" font-size="9.5">内存 ≈ 向量原始大小 × 2~3 倍（图边+结构开销）</text>
+    <text x="424" y="284" fill="var(--ink)" font-size="9.5">这就是"百万向量分水岭"的物理来源：内存墙先到，磁盘还没满</text>
+  </svg>
+  </div>
+
+  <p><strong>Embedding 模型做的事：把文本映射成语义坐标系里的一个点</strong>。语义相近的文本（"退货运费谁承担"与"退货的运费规则"）会被映射到相近的位置，无关文本则相隔很远——模型在训练时见过海量"哪些句子在回答同一件事"的语料，把这种共现关系压缩进了几何结构。检索于是变成纯几何问题：<strong>拿查询向量在库里找夹角最小（cosine 距离）的 K 个邻居</strong>。精确逐个比对是 KNN，百万级向量、毫秒级延迟下算不动，生产用 ANN（近似最近邻）——<strong>HNSW 就是主流答案</strong>：多层图结构，顶层稀疏长边负责跨簇快速定位、底层稠密短边负责邻域精找，查询只拜访一小部分节点就逼近精确解。它的代价写在图里：<strong>图索引必须整体常驻内存，实际内存约为原始向量的 2~3 倍</strong>——向量库选型的一切纠结，都源于这面"内存墙"。</p>
+
+  <h3>三个必须算在选型前的工程参数</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>参数</th><th>它决定什么</th><th>工程要点</th></tr>
+    <tr><td><strong>维度</strong></td><td>单个向量的成本基数</td><td>容量 = 数量 × 维度 × 4 字节（float32），再乘索引系数 2~3；维度跟着 Embedding 模型走，选模型即选维度</td></tr>
+    <tr><td><strong>精度/量化</strong></td><td>同样的向量占多少内存</td><td>float32 → halfvec 半精度省约一半 → int8 省四分之三 → binary 省 32 倍；压缩越狠召回掉得越多，需评测集验证</td></tr>
+    <tr><td><strong>模型版本</strong></td><td>向量空间是否同一套坐标系</td><td><strong>不同模型的向量不在同一空间，绝对不能混存混检</strong>——换模型 = 全量重嵌入 + 重建索引 + 蓝绿切换（见上一讲）</td></tr>
+  </table>
+  </div>
+  <p>维度与精度是"账"，模型版本是"红线"。团队里最容易踩的坑就是半路换了个评测分更高的 Embedding 模型，新向量直接插进旧索引——新旧两套坐标系混在一起，检索质量无声劣化，还不报错。<strong>把 embedding_model 与版本写进每条向量的元数据，检索默认带版本过滤</strong>，是和上一讲"块带 version 元数据"同一条纪律。</p>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：两种形态哲学与分水岭决策</h2>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 400" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar26b" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <text x="380" y="20" text-anchor="middle" fill="var(--muted)" font-size="13">同一个需求，两种形态：库内扩展 vs 独立基础设施</text>
+
+    <!-- 左：PGVector -->
+    <rect x="20" y="36" width="348" height="310" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="194" y="60" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">PGVector：向量住在数据库里</text>
+    <rect x="40" y="76" width="308" height="150" rx="8" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="56" y="96" fill="var(--ink)" font-size="10" font-weight="700">PostgreSQL 实例（垂直扩展）</text>
+    <rect x="56" y="106" width="130" height="34" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="121" y="122" text-anchor="middle" fill="var(--ink)" font-size="9">业务表</text>
+    <text x="121" y="134" text-anchor="middle" fill="var(--muted)" font-size="8">订单/工单/权限</text>
+    <rect x="196" y="106" width="138" height="34" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="265" y="122" text-anchor="middle" fill="var(--ink)" font-size="9">chunks 表 + 向量列</text>
+    <text x="265" y="134" text-anchor="middle" fill="var(--muted)" font-size="8">HNSW 索引在内存</text>
+    <rect x="56" y="150" width="278" height="30" rx="6" fill="var(--warn-bg)" stroke="var(--bad)"/>
+    <text x="200" y="169" text-anchor="middle" fill="var(--ink)" font-size="9">共享：缓冲池 / 连接池 / CPU —— 互相踩踏的根源</text>
+    <text x="56" y="202" fill="var(--muted)" font-size="8.5">白拿：事务 / 权限 / SQL JOIN / 备份恢复 / DBA 生态</text>
+    <rect x="40" y="238" width="308" height="92" rx="8" fill="var(--bg-accent)" stroke="var(--accent)"/>
+    <text x="56" y="258" fill="var(--ink)" font-size="10" font-weight="700">适用画像</text>
+    <text x="56" y="276" fill="var(--ink)" font-size="9.5">· 百万级以内向量，中小 QPS</text>
+    <text x="56" y="292" fill="var(--ink)" font-size="9.5">· 检索结果要与业务数据 JOIN 过滤</text>
+    <text x="56" y="308" fill="var(--ink)" font-size="9.5">· 不想为向量新增一个分布式系统</text>
+    <text x="56" y="324" fill="var(--muted)" font-size="8.5">扩展路径：只读副本 / 量化 / 分区，到顶后迁走</text>
+
+    <!-- 右：Milvus -->
+    <rect x="392" y="36" width="348" height="310" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="566" y="60" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">Milvus：为向量而生的集群</text>
+    <rect x="412" y="76" width="308" height="150" rx="8" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="428" y="96" fill="var(--ink)" font-size="10" font-weight="700">存算分离（水平扩展）</text>
+    <rect x="428" y="106" width="136" height="32" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="496" y="120" text-anchor="middle" fill="var(--ink)" font-size="9">QueryNode × N</text>
+    <text x="496" y="132" text-anchor="middle" fill="var(--muted)" font-size="8">检索按分片并行</text>
+    <rect x="574" y="106" width="132" height="32" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="640" y="120" text-anchor="middle" fill="var(--ink)" font-size="9">DataNode / IndexNode</text>
+    <text x="640" y="132" text-anchor="middle" fill="var(--muted)" font-size="8">写入/建索引独立扩</text>
+    <rect x="428" y="148" width="130" height="30" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="493" y="167" text-anchor="middle" fill="var(--ink)" font-size="9">对象存储（底座）</text>
+    <rect x="568" y="148" width="138" height="30" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="637" y="167" text-anchor="middle" fill="var(--ink)" font-size="9">消息队列 + etcd</text>
+    <text x="428" y="202" fill="var(--muted)" font-size="8.5">Coordinator 编排 · 多副本高可用 · Partition 租户隔离</text>
+    <rect x="412" y="238" width="308" height="92" rx="8" fill="var(--bg-accent)" stroke="var(--accent)"/>
+    <text x="428" y="258" fill="var(--ink)" font-size="10" font-weight="700">适用画像</text>
+    <text x="428" y="276" fill="var(--ink)" font-size="9.5">· 千万到亿级向量，高 QPS 检索</text>
+    <text x="428" y="292" fill="var(--ink)" font-size="9.5">· 多业务线共用（Partition/多库）</text>
+    <text x="428" y="308" fill="var(--ink)" font-size="9.5">· 2.5+ 原生 Sparse-BM25 全文混检</text>
+    <text x="428" y="324" fill="var(--muted)" font-size="8.5">代价：一整套分布式系统的运维与监控面</text>
+  </svg>
+  </div>
+
+  <p>两个产品背后是<strong>两种形态哲学</strong>。PGVector 是"数据库里的一个扩展"：向量列与业务表同居一库，SQL/事务/权限/JOIN/备份全部白拿，是零新增运维的最短路径——代价是<strong>垂直扩展的单机内存墙</strong>，向量索引与业务查询共享同一台实例的资源池。Milvus 是"为向量而生的独立基础设施"：存算分离架构（计算节点无状态、数据沉到对象存储、消息队列串起写入链路），检索与写入按分片水平扩展，2.5 版起还内置了 Sparse-BM25 全文检索，混检不用再外挂一个搜索引擎——代价是<strong>运维面骤增</strong>：etcd、消息队列、对象存储、多角色节点，这是一整套分布式系统的账单。</p>
+
+  <h3>选型对比表</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>维度</th><th>PGVector</th><th>Milvus</th></tr>
+    <tr><td>舒适区规模</td><td>百万级以内（量化后可再撑一档）</td><td>千万~亿级，分片线性扩展</td></tr>
+    <tr><td>QPS 画像</td><td>中小并发，与业务库共享资源</td><td>高并发，检索流量独立扩容</td></tr>
+    <tr><td>扩展方式</td><td>升配/读副本（垂直）</td><td>加节点（水平），读写角色分离</td></tr>
+    <tr><td>事务与 JOIN</td><td><strong>原生 SQL，白拿</strong></td><td>需应用层二次查询拼装</td></tr>
+    <tr><td>全文混检</td><td>库内 FTS 另配，融合自己写</td><td>2.5+ 原生 Sparse-BM25，RRF 内置</td></tr>
+    <tr><td>多租户</td><td>按库/表/行隔离（软隔离为主）</td><td>Partition/多库硬隔离，配额独立</td></tr>
+    <tr><td>运维成本</td><td>接近零（复用现有 PG）</td><td>一套分布式系统（含依赖三件套）</td></tr>
+    <tr><td>上手速度</td><td>10 分钟（一个扩展）</td><td>半天起步（部署+建模+调参）</td></tr>
+  </table>
+  </div>
+
+  <p><strong>决策口诀：百万向量是分水岭，运维意愿是第二票</strong>。向量总量百万以内、检索并发中小、结果要与业务数据强 JOIN——PGVector 是性价比之王；向量奔千万、QPS 上百、多业务线共用——Milvus 集群；<strong>卡在中间的，先做量化与只读副本再决策，别急着上分布式</strong>。回到第 01 节的复盘：300 万块、数百 QPS、三业务线——三个条件全部踩在 Milvus 一侧，但迁移不是拍脑袋，还有最后一道容量账要算清楚：</p>
+
+  <div class="callout">
+    <p class="callout-title">容量三笔账（以 300 万块 × 1024 维为例）</p>
+    <p><strong>原始账：</strong>300 万 × 1024 × 4B ≈ 12GB；<strong>索引账：</strong>HNSW 系数 2~3 → 内存 25~35GB（PGVector 单实例很挤，Milvus 可分片摊到多节点）；<strong>量化账：</strong>halfvec 内存减半 ≈ 13~18GB、int8 减至四分之一 ≈ 6~9GB（召回损失 1~3 个点，必须用评测集验证业务可接受）。先算这三笔，再决定"撑一撑"还是"迁"。</p>
+  </div>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：两边各搭一条最小链路</h2>
+
+  <h3>PGVector：半精度索引 + 迭代扫描（0.8+）</h3>
+  <pre><code><span class="c-kw">CREATE EXTENSION</span> vector;
+<span class="c-kw">CREATE TABLE</span> chunks (
+  id        bigserial <span class="c-kw">PRIMARY KEY</span>,
+  doc_id    text <span class="c-kw">NOT NULL</span>,
+  content   text,
+  embedding vector(<span class="c-num">1024</span>),          <span class="c-com">-- 维度跟 Embedding 模型走</span>
+  emodel    text <span class="c-kw">DEFAULT</span> <span class="c-str">'bge-m3@v1'</span>  <span class="c-com">-- 模型版本红线：随行落库</span>
+);
+<span class="c-com">-- 半精度 HNSW：索引内存省约一半，召回损失小</span>
+<span class="c-kw">CREATE INDEX ON</span> chunks <span class="c-kw">USING</span> hnsw
+  (embedding::halfvec(<span class="c-num">1024</span>) halfvec_cosine_ops);
+<span class="c-kw">SET</span> hnsw.iterative_scan = relaxed;   <span class="c-com">-- 0.8+：过滤后不足额就继续扫，治"过度过滤"</span>
+
+<span class="c-kw">SELECT</span> id, content <span class="c-kw">FROM</span> chunks
+ <span class="c-kw">WHERE</span> emodel = <span class="c-str">'bge-m3@v1'</span>          <span class="c-com">-- 版本过滤：单一向量空间</span>
+ <span class="c-kw">ORDER BY</span> embedding::halfvec &lt;=&gt; :query_vec::halfvec
+ <span class="c-kw">LIMIT</span> <span class="c-num">10</span>;</code></pre>
+
+  <h3>Milvus：建 Collection + 过滤检索</h3>
+  <pre><code><span class="c-kw">from</span> pymilvus <span class="c-kw">import</span> MilvusClient, DataType
+
+client = MilvusClient(<span class="c-str">"http://milvus-lb:19530"</span>)       <span class="c-com"># 接入 LB，多副本</span>
+schema = client.create_schema()
+schema.add_field(<span class="c-str">"id"</span>, DataType.INT64, is_primary=<span class="c-kw">True</span>)
+schema.add_field(<span class="c-str">"vec"</span>, DataType.FLOAT_VECTOR, dim=<span class="c-num">1024</span>)
+schema.add_field(<span class="c-str">"doc_id"</span>, DataType.VARCHAR, max_length=<span class="c-num">64</span>)  <span class="c-com"># 过滤字段</span>
+
+idx = client.prepare_index_params()
+idx.add_index(<span class="c-str">"vec"</span>, index_type=<span class="c-str">"HNSW"</span>, metric_type=<span class="c-str">"COSINE"</span>,
+              params={<span class="c-str">"M"</span>: <span class="c-num">16</span>, <span class="c-str">"efConstruction"</span>: <span class="c-num">200</span>})
+client.create_collection(<span class="c-str">"kb_chunks"</span>, schema=schema, index_params=idx)
+
+res = client.search(<span class="c-str">"kb_chunks"</span>, data=[query_vec], limit=<span class="c-num">10</span>,
+                    <span class="c-com"># 标量过滤先裁剪，再在分片内做向量近邻——过滤字段同样要建索引</span>
+                    filter=<span class="c-str">'doc_id like "hr-2026q3%"'</span>,
+                    output_fields=[<span class="c-str">"doc_id"</span>], search_params={<span class="c-str">"params"</span>: {<span class="c-str">"ef"</span>: <span class="c-num">64</span>}})</code></pre>
+
+  <div class="card card-tip">
+    <h4>✅ 上线体检清单</h4>
+    <p>☐ 选型前量化过三笔账（原始/索引/量化）与 QPS 峰值　☐ 每条向量带 embedding_model 版本元数据且检索默认过滤　☐ 量化前后用评测集验证召回损失（1~3 个点内）　☐ 过滤字段建标量索引（PG：btree；Milvus：标量索引/Clustering Compaction）　☐ ef/M/nprobe 等索引参数按召回-延迟曲线压测调定，不抄默认值　☐ 迁移走双写+影子读+蓝绿切流，留回滚窗口　☐ 向量库故障有降级路径（仅 BM25 或缓存热点答案）　☐ 监控盯两个指标：检索 P99 延迟与召回抽检得分</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>Embedding = 语义坐标系：</strong>模型把文本映射成向量，语义越近夹角越小；检索就是找最近邻。模型决定坐标系，<strong>不同模型的向量绝不能混存混检</strong>——版本红线写进元数据。</li>
+    <li><strong>HNSW 快在多层图、贵在内存墙：</strong>顶层长边定位、底层短边精找，查询只拜访小部分节点；代价是索引整体常驻内存（原始向量 × 2~3 倍），这面墙决定了选型的物理边界。</li>
+    <li><strong>两种形态哲学：</strong>PGVector 是"数据库里的扩展"——SQL/事务/JOIN 白拿、零新增运维，垂直扩展有顶；Milvus 是"为向量而生的基础设施"——存算分离水平扩展、原生混检，代价是一套分布式系统的运维面。</li>
+    <li><strong>百万向量是分水岭，先算账再投票：</strong>百万以内 PGVector 是性价比之王；千万级高 QPS 多租户上 Milvus；中间地带先量化（halfvec/int8）、读副本、分区撑一撑，别急着上分布式。</li>
+    <li><strong>迁移走蓝绿不停机：</strong>双写 → 影子读比对 → 评测集验收 → 原子切流 → 保留旧索引观察期；容量按"原始账 × 索引系数 × 量化档位"三笔算清再动手。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目一：你们用 PGVector 上线的知识库运行半年：500 万块向量、白天峰值 200 QPS，且大促期间业务库 CPU 常年报警。CTO 建议迁 Milvus。① 迁移前哪些数字必须先量化？② 有哪些"不迁移"的替代方案？③ 如果最终决定迁，怎么做到不停机？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>先量化四组数：</strong>真实向量总量与半年增长曲线（判断是"已经越界"还是"恐慌性提前"）；检索 QPS 与 P99 延迟分布（峰值持续时间——短尖峰可用缓存削）；PG 实例内存水位与缓冲池命中率（向量索引与业务查询的踩踏程度）；量化空间（halfvec 减半、int8 减至四分之一后，500 万块 ≈ 20GB 原始 → 量化后 5~10GB，可能直接从"很挤"变"宽松"）。<strong>没有这些数就上 Milvus，是用一个分布式系统的运维成本去换一个可能不存在的问题</strong>。</p>
+      <p>② <strong>替代方案按侵入性排序：</strong>把向量检索切到专用只读副本（写走主库、读隔离，业务库 CPU 立刻解耦）；halfvec/int8 量化把内存砍到 1/2~1/4（评测集验证召回损失）；按业务线分区拆表（大库变小库）；热点查询结果缓存（问答场景长尾明显，命中率高）。多数"半越界"场景，这四招组合能再撑一年以上。</p>
+      <p>③ <strong>不停机迁移 = 蓝绿 + 双写 + 影子读：</strong>新 Milvus 集群建好 collection；入库链路改造为双写（PG 与 Milvus 同步写，Milvus 失败不阻塞主链路、记补偿日志）；存量数据批量搬迁+校验（数量对账+抽样向量比对）；<strong>影子读阶段</strong>线上查询同时打到两边但只返回 PG 结果，比对召回差异跑一到两周；评测集验收通过后按流量比例切流（5% → 50% → 100%）；旧 PGVector 索引保留一个月作回滚兜底。切流原子性靠"版本号+配置中心开关"，与上一讲的蓝绿索引切换是同一套纪律。</p>
+    </div>
+  </details>
+
+  <details class="q-card">
+    <summary>题目二：现网用 768 维的旧 Embedding 模型，新模型 1024 维、语义评测榜明显更高，团队想升级。① 为什么不能把新模型的向量直接插进现有索引？② 换模型要动架构里的哪些东西？③ 给出平滑切换方案，并说明如何验证"新模型真的更好"。<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>不同模型 = 不同坐标系：</strong>768 维旧模型和 1024 维新模型各自有一套独立的向量空间，连维度都不同；即便维度凑巧相同，同一句文本在两个空间里的坐标也没有可比性——新旧块的相似度分数不可比，混存混检的结果是排序整体失真，而且<strong>不报错、只变差</strong>，是最难排查的一类静默故障。这就是"模型版本红线"。</p>
+      <p>② <strong>连锁改动清单：</strong>存储层——Milvus 要建新 collection（维度是 schema 一部分，建定不可改）或 PG 加新列/新表，旧索引保留；嵌入层——全量文档重嵌入（500 万块的 GPU/时间/费用预算，通常按天级排期）；检索层——查询侧 Embedding 调用同步换模型（查询与文档必须同模型）；元数据——emodel 字段值更新，检索过滤条件跟着切；容量——1024 维比 768 维贵 33%（12GB → 16GB 原始账，索引账、量化账同比例放大）；上游——切块策略最好与新模型的训练分布匹配，顺带复核。</p>
+      <p>③ <strong>平滑切换 = 蓝绿索引 + 评测验收：</strong>新向量写入新 collection（蓝绿中的"绿"）；离线批量重嵌入存量；<strong>先评测后切流</strong>——用固定的评测问题集（问题+标准答案+相关块）分别在新旧索引上跑召回率、nDCG、端到端答案质量（RAGAS 类框架），新模型必须在自己的业务语料上赢，榜单分数只是入场券；验收通过后配置中心原子切读；旧索引保留观察期（既是回滚兜底，也能对比线上真实查询分布下的表现）。切完盯一周"检索 P99 + 抽检召回 + 用户负反馈"三件套，稳了再下线旧索引。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>Milvus 官方文档（架构与存算分离、索引选型、2.5+ 全文检索与混合搜索的权威参考，本期 Milvus 侧口径来源）：<br>
+    <a href="https://milvus.io/docs" target="_blank" rel="noopener">https://milvus.io/docs</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>PGVector 官方仓库（安装、HNSW/IVFFlat 索引、halfvec 量化与 iterative_scan 用法）：<a href="https://github.com/pgvector/pgvector" target="_blank" rel="noopener">github.com/pgvector/pgvector</a>。上一讲见 <a href="0025-rag-retrieval-augmented-generation.html">0025 · RAG 检索增强架构</a>——切块、混检与蓝绿索引的上下文都在那一讲。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0025-rag-retrieval-augmented-generation.html">← 上一期：RAG 检索增强架构</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 26 期 · AI 大模型应用系列 · 下一期预告：AI 大模型应用 —— Function Calling 与工具调用</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
