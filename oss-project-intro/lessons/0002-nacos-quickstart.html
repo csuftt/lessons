@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Nacos 系列第 2 期：从零跑起来 | 2026-09-18</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0002</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0001-nacos-what-and-why.html">上一期：Nacos 是什么</a> · <a href="https://nacos.io" target="_blank" rel="noopener">nacos.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · Nacos 系列第 2 期：从零跑起来</p>
+  <h1>从零把 Nacos 3.x 跑起来：注册第一个服务、发出第一条配置</h1>
+  <p class="subtitle">入门一个开源项目最忌"先看两周文档再动手"。这一期只做一件事：在本机把 Nacos 单机版完整跑通——装好、启动、登进控制台，再用几条 curl 完成两条闭环：把一个服务注册进电话簿并查出来，发布一条配置再原样读回。版本锚定 3.2.4（2026-08-27 发布），命令与示例响应全部对齐官方 OpenAPI 手册与鉴权文档（2026-09-18 核对），每一步都能拿着官方文档对照验货。命令行以 Windows 写法为主，Linux/macOS 标注差异。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 注册/配置中心 · Java · Apache-2.0</span>
+    <span class="tag">📦 3.2.4 · 命令与响应对齐官方文档</span>
+    <span class="tag-date">📅 2026-09-18 · 第 2 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 路线 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>本期路线与跑通判定</h2>
+  <p>五步路线：<strong>查环境 → 下载解压 → 启动 → 控制台初见 → curl 冒烟</strong>。全部走完后你应该达到四条跑通判定，缺一条都算没通，后面每节就对着这四条打勾：</p>
+  <div class="card">
+    <ul class="steps">
+      <li>① Nacos 进程存活（startup 日志无 ERROR 收尾）；</li>
+      <li>② 浏览器能登录控制台（127.0.0.1:8080，账号 nacos）；</li>
+      <li>③ 服务列表里能看到你用 curl 注册的那个实例；</li>
+      <li>④ 发布的配置能被接口原样读回来。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= 02 环境 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>环境准备：只有一条硬门槛</h2>
+  <p>官方要求一句话：<strong>64 位操作系统 + 64 位 JDK 17 及以上</strong>（Linux/Unix/macOS/Windows 都支持，推荐前两者）；机器建议 2C4G、磁盘 60G 起步——本机试玩远用不到，但别拿 1G 内存的小虚拟机硬上。</p>
+  <pre><code>:: 检查 JDK —— 版本号必须 ≥ 17，且是 64 位
+java -version
+
+:: 示例输出（openjdk 21 同样合格）
+:: openjdk version "17.0.10" 2024-01-16
+:: OpenJDK Runtime Environment (build 17.0.10+7)
+:: OpenJDK 64-Bit Server VM (build 17.0.10+7, mixed mode)</code></pre>
+  <div class="warn">
+    <p><strong>最容易翻车的一步：</strong>本机还挂着 JDK 8 的同学，<code>java -version</code> 会直接暴露问题。Nacos 3.x 起 JDK 17 是硬性下限，别挣扎 8/11——临时把 JAVA_HOME 指到 17+ 的安装目录再启动即可，不影响其他项目。</p>
+  </div>
+</section>
+
+<!-- ================= 03 下载 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>下载与解压发行包</h2>
+  <p>去 GitHub Releases（<code>github.com/alibaba/nacos/releases</code>）下载当前稳定版的发行包——写作时 Latest 是 <strong>3.2.4</strong>（2026-08-27 发布），对应 <code>nacos-server-3.2.4.zip</code>，在该条目下方的 Assets 里；release notes 里还有一张官方 Java 版本要求表（Nacos-Server 一栏：Java 17）。解压后进入 <code>bin</code> 目录，不需要源码、不需要 Maven——发行包开箱即用。</p>
+  <pre><code>:: Windows（PowerShell 自带 unzip 语义用 Expand-Archive，或用 7-Zip）
+Expand-Archive nacos-server-3.2.4.zip -DestinationPath D:\apps
+cd D:\apps\nacos\bin
+
+# Linux / macOS
+unzip nacos-server-3.2.4.zip
+cd nacos/bin</code></pre>
+  <p class="note">解压出来的目录结构先混个眼熟：<code>bin/</code> 启停脚本、<code>conf/</code> 配置（application.properties 在这）、<code>target/</code> 服务端 jar、<code>logs/</code> 日志落位。第 3 期讲模块地图时会回来逐个点名。</p>
+</section>
+
+<!-- ================= 04 启动 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>启动单机模式：一条命令 + 三个鉴权参数</h2>
+  <p>standalone（单机模式）是学习与本地开发的正确姿势——不加参数默认按集群模式起，会在选主阶段报错退出，这是新手第二大坑：<strong>别双击 startup.cmd</strong>，带上模式参数跑：</p>
+  <pre><code>:: Windows
+startup.cmd -m standalone
+
+# Linux / macOS
+sh startup.sh -m standalone   # Ubuntu 下脚本报错就换 bash startup.sh -m standalone</code></pre>
+  <h3>3.x 首启的鉴权三件套</h3>
+  <p>Nacos 3.0.0 起<strong>默认开启控制台与服务端鉴权</strong>，首次启动会交互式提示输入三项；也可以提前写进 <code>conf/application.properties</code> 免交互：</p>
+  <pre><code># conf/application.properties 中预配（示例值，生产必须换成自己的）
+nacos.core.auth.plugin.nacos.token.secret.key=SecretKey012345678901234567890123456789012345678901234567890123456789
+nacos.core.auth.server.identity.key=serverIdentity
+nacos.core.auth.server.identity.value=security</code></pre>
+  <ul>
+    <li><strong>token secret key：</strong>控制台会话 JWT 的签名密钥，要求 Base64 编码、足够长——它决定"伪造控制台会话"的难度，用默认值等于给门上了个玩具锁；</li>
+    <li><strong>identity key / value：</strong>服务端内部 RPC 之间的身份对账暗号，防止绕过控制台直连内部端口。</li>
+  </ul>
+  <p>看到日志出现 <code>Nacos started successfully in stand alone mode. use embedded storage</code> 字样（或无 ERROR 收尾、进程稳定存活）即启动完成。关闭用 <code>shutdown.cmd</code>（Linux：<code>sh shutdown.sh</code>）。</p>
+</section>
+
+<!-- ================= 05 控制台 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>控制台初见：换了地方，别再找 8848</h2>
+  <p>打开浏览器访问 <strong><code>http://127.0.0.1:8080</code></strong>——注意不是 2.x 时代的 <code>8848/nacos</code>！3.x 起控制台是独立部署的console，默认端口 8080。用管理员账号 <code>nacos</code> 登录，<strong>首次登录会让你初始化该账号的密码</strong>（顺手记进密码管理器）。</p>
+  <p>登录后先逛两个地方，正好对应两大闭环：</p>
+  <ul>
+    <li><strong>服务管理 → 服务列表：</strong>现在应该是空的——下一节用 curl 塞一个进去，它就会出现在这；</li>
+    <li><strong>配置管理 → 配置列表：</strong>同样空着，发布的第一条配置会落在这，并且能点开看历史版本。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 curl 冒烟 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>curl 冒烟：把服务塞进电话簿、把配置推出去</h2>
+  <p>不需要写一行 Java。五条命令打通两条闭环：<strong>注册 → 发现 → 登录换票 → 发配置 → 读配置</strong>。命令与示例响应全部可在官方文档逐字核对——服务/配置接口出自 <a href="https://nacos.io/docs/latest/open-api/" target="_blank" rel="noopener">官方 Open API 手册（v2 路径）</a>，登录接口出自 <a href="https://nacos.io/docs/latest/manual/user/auth/" target="_blank" rel="noopener">官方鉴权文档（v3 路径）</a>。所有接口响应都是同一个外壳：<code>code / message / data</code>，<code>code=0</code> 即成功。</p>
+  <pre><code>:: ① 登录换 accessToken（官方鉴权文档原例；密码用你第 05 节初始化的那个）
+curl -X POST "http://127.0.0.1:8848/nacos/v3/auth/user/login" -d "username=nacos" -d "password=你的密码"
+:: → 官方示例响应：{"accessToken":"eyJ...","tokenTtl":18000,"globalAdmin":true,"username":"nacos"}
+::   tokenTtl=18000 秒即 5 小时，过期重新登录换一张
+
+:: ② 注册一个实例（服务名 test_service，地址 127.0.0.1:8080；accessToken 拼在 URL 上）
+curl -X POST "http://127.0.0.1:8848/nacos/v2/ns/instance?accessToken=你的token^&amp;serviceName=test_service^&amp;ip=127.0.0.1^&amp;port=8080"
+:: → {"code":0,"message":"success","data":true}
+
+:: ③ 发现：按服务名拉实例清单（调用方要调 test_service 时就是干这事）
+curl "http://127.0.0.1:8848/nacos/v2/ns/instance/list?accessToken=你的token^&amp;serviceName=test_service"
+:: → data.hosts 数组里有 127.0.0.1:8080，healthy=true，ephemeral=true
+::   以及心跳三参数：instanceHeartBeatInterval=5000 / TimeOut=15000 / ipDeleteTimeout=30000</code></pre>
+  <p class="note">curl 注册的是<strong>临时实例（ephemeral=true）</strong>：不发心跳 15 秒标记不健康、约 30 秒被摘除——你现在去查可能已经不在了，这不是 bug，是电话簿只留活人。想让实例常驻，注册时加 <code>ephemeral=false</code> 走服务端健康检查，临时与持久的分野第 3 期展开。</p>
+  <pre><code>:: ④ 发布配置：dataId + 分组 + 内容（内容就用官方手册示例的 contentTest）
+curl -X POST "http://127.0.0.1:8848/nacos/v2/cs/config?accessToken=你的token^&amp;dataId=example.properties^&amp;group=DEFAULT_GROUP^&amp;content=contentTest"
+:: → {"code":0,"message":"success","data":true}　发布即生效，不用重启服务端
+
+:: ⑤ 读回配置：data 字段原样返回内容，与官方手册示例一字不差
+curl "http://127.0.0.1:8848/nacos/v2/cs/config?accessToken=你的token^&amp;dataId=example.properties^&amp;group=DEFAULT_GROUP"
+:: → {"code":0,"message":"success","data":"contentTest"}</code></pre>
+  <p class="note">Windows cmd 里 <code>&amp;</code> 要写成 <code>^&amp;</code>（PowerShell 用引号包 URL 即可）；Linux/macOS 直接去掉 <code>^</code>。accessToken 官方支持两种给法：拼在 URL 的 <code>accessToken</code> 参数（本文用法），或请求头 <code>Authorization: Bearer &lt;token&gt;</code>。</p>
+  <p>到这里四条跑通判定应该全部打勾：<strong>进程活着、控制台能登、服务列表有实例、配置读得回来</strong>。第 1 期的"电话簿 + 遥控器"，此刻在你机器上是真实存在的两个 HTTP 资源了。</p>
+</section>
+
+<!-- ================= 07 端口与排错 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>端口账本与高频翻车点</h2>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>端口</th><th>用途</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>8848</td><td>主端口 / OpenAPI</td><td>注册、发现、配置读写都从这里进出（本期的 curl 全打它）</td></tr>
+      <tr><td>8080</td><td>控制台（3.x 独立）</td><td>2.x 时代控制台挂在 8848 下，3.x 拆成独立 console</td></tr>
+      <tr><td>9848 / 9849</td><td>客户端 gRPC 通道</td><td>2.x 起客户端长连接走这里（= 主端口 +1000/1001 偏移），SDK 接入时防火墙要放行</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="card card-tip">
+    <p><strong>翻车速查（按出现频率排序）：</strong></p>
+    <ul>
+      <li><strong>启动即退 + 版本报错：</strong>JDK 低于 17，回第 02 节；</li>
+      <li><strong>卡在交互输入 / 鉴权报错：</strong>首启没给三件套，回第 04 节预配到 application.properties；</li>
+      <li><strong>端口被占（Address already in use）：</strong>8848/8080 撞了本机其他服务，改 <code>server.port</code> 与 console 端口或停掉占用方；</li>
+      <li><strong>集群模式报错（distro/raft 选主失败）：</strong>忘了 <code>-m standalone</code>，或者手滑双击了 startup.cmd；</li>
+      <li><strong>控制台打不开：</strong>确认访问的是 8080 而不是 8848/nacos——肌肉记忆还停在 2.x 是最常见的原因。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= 08 quiz ================= -->
+<section>
+  <h2><span class="sec-num">08</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. Windows 下启动单机模式的正确姿势是？</p>
+      <ul class="quiz-options" data-answer="1">
+        <li class="quiz-option">双击 startup.cmd</li>
+        <li class="quiz-option">命令行执行 startup.cmd -m standalone</li>
+        <li class="quiz-option">startup.cmd -m cluster -p single</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. Nacos 3.x 启动后，控制台应该去哪个地址看？</p>
+      <ul class="quiz-options" data-answer="2">
+        <li class="quiz-option">http://127.0.0.1:8848/nacos</li>
+        <li class="quiz-option">http://127.0.0.1:9848</li>
+        <li class="quiz-option">http://127.0.0.1:8080</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 首启要求配置的 token secret key，实际保护的是什么？</p>
+      <ul class="quiz-options" data-answer="0">
+        <li class="quiz-option">控制台会话令牌的签名强度——决定伪造登录态的难度</li>
+        <li class="quiz-option">配置内容在磁盘上的加密强度</li>
+        <li class="quiz-option">客户端 gRPC 连接的 TLS 证书</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 09 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：为什么 Nacos 3.x 要把"首启配鉴权"做成强制项，而 2.x 默认是关闭的？</summary>
+    <div class="details-body">
+      <p>因为暴露在公网的无鉴权 Nacos 是现成的供应链入口：注册中心可任意写入意味着攻击者能注册一个同名恶意实例把流量劫走（电话簿被人改了号码），配置中心可任意读取意味着数据库密码、AK/SK 直接拱手送人——历年安全报告中大量在公网裸奔的 Nacos 实例就是这么被扫出来的。2.x 时代的哲学是"内网默认安全，鉴权自己打开"，但"默认不安全"的东西最终一定会以错误配置出现在公网上，这是整个基础设施行业的教训（Elasticsearch、Redis、MongoDB 都走过同一条路）。所以 3.x 把默认值翻转：要么给足长度的签名密钥、要么起不来，把"忘记配"这个最常见的人为失误直接堵死在启动环节。你在第 04 节多花的那两分钟，就是"secure by default"这个趋势的具象化。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：单机模式的数据存在哪？为什么生产环境不能就这么用？</summary>
+    <div class="details-body">
+      <p>standalone 默认把数据落在内嵌的本地存储里（Derby，跟着进程目录走），重启不丢、但也就到此为止。生产不能用单机版的原因是两层的：第一层显而易见——单进程是单点，进程挂了整个微服务体系的"电话簿服务台"停摆（好在消费者有本地快照兜底存量调用，但新注册、新发现、配置发布全停）；第二层更本质——<strong>Nacos 的两类数据对持久化的要求不同</strong>：注册记录是易失数据，实例心跳一停就该消失，集群重建时可以靠服务重新注册自愈；配置数据是账本，写丢一条服务可能永远起不来，必须放到独立于 Nacos 进程生命周期的持久层（外置 MySQL 等）并做多副本。单机 Derby 把两类数据一起绑死在一个进程的生死上，这在生产是结构性的不可接受。集群怎么组、Distro 和 Raft 分别管什么——正是第 3 期《核心概念与整体架构》的主菜。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 10 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这四条：</strong></p>
+    <ul>
+      <li>硬门槛只有 JDK 17+；发行包解压即用，<code>-m standalone</code> 别丢；</li>
+      <li>3.x 首启强制鉴权三件套，token secret key 决定控制台会话的签名强度；</li>
+      <li>控制台搬家了：8080 独立 console，8848 是 OpenAPI、9848/9849 是客户端 gRPC；</li>
+      <li>冒烟五连（登录→注册→发现→发配置→读回）就是日常排错的探针，条条 code:0 才算活着。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 3 期《核心概念与整体架构》——命名空间/分组/DataId 三层组织、临时与持久实例的分野、一张自绘的整体架构图，以及源码仓库的模块地图：你今天敲的每条 curl，落到源码里是哪个模块在接。Primary source：<a href="https://nacos.io/docs/latest/quickstart/quick-start/" target="_blank" rel="noopener">官方 Quick Start</a> · <a href="https://nacos.io/docs/latest/open-api/" target="_blank" rel="noopener">Open API 手册（②③④⑤ 出处）</a> · <a href="https://nacos.io/docs/latest/manual/user/auth/" target="_blank" rel="noopener">鉴权文档（① 出处）</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0001-nacos-what-and-why.html">← 上一期：Nacos 是什么</a>
+  <span class="next">下一期：核心概念与整体架构（制作中）</span>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，正确答案已标绿。");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

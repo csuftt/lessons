@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Netty 系列第 2 期：5 分钟跑起来 | 2026-09-18</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0007</span>
+  <span><a href="../index.html">课程目录</a> · Netty 系列第 2 期 / 共 5 期 · <a href="https://netty.io" target="_blank" rel="noopener">netty.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · Netty 系列第 2 期：5 分钟跑起来</p>
+  <h1>5 分钟跑起来 Netty：你的第一个回声服务器</h1>
+  <p class="subtitle">上一期我们认识了 Netty 的定位和主从 Reactor 心智模型，这一期把它请下神坛：加依赖、抄官方 Echo Server、启动、用 telnet 连上去发一条消息看它原样回来。全文基于 4.2.18.Final（2026-09-09 发布，官方当前推荐主线；4.1 系仍在长期维护，版本与 JDK 基线差异已分别标注，2026-09-18 于 netty.io 与 GitHub Releases 核对）。跑通判定标准和五个高频翻车点一并给全，跑不通先对照自查，再怀疑人生。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 网络框架 · Java · Apache-2.0</span>
+    <span class="tag">📦 基于 4.2.18.Final（4.1.138.Final 同步维护）</span>
+    <span class="tag-date">📅 2026-09-18 · 第 2 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 路线 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>本期路线与跑通判定</h2>
+  <p>四步路线：<strong>查 JDK → 加 Maven 依赖 → 建 EchoServer → telnet 验证</strong>。全部走完后你应该满足三条跑通判定，缺一条都算没通：</p>
+  <div class="card">
+    <ul class="steps">
+      <li>① <strong>进程不退：</strong>main 线程停在 <code>closeFuture().sync()</code> 上阻塞等待，是设计如此、不是卡死；</li>
+      <li>② <strong>telnet 通：</strong><code>telnet 127.0.0.1 8009</code> 能连上不报连接拒绝；</li>
+      <li>③ <strong>发啥回啥：</strong>键盘敲 <code>hello netty</code>，屏幕上看到服务器把这串字符原样送回来。</li>
+    </ul>
+  </div>
+  <p>Echo（回声）服务器是官方入门示例的首选——收什么就回什么，零业务逻辑，恰好把"端口监听、连接接入、数据读写、业务处理"四个环节全部点亮。Discard 示例（收到即丢）更简单，但"看不到回显"对新手不友好，验证闭环还是 Echo 完整。</p>
+</section>
+
+<!-- ================= 02 环境 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>环境要求：先看 JDK 这条硬门槛</h2>
+  <p>Netty 是纯 Java 库，没有独立服务端要安装——但两条版本线的 JDK 基线不同，先对号入座：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>版本线</th><th>状态</th><th>Java 基线</th><th>当前版本（2026-09-18 核对）</th></tr></thead>
+    <tbody>
+      <tr><td>4.2</td><td>稳定 · 官方推荐</td><td>Java 8 起（4.2 迁移指南：最低版本由 Java 6 提升到 Java 8）</td><td>4.2.18.Final（2026-09-09）</td></tr>
+      <tr><td>4.1</td><td>稳定 · 长期维护</td><td>Java 6 起（官方 user guide 原文 "JDK 1.6 or above"）</td><td>4.1.138.Final（2026-09-09）</td></tr>
+      <tr><td>5.0</td><td>开发预览</td><td>—</td><td>5.0.0.Alpha5，多年未动，别上生产</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <pre><code>:: 检查 JDK —— 本系列按 4.2 讲，版本号 ≥ 8 即可（8/11/17/21 都行）
+java -version
+
+:: 示例输出
+:: openjdk version "17.0.10" 2024-01-16
+:: OpenJDK Runtime Environment (build 17.0.10+7)</code></pre>
+  <p>构建工具用 Maven（3.6+ 均可，Gradle 同理坐标一致）。公司主栈 Spring Cloud Alibaba 的服务里，Netty 常作为传递依赖早已在 classpath 上——本期为了看清每一行，仍然自己显式引一遍。</p>
+</section>
+
+<!-- ================= 03 依赖 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>Maven 依赖坐标：一把梭 or 分模块</h2>
+  <p>入门阶段直接用聚合包 <code>netty-all</code>，一个坐标把 buffer、transport、codec、handler 全带上：</p>
+  <pre><code>&lt;dependency&gt;
+    &lt;groupId&gt;io.netty&lt;/groupId&gt;
+    &lt;artifactId&gt;netty-all&lt;/artifactId&gt;
+    &lt;version&gt;4.2.18.Final&lt;/version&gt;
+&lt;/dependency&gt;</code></pre>
+  <p>进阶写法是按模块拆开引，依赖树干净、体积可控：核心数据结构 <code>netty-buffer</code>（ByteBuf）、传输层 <code>netty-transport</code>（含 NIO）、编解码 <code>netty-codec</code>、以及聚合了常用功能的 <code>netty-handler</code>（SSL、日志、超时等）。本系列前几期一律 <code>netty-all</code>，讲架构拆模块时再换成清单式。</p>
+  <div class="warn">
+    <p><strong>版本号尾巴别丢：</strong>Netty 4.x 的发布版本号一律带 <code>.Final</code> 后缀，写成 <code>4.2.18</code> 会直接 Maven 解析失败；5.0 预览版则是 <code>5.0.0.Alpha5</code> 这种格式。这是新手第二天坑（第一是端口占用）。</p>
+  </div>
+</section>
+
+<!-- ================= 04 EchoServer 逐段 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>官方 Echo Server 逐段讲：四步引导一台服务器</h2>
+  <p>官方示例（netty.io user guide 与 GitHub <code>example</code> 模块的 <code>io.netty.example.echo</code> 包）主体就一个引导流程。先把全景图看一遍，再逐段抄代码——每一步对应第 1 期主从 Reactor 模型里的一个角色：</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar2g" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+
+    <rect x="20" y="14" width="720" height="26" rx="6" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="380" y="31" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">ServerBootstrap 四步引导：group → channel → childHandler → bind</text>
+
+    <rect x="30" y="70" width="130" height="52" rx="8" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="95" y="91" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">① group</text>
+    <text x="95" y="108" text-anchor="middle" fill="var(--muted)" font-size="9.5">boss + worker 两个线程池</text>
+    <line x1="160" y1="96" x2="180" y2="96" stroke="var(--muted)" marker-end="url(#ar2)"/>
+
+    <rect x="184" y="70" width="130" height="52" rx="8" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="249" y="91" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">② channel</text>
+    <text x="249" y="108" text-anchor="middle" fill="var(--muted)" font-size="9.5">NioServerSocketChannel</text>
+    <line x1="314" y1="96" x2="334" y2="96" stroke="var(--muted)" marker-end="url(#ar2)"/>
+
+    <rect x="338" y="70" width="130" height="52" rx="8" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="403" y="91" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">③ childHandler</text>
+    <text x="403" y="108" text-anchor="middle" fill="var(--muted)" font-size="9.5">每个新连接的初始化逻辑</text>
+    <line x1="468" y1="96" x2="488" y2="96" stroke="var(--muted)" marker-end="url(#ar2)"/>
+
+    <rect x="492" y="70" width="130" height="52" rx="8" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="557" y="91" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">④ bind(8009)</text>
+    <text x="557" y="108" text-anchor="middle" fill="var(--muted)" font-size="9.5">绑定端口，开始监听</text>
+    <line x1="622" y1="96" x2="648" y2="96" stroke="var(--accent-3)" marker-end="url(#ar2g)"/>
+    <text x="692" y="100" text-anchor="middle" fill="var(--accent-3)" font-size="10" font-weight="700">服务器</text>
+    <text x="692" y="114" text-anchor="middle" fill="var(--muted)" font-size="9">活了</text>
+
+    <rect x="20" y="152" width="460" height="128" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="36" y="176" fill="var(--ink)" font-size="12" font-weight="700">连进来之后，一条连接的旅程（对应第 1 期主从 Reactor）</text>
+    <rect x="36" y="190" width="110" height="44" rx="7" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="91" y="208" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">bossGroup ×1</text>
+    <text x="91" y="224" text-anchor="middle" fill="var(--muted)" font-size="9">只管 accept 接入</text>
+    <line x1="146" y1="212" x2="166" y2="212" stroke="var(--muted)" marker-end="url(#ar2)"/>
+    <rect x="170" y="190" width="110" height="44" rx="7" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="225" y="208" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">workerGroup</text>
+    <text x="225" y="224" text-anchor="middle" fill="var(--muted)" font-size="9">已建连接的读写</text>
+    <line x1="280" y1="212" x2="300" y2="212" stroke="var(--muted)" marker-end="url(#ar2)"/>
+    <rect x="304" y="190" width="156" height="72" rx="7" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="382" y="210" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">pipeline（每连接一条）</text>
+    <text x="382" y="228" text-anchor="middle" fill="var(--muted)" font-size="9">ChannelInitializer</text>
+    <text x="382" y="244" text-anchor="middle" fill="var(--muted)" font-size="9">→ EchoServerHandler</text>
+
+    <rect x="500" y="152" width="240" height="128" rx="10" fill="var(--warn-bg)" stroke="var(--accent)"/>
+    <text x="516" y="178" fill="var(--ink)" font-size="11.5" font-weight="700">速记：group 定线程，channel 定传输，</text>
+    <text x="516" y="198" fill="var(--ink)" font-size="11.5" font-weight="700">childHandler 定业务，bind 定端口。</text>
+    <text x="516" y="226" fill="var(--muted)" font-size="10">四步之外的都是参数微调（option 等），</text>
+    <text x="516" y="244" fill="var(--muted)" font-size="10">先跑通，再调优。</text>
+  </svg>
+  </div>
+
+  <h3>第一段：两个线程池，各就各位</h3>
+  <pre><code>EventLoopGroup bossGroup   = new NioEventLoopGroup(1);  // 只管接入，1 个线程足够
+EventLoopGroup workerGroup = new NioEventLoopGroup();   // 管读写，默认 2×CPU 核数
+try {
+    ServerBootstrap b = new ServerBootstrap();          // 引导器：把零件组装成服务器</code></pre>
+  <p>boss 和 worker 就是第 1 期"主从 Reactor"里的主和从：<strong>boss 只干一件事——accept 新连接，然后把连接转交 worker；worker 负责这条连接上之后所有的读写事件。</strong>两者交接是框架内部完成的，你的代码只需要声明这两个池子。</p>
+
+  <h3>第二段：链式配置，一步一句</h3>
+  <pre><code>b.group(bossGroup, workerGroup)                        // 登记两个线程池
+ .channel(NioServerSocketChannel.class)              // 用 NIO 的 ServerSocket 实现来监听
+ .option(ChannelOption.SO_BACKLOG, 100)              // accept 积压队列上限（握手完成未被取走的连接最多 100 个）
+ .handler(new LoggingHandler(LogLevel.INFO))         // boss 通道自己的 handler：打日志做观测
+ .childHandler(new ChannelInitializer&lt;SocketChannel&gt;() {
+     @Override
+     public void initChannel(SocketChannel ch) {     // 每个新连接进来执行一次
+         ch.pipeline().addLast(new EchoServerHandler());  // 把业务 handler 挂到该连接的流水线
+     }
+ });</code></pre>
+  <p>注意 <code>handler</code> 与 <code>childHandler</code> 的分工：前者挂在<strong>监听通道</strong>上（通常只放日志），后者挂在<strong>每一条新连接</strong>上（业务逻辑放这）。写反了是新手第三大坑——业务代码不执行，日志里却一切正常。</p>
+
+  <h3>第三段：绑定端口，挂住主线程</h3>
+  <pre><code>ChannelFuture f = b.bind(8009).sync();   // 绑定端口并等待完成；8009 是官方示例默认端口
+f.channel().closeFuture().sync();       // 阻塞到服务器关闭——这就是"进程不退"的原因
+} finally {
+    bossGroup.shutdownGracefully();     // 优雅关闭：处理完存量事件再退
+    workerGroup.shutdownGracefully();
+}</code></pre>
+
+  <h3>第四段：业务逻辑，总共三件事</h3>
+  <pre><code>@Sharable                                        // 声明"我无状态，可以被多个连接共享"
+public class EchoServerHandler extends ChannelInboundHandlerAdapter {
+    @Override
+    public void channelRead(ChannelHandlerContext ctx, Object msg) {
+        ctx.write(msg);                          // 收到什么就写回什么（回声的全部秘密）
+    }
+    @Override
+    public void channelReadComplete(ChannelHandlerContext ctx) {
+        ctx.flush();                             // 读事件处理完，把积攒的写一次性冲出去
+    }
+    @Override
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+        cause.printStackTrace();                  // 出错别让异常把线程池打死
+        ctx.close();                             // 关掉这条出问题的连接，服务器继续活着
+    }
+}</code></pre>
+  <p>一个 TCP 包到达 → worker 线程触发 <code>channelRead</code> → <code>write</code> 把数据挂到出站队列 → <code>channelReadComplete</code> 里 <code>flush</code> 冲刷上线——回声逻辑就这三步。业务 handler 从 <code>ChannelInboundHandlerAdapter</code> 继承并只覆写关心的回调，这是 Netty 编程的基本姿势。</p>
+</section>
+
+<!-- ================= 05 telnet ================= -->
+<section>
+  <h2><span class="sec-num">05</span>客户端验证：telnet 连上去说句话</h2>
+  <p>服务器跑起来后，不需要再写 Java 客户端，一个终端工具就够。Linux/macOS 自带 <code>nc</code> 与 <code>telnet</code>；Windows 的 telnet 客户端默认关闭，先花 30 秒打开：</p>
+  <pre><code>:: Windows 开启 telnet（管理员 PowerShell，任选其一）
+dism /online /Enable-Feature /FeatureName:TelnetClient
+Add-WindowsCapability -Online -Name TelnetClient~~~~0.0.1.0
+:: 图形界面路径：控制面板 → 程序 → 启用或关闭 Windows 功能 → 勾选 Telnet Client
+
+# 验证（所有平台通用）
+telnet 127.0.0.1 8009     # 注意：IP 和端口之间是空格，不是冒号
+nc 127.0.0.1 8009         # 有 nc 的话更省心，输入即回显</code></pre>
+  <p>连上后敲 <code>hello netty</code>，每敲一个字符屏幕上立刻回来一个——telnet 是<strong>逐字符发包</strong>的，所以回显也是一个字一个字地蹦，这是正常现象不是性能问题。</p>
+  <div class="note">
+    <p><strong>Windows telnet 最迷惑的坑：</strong>连上后打字"看不见"（自己敲的字符不显示），但服务器其实收到了也回了。原因是 Windows telnet 默认关闭<strong>本地回显</strong>。按 <code>Ctrl+]</code> 进入 telnet 命令模式，输入 <code>set localecho</code> 回车，回到会话就能看见自己打的字了。判断"到底通没通"，看的是<strong>有没有字符从服务器回来</strong>，而不是你能不能看见自己的输入。</p>
+  </div>
+</section>
+
+<!-- ================= 06 报错 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>高频报错速查：现象 → 原因 → 解法</h2>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>现象</th><th>原因</th><th>解法</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>BindException: Address already in use</code>，启动即炸</td>
+        <td>8009 被占：上一个实例没退干净，或撞了本机其他程序</td>
+        <td><code>netstat -ano | findstr 8009</code> 找 PID（Linux：<code>lsof -i:8009</code>），<code>taskkill /PID xxx /F</code> 后重启；或改绑别的端口</td>
+      </tr>
+      <tr>
+        <td>Maven 解析失败 / 运行时 <code>NoClassDefFoundError</code></td>
+        <td>版本号少了 <code>.Final</code> 尾巴，写成了 <code>4.2.18</code></td>
+        <td>补全为 <code>4.2.18.Final</code>；4.x 发布版本一律带 <code>.Final</code>，5.0 预览版是 <code>5.0.0.Alpha5</code> 格式</td>
+      </tr>
+      <tr>
+        <td>多个连接互相串数据 / 计数互相污染</td>
+        <td>带成员变量状态的 handler 被标了 <code>@Sharable</code> 并做成单例，所有连接共用同一份状态</td>
+        <td><code>@Sharable</code> 只给<strong>真正无状态</strong>的 handler（如官方 EchoServerHandler）；有状态就在 <code>initChannel</code> 里每个连接 <code>new</code> 一份</td>
+      </tr>
+      <tr>
+        <td>日志出现 <code>LEAK: ByteBuf.release() was not called before it's garbage-collected</code></td>
+        <td>入站 ByteBuf 是<strong>引用计数</strong>的：<code>channelRead</code> 里拿到后既没传递给下游、也没 <code>release</code>，GC 时泄漏探测器抓了现行</td>
+        <td>保持"引用计数守恒"：要么 <code>ctx.write(msg)</code>/<code>fireChannelRead</code> 把所有权传下去，要么 <code>ReferenceCountUtil.release(msg)</code>；排查加参数 <code>-Dio.netty.leakDetection.level=paranoid</code></td>
+      </tr>
+      <tr>
+        <td>telnet 连上、服务端日志也打了，但屏幕没反应</td>
+        <td>Windows telnet 默认不开本地回显（见第 05 节）</td>
+        <td><code>Ctrl+]</code> → <code>set localecho</code> → 回车；或直接换 <code>nc</code></td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">其中 ByteBuf 泄漏值得多说一句：官方 Echo 示例里 <code>ctx.write(msg)</code> 会把 msg 的所有权转交给出站流水线、写完由框架释放，所以不漏；但你的代码一旦"读了不用又不管"，泄漏就发生了。第 4 期讲 ByteBuf 与内存池时会专门拆这套引用计数机制。</p>
+</section>
+
+<!-- ================= 07 quiz ================= -->
+<section>
+  <h2><span class="sec-num">07</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. ServerBootstrap 的四步引导中，真正让端口开始监听的是哪一步？</p>
+      <ul class="quiz-options" data-answer="2">
+        <li class="quiz-option">group(bossGroup, workerGroup)</li>
+        <li class="quiz-option">channel(NioServerSocketChannel.class)</li>
+        <li class="quiz-option">bind(8009)</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 服务器启动后 main 线程停在 closeFuture().sync() 上不往下走，这是？</p>
+      <ul class="quiz-options" data-answer="0">
+        <li class="quiz-option">设计如此：事件驱动服务要挂住主线程直到关闭，否则 finally 会把线程池关掉、服务秒退</li>
+        <li class="quiz-option">死锁了，需要重启</li>
+        <li class="quiz-option">端口没绑定成功的表现</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 下面哪种 handler 可以安全地加 @Sharable 并在多个连接间共享单例？</p>
+      <ul class="quiz-options" data-answer="1">
+        <li class="quiz-option">带一个 int 计数器成员变量、统计每连接消息数的 handler</li>
+        <li class="quiz-option">没有任何成员变量状态、只根据入参做转发的 handler</li>
+        <li class="quiz-option">所有继承自 ChannelInboundHandlerAdapter 的 handler</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. 日志报 LEAK: ByteBuf.release() was not called，最可能的原因是？</p>
+      <ul class="quiz-options" data-answer="2">
+        <li class="quiz-option">JDK 版本低于 Netty 基线</li>
+        <li class="quiz-option">telnet 没开本地回显</li>
+        <li class="quiz-option">channelRead 拿到的 ByteBuf 既没传递给下游、也没调用 release</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 08 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：官方 EchoServerHandler 加了 @Sharable 做单例共享，为什么你随手加个计数器版本就出事？</summary>
+    <div class="details-body">
+      <p>@Sharable 的本质是一份<strong>契约声明</strong>："我承诺没有任何连接相关的状态，随便共享"。官方 EchoServerHandler 的 <code>channelRead</code> 只做 <code>ctx.write(msg)</code>——不存成员变量、不记上下文，输入输出都是参数和流水线，共享一万份和一份没有区别。而你加了 <code>private int count</code> 之后，这个成员变量就成了"单例的私有账本"：连接 A 的事件线程写一半、连接 B 的事件线程也来写（两个连接可能绑在不同的 worker 线程上），轻则计数互相污染，重则非原子操作下数据错乱。关键是 <strong>@Sharable 只是承诺，Netty 不会替你校验承诺的真伪</strong>——标了注解，框架就放行共享，出错时没有异常、只有诡异的数据。工程上更稳的默认姿势：入门阶段一律在 <code>initChannel</code> 里每连接 <code>new</code> 一个 handler 实例，创建开销可以忽略；等真正需要省对象、又确认无状态时，再上 <code>@Sharable</code> 单例。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：bind 之后的代码"永远执行不到"，为什么这反而是 Netty 服务器的正确形态？</summary>
+    <div class="details-body">
+      <p>因为 Netty 服务是<strong>事件驱动的长活进程</strong>：main 线程的全部职责是"把零件组装起来、按下开关"，然后就该退到一边。真正干活的是 boss 和 worker 线程池里的事件循环——它们在各自的线程上转着，等连接来、等数据到，和 main 线程是平行的世界。<code>closeFuture().sync()</code> 的作用是把 main 挂住：如果去掉这行，main 跑完就进 finally，把两个线程池 <code>shutdownGracefully</code> 关掉，刚出生的服务器立刻死亡——这是"服务器闪退"最经典的原因。这和操作系统里守护进程要"前台挂住"是同一种模式：有生命周期的东西必须有个东西托着它。顺带一提，真正的事件处理永远不发生在 main 线程上——这也意味着 handler 里的代码默认跑在 worker 线程，耗时操作会直接堵住同一条 EventLoop 上的其他连接。这个问题怎么解，正是第 3 期讲 EventLoop 线程模型时要展开的主菜。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 09 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这四条：</strong></p>
+    <ul>
+      <li>JDK 基线：4.2 要 Java 8 起、4.1 要 Java 6 起；版本号尾巴 <code>.Final</code> 不能丢（当前 4.2.18.Final / 4.1.138.Final）；</li>
+      <li>四步引导口诀：group 定线程、channel 定传输、childHandler 定业务、bind 定端口，其余都是微调；</li>
+      <li>跑通判定三条：进程不退（closeFuture 挂住）、telnet 能连上、发啥回啥；</li>
+      <li>翻车高发区：端口占用、@Sharable 误用、ByteBuf 引用计数不守恒——现象→原因→解法对照第 06 节。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 3 期《核心概念与整体架构》——Channel、EventLoop、Pipeline、ByteBuf 四大件各自是什么、怎么咬合，一张整体架构图把今天代码里的每个名字落到图上的位置，你会看到 EchoServer 的每一行在框架内部触发了什么。Primary source：<a href="https://netty.io/wiki/user-guide-for-4.x.html" target="_blank" rel="noopener">Netty 官方 User Guide for 4.x</a>（本期示例出处）与 <a href="https://github.com/netty/netty/tree/4.1/example/src/main/java/io/netty/example/echo" target="_blank" rel="noopener">GitHub 官方 Echo 示例</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0006-netty-what-and-why.html">← 上一期：认识 Netty</a>
+  <a class="next" href="0008-netty-core-concepts.html">下一期：核心概念与整体架构 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

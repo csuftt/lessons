@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Nacos 系列第 4 期：实战场景 | 2026-09-18</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0004</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0003-nacos-core-concepts-architecture.html">上一期：核心概念与整体架构</a> · <a href="https://sca.aliyun.com" target="_blank" rel="noopener">sca.aliyun.com ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · Nacos 系列第 4 期：实战场景</p>
+  <h1>把 stock-service 接进 Nacos：注册、按名调用、热更新、优雅下线</h1>
+  <p class="subtitle">前三期你已经知道 Nacos 是什么、能把它跑起来、也拿到了它的概念地图——但都是隔着 curl 看的。这一期换真枪实弹：用 Spring Cloud Alibaba 把一个真实的 Spring Boot 服务接进来。主角是"下单扣库存"的最小系统：库存服务 stock-service 部署两个实例，同时吃 Nacos 的注册与配置两碗饭；订单服务 order-service 只凭服务名调用它。注册可见、按名调用、配置热更新、权重摘流量，四件事端到端走完——走完你会发现自己前几期学的每个概念都长在了配置文件的某一行上。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 注册/配置中心 · Java · Apache-2.0</span>
+    <span class="tag">📦 基于 Nacos v3.x + Spring Boot 3.x / SCA 2023.x</span>
+    <span class="tag-date">📅 2026-09-18 · 第 4 期</span>
+    <span class="tag time">⏱ 预计阅读 18 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景设定 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>场景设定：一个最小的"下单扣库存"</h2>
+  <p>场景刻意选小，但五脏俱全：<strong>stock-service（库存服务）部署两个实例</strong>（8081、8082），启动后注册进 Nacos，业务参数从 Nacos 的配置中心读；<strong>order-service（订单服务）</strong>自己不碰库存数据，只通过<strong>服务名</strong>调 stock-service。整条链路如下图，右上的控制台是你全程的"驾驶舱"（8080，别忘了第 2 期它已经搬家）：</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 400" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar4" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar4b" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+
+    <!-- order-service -->
+    <rect x="16" y="120" width="200" height="110" rx="10" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="116" y="144" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">order-service（订单服务）</text>
+    <text x="116" y="166" text-anchor="middle" fill="var(--muted)" font-size="9.5">@FeignClient(name = "stock-service")</text>
+    <text x="116" y="182" text-anchor="middle" fill="var(--muted)" font-size="9.5">只认识服务名，不知道任何 IP:端口</text>
+    <text x="116" y="204" text-anchor="middle" fill="var(--muted)" font-size="9.5">LoadBalancer 从服务表里挑实例</text>
+
+    <!-- Nacos -->
+    <rect x="290" y="100" width="200" height="180" rx="10" fill="var(--bg-accent)" stroke="var(--accent)"/>
+    <text x="390" y="124" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">Nacos 服务端</text>
+    <rect x="304" y="138" width="172" height="40" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="390" y="155" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">服务发现（电话簿）</text>
+    <text x="390" y="170" text-anchor="middle" fill="var(--muted)" font-size="9">stock-service: 8081 / 8082</text>
+    <rect x="304" y="186" width="172" height="40" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="390" y="203" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">配置中心（遥控器）</text>
+    <text x="390" y="218" text-anchor="middle" fill="var(--muted)" font-size="9">stock-service.yaml 热推送</text>
+    <text x="390" y="252" text-anchor="middle" fill="var(--muted)" font-size="9.5">SDK 数据通道：gRPC 9848</text>
+    <text x="390" y="268" text-anchor="middle" fill="var(--muted)" font-size="9.5">OpenAPI 8848 · 控制台 8080</text>
+
+    <!-- 控制台标签 -->
+    <rect x="304" y="40" width="172" height="40" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="390" y="57" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">控制台（驾驶舱）</text>
+    <text x="390" y="72" text-anchor="middle" fill="var(--muted)" font-size="9">看实例 · 改配置 · 调权重</text>
+    <line x1="390" y1="80" x2="390" y2="96" stroke="var(--muted)" stroke-dasharray="4 3"/>
+
+    <!-- stock 实例 x2 -->
+    <rect x="544" y="70" width="200" height="80" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="644" y="94" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">stock-service 实例一</text>
+    <text x="644" y="112" text-anchor="middle" fill="var(--muted)" font-size="9.5">:8081 · 权重 1.0 · 临时实例</text>
+    <text x="644" y="130" text-anchor="middle" fill="var(--muted)" font-size="9.5">注册 + 心跳 + 收配置</text>
+
+    <rect x="544" y="210" width="200" height="80" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="644" y="234" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">stock-service 实例二</text>
+    <text x="644" y="252" text-anchor="middle" fill="var(--muted)" font-size="9.5">:8082 · 权重 1.0（本章调 0 做实验）</text>
+    <text x="644" y="270" text-anchor="middle" fill="var(--muted)" font-size="9.5">与实例一同 jar 不同端口</text>
+
+    <!-- 箭头：stock -> nacos 注册/心跳 -->
+    <line x1="544" y1="110" x2="490" y2="128" stroke="var(--muted)" marker-end="url(#ar4)"/>
+    <text x="520" y="106" text-anchor="middle" fill="var(--muted)" font-size="8.5">注册/心跳</text>
+    <line x1="544" y1="250" x2="490" y2="232" stroke="var(--muted)" marker-end="url(#ar4)"/>
+    <text x="520" y="256" text-anchor="middle" fill="var(--muted)" font-size="8.5">注册/心跳</text>
+
+    <!-- 箭头：nacos -> stock 配置推送 -->
+    <line x1="490" y1="150" x2="544" y2="132" stroke="var(--muted)" marker-end="url(#ar4)"/>
+    <text x="516" y="146" text-anchor="middle" fill="var(--muted)" font-size="8.5">配置推送</text>
+
+    <!-- 箭头：nacos -> order 服务表订阅 -->
+    <line x1="290" y1="158" x2="216" y2="158" stroke="var(--muted)" marker-end="url(#ar4)"/>
+    <text x="253" y="150" text-anchor="middle" fill="var(--muted)" font-size="8.5">订阅服务表</text>
+
+    <!-- 箭头：order -> stock 实际调用 -->
+    <path d="M 116 230 C 116 330, 644 340, 644 292" fill="none" stroke="var(--accent)" stroke-width="2" marker-end="url(#ar4b)"/>
+    <text x="380" y="336" text-anchor="middle" fill="var(--accent)" font-size="9.5" font-weight="700">HTTP 调用：名字 → LoadBalancer 选实例 → 127.0.0.1:808x</text>
+
+    <text x="380" y="378" text-anchor="middle" fill="var(--muted)" font-size="10">读法：虚线是控制流量（人看），灰线是数据通道（SDK 走 gRPC 9848），彩线才是真正的业务调用</text>
+  </svg>
+  </div>
+
+  <p>全程四条目标，做完一条勾一条，缺一条都算没接通：</p>
+  <div class="card">
+    <ul class="steps">
+      <li>① <strong>注册可见：</strong>两个实例出现在控制台服务列表，健康、权重、元数据对得上；</li>
+      <li>② <strong>按名调用：</strong>order-service 连续下单，流量轮询落到 8081/8082 两个实例；</li>
+      <li>③ <strong>配置热更新：</strong>控制台改一个参数并发布，两个实例不重启读到新值；</li>
+      <li>④ <strong>权重摘流量：</strong>把 8081 权重调成 0，新流量全部导向 8082。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= 02 依赖与配置 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>依赖与配置：两个 starter + 一份 yaml</h2>
+  <p>Spring Cloud Alibaba（SCA）把 Nacos 能力封成了两个 starter，注册发现与配置各管一个，stock-service 两个都要：</p>
+  <pre><code>&lt;!-- 服务注册与发现 --&gt;
+&lt;dependency&gt;
+  &lt;groupId&gt;com.alibaba.cloud&lt;/groupId&gt;
+  &lt;artifactId&gt;spring-cloud-starter-alibaba-nacos-discovery&lt;/artifactId&gt;
+&lt;/dependency&gt;
+&lt;!-- 配置中心 --&gt;
+&lt;dependency&gt;
+  &lt;groupId&gt;com.alibaba.cloud&lt;/groupId&gt;
+  &lt;artifactId&gt;spring-cloud-starter-alibaba-nacos-config&lt;/artifactId&gt;
+&lt;/dependency&gt;</code></pre>
+  <p class="note">版本号不在依赖里写死，交给 dependencyManagement 中的 SCA BOM 统一管（本系列按 SCA 2023.x，对应 Spring Boot 3.x / Spring Cloud 2023.x）。SCA 各版本与 Spring Boot/Cloud 的对应关系每版都会调整，<strong>以你所用 SCA 版本的官方版本文档为准</strong>，不要抄旧教程里的组合。</p>
+  <p>接下来是本期最重要的一个文件——<code>src/main/resources/application.yaml</code>，完整可抄：</p>
+  <pre><code>spring:
+  application:
+    name: stock-service            # 服务名：注册进电话簿的“名字”，也是 DataId 的前缀
+  config:
+    import:
+      - optional:nacos:stock-service.yaml   # Boot 3.x 接 Nacos 配置的正统写法，DataId 直接写明
+  cloud:
+    nacos:
+      server-addr: 127.0.0.1:8848  # 主端口；SDK 的数据通道实际走 9848 gRPC（第 2 期端口账本）
+      username: nacos
+      password: 你的控制台密码      # 3.x 默认开鉴权，客户端不带凭证会被拒（见第 2 期）
+      discovery:
+        namespace: 6d3f1a2e-xxxx   # 命名空间 ID（不是名字！）；不配则落 public
+        group: TRADE_GROUP         # 服务分组：库存类服务都归这组，默认 DEFAULT_GROUP
+      config:
+        namespace: 6d3f1a2e-xxxx   # 注意：与 discovery 分开配置，只配一处是经典串坑
+        file-extension: yaml       # DataId 约定：服务名.扩展名 → stock-service.yaml
+server:
+  port: 8081</code></pre>
+  <p>五个关键点，每个都对应前几期的一个概念：</p>
+  <ul>
+    <li><strong>服务名是一切的锚点：</strong>注册进电话簿的条目、配置 DataId 的前缀、Feign 调用写的名字，三处共用 <code>spring.application.name</code>——起名要像变量名一样认真。</li>
+    <li><strong><code>spring.config.import</code> 是 Boot 3.x 的正统：</strong>Boot 3 默认不再加载老教程里的 bootstrap.yaml（想沿用得额外引 spring-cloud-starter-bootstrap，以版本文档为准）；<code>optional:</code> 前缀表示 Nacos 拉不到时用本地默认值继续启动，别让配置中心一抖全公司起不来。</li>
+    <li><strong>DataId 约定：</strong>不显式写 DataId 时，按 <code>服务名.扩展名</code> 推导——<code>file-extension</code> 默认是 properties，配成 yaml 才有上面的 <code>stock-service.yaml</code>。import 里写明 DataId 的，以写明的为准。</li>
+    <li><strong>namespace 填 ID 不填名字：</strong>控制台建命名空间生成的是一串 ID（第 3 期讲过的硬隔离层），yaml 里填名字不生效，是新手高频翻车点。</li>
+    <li><strong>discovery 与 config 的 namespace/group 各配各的：</strong>本文刻意让服务注册进 TRADE_GROUP、配置落默认 DEFAULT_GROUP——两套坐标互不相干，漏配哪处哪处就悄悄掉回 public/DEFAULT_GROUP。</li>
+  </ul>
+</section>
+
+<!-- ================= 03 注册与核对 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>注册与核对：启动即注册，控制台对账</h2>
+  <p>近年版本的 SCA 里，引入 discovery starter 后注册是<strong>自动行为</strong>——不用在启动类上标任何注解，应用起来就会把自己挂上电话簿。两个实例同 jar 起两份，只差端口：</p>
+  <pre><code># 实例一：按 application.yaml 默认启动（8081）
+java -jar stock-service.jar
+
+# 实例二：命令行只覆盖端口，其余配置完全相同（8082）
+java -jar stock-service.jar --server.port=8082</code></pre>
+  <p>启动日志里搜 <code>register finished</code> 字样（不同版本措辞略有差异），看到服务名带上自己的 IP:端口即注册成功。然后开控制台<strong>对账</strong>（<code>http://127.0.0.1:8080</code>，服务管理 → 服务列表）：切到 dev 命名空间，出现 <code>stock-service</code>，组 TRADE_GROUP，实例数 2。点进详情逐项核对——这正是第 3 期概念的实物对照：</p>
+  <ul>
+    <li><strong>健康状态：</strong>两个实例都是健康（临时实例靠心跳续约，停跳才掉线）；</li>
+    <li><strong>权重：</strong>都是默认 1.0，第 06 节要在它身上做文章；</li>
+    <li><strong>元数据：</strong>能查到实例自报的版本、机房类标签（metadata），订阅方按需读取。</li>
+  </ul>
+  <p>顺手做一个<strong>行为差异实验</strong>，体会临时实例的"活法"：直接 <code>kill -9</code> 掉 8082 的进程（模拟宕机，不给任何善后机会），控制台十几秒内把它标为不健康、随后摘除——心跳默认 5 秒一发，失联后先标记再剔除，这正是第 3 期"电话簿自愈"的现场版。重新拉起进程，实例又自己回来了：注册这事的正确心智是<strong>报户口，不是办户口</strong>——实例自己上门，服务端只管记账。</p>
+</section>
+
+<!-- ================= 04 配置接入与热更新 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>配置接入与热更新：改值、发布、不重启</h2>
+  <p>第 02 节的 import 已经把 <code>stock-service.yaml</code>（DEFAULT_GROUP）接了进来，现在去控制台把这条配置真的建出来：配置管理 → 配置列表 → 创建，DataId 填 <code>stock-service.yaml</code>，Group 用默认 DEFAULT_GROUP，格式 YAML，内容先放两个业务参数：</p>
+  <pre><code>stock:
+  deduct:
+    mode: batch          # 扣减模式：single 逐件 / batch 批量
+    lock-seconds: 30     # 库存锁定秒数</code></pre>
+  <p>发布后重启两个实例（此刻还没有热更新需求，正常启动加载即可），代码里这样消费：</p>
+  <pre><code>@RestController
+@RefreshScope                            // 关键注解：没有它，@Value 只在启动时读一次
+public class StockConfigController {
+
+    @Value("${stock.deduct.lock-seconds:30}")   // 冒号后是本地兜底默认值
+    private int lockSeconds;
+
+    @GetMapping("/stock/config")
+    public Map&lt;String, Object&gt; current() {
+        return Map.of("lockSeconds", lockSeconds);
+    }
+}</code></pre>
+  <p><strong>验证热更新三步走：</strong>先 <code>curl http://127.0.0.1:8081/stock/config</code> 得到 30；控制台把 lock-seconds 改成 60 点发布；再 curl 一次（以及 8082 那份）——不重启，读到 60。改动到达是<strong>推送</strong>而非轮询：gRPC 长连接毫秒级送达（第 3 期讲过的通道升级），应用日志里能看到配置变更记录。窗口里的另两个实用件：每次发布自动留<strong>历史版本</strong>可一键回滚；发布前可选 <strong>Beta 灰度</strong>（先推给指定 IP 验证再全量），上一期概念篇都点过名，这里不展开。</p>
+  <div class="warn">
+    <p><strong>本节唯一的坑：</strong>只写 <code>@Value</code> 忘了 <code>@RefreshScope</code>，热更新静默失效——值永远停在启动时读的那份，接口表现"改了没反应"。判断方法就一步：curl 拿到的还是旧值时，先查这个注解，再查是不是改错了 DataId/Group。</p>
+  </div>
+</section>
+
+<!-- ================= 05 按服务名调用 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>按服务名调用：OpenFeign + LoadBalancer</h2>
+  <p>轮到 order-service。它引同样的 nacos-discovery starter（配置只把 <code>spring.application.name</code> 换成 order-service，namespace/group 保持与 stock 一致，否则互相看不见），再加 OpenFeign 的 starter（<code>spring-cloud-starter-openfeign</code>），启动类标 <code>@EnableFeignClients</code>。调用代码总共一个接口：</p>
+  <pre><code>@FeignClient(name = "stock-service")     // 只写服务名，没有 IP、没有端口
+public interface StockClient {
+    @GetMapping("/stock/deduct")
+    String deduct(@RequestParam("sku") String sku);
+}
+
+@RestController
+public class OrderController {
+    private final StockClient stockClient;
+    public OrderController(StockClient stockClient) { this.stockClient = stockClient; }
+
+    @PostMapping("/order")
+    public String create(@RequestParam("sku") String sku) {
+        return "下单成功，库存侧返回：" + stockClient.deduct(sku);
+    }
+}</code></pre>
+  <p>stock 侧让接口返回自己的端口，方便肉眼核对流量去向：</p>
+  <pre><code>@GetMapping("/stock/deduct")
+public String deduct(@RequestParam String sku) {
+    log.info("扣减 {}，本实例端口 {}", sku, port);   // port 由 @Value("${server.port}") 注入
+    return "ok-" + port;
+}</code></pre>
+  <p>order-service 自身端口按 8090 起（<code>server.port: 8090</code>），然后连续 <code>curl -X POST "http://127.0.0.1:8090/order?sku=A001"</code> 若干次，返回在 <code>ok-8081</code> 与 <code>ok-8082</code> 之间交替，两边的 stock 日志也各有一半扣减记录——目标②达成。幕后分工：Feign 只负责"把方法调用变成 HTTP 请求"，请求发给谁由<strong>负载均衡器</strong>从服务表里挑，SCA 2023.x 默认用 <strong>spring-cloud-loadbalancer</strong>（轮询策略）——Ribbon 是 Spring Cloud 2020 之前的旧话，老教程里"default ribbon"的说法直接跳过，别再往 pom 里塞它。另注意：order 侧拿到的实例列表同样来自订阅推送，本地有缓存兜底（第 3 期容灾三件套），所以 Nacos 短暂抖动不至于打断存量调用。</p>
+</section>
+
+<!-- ================= 06 优雅下线与权重 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>优雅下线与权重：把 8081 摘出流量</h2>
+  <p>最后一个动作，也是这套路子在生产里最日常的用法。控制台 → stock-service 详情 → 编辑 8081 实例，把<strong>权重从 1.0 改成 0</strong>，保存。保持下单流量不停，观察返回值：几秒内全部变成 <code>ok-8082</code>——权重 0 表示"不再分新流量"，但实例还健康地活在列表里，随时可以恢复。这个秒级的生效速度靠的是订阅推送，不是轮询。</p>
+  <p>这个开关的两类现实用法：</p>
+  <ul>
+    <li><strong>滚动发布：</strong>发布 stock-service 新版本时，先把实例一的权重调 0 → 确认流量干净地全在实例二 → 停实例一、换包、启动 → 权重调回 → 对实例二如法炮制。全程在途请求不被切断，"先摘流量再动进程"就是"优雅"二字的全部含义；</li>
+    <li><strong>紧急摘流量：</strong>某实例行为异常（内存泄漏、响应变慢）时，先权重调 0 把它隔离出现场再慢慢排查——比直接 kill 温柔得多，kill 掉临时实例虽会自动摘除，但那有十几秒的心跳超时窗口，窗口内的新请求仍可能砸向尸体。</li>
+  </ul>
+  <div class="card card-tip">
+    <p><strong>收尾别忘：</strong>权重 0 只是"暂停营业"不是"注销"，实验做完记得把 8081 调回 1.0，否则下次压测你会困惑为什么一台机器闲着。四条目标此刻应该全部打勾——这四步合起来，就是绝大多数团队用 Nacos 的日常全景。</p>
+  </div>
+</section>
+
+<!-- ================= 07 quiz ================= -->
+<section>
+  <h2><span class="sec-num">07</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. 把 stock-service 注册进 Nacos，下面哪一步是【不需要】的？</p>
+      <ul class="quiz-options" data-answer="0">
+        <li class="quiz-option">在控制台服务列表里手动"添加实例"、填 IP 和端口</li>
+        <li class="quiz-option">pom 引入 spring-cloud-starter-alibaba-nacos-discovery</li>
+        <li class="quiz-option">配置 spring.cloud.nacos.server-addr 指向服务端</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 控制台改了 lock-seconds 并发布，想让 @Value 注入的值不重启就生效，必须配合什么？</p>
+      <ul class="quiz-options" data-answer="0">
+        <li class="quiz-option">给持有该 @Value 的 Bean 加 @RefreshScope</li>
+        <li class="quiz-option">给配置字段加 volatile 关键字</li>
+        <li class="quiz-option">没有办法，@Value 的值只能重启刷新</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. dev 与 prod 的服务要彻底互不可见，用第 3 期三层坐标的哪一层隔离？</p>
+      <ul class="quiz-options" data-answer="1">
+        <li class="quiz-option">Group——把环境写进分组名</li>
+        <li class="quiz-option">Namespace——硬隔离层，配错的那个环境连"看见"都看不见</li>
+        <li class="quiz-option">给服务名加 dev- / prod- 前缀</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 08 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：@RefreshScope 的热更新有边界——为什么数据库连接池、线程池这类资源改了配置不会自动跟着变？怎么处理？</summary>
+    <div class="details-body">
+      <p>原理先说透：@RefreshScope 的实现是<strong>代理刷新</strong>。容器给带该注解的 bean 生成一个代理，配置变更事件到达时并不"原地改字段"，而是把代理背后的目标实例作废，<strong>下次请求再访问代理时重新创建一个 bean、用新值完成注入</strong>——所以它刷得动的是"每次被调用时才取值"的东西，比如我们那个每次请求都读 lockSeconds 的 Controller。而连接池、线程池是<strong>启动期一次性装配</strong>的资源：池子在某个 bean 的构造/初始化阶段就按当时的配置把连接、线程建好了，之后字段哪怕被新值覆盖，已建好的池子也不会自己伸缩——好比把菜单上的价格改了，厨房里按旧菜单备好的菜不会消失。处理方式按需求选三档：<strong>一</strong>，把可热更项收敛为"用值时才生效"的参数（每次请求重读，@Value 或 @ConfigurationProperties 都行），池类参数不进热更清单；<strong>二</strong>，确实要跟随变更的资源，监听刷新事件（如 EnvironmentChangeEvent）自行销毁重建池——要自己处理并发使用中的旧池优雅排空，成本不低；<strong>三</strong>，最朴素的工程答案：池类配置改动就走第 06 节的权重摘流量 + 滚动重启，用发布流程换确定性。另附一个易踩的边角：RefreshScope 刷新瞬间旧 bean 被作废重建，<strong>有状态的 bean（持有用户会话、缓存）别放进 RefreshScope</strong>，刷新即失忆。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：多环境隔离，Namespace 与 Group 各该承担什么？混用会踩什么坑？</summary>
+    <div class="details-body">
+      <p>第 3 期给过定性：namespace 硬隔离、group 软分组。落到实战，分工应该是一句话：<strong>环境用 namespace，业务域用 group</strong>。namespace 强在"隔离是结构性的"：dev 与 prod 各自独立 ID，互相连列举都做不到；3.x 的权限体系还能把账号的可见/可操作范围绑到 namespace 上——开发账号碰不到 prod 的服务与配置，误操作的能量从根上被限住。group 弱在"只是名字里多了一段前缀"：同 namespace 内按组寻址、避免不同业务同名服务打架，够用，但没有权限语义，隔而不离。<strong>混用的大坑是拿 group 冒充环境隔离</strong>：图省事全公司共用 public namespace，用 TRADE_GROUP_PROD、TRADE_GROUP_DEV 分环境——某台开发机上的配置漏写 group（默认落 DEFAULT_GROUP）或写错组，它的服务就可能注册进"生产组"；prod 的消费者按服务名订阅时把这台开发机一并拉进服务表，流量就真的打到开发者的笔记本上了——<strong>同名服务跨环境串流量</strong>，这是有真实事故样本的经典模式，而且静默：没有任何报错，只是"生产偶发诡异"。辅助坑同样值得记：discovery 与 config 的 namespace 是<strong>分开配置</strong>的，只改了一处另一处还留在旧环境，服务注册进了 dev、配置却读着 prod，行为立刻精神分裂。所以团队规约应该写死：环境切换只允许出现在 namespace 一处，group 只表达业务语义——一个维度只干一件事，出问题时排查路径才是唯一的。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 09 要点与下期预告 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这四句：</strong></p>
+    <ul>
+      <li>注册是 starter 的自动行为：依赖 + server-addr（3.x 记得带鉴权凭证）即报上户口，控制台手动加实例是给无 SDK 场景留的后门；</li>
+      <li>Boot 3.x 用 spring.config.import 接配置，DataId 约定"服务名.扩展名"；热更新 = @RefreshScope + gRPC 推送，缺注解则静默失效；</li>
+      <li>按名调用：@FeignClient 写服务名，挑实例交给 Spring Cloud LoadBalancer——Ribbon 是历史，老教程的说法别再抄；</li>
+      <li>权重调 0 = 摘流量不动进程：滚动发布与紧急止损的标准动作，秒级生效，做完记得改回。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 5 期《架构与源码导读》——应用侧的每条 gRPC 在 Nacos 源码里落到哪个模块、Distro 分片同步在代码里怎么走、配置推送链路从发布到监听器的完整路径，并给一份"从哪个类开始读"的地图。Primary source：<a href="https://sca.aliyun.com" target="_blank" rel="noopener">Spring Cloud Alibaba 官方文档（Nacos 章节，本期依赖与配置项出处）</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0003-nacos-core-concepts-architecture.html">← 上一期：核心概念与整体架构</a>
+  <a class="next" href="0005-nacos-source-reading-guide.html">下一期：架构与源码导读 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，正确答案已标绿。");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Netty 系列第 3 期：核心概念与整体架构 | 2026-09-18</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0008</span>
+  <span><a href="../index.html">课程目录</a> · Netty 系列第 3 期 / 共 5 期 · <a href="https://netty.io" target="_blank" rel="noopener">netty.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · Netty 系列第 3 期：核心概念与整体架构</p>
+  <h1>Netty 核心概念与整体架构：五块积木与一次数据的旅程</h1>
+  <p class="subtitle">上一期我们用二十来行代码跑通了 Echo Server，但那二十行里其实埋着 Netty 的全部主角：两个 EventLoopGroup、一条 ChannelPipeline、一串 ChannelHandler、还有 channelRead 里接住的 ByteBuf。这一期把它们一个个请出来：Channel 是连接、EventLoop 是工人、Pipeline 是流水线、Handler 是工序、ByteBuf 是集装箱——五大概念配类比和一句话定义，一张自绘整体架构图看懂 boss 与 worker 的交接，再跟着一条数据从网卡走到业务再写回网卡。最后附上源码仓库的顶层模块地图。读完这一期，Netty 对你就不再是一堆模糊的类名。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 网络框架 · Java · Apache-2.0</span>
+    <span class="tag">📦 基于 4.2 线（4.2.18.Final · 2026-09-18 核对）</span>
+    <span class="tag-date">📅 2026-09-18 · 第 3 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 承上启下 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>上一期的 Echo 代码，其实已经用全了五个概念</h2>
+  <p>回看第 2 期那段 Echo Server，它就是今天整期内容的预告片：</p>
+  <ul>
+    <li><strong>两个 EventLoopGroup</strong>：boss 负责接连接，worker 负责处理连接上的读写——工人团队的分工；</li>
+    <li><strong>传给 childHandler 的 ChannelInitializer</strong>：往这条连接的 ChannelPipeline 里铺工序；</li>
+    <li><strong>channelRead 里接住的 msg</strong>：一个 ByteBuf，装着刚从网卡读进来的字节。</li>
+  </ul>
+  <p>上一期的目标是"跑起来"，这一期的目标是"看明白"。用户视角的 Netty 核心，说穿了就是五个名词：Channel、EventLoop（与 EventLoopGroup）、ChannelHandler、ChannelPipeline、ByteBuf。后面不管你写 HTTP 服务器还是自定义协议服务器，本质都是在组合这五块积木。</p>
+</section>
+
+<!-- ================= 02 五大核心概念 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>五块积木：类比 + 一句话定义 + 关键点</h2>
+
+  <div class="grid-2">
+    <div class="card">
+      <h4>① Channel——一条拨通的电话线</h4>
+      <p><strong>一句话定义：</strong>网络连接的抽象，读、写、连接、绑定等 I/O 操作的"总枢纽"（官方 javadoc：a nexus to a network socket）。</p>
+      <ul>
+        <li>比 JDK Socket 多了<strong>状态</strong>（open / active / closed）与统一的<strong>异步操作</strong>：所有操作立刻返回 ChannelFuture，完成时回调；</li>
+        <li>一条连接对应一个 Channel，它自带一条 Pipeline，并终身注册在一个 EventLoop 上。</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>② EventLoop / EventLoopGroup——一工人一线程一 Selector</h4>
+      <p><strong>一句话定义：</strong>事件循环——一个 EventLoop 就是一个线程加一个事件分发器，不停轮询"我名下的连接谁来事件了"；Group 是这支队伍。</p>
+      <ul>
+        <li>官方 javadoc 的说法：EventLoop <em>"will handle all the I/O operations for a Channel once registered"</em>——注册之后，这个连接的所有 I/O 都归它；</li>
+        <li><strong>连接终身绑定一个 worker</strong>：同一个连接的事件永远由同一线程串行处理，因此 handler 里不需要加锁——串行无锁的关键；</li>
+        <li>boss 只管 accept 新连接，注册完就撒手，读写全是 worker 的事。</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>③ ChannelHandler——一道工序</h4>
+      <p><strong>一句话定义：</strong>处理或拦截 I/O 事件的处理单元，业务逻辑就写在这里。</p>
+      <ul>
+        <li>分<strong>入站</strong>（ChannelInboundHandler：收到数据、连接激活）、<strong>出站</strong>（ChannelOutboundHandler：写出、绑定）和双工三类；</li>
+        <li>常见角色：解码器、编码器、业务处理器，以及官方内置的空闲检测、日志等；</li>
+        <li>约定俗成的责任：消费掉的消息要释放引用、要转发就显式调 <code>ctx.fireChannelRead()</code>。</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>④ ChannelPipeline——双向流水线</h4>
+      <p><strong>一句话定义：</strong>每个 Channel 自带一条 handler 链，入站事件与出站操作在链上沿相反方向传播。</p>
+      <ul>
+        <li><strong>入站</strong>（读到的数据）：从靠近socket的 head 出发，按添加顺序一站站传向 tail；</li>
+        <li><strong>出站</strong>（写操作）：从 tail 一侧出发，按相反顺序流回 head，由 head 真正落到网络；</li>
+        <li>运行期可动态增删 handler——发敏感数据前插一个 SSL handler，发完再摘掉。</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>⑤ ByteBuf——集装箱（读写双指针）</h4>
+      <p><strong>一句话定义：</strong>字节容器，用独立的读、写两个指针管理数据，替代 java.nio.ByteBuffer。</p>
+      <ul>
+        <li>JDK ByteBuffer 只有一个 position，读写切换必须手工 <code>flip()</code>，忘一次就翻车；ByteBuf 读写指针各管各的，<strong>永远不需要 flip</strong>；</li>
+        <li><strong>池化</strong>：默认从池化分配器取缓冲区（PooledByteBufAllocator），配引用计数（refCnt）显式回收；</li>
+        <li>支持堆内/堆外、按需扩容，以及 slice / composite 视图组合——零拷贝的基础。</li>
+      </ul>
+    </div>
+  </div>
+  <p class="note"><span class="h">版本备注</span>以上概念与官方表述已对照 Netty 4.2 用户指南与 javadoc 核对（2026-09-18）。4.1 与 4.2 两条稳定线在这些用户级概念上基本一致，4.x 老资料仍然适用。</p>
+</section>
+
+<!-- ================= 03 整体架构图 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>整体架构：一次连接的交接仪式</h2>
+  <p>五块积木拼起来的全景如下。读图三句话：<strong>boss 接连接、worker 管连接、pipeline 承载连接上的一切事件</strong>。虚线是"注册/绑定"关系，实线是数据流向。</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 440" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" style="max-width:100%">
+    <defs>
+      <marker id="ar-n" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar-g" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+      <marker id="ar-a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+
+    <!-- 客户端 -->
+    <rect x="20" y="58" width="118" height="56" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="79" y="80" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">客户端</text>
+    <text x="79" y="97" text-anchor="middle" fill="var(--muted)" font-size="9.5">发起 TCP 连接</text>
+    <line x1="138" y1="86" x2="166" y2="86" stroke="var(--muted)" marker-end="url(#ar-n)"/>
+
+    <!-- boss group -->
+    <rect x="172" y="54" width="196" height="64" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="270" y="76" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">boss EventLoopGroup</text>
+    <text x="270" y="94" text-anchor="middle" fill="var(--muted)" font-size="9.5">通常 1 个线程 · 只做 accept</text>
+
+    <!-- 注册虚线 -->
+    <path d="M320,118 C320,150 430,130 430,166" fill="none" stroke="var(--accent-3)" stroke-dasharray="4 3" marker-end="url(#ar-g)"/>
+    <text x="446" y="148" fill="var(--accent-3)" font-size="9.5">accept 后创建 Channel，注册到某个 worker（终身绑定）</text>
+
+    <!-- worker group -->
+    <rect x="172" y="170" width="568" height="126" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="188" y="192" fill="var(--ink)" font-size="11" font-weight="700">worker EventLoopGroup</text>
+    <text x="330" y="192" fill="var(--muted)" font-size="9.5">N 个 EventLoop · 每个 = 一条线程 + 一个事件分发器</text>
+
+    <rect x="188" y="202" width="164" height="56" rx="8" fill="var(--bg-accent)" stroke="var(--line)"/>
+    <text x="270" y="224" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">EventLoop-1</text>
+    <text x="270" y="241" text-anchor="middle" fill="var(--muted)" font-size="9">一线程 + 一 Selector</text>
+
+    <rect x="372" y="202" width="164" height="56" rx="8" fill="var(--bg-accent)" stroke="var(--line)"/>
+    <text x="454" y="224" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">EventLoop-2</text>
+    <text x="454" y="241" text-anchor="middle" fill="var(--muted)" font-size="9">一线程 + 一 Selector</text>
+
+    <rect x="556" y="202" width="164" height="56" rx="8" fill="var(--bg-accent)" stroke="var(--line)"/>
+    <text x="638" y="224" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">EventLoop-3</text>
+    <text x="638" y="241" text-anchor="middle" fill="var(--muted)" font-size="9">一线程 + 一 Selector</text>
+
+    <!-- channel chips -->
+    <rect x="188" y="266" width="78" height="22" rx="5" fill="var(--card)" stroke="var(--line)"/>
+    <text x="227" y="281" text-anchor="middle" fill="var(--ink)" font-size="8.5">Channel A</text>
+    <rect x="274" y="266" width="78" height="22" rx="5" fill="var(--card)" stroke="var(--line)"/>
+    <text x="313" y="281" text-anchor="middle" fill="var(--ink)" font-size="8.5">Channel B</text>
+    <rect x="372" y="266" width="78" height="22" rx="5" fill="var(--card)" stroke="var(--line)"/>
+    <text x="411" y="281" text-anchor="middle" fill="var(--ink)" font-size="8.5">Channel C</text>
+    <rect x="556" y="266" width="78" height="22" rx="5" fill="var(--card)" stroke="var(--line)"/>
+    <text x="595" y="281" text-anchor="middle" fill="var(--ink)" font-size="8.5">Channel D</text>
+    <rect x="642" y="266" width="78" height="22" rx="5" fill="var(--card)" stroke="var(--line)"/>
+    <text x="681" y="281" text-anchor="middle" fill="var(--ink)" font-size="8.5">Channel E</text>
+
+    <!-- worker -> pipeline 虚线 -->
+    <line x1="270" y1="296" x2="270" y2="324" stroke="var(--accent-3)" stroke-dasharray="4 3" marker-end="url(#ar-g)"/>
+    <text x="282" y="314" fill="var(--accent-3)" font-size="9.5">该连接的所有事件由这个 EventLoop 串行处理</text>
+
+    <!-- pipeline -->
+    <rect x="20" y="328" width="720" height="112" rx="10" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="36" y="348" fill="var(--ink)" font-size="11" font-weight="700">ChannelPipeline（双向流水线 · 每条连接一条，链在 Channel 上）</text>
+
+    <rect x="36" y="358" width="92" height="36" rx="6" fill="var(--card)" stroke="var(--accent)"/>
+    <text x="82" y="373" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">Head</text>
+    <text x="82" y="387" text-anchor="middle" fill="var(--muted)" font-size="8">socket 端</text>
+    <line x1="128" y1="376" x2="142" y2="376" stroke="var(--muted)"/>
+
+    <rect x="142" y="358" width="118" height="36" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="201" y="373" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">解码器</text>
+    <text x="201" y="387" text-anchor="middle" fill="var(--muted)" font-size="8">入站工序</text>
+    <line x1="260" y1="376" x2="274" y2="376" stroke="var(--muted)"/>
+
+    <rect x="274" y="358" width="130" height="36" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="339" y="373" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">业务 handler</text>
+    <text x="339" y="387" text-anchor="middle" fill="var(--muted)" font-size="8">写你的逻辑</text>
+    <line x1="404" y1="376" x2="418" y2="376" stroke="var(--muted)"/>
+
+    <rect x="418" y="358" width="118" height="36" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="477" y="373" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">编码器</text>
+    <text x="477" y="387" text-anchor="middle" fill="var(--muted)" font-size="8">出站工序</text>
+    <line x1="536" y1="376" x2="550" y2="376" stroke="var(--muted)"/>
+
+    <rect x="550" y="358" width="92" height="36" rx="6" fill="var(--card)" stroke="var(--accent)"/>
+    <text x="596" y="373" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">Tail</text>
+    <text x="596" y="387" text-anchor="middle" fill="var(--muted)" font-size="8">末端</text>
+
+    <line x1="46" y1="406" x2="520" y2="406" stroke="var(--accent)" marker-end="url(#ar-a)"/>
+    <text x="530" y="410" fill="var(--accent)" font-size="9.5">入站：head → tail（读事件）</text>
+    <line x1="520" y1="424" x2="46" y2="424" stroke="var(--accent-3)" marker-end="url(#ar-g)"/>
+    <text x="530" y="428" fill="var(--accent-3)" font-size="9.5">出站：tail → head（写回）</text>
+  </svg>
+  </div>
+
+  <p>交接仪式分两步：<strong>第一步</strong>，客户端发起 TCP 连接，boss 的事件循环发现 accept 就绪，创建对应的 Channel，并把它注册到 worker 组里的某个 EventLoop 上——从这一刻起，这条连接终身归这个工人管，boss 不再过问；<strong>第二步</strong>，这条连接后续所有的读写事件，都由绑定的 worker 从事件循环中拿出来，沿着它的 Pipeline 传播处理。图里 EventLoop 名下的 Channel 小方块就是"终身绑定"的样子：每个工人名下挂一批连接，互不越界。</p>
+</section>
+
+<!-- ================= 04 一条数据的旅程 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>叙事主线：一条数据的旅程</h2>
+  <p>概念讲完了，现在用一条数据把它们串起来。假设客户端发来一句 <code>"hello"</code>，Echo Server 要把它原样送回去：</p>
+  <ol>
+    <li><strong>字节到达。</strong>网卡收到数据，内核把它放进这条 TCP 连接的接收缓冲区——注意，TCP 给你的是<strong>一串没有边界感的字节流</strong>，"一条消息"的边界要由你自己定义；</li>
+    <li><strong>EventLoop 醒来。</strong>这条连接绑定的 worker EventLoop 正在轮询自己名下的事件，发现"这条 Channel 可读了"，就把字节读进一个<strong>池化的 ByteBuf</strong>（集装箱在这一步装货）；</li>
+    <li><strong>入站传播。</strong>EventLoop 从 Pipeline 的 <strong>head</strong> 触发 <code>channelRead</code>，事件像零件上流水线一样按添加顺序过站：<strong>解码器</strong>先把字节流切出完整的帧（这就是上一期说的"拆包粘包"要处理的事），再交到下一站；</li>
+    <li><strong>业务 handler。</strong>拿到解码后的完整消息，执行你的业务逻辑。Echo 的逻辑就一句：<code>ctx.writeAndFlush(msg)</code>——把货发回去；</li>
+    <li><strong>出站回程。</strong>这次写从 <strong>tail</strong> 一侧反向出发：<strong>编码器</strong>把消息转回字节，装进 ByteBuf，流到 head 由它真正写到网络；</li>
+    <li><strong>异步收尾。</strong><code>writeAndFlush</code> 立刻返回一个 <strong>ChannelFuture</strong>，写完成的回调在 listener 里触发——想"发完再关连接"，逻辑就写在那里。</li>
+  </ol>
+  <p>走完这一圈你会发现：一条数据的旅程，恰好把五大概念各用了一次——<strong>Channel 提供连接与操作、EventLoop 驱动整个旅程、Pipeline 规定路线、Handler 是沿途站点、ByteBuf 是全程的载具</strong>。以后看任何 Netty 代码，先在心里把这条路线画出来，类名就都有位置了。</p>
+</section>
+
+<!-- ================= 05 源码仓库模块地图 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>打开仓库：顶层模块地图</h2>
+  <p>概念清楚了，再看源码仓库就不慌。以 GitHub 上 netty/netty 默认分支 <strong>4.2</strong> 的实际目录为准（2026-09-18 核对），常用模块一句话：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>顶层模块</th><th>一句话职责</th></tr></thead>
+    <tbody>
+      <tr><td><code>transport/</code></td><td>核心传输实现：NIO 通道等，还提供 local / embedded 等用于测试的传输</td></tr>
+      <tr><td><code>transport-native-epoll/</code> 等</td><td>Linux(epoll)、macOS/BSD(kqueue)、io_uring 的原生传输，走系统调用更少拷贝更快</td></tr>
+      <tr><td><code>buffer/</code></td><td>ByteBuf 全家：读写指针、池化分配器、堆内外实现都在这</td></tr>
+      <tr><td><code>codec/</code> + <code>codec-*</code></td><td>编解码框架（如 ByteToMessageDecoder）+ http/http2/dns/mqtt/redis 等协议实现</td></tr>
+      <tr><td><code>handler/</code></td><td>内置功能 handler：空闲检测 IdleStateHandler、日志、流量整形、SSL/TLS</td></tr>
+      <tr><td><code>handler-proxy/</code></td><td>SOCKS / HTTP 代理相关 handler</td></tr>
+      <tr><td><code>common/</code></td><td>公共地基：引用计数工具、内部并发与工具类，所有模块都依赖它</td></tr>
+      <tr><td><code>resolver/</code> + <code>resolver-dns/</code></td><td>地址解析抽象与异步 DNS 解析器</td></tr>
+      <tr><td><code>example/</code></td><td>官方示例：echo、http、snoop 等，可以编译直接跑——比任何教程都可信</td></tr>
+      <tr><td><code>microbench/</code> + <code>testsuite*/</code></td><td>JMH 微基准与各级测试套件</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note"><span class="h">版本基线</span>netty.io 当前推荐稳定线为 <strong>4.2</strong>（最新 4.2.18.Final，2026-09-09 发布），<strong>4.1</strong> 线仍在并行维护（4.1.138.Final）；两者模块结构一致。社区面（2026-09-18 GitHub 核对）：netty/netty <strong>35.1k Stars、16.3k Forks</strong>，Apache-2.0 协议。</p>
+</section>
+
+<!-- ================= 06 quiz ================= -->
+<section>
+  <h2><span class="sec-num">06</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. 数据到达后，入站事件沿 ChannelPipeline 的传播方向是？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["反了：tail 是流水线末端，入站事件从 head 出发；出站才是反方向。","对：入站事件从靠近 socket 的 head 出发，按 handler 添加顺序传向 tail。","流水线不会从中间向两边扩散，每个事件都有固定起点和方向。"]'>
+        <li class="quiz-option">从 tail 出发，按添加逆序传递</li>
+        <li class="quiz-option">从 head 出发，按添加顺序传递</li>
+        <li class="quiz-option">从中间工序向两端同时扩散</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 一条连接上的读写事件，由谁负责处理？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不是抢活制：事件在哪个 worker 名下是注册时定好的。","不是每事件一线程：那样线程开销和锁竞争会吃掉性能。","对：连接注册后终身绑定一个 EventLoop，所有事件由该线程串行处理，因此无需加锁。"]'>
+        <li class="quiz-option">worker 组里谁空闲谁领取</li>
+        <li class="quiz-option">每个事件临时派一条线程</li>
+        <li class="quiz-option">终身绑定给一个固定 EventLoop</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. ByteBuf 相对 java.nio.ByteBuffer 最核心的差别是？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对：读写两个独立指针，读写切换不需要 flip，还支持池化复用。","不对：ByteBuf 堆内堆外都支持，由分配方式决定。","不对：ByteBuf 写满可以按需扩容，不是固定容量。"]'>
+        <li class="quiz-option">读写双指针，无需 flip 切换</li>
+        <li class="quiz-option">ByteBuf 只能分配在堆外</li>
+        <li class="quiz-option">ByteBuf 创建后容量固定不变</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. boss EventLoopGroup 的职责是什么？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对：boss 只管 accept 新连接并注册给 worker，之后不再过问。","不对：连接上的读写事件全部由绑定的 worker 处理。","不对：业务逻辑写在 pipeline 的 handler 里，boss 不碰业务。"]'>
+        <li class="quiz-option">接收新连接，注册给 worker</li>
+        <li class="quiz-option">处理连接上终身的读写事件</li>
+        <li class="quiz-option">执行业务逻辑，给 worker 减负</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 07 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：为什么连接"绑死"一个 EventLoop 反而更快？多线程不是万能答案吗？</summary>
+    <div class="details-body">
+      <p>直觉上，谁空闲谁处理似乎更"充分利用"线程，但那套方案（类似传统线程池 per-request 模型）有三笔隐性开销：<strong>锁竞争</strong>（同一条连接的缓冲区、handler 状态被多线程碰，处处加锁）、<strong>上下文切换</strong>（任务在线程间倒手，缓存与栈帧反复重建）、<strong>顺序难题</strong>（两条消息可能被并发处理，想保序就得引入队列与同步）。而"终身绑定一个工人"一次性解决了三件事：单线程串行执行，<strong>所有共享状态天然无锁</strong>；事件的<strong>处理顺序等于到达顺序</strong>，免费获得；同一个工人反复摸同一条连接的缓冲区，<strong>CPU 缓存局部性</strong>更好。线程模型从"多条线程抢一份状态"变成"一条线程独占一批连接"，吞吐反而上去——这正是 Netty 高性能的第一块基石。当然它有代价：一个 EventLoop 名下的所有连接共享这条线程，<strong>任何阻塞调用（JDBC、sleep、重计算）都会拖死一整批连接</strong>，所以铁律是"EventLoop 上不阻塞"，重逻辑丢给业务线程池，算完再调 write 写回——那一步是线程安全的，因为写操作会被提交回这条连接绑定的 EventLoop 执行。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：为什么 ByteBuf 必须手动 release，而不能像普通 Java 对象一样交给 GC？</summary>
+    <div class="details-body">
+      <p>因为<strong>池化 + 堆外</strong>这两件事都超出了 GC 的管辖范围。堆外内存 GC 看不见，不回收；而池化的意义在于"用完还回池子"，可 GC 根本不知道"什么时候算用完"。所以 Netty 用<strong>引用计数</strong>（refCnt）手工管理生命周期：谁最后用完，谁负责 release，归零时堆外内存被释放、缓冲区被还回池子。配套的是几条约定：<strong>写出到网络的消息，Netty 在写完时替你 release</strong>；你自己消费（比如解码后丢弃）或传递的消息，需要你自己释放；忘了释放的入站消息漂到 tail 时会被记日志，ResourceLeakDetector 还会采样报告泄漏——这也是初学者最常撞的坑（典型症状：日志里出现 LEAK 警告）。反观 JDK ByteBuffer：默认堆内、不池化，可以偷懒全交给 GC，代价是高并发下频繁分配带来的 GC 压力。本质上，Netty 是<strong>用"手工生命周期"换"性能"</strong>，再把这份手工成本尽量放在框架能代劳的边界上——理解了这层取舍，引用计数就不再是玄学。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 08 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这三句话：</strong></p>
+    <ul>
+      <li>五块积木：Channel 是连接、EventLoop 是工人、Pipeline 是流水线、Handler 是工序、ByteBuf 是集装箱；</li>
+      <li>一条铁律：连接终身绑定一个 EventLoop，单线程串行、无锁——代价是 EventLoop 上不能阻塞；</li>
+      <li>两个方向：入站 head → tail 按添加顺序，出站 tail → head 反向回流；ByteBuf 读写双指针、池化加引用计数。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 4 期《实战：自定义协议服务器》——在今天的流水线上动真格：用长度字段解决拆包粘包、加 IdleStateHandler 做心跳保活、自己写一对编解码器。跑完那一期，五大概念就从"看懂"变成"会用"。</p>
+  <p><strong>延伸阅读：</strong>Primary source 官方资料两份：<a href="https://netty.io/wiki/user-guide-for-4.x.html" target="_blank" rel="noopener">Netty 4.x User Guide（官方 wiki）</a>（boss/worker、异步操作、ByteBuf 双指针的一手出处）与 <a href="https://netty.io/4.2/api/io/netty/channel/package-summary.html" target="_blank" rel="noopener">io.netty.channel 包 javadoc</a>（Channel / EventLoop / Pipeline 的权威定义）；方向传播细节可再读 <a href="https://netty.io/4.2/api/io/netty/channel/ChannelPipeline.html" target="_blank" rel="noopener">ChannelPipeline javadoc</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0007-netty-quickstart.html">← 上一期：5 分钟跑起来</a>
+  <a class="next" href="0009-netty-custom-protocol.html">下一期：实战场景 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

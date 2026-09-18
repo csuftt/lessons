@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Nacos 系列第 1 期：微服务的电话簿和配置遥控器 | 2026-09-18</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0001</span>
+  <span><a href="../index.html">课程目录</a> · Nacos 系列第 1 期 / 共 5 期 · <a href="https://nacos.io" target="_blank" rel="noopener">nacos.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · Nacos 系列第 1 期：认识项目</p>
+  <h1>Nacos 是什么：微服务的电话簿和配置遥控器</h1>
+  <p class="subtitle">每个开源项目入门系列的第一件事，都是回答三个问题：它解决什么痛点、凭什么活下来、什么场景该选它。Nacos（Dynamic Naming and Configuration Service）是阿里开源的"服务发现 + 配置管理"平台，也是 Spring Cloud Alibaba 全家桶里最常驻的一个组件——公司主栈每天在用它，但多数人只把它当"依赖里的一个 jar"。这一期先把它当成一个独立的开源项目来认识：两个"找不到"的痛点、一张两大功能的闭环图、一份与 Eureka/Apollo/Consul 的对比账，以及一个能贯穿整个系列的心智模型。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 注册/配置中心 · Java · Apache-2.0</span>
+    <span class="tag">📦 基于 v3.x（2026-09 主线 3.2）</span>
+    <span class="tag-date">📅 2026-09-18 · 第 1 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 痛点 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>微服务时代，两个"找不到"的痛点</h2>
+  <p>单体应用拆成微服务后，最先撞上的不是技术多酷，而是两件朴素的小事开始失控：</p>
+  <ul>
+    <li><strong>服务找不到：</strong>订单服务要调库存服务，写谁地址？写死 <code>10.0.3.15:8081</code>，库存服务一扩容、一迁移、一上容器，所有调用方改配置发版。实例从 2 台变 8 台，谁来做负载均衡？某台挂了，谁来把摘除消息通知出去？</li>
+    <li><strong>配置找不到（管不住）：</strong>超时时间、限流阈值、开关	flag，散落在几十个服务的几百份配置文件里。改一个值要走"改代码 → 打包 → 重启"全流程；半夜出事故想秒级关掉一个功能开关，发现做不到。</li>
+  </ul>
+  <p>这两个痛点的公共解法，是把"名字 → 地址"和"配置 → 实例"这两份映射关系，从每个应用里抽出来，交给一个所有服务都信任的中间组件保管——它就是 Nacos 要占的那个位置。名字 <strong>Nacos</strong> 就是 <strong>Na</strong>ming <strong>an</strong>d <strong>Co</strong>nfiguration <strong>S</strong>ervice 的缩写，直白到不用翻译。</p>
+</section>
+
+<!-- ================= 02 是什么 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>Nacos 是什么：一张图看懂两大闭环</h2>
+  <p>Nacos 2018 年由阿里开源（Apache-2.0 协议），在生产上经过了多年双十一级别的打磨。它干两件事，对应两条闭环：</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar1g" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+
+    <rect x="20" y="14" width="348" height="26" rx="6" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="194" y="31" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">闭环一：服务发现（电话簿）</text>
+    <rect x="30" y="64" width="96" height="46" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="78" y="83" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">提供者</text>
+    <text x="78" y="100" text-anchor="middle" fill="var(--muted)" font-size="9.5">启动即注册</text>
+    <line x1="126" y1="87" x2="146" y2="87" stroke="var(--muted)" marker-end="url(#ar1)"/>
+    <rect x="150" y="56" width="96" height="56" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="198" y="78" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">Nacos</text>
+    <text x="198" y="96" text-anchor="middle" fill="var(--muted)" font-size="9.5">服务名→实例清单</text>
+    <line x1="246" y1="87" x2="266" y2="87" stroke="var(--muted)" marker-end="url(#ar1)"/>
+    <rect x="270" y="64" width="88" height="46" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="314" y="83" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">消费者</text>
+    <text x="314" y="100" text-anchor="middle" fill="var(--muted)" font-size="9.5">订阅+本地缓存</text>
+    <path d="M198,112 C198,132 78,126 78,146" fill="none" stroke="var(--accent-3)" stroke-dasharray="4 3" marker-end="url(#ar1g)"/>
+    <rect x="34" y="148" width="330" height="26" rx="8" fill="var(--bg-accent)" stroke="var(--line)"/>
+    <text x="46" y="165" fill="var(--ink)" font-size="10">心跳续约（默认 5s）· 停跳超时自动摘除 · 消费者收到推送刷新</text>
+
+    <rect x="392" y="14" width="348" height="26" rx="6" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="566" y="31" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">闭环二：配置管理（遥控器）</text>
+    <rect x="402" y="64" width="100" height="46" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="452" y="83" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">控制台/CLI</text>
+    <text x="452" y="100" text-anchor="middle" fill="var(--muted)" font-size="9.5">发布/灰度/回滚</text>
+    <line x1="502" y1="87" x2="522" y2="87" stroke="var(--muted)" marker-end="url(#ar1)"/>
+    <rect x="526" y="56" width="96" height="56" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="574" y="78" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">Nacos</text>
+    <text x="574" y="96" text-anchor="middle" fill="var(--muted)" font-size="9.5">版本化配置账本</text>
+    <line x1="622" y1="87" x2="642" y2="87" stroke="var(--accent-3)" marker-end="url(#ar1g)"/>
+    <rect x="646" y="64" width="88" height="46" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="690" y="83" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">应用</text>
+    <text x="690" y="100" text-anchor="middle" fill="var(--muted)" font-size="9.5">监听变更不重启</text>
+    <rect x="406" y="148" width="330" height="26" rx="8" fill="var(--bg-accent)" stroke="var(--line)"/>
+    <text x="418" y="165" fill="var(--ink)" font-size="10">长轮询/长连接推送变更 · 客户端本地快照兜底 · 历史版本一键回滚</text>
+
+    <rect x="20" y="200" width="720" height="108" rx="10" fill="var(--warn-bg)" stroke="var(--accent)"/>
+    <text x="36" y="226" fill="var(--ink)" font-size="12" font-weight="700">贯穿全系列的心智模型</text>
+    <text x="36" y="250" fill="var(--ink)" font-size="11">服务发现 = 电话簿：记名字就能找到人，换号码（IP）不用通知所有人；挂机（宕机）自动从簿里划掉。</text>
+    <text x="36" y="272" fill="var(--ink)" font-size="11">配置中心 = 遥控器：运行中的服务像开着电视，调音量（改配置）不用关机重启，按一下（发布）全屋生效。</text>
+    <text x="36" y="294" fill="var(--muted)" font-size="10">两者共用同一套命名空间/分组/服务名的组织方式和同一个控制台——这是 Nacos"二合一"的架构红利。</text>
+  </svg>
+  </div>
+
+  <p><strong>电话簿怎么保持新鲜？</strong>提供者启动时注册自己（服务名 + IP + 端口 + 元数据），之后持续心跳续约；Nacos 一旦收不到心跳就标记不健康、超时自动摘除；消费者订阅感兴趣的服务，实例上下线时收到推送刷新本地缓存——注意这个细节：<strong>消费者本地也有一份缓存快照</strong>，Nacos 整个挂掉的几分钟里，存量调用关系还能靠快照撑着，这是"电话簿"架构的容灾底线。</p>
+  <p><strong>遥控器怎么做到"不重启就生效"？</strong>配置发布后由 Nacos 推送到监听该配置的实例（2.x 起客户端与服务端之间改用 gRPC 长连接），应用在代码里给配置注册一个监听器，变更回调里自己决定怎么热应用——改线程池、切数据源、关功能开关都可以。同时每次发布都生成一个历史版本，出问题一键回滚到上一版，这在事故响应里比"回滚代码重新发版"快一个数量级。</p>
+</section>
+
+<!-- ================= 03 生态位与数据 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>它凭什么活下来：社区数据与生态位</h2>
+  <p>注册中心这个赛道 2015~2018 年相当拥挤：Eureka、Consul、ZooKeeper、etcd、Apollo 各占一角。Nacos 能成为国内事实标准之一，靠的是两件事：<strong>把"注册 + 配置"合成一个组件</strong>（别的竞品大多只做一半），以及<strong>对所有主流 RPC 生态中立兼容</strong>——Spring Cloud、Apache Dubbo、gRPC &amp; Dubbo RPC、Kubernetes Service、CoreDNS、Istio（xDS）、Prometheus 服务发现都在官方兼容清单里。对一个混合技术栈的公司来说，"一个组件接所有框架"的运维诱惑是实实在在的。</p>
+  <p>社区面上（2026-09-18 GitHub 核对）：alibaba/nacos 仓库 <strong>33.4k Stars、13.3k Forks</strong>，主分支六千余次提交，维护活跃度在国内基础设施项目里属于第一梯队。背书则是阿里内部多年大促场景的生产验证——开源基础设施的"生产打磨履历"没有捷径，这是它对新项目拉开身位的地方。</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>能力维度</th><th>Nacos</th><th>Eureka</th><th>Apollo</th></tr></thead>
+    <tbody>
+      <tr><td>服务发现</td><td>✅ 心跳 + 主动探测，推送变更</td><td>✅ 心跳，客户端定时全量拉</td><td>❌ 不做</td></tr>
+      <tr><td>配置管理</td><td>✅ 版本 / 灰度 / 回滚</td><td>❌ 不做</td><td>✅ 灰度发布是招牌能力</td></tr>
+      <tr><td>一致性模型</td><td>临时实例 AP / 持久实例 CP，按类型分流</td><td>AP（自我保护模式）</td><td>依赖数据库，CP 倾向</td></tr>
+      <tr><td>维护现状（2026-09）</td><td>活跃，3.x 主线演进中</td><td>2.x 停止开发，仅维护</td><td>活跃</td></tr>
+      <tr><td>典型选择理由</td><td>注册配置二合一，SCA 原生</td><td>历史存量（Spring Cloud Netflix）</td><td>只要顶级配置管理时</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">对比基于各项目公开文档与仓库状态的定性归纳，用于建立选型直觉；具体版本的行为差异以官方文档为准。Consul（HashiCorp，多面手但国内中间件生态集成弱）与 ZooKeeper/etcd（通用一致性存储，注册中心只是其上的"用法"而非产品定位）也常被放进这张表，这里收缩到三个最常被对位的选项。</p>
+</section>
+
+<!-- ================= 04 版本演进 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>三代演进：从 HTTP 短连接到 3.x</h2>
+  <p>认识一个项目，看它的版本路线比看功能列表更能理解它的设计取舍：</p>
+  <ul>
+    <li><strong>1.x（2019 起）：HTTP 短连接时代。</strong>客户端靠定时任务轮询拉取服务列表和配置变更，实现简单，但万级服务规模下服务端连接数与推送延迟都吃紧。</li>
+    <li><strong>2.x（2020 底 2.0 起）：gRPC 长连接时代。</strong>客户端与服务端建一条长连接，注册、心跳、订阅推送全走连接级通道，连接数从"实例 × 任务"降为"实例 × 1"，推送从秒级轮询变成毫秒级触达——这是 Nacos 支撑超大规模集群的关键一跃。今天公司里跑的生产版本绝大多数在这个系。</li>
+    <li><strong>3.x（2025-05 3.0 GA，当前 3.2）：控制台独立与默认安全时代。</strong>控制台从主端口拆出来独立部署（默认 8080）、首次启动强制配置鉴权密钥、OpenAPI 升级到 v3 路径；3.2 还把触角伸向 AI 服务注册（MCP、Prompt、Agent 管理）。老的 8848 主端口与核心协议保持兼容，2.x 客户端可以平滑接入 3.x 服务端。</li>
+  </ul>
+  <p>本系列以 <strong>3.x 为基准版本</strong>讲（装的就是 3.x），涉及 2.x 差异的地方会单独标注——毕竟"公司生产在 2.x、社区主线在 3.x"会是未来几年的常态，两边的对应关系本身就是入门者最需要的地图。</p>
+</section>
+
+<!-- ================= 05 什么场景选它 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>什么场景该选它（以及不该）</h2>
+  <div class="card">
+    <p><strong>✅ 适合：</strong></p>
+    <ul>
+      <li>技术栈在 Spring Cloud Alibaba / Dubbo 系——Nacos 是原生默认项，集成成本接近零；</li>
+      <li>想要"注册 + 配置"一个组件管两件事，不想同时运维 Eureka + Apollo 两套；</li>
+      <li>虚拟机、混合云、K8s 并存的部署形态——Nacos 不绑定 K8s，跨机房多集群场景照样组织；</li>
+      <li>服务规模在数十到数千实例量级、需要毫秒级配置推送和灰度发布能力。</li>
+    </ul>
+    <p><strong>❌ 不必：</strong></p>
+    <ul>
+      <li>全部服务已经跑在 K8s 里且只用原生 Service/DNS 做发现——再引入 Nacos 属于重复建设（除非需要它做配置中心）；</li>
+      <li>只需要存少量强一致 KV（如选主、元数据锁）——那是 etcd/ZooKeeper 的领地，别拿电话簿当保险柜；</li>
+      <li>配置管理需求极深（多集群多环境超复杂灰度矩阵）且已稳定运行 Apollo——迁移收益不一定盖过风险。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= 06 quiz ================= -->
+<section>
+  <h2><span class="sec-num">06</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. 库存服务从 2 台扩到 8 台，使用 Nacos 做发现后，订单服务的代码或配置需要改动吗？</p>
+      <ul class="quiz-options" data-answer="1">
+        <li class="quiz-option">需要把 8 台的地址都加进配置文件</li>
+        <li class="quiz-option">不需要，订单服务订阅的是服务名，实例清单由 Nacos 推送刷新</li>
+        <li class="quiz-option">需要重启订单服务让它重新发现</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 临时实例与持久实例在一致性模型上的差别，下面哪个说法是对的？</p>
+      <ul class="quiz-options" data-answer="2">
+        <li class="quiz-option">两者都走 Raft 强一致</li>
+        <li class="quiz-option">两者都只需要最终一致</li>
+        <li class="quiz-option">临时实例走 Distro 追求可用，持久实例走 Raft 追求强一致</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. Nacos 2.x 相对 1.x 最关键的架构变化是什么？</p>
+      <ul class="quiz-options" data-answer="0">
+        <li class="quiz-option">客户端与服务端之间从 HTTP 短连接轮询升级为 gRPC 长连接</li>
+        <li class="quiz-option">控制台从 8848 端口拆到独立的 8080</li>
+        <li class="quiz-option">配置存储从 Derby 换成 MySQL</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 07 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：为什么 Nacos 要同时支持 AP 和 CP，而不是像 Eureka 那样一心一意选 AP？</summary>
+    <div class="details-body">
+      <p>因为电话簿和账本对"错"的容忍度不一样。<strong>临时实例</strong>（微服务注册的典型形态）本质是"活着才有意义"的记录——实例挂了记录就该消失，网络分区时宁可各自保留旧清单继续服务（AP，Distro 协议），也不能为了强一致把整个发现服务卡死；反正心跳停了记录会被摘除，短暂不一致会自愈。<strong>持久实例</strong>和<strong>配置数据</strong>则相反：配置是"写下去就必须都在"的账本，丢一条可能让某个服务永远起不来，这类数据必须走多数派提交（CP，Raft 协议），分区时宁可拒绝写入也不允许两边各记各的账。Eureka 只有第一类数据，所以可以一心 AP；Nacos 两类都管，就必须把一致性粒度做到"按数据类型分流"——这也是第 3 期讲架构分层时的主线之一。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：Eureka 停止 2.x 开发后，国内团队迁移时为什么多数选了 Nacos 而不是 Consul？</summary>
+    <div class="details-body">
+      <p>三个现实账。①<strong>迁移成本</strong>：Spring Cloud Alibaba 体系里 Nacos 是"换依赖 + 换配置"级别的事，Consul 则要引入一套 HashiCorp 生态的 agent/ACL 心智；对存量微服务，迁移摩擦是第一决定因素。②<strong>能力补全</strong>：迁注册中心往往是补配置中心需求的顺手时机，Nacos 二合一，Consul 的 KV 存储做配置管理在灰度发布、版本回滚、客户端热更新这些"配置中心必备能力"上都要自建或引入第三方。③<strong>生态与验证</strong>：Dubbo、Sentinel、Seata、Spring Cloud Alibaba 官方文档默认对接 Nacos，社区中文资料和生产案例密度完全不是一个量级。Consul 的优势（多数据中心原生、DNS 接口干净、与 Vault/Terraform 同生态）在以 Java 中间件为主的栈里发挥不出来——选型不是选"更好的组件"，是选"在自己生态里摩擦最小的组件"。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 08 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这三句话：</strong></p>
+    <ul>
+      <li>Nacos = 服务发现（电话簿）+ 配置管理（遥控器），一个组件管两件微服务最日常的事；</li>
+      <li>它的护城河是"二合一 + 生态中立"：SCA/Dubbo/gRPC/K8s 全兼容，而非单点技术碾压；</li>
+      <li>1.x 轮询 → 2.x gRPC 长连接 → 3.x 控制台独立 + 默认鉴权，三代演进的主线是"更大、更安全"。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 2 期《5 分钟跑起来》——本机装一个 3.x 单机版，把一个真实服务注册进去、发一条会被热推送的配置，全程只用浏览器和几条 curl。跑通它，电话簿和遥控器就不再只是比喻。</p>
+  <p><strong>延伸阅读：</strong>原理视角的《Nacos 注册与配置》见每日微课程线 <a href="../../daily-tech-course/lessons/002-nacos-registry-config.html">第 0002 期</a>（本系列第 3、5 期会深入架构与源码，与之互为表里）。Primary source：<a href="https://nacos.io/docs/latest/what-is-nacos/" target="_blank" rel="noopener">Nacos 官方文档 · What is Nacos</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev">← 最早一期</span>
+  <a class="next" href="0002-nacos-quickstart.html">下一期：5 分钟跑起来 Nacos →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

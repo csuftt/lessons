@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Netty 系列第 1 期：Java 高性能网络的事实地基 | 2026-09-18</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0006</span>
+  <span><a href="../index.html">课程目录</a> · Netty 系列第 1 期 / 共 5 期 · <a href="https://netty.io" target="_blank" rel="noopener">netty.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · NETTY 系列第 1 期：认识项目</p>
+  <h1>Netty 是什么：Java 高性能网络的事实地基</h1>
+  <p class="subtitle">开源项目入门系列的每个新主题，都从三个问题开始：它解决什么痛点、凭什么活下来、什么场景该选它。Netty 是一个异步事件驱动的网络应用框架：Java 原生网络编程两代都不省心——BIO 一连接一线程，撞上 C10K 就熄火；NIO 给了 epoll 的能力，却极难写对。Netty 在 JDK NIO 之上补齐线程模型、ByteBuf、编解码这一层工程件，成为 Dubbo、Elasticsearch、RocketMQ、gRPC 共同的地基。这一期带走一个能贯穿全系列的心智模型：主从 Reactor——一队接待、一队干活、每条连接一条流水线。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 网络框架 · Java · Apache-2.0</span>
+    <span class="tag">📦 基于 Netty 4.2.x（主线 4.2.18.Final）</span>
+    <span class="tag-date">📅 2026-09-18 · 第 1 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 痛点 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>两代困境：Java 原生网络编程为什么难</h2>
+  <p>在 Netty 出现之前，用 Java 写一个"扛得住很多连接"的服务端，要过两关，两关都不好过。</p>
+  <p><strong>第一代是 BIO（阻塞 I/O）：一连接一线程。</strong>服务端 <code>accept()</code> 到一个连接，就得分配一个线程守着它读写——线程一进入 <code>read()</code> 就阻塞，直到对端来数据。连接少时这是最自然的写法；但上世纪九十年代末 Dan Kegel 把"万级并发连接"命名为 <strong>C10K 问题</strong>后，这笔账就算不下去了：一万连接就是一万线程，仅线程栈（JVM 默认每线程约 1MB）就要吃掉约 10GB 内存，加上内核不停地在几万个线程间切换上下文，CPU 大量时间花在"保存现场、恢复现场"而不是干活上。线程池只是把排队换个地方，救不了"每个连接天然占住一个线程"这个本质。</p>
+  <p><strong>第二代是 NIO（JDK 1.4，2002 年）：能力给了，但没给工程。</strong>Selector + Channel + Buffer 的组合，底层正是 Linux 的 epoll：一个线程可以盯住上万个连接，谁就绪处理谁，理论上线程数和 CPU 核数对齐就够了。能力到位了，可裸写 NIO 极难写对，坑是成系列的：</p>
+  <ul>
+    <li><strong>API 面向流、面向位运算：</strong>就绪事件靠 <code>SelectionKey</code> 的 interestOps 位集合表达，注册、取消、握手写一半的事件管理全靠自己，状态一多就成一锅粥；</li>
+    <li><strong>半包粘包自己扛：</strong>TCP 是没有"消息边界"的字节流，一次 <code>read()</code> 拿到的可能是半条消息、一条半消息，攒缓冲区、判边界、拆包、重组全是手艺活，写错就是线上数据错乱；</li>
+    <li><strong>JDK 的 epoll 空轮询 bug：</strong>Linux 上老版本 JDK 的 <code>select()</code> 偶发"没有事件也立即返回 0"，事件循环退化成死循环空转，一个线程直接把 CPU 打到 100%（JDK-6403933，多年才在 JDK 侧收敛）。写裸 NIO 的人得自己识别这种空转并重建 Selector——多数人根本不知道有这回事。</li>
+  </ul>
+  <p>结论很清楚：<strong>NIO 给了操作系统级的能力，却没给应用级的工程封装。</strong>每个团队都把"线程模型、拆包、容错"重写一遍，写得还都不如别人——这个"别人"就是 Netty。</p>
+</section>
+
+<!-- ================= 02 Netty 是什么 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>Netty 是什么：NIO 之上的那一层工程</h2>
+  <p>Netty 官方给自己的定义是"异步事件驱动的网络应用框架"。翻译成人话：<strong>你在回调里写业务，连接、线程、缓冲、拆包这些脏活累活框架全包了。</strong>项目由韩国工程师 Trustin Lee 于 2008 年前后发起（3.x 时代隶属 JBoss，包名还是 <code>org.jboss.netty</code>），4.x 起包名改为 <code>io.netty</code>，如今由 Norman Maurer 等核心维护者持续演进，Apache-2.0 协议。它补齐的正是裸 NIO 缺的四块工程件：</p>
+  <ul>
+    <li><strong>线程模型：</strong>EventLoop + 主从 Reactor，帮你把"多少线程、怎么分活"一次配好（第 04 节展开）；</li>
+    <li><strong>缓冲：</strong>ByteBuf 取代 ByteBuffer，读写双指针、可池化、支持零拷贝组合，不再为 flip() 的顺序抓狂；</li>
+    <li><strong>编解码与 handler 链：</strong>每条连接一条 pipeline，解码器、业务处理器、编码器像流水线工位一样组装，粘包半包在框架层解决；</li>
+    <li><strong>成熟协议实现：</strong>HTTP/1.1、HTTP/2、WebSocket、SSL/TLS、Redis、DNS、Protobuf……开箱即用；连上面那个空轮询 bug，Netty 也有内置兜底——默认连续 512 次空轮询就自动重建 Selector。</li>
+  </ul>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <rect x="20" y="16" width="720" height="52" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="380" y="38" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">你的业务（Handler）：登录校验、报文处理、推送逻辑……</text>
+    <text x="380" y="56" text-anchor="middle" fill="var(--muted)" font-size="10">只用管"事件来了做什么"，不用管"事件怎么被捞出来"</text>
+
+    <rect x="20" y="84" width="720" height="78" rx="8" fill="var(--card)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="380" y="104" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">Netty 工程层（这就是框架本体）</text>
+    <rect x="36" y="112" width="164" height="38" rx="6" fill="var(--bg-accent)" stroke="var(--line)"/>
+    <text x="118" y="130" text-anchor="middle" fill="var(--ink)" font-size="10.5">线程模型</text>
+    <text x="118" y="144" text-anchor="middle" fill="var(--muted)" font-size="9">EventLoop · 主从 Reactor</text>
+    <rect x="212" y="112" width="164" height="38" rx="6" fill="var(--bg-accent)" stroke="var(--line)"/>
+    <text x="294" y="130" text-anchor="middle" fill="var(--ink)" font-size="10.5">缓冲</text>
+    <text x="294" y="144" text-anchor="middle" fill="var(--muted)" font-size="9">ByteBuf · 池化 · 零拷贝</text>
+    <rect x="388" y="112" width="164" height="38" rx="6" fill="var(--bg-accent)" stroke="var(--line)"/>
+    <text x="470" y="130" text-anchor="middle" fill="var(--ink)" font-size="10.5">编解码</text>
+    <text x="470" y="144" text-anchor="middle" fill="var(--muted)" font-size="9">pipeline · 粘包半包</text>
+    <rect x="564" y="112" width="160" height="38" rx="6" fill="var(--bg-accent)" stroke="var(--line)"/>
+    <text x="644" y="130" text-anchor="middle" fill="var(--ink)" font-size="10.5">协议实现</text>
+    <text x="644" y="144" text-anchor="middle" fill="var(--muted)" font-size="9">HTTP · WebSocket · TLS…</text>
+
+    <rect x="20" y="178" width="720" height="44" rx="8" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="380" y="196" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">传输抽象层：NIO / epoll / io_uring / KQueue 一套 API 随切</text>
+    <text x="380" y="212" text-anchor="middle" fill="var(--muted)" font-size="9.5">（空轮询 bug 的 Selector 自动重建也兜在这一层）</text>
+
+    <rect x="20" y="238" width="720" height="44" rx="8" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="380" y="256" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">操作系统内核：epoll / io_uring / KQueue</text>
+    <text x="380" y="272" text-anchor="middle" fill="var(--muted)" font-size="9.5">内核给你的多路复用能力，4.2 起默认拥抱 io_uring</text>
+  </svg>
+  </div>
+
+  <p><strong>谁在用它？</strong>这个清单几乎是半个 Java 中间件世界：Apache Dubbo 的默认网络传输层、Elasticsearch 的节点间通信、RocketMQ 的 Remoting 网络模块、gRPC-Java 的底层传输，以及 Spring WebFlux 默认运行时 Reactor Netty——你写 WebFlux 的时候可能没 import 过 Netty，但它就在依赖树底下跑着。Netty 官方 wiki 的 related-projects 清单里还有 Spark、Flink、Cassandra、Pulsar、Vert.x、Lettuce、Redisson、Micronaut 等一长串名字（2026-09 核对）。换句话说：<strong>就算你从不直接用它写代码，你也在天天用它做的软件。</strong></p>
+</section>
+
+<!-- ================= 03 社区数据与版本演进 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>社区数据与版本演进：4.0 → 4.1 → 4.2</h2>
+  <p>社区面上（2026-09-18 GitHub 核对）：netty/netty 仓库 <strong>35.1k Stars、16.3k Forks</strong>，Apache-2.0 协议，发布节奏稳定——这个数字在"基础设施类"项目里属于世界级梯队。比星数更硬的指标是它的<strong>维护寿命</strong>：4.1 从 2016 年 3 月发布至今十年，仍在按月发安全补丁（当前 4.1.138.Final，2026-09-09 发布），这种十年如一日的并行维护在开源圈并不多见。</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>版本线</th><th>起点</th><th>当前（2026-09）</th><th>定位</th></tr></thead>
+    <tbody>
+      <tr><td>4.0</td><td>2013-07</td><td>4.0.56.Final（2018 年封版）</td><td>包名改为 io.netty 的奠基之作</td></tr>
+      <tr><td>4.1（长期维护线）</td><td>2016-03</td><td><strong>4.1.138.Final</strong>（2026-09-09）</td><td>生产存量主力，仍在发安全补丁</td></tr>
+      <tr><td>4.2（当前主线）</td><td>2025-04-03 GA</td><td><strong>4.2.18.Final</strong>（2026-09-09）</td><td>io_uring 成为一等传输，4.1 二进制兼容升级</td></tr>
+      <tr><td>5.0</td><td>—</td><td>仅 5.0.0.Alpha5（2022-09）</td><td>未成主线，选型时忽略</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">数据来源：netty.io 首页下载区与 GitHub netty/netty releases 页，2026-09-18 核对。4.2 的头牌变化是 io_uring 传输从孵化器"毕业"为一等公民（Linux 上更低的系统调用开销）；对应用层 API 基本兼容，4.1 项目可以平滑升上来。本系列以 <strong>4.2.x 为基准版本</strong>，涉及 4.1 差异处会单独标注。</p>
+</section>
+
+<!-- ================= 04 心智模型 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>一句话心智模型：主从 Reactor 的餐厅</h2>
+  <p>Netty 的线程模型有个学名叫<strong>主从 Reactor</strong>，听着唬人，其实开过餐厅就懂：<strong>一队接待（boss）+ 一队干活（worker）+ 每条连接一条流水线（pipeline）</strong>。</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 310" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar3" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar3g" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+
+    <rect x="20" y="30" width="120" height="120" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="80" y="76" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">客户端们</text>
+    <text x="80" y="98" text-anchor="middle" fill="var(--muted)" font-size="9.5">1 万个连接</text>
+    <text x="80" y="116" text-anchor="middle" fill="var(--muted)" font-size="9.5">同时在敲门</text>
+
+    <line x1="140" y1="66" x2="196" y2="66" stroke="var(--muted)" marker-end="url(#ar3)"/>
+    <line x1="140" y1="116" x2="196" y2="116" stroke="var(--muted)" marker-end="url(#ar3)"/>
+
+    <rect x="200" y="30" width="150" height="120" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="275" y="62" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">Boss 组</text>
+    <text x="275" y="82" text-anchor="middle" fill="var(--muted)" font-size="9.5">一队接待</text>
+    <text x="275" y="100" text-anchor="middle" fill="var(--ink)" font-size="10">只干一件事：</text>
+    <text x="275" y="116" text-anchor="middle" fill="var(--ink)" font-size="10">accept 新连接</text>
+    <text x="275" y="136" text-anchor="middle" fill="var(--muted)" font-size="9.5">1 个线程就够</text>
+
+    <line x1="350" y1="90" x2="406" y2="90" stroke="var(--accent-3)" marker-end="url(#ar3g)"/>
+    <text x="378" y="78" text-anchor="middle" fill="var(--accent-3)" font-size="9">登记入座</text>
+
+    <rect x="410" y="30" width="150" height="120" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="485" y="62" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">Worker 组</text>
+    <text x="485" y="82" text-anchor="middle" fill="var(--muted)" font-size="9.5">一队干活</text>
+    <text x="485" y="100" text-anchor="middle" fill="var(--ink)" font-size="10">盯读写事件</text>
+    <text x="485" y="116" text-anchor="middle" fill="var(--ink)" font-size="10">默认 CPU 核数</text>
+    <text x="485" y="136" text-anchor="middle" fill="var(--muted)" font-size="9.5">每连接固定绑一个</text>
+
+    <line x1="560" y1="90" x2="616" y2="90" stroke="var(--accent-3)" marker-end="url(#ar3g)"/>
+    <text x="588" y="78" text-anchor="middle" fill="var(--accent-3)" font-size="9">按连接分发</text>
+
+    <rect x="620" y="30" width="120" height="120" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="680" y="62" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">Pipeline</text>
+    <text x="680" y="82" text-anchor="middle" fill="var(--muted)" font-size="9.5">每条连接一条</text>
+    <text x="680" y="100" text-anchor="middle" fill="var(--ink)" font-size="10">Decoder</text>
+    <text x="680" y="116" text-anchor="middle" fill="var(--ink)" font-size="10">→ 业务 → Encoder</text>
+    <text x="680" y="136" text-anchor="middle" fill="var(--muted)" font-size="9.5">流水线工位</text>
+
+    <rect x="20" y="182" width="720" height="110" rx="10" fill="var(--warn-bg)" stroke="var(--accent)"/>
+    <text x="36" y="208" fill="var(--ink)" font-size="12" font-weight="700">对应到餐厅</text>
+    <text x="36" y="232" fill="var(--ink)" font-size="11">接待组（boss）在门口只负责带客入座，入座后这桌就归某个服务员（worker EventLoop）管到底；</text>
+    <text x="36" y="254" fill="var(--ink)" font-size="11">点单上菜不靠服务员盯桌傻等（阻塞），哪桌举手（事件就绪）就处理哪桌（异步回调）；</text>
+    <text x="36" y="276" fill="var(--muted)" font-size="10">每桌的点菜单走同一条流水线：先译成后厨看得懂的单（解码），再做菜（业务），再装盘（编码）。</text>
+  </svg>
+  </div>
+
+  <p>三个角色各有纪律：<strong>boss 组很小</strong>（一个线程足矣），它只做 accept，从不碰业务；<strong>worker 组按核数配置</strong>，每条连接一旦登记到某个 worker 就绑定不走——同一连接的所有事件都在同一个线程上处理，天然免掉了锁竞争；<strong>pipeline 是每连接一条</strong>的 handler 链，解码器把字节流拆成消息对象，业务 handler 拿到的永远是"完整的一条消息"，第 01 节那个粘包半包的坑，就在这一层被填平。所谓"异步事件驱动"，说的就是这三件事的合体：<strong>不蹲着等（异步）、事件来了才动（事件驱动）、来了沿流水线走（pipeline）。</strong></p>
+</section>
+
+<!-- ================= 05 什么场景选它 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>什么场景该选它（以及不该）</h2>
+  <div class="card">
+    <p><strong>✅ 适合：</strong></p>
+    <ul>
+      <li><strong>自定义 TCP 私有协议：</strong>自研 RPC 框架、设备网关、物联网接入——报文格式自己定，编解码器自己写，正是 pipeline 的主场；</li>
+      <li><strong>长连接推送：</strong>IM 消息、行情下发、协同编辑——十万级连接常驻，BIO 时代不可能的账在 EventLoop 模型下算得过来；</li>
+      <li><strong>网关 / 代理类服务：</strong>南北向流量入口要做协议转换、流量镜像、自定义路由，需要精细控制每一层字节；</li>
+      <li><strong>游戏服务器：</strong>长连接 + 高频小报文 + 自定义协议，三个 Netty 特长全占。</li>
+    </ul>
+    <p><strong>❌ 不必：</strong></p>
+    <ul>
+      <li><strong>纯 HTTP CRUD 业务系统：</strong>Spring Boot / Spring MVC 一把梭就够了，引入 Netty 是给自己造底盘——WebFlux 场景下你写的仍是 WebFlux，Netty 在底下，不用直接碰；</li>
+      <li><strong>简单内部工具、管理后台：</strong>并发两位数的系统，阻塞 I/O 的简单直接反而是优势；</li>
+      <li><strong>只需要调 HTTP 接口的客户端：</strong>用 HttpClient / OkHttp / RestTemplate，不必自己碰网络框架。</li>
+    </ul>
+  </div>
+  <p>一条判断捷径：<strong>协议是自己的、连接是长的、并发是高的——三者占其二，就该认真考虑 Netty。</strong>全不占，就别为了"高性能"三个字给自己加难度。</p>
+</section>
+
+<!-- ================= 06 quiz ================= -->
+<section>
+  <h2><span class="sec-num">06</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. BIO"一连接一线程"模型下，1 万个空闲连接大约要付出多少线程栈内存（JVM 默认每线程约 1MB）？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，线程栈不会因为连接空闲而释放，只要线程还在守着连接就占用。","低估了，1 万个线程不是 1 千个。","对的：1 万连接 × 1MB ≈ 10GB，还没算上下文切换的 CPU 开销，这就是 C10K 的账。"]'>
+        <li class="quiz-option">几乎为零，空闲连接不耗内存</li>
+        <li class="quiz-option">约 1GB</li>
+        <li class="quiz-option">约 10GB，且还不算上下文切换开销</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 为什么裸写 NIO 必须自己处理"粘包半包"？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：TCP 只保证字节流有序到达，不保证按消息边界到达，边界要靠应用层协议（长度字段、分隔符等）自己切。","不对，NIO 的 Selector 只解决就绪通知问题，不管消息边界。","不对，ByteBuffer 只是缓冲区容器，攒包拆包仍要自己写。"]'>
+        <li class="quiz-option">TCP 是无边界的字节流，一次 read 可能拿到半条或一条半消息，边界要应用层自己定</li>
+        <li class="quiz-option">Selector 的事件通知会把消息切碎</li>
+        <li class="quiz-option">ByteBuffer 的 flip 用错导致的</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. JDK 的 epoll 空轮询 bug（JDK-6403933）是什么症状？Netty 怎么兜底？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，这个 bug 恰恰是没有事件也醒，select 立即返回 0。","对的：select() 无事件也立即返回 0，线程空转吃满 CPU；Netty 检测连续空轮询（默认阈值 512 次）后自动新建 Selector 并把通道重新注册上去。","方向对了一半：确实会重建，但不是定时任务，而是空轮询计数超阈值时触发。"]'>
+        <li class="quiz-option">事件丢失导致连接卡死；Netty 用定时重连解决</li>
+        <li class="quiz-option">select() 无事件也立即返回 0，线程空转打满 CPU；Netty 连续空轮询超阈值后自动重建 Selector</li>
+        <li class="quiz-option">内存泄漏；Netty 用 ByteBuf 池化解决</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. Netty 主从 Reactor 模型里，boss 组和 worker 组的分工是？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，boss 只负责 accept 新连接，不碰读写也不跑业务。","不对，业务逻辑运行在 pipeline 的 handler 里，由 worker 线程驱动执行。","对的：boss 接待（accept 后把连接登记给 worker），worker 盯读写事件并驱动 pipeline 处理，一条连接绑定一个 worker 线程。"]'>
+        <li class="quiz-option">boss 处理读，worker 处理写</li>
+        <li class="quiz-option">boss 跑业务逻辑，worker 管连接</li>
+        <li class="quiz-option">boss 只 accept 新连接，worker 盯读写事件并驱动各自连接的 pipeline</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 07 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：既然 Netty 这么好用，JDK 为什么不直接把它收进标准库？</summary>
+    <div class="details-body">
+      <p>因为标准库和框架的演进约束完全不同。JDK 走 JCP 委员会流程，一个 API 一旦发布就背上"若干年内不能破坏兼容"的承诺，改动以年计；而 Netty 的价值恰恰在于<strong>快速吸收工程层的血泪教训</strong>——Selector 重建、ByteBuf 池化、io_uring 适配，这类"跟着操作系统和真实故障跑"的迭代，标准库背不动。历史也验证过这条路：JDK 7 的 NIO.2 把精力花在了异步文件与 AsynchronousChannelChannel（AIO）上，而 Linux 上 AIO 的内核支持一直不给力，服务端高并发的实际主流仍是 epoll 路线——Netty 选择的战场。回头看，社区里"标准库给原子能力、框架给工程抽象"的分工反而是好结局：Netty 每年都在变好，而 JDK 的 NIO 稳定地充当它的地基。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：Dubbo、gRPC、RocketMQ 协议各不相同，为什么网络层都选 Netty 而不是各自裸写 NIO？</summary>
+    <div class="details-body">
+      <p>这是经典的<strong>分层复用账</strong>。网络编程的难点分两层：下层是"把字节正确高效地搬进搬出"——线程模型、缓冲管理、空轮询容错、epoll/io_uring 适配，这些与业务协议完全无关，且极难写对；上层是"字节怎么组织成协议"——Dubbo 的报文头、gRPC 的 HTTP/2 帧、RocketMQ 的命令格式，各家各话。Netty 恰好把下层的坑全填了，还用 pipeline 把上层留成可插拔的 handler 链：协议实现方只需写自己的编解码器，就能免费拿到工业级的传输层。反过来看成本：裸写 NIO 等于每个项目重新趟一遍十年积累的坑，修一个空轮询 bug 就够一个团队喝一壶。所以"传输层复用一个、协议层各写各的"成了经济上唯一合理的解——这也解释了为什么 Netty 的 stars 不如明星应用抢眼、依赖树却无处不在：<strong>做地基的项目，热度在下、重量在上。</strong></p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 08 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这四句话：</strong></p>
+    <ul>
+      <li>Java 原生网络编程两代困境：BIO 一连接一线程扛不住 C10K；NIO 有 epoll 能力但没给工程封装；</li>
+      <li>Netty = 在 JDK NIO 之上补齐线程模型、ByteBuf、编解码 pipeline、协议实现的那层工程件；</li>
+      <li>心智模型一句话：一队接待（boss accept）+ 一队干活（worker 读写）+ 每条连接一条流水线（pipeline）；</li>
+      <li>版本看两头：4.1 长期维护线（4.1.138）管存量，4.2 主线（4.2.18，io_uring 一等传输）管未来——选新项目直接 4.2。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 2 期《5 分钟跑起来》——一个最小可运行的 Netty 服务端：两个线程组、一条 ServerBootstrap 启动链、一个挂进 pipeline 的 Echo Handler，用十几行代码把今天的餐厅开起来，再用 telnet 亲手敲一敲回声。跑通它，"接待、干活、流水线"就不再只是比喻。</p>
+  <p><strong>延伸阅读：</strong>Primary source 是 <a href="https://netty.io/wiki/user-guide-for-4.x.html" target="_blank" rel="noopener">Netty 官方 Wiki · User Guide for 4.x</a>（含 Getting Started 五章入门）与 <a href="https://netty.io/" target="_blank" rel="noopener">netty.io 首页</a>的版本公告；谁在用的完整清单见官方 wiki 的 <a href="https://netty.io/wiki/related-projects.html" target="_blank" rel="noopener">Related Projects</a> 页。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev">← 课程目录</span>
+  <a class="next" href="0007-netty-quickstart.html">下一期：5 分钟跑起来 Netty →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

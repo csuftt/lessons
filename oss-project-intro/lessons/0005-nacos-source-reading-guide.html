@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Nacos 系列第 5 期：架构与源码导读 | 2026-09-18</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0005</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0004-nacos-spring-cloud-in-action.html">上一期：实战场景</a> · <a href="https://github.com/alibaba/nacos" target="_blank" rel="noopener">github.com/alibaba/nacos ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · Nacos 系列第 5 期：架构与源码导读</p>
+  <h1>走进 Nacos 源码：三个设计决策、一张入口地图、一条三步路线</h1>
+  <p class="subtitle">前四期我们都在 Nacos 外面看它：装起来、敲 curl、认概念、接 Spring Cloud。收官期换视角走到里面——但不是逐行啃代码，而是抓三个真正塑造这份代码的设计决策（一致性按数据分流、客户端本地容灾、长连接归一），配一张关键类入口地图和一条三步读码路线，最后把源码跑起来、把架构启发带走。读完这期，Nacos 仓库对你不再是一个陌生的庞然大物，而是一张下得了脚的地图。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 注册/配置中心 · Java · Apache-2.0</span>
+    <span class="tag">📦 源码基准 2.3.x（3.x 差异标注）</span>
+    <span class="tag-date">📅 2026-09-18 · 第 5 期 · 系列收官</span>
+    <span class="tag time">⏱ 预计阅读 17 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 本期读法 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>本期读法：从设计决策进源码</h2>
+  <p>读源码最常见的死法是从第一个模块顺序读——那是写代码的顺序，不是读代码的顺序。本期反过来：<strong>先抓住三个设计决策，再顺着决策找类</strong>。类是易变的，决策是稳定的；理解了"为什么非这么设计不可"，具体代码只是决策的拼写。</p>
+  <p>三个决策对应三个"为什么"：一致性为什么按数据类型分流（第 02 节）、客户端为什么自己留一套容灾（第 03 节）、2.x 为什么把所有通信归到一条长连接（第 04 节）。随后第 05 节给入口表、第 06 节给三步路线图、第 07 节把源码跑起来、第 08 节把架构启发搬回自己的系统。</p>
+  <div class="note">
+    <span class="h">源码基准声明</span>
+    本期以 <strong>2.3.x 为纲</strong>：一是公司生产的主力版本系，读它即读自己每天在跑的东西；二是 2.x 的社区分析资料最密集，卡住随手能查对照文章。<strong>3.x 差异只讲已核实的四处</strong>：console 独立部署（8080）、JDK 17 硬下限、persistence 拆分、鉴权默认开启——协议层重构细节不在本期能核实范围，读码时一律以对应 tag 为准。
+  </div>
+</section>
+
+<!-- ================= 02 决策一：一致性分流 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>决策一：一致性按数据类型分流</h2>
+  <p>第 3 期讲架构时留过一句"第 5 期讲源码时会看到它在代码里怎么落地"，现在兑现。先做一次反面推演：<strong>假如像 ZooKeeper 那样，用一套全 CP 协议做注册中心，会发生什么？</strong>每一次注册、心跳续约、订阅查询都要走多数派确认——集群 5 台挂 3 台，注册中心直接停摆：新服务注册不上、不健康实例摘不掉、新消费者发现不了。而注册中心是"基础设施的基础设施"，它停摆的每一秒都在向全公司业务链路广播抖动，短暂不可用被放大成全链路事故。ZK 没做错什么，只是它假设自己保管的是不可自愈的账本；拿账本的规矩管电话簿，可用性就被一致性绑架了。</p>
+  <p>Nacos 的回答是分家，而且分得比"选一边"细：</p>
+  <ul>
+    <li><strong>Distro 管"活着才算数"的数据（临时实例，AP）：</strong>任何节点都能接任何客户端的请求——客户端不用挑节点连；但集群内部按分片认权威：一个实例的数据只由它所连的节点说了算，写入先落本地、再异步批量同步给其他节点。分区时宁可短暂不一致，也把"能注册、能发现"保住——心跳一停坏记录自愈，第 1 期那句"电话簿丢一页会自己长回来"，代码里的保证就是这条。</li>
+    <li><strong>Raft 管"写下去就必须都在"的数据（配置、持久实例，CP）：</strong>写入必须获多数节点确认才算成功，5 台挂 3 台宁拒不写。第 3 期思考题一推演过的"分区两边各记各账"式静默脑裂，在多数派面前从机制上就不会发生——账本宁可不记账，不能记错账。</li>
+  </ul>
+  <p>源码落地总入口：<code>DistroProtocol</code>（naming 模块内，第 05 节入口表对号）；Raft 侧由 consistency 模块承接，读码优先级放后。</p>
+</section>
+
+<!-- ================= 03 决策二：客户端容灾 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>决策二：客户端本地容灾三件套</h2>
+  <p>第 3 期思考题二已把"读旧"的边界拆干净（旧开关风险、静默降级掩盖故障），不重复，只看机制。设计判断一句话：<strong>读旧胜过读不得</strong>——服务端挂掉的窗口里，消费端继续调存量、重启的应用以旧值起来。三件套各管一段：</p>
+  <ul>
+    <li><strong>内存服务表：</strong><code>ServiceInfoHolder</code> 维护的内存表，订阅的每个服务的实例清单都在这里。服务端推送到达时更新它，业务调用方读的也是它——<strong>服务发现的读路径根本不出 JVM</strong>，这是 Nacos 挂掉那几分钟里系统还能撑住的直接原因。</li>
+    <li><strong>failover 文件：</strong>客户端会定时扫描磁盘上的 failover 开关文件；开关一打开，服务表的读取就切换到 failover 目录里的数据。这是给运维留的人工闸刀——服务端数据整体错乱时，宁可冻结一份已知正确的旧表继续服务。</li>
+    <li><strong>配置 snapshot 快照：</strong><code>ClientWorker</code> 每拉到一条配置就在本地快照目录存一份。配置中心挂了若是"所有人都起不来"（第 3 期的原话），快照把这句话改写成"所有人以旧值起来"。</li>
+  </ul>
+  <p>三件套有层次：内存表是<strong>常态</strong>（每次读都走），snapshot 是<strong>自动兜底</strong>（服务端读不到才走），failover 是<strong>人工闸刀</strong>（运维主动扳）——自动化与人的判断分开安排，这个分层本身就可借鉴。</p>
+</section>
+
+<!-- ================= 04 决策三：长连接归一 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>决策三：2.x 把一切归到一条 gRPC 长连接</h2>
+  <p>第 1 期版本演进说 2.x 是"支撑超大规模的关键一跃"，现在把这笔账算清楚。1.x 的世界：HTTP 是无状态的，服务端"记住"一个客户端的办法只有让客户端反复来问。于是每个实例要为每个订阅的服务维持一条挂起的轮询连接、一个心跳定时任务、一个刷新任务——<strong>连接数和定时任务数都是 O(实例 × 任务)</strong>。100 个实例、每个订阅 20 个服务，服务端就挂着两千条连接、两千个定时器；规模再涨，FD、内存、GC 全线吃紧。</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 290" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar5" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar5a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent)"/>
+      </marker>
+      <marker id="ar5b" markerWidth="8" markerHeight="8" refX="1" refY="4" orient="auto">
+        <path d="M8,0 L0,4 L8,8 Z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+
+    <!-- 左：1.x -->
+    <rect x="20" y="14" width="340" height="26" rx="6" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="190" y="31" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">1.x：HTTP 短连接轮询</text>
+    <rect x="30" y="66" width="96" height="40" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="78" y="83" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">客户端 A</text>
+    <text x="78" y="98" text-anchor="middle" fill="var(--muted)" font-size="9">订阅服务 × N</text>
+    <rect x="30" y="126" width="96" height="40" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="78" y="143" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">客户端 B</text>
+    <text x="78" y="158" text-anchor="middle" fill="var(--muted)" font-size="9">订阅服务 × N</text>
+    <rect x="30" y="186" width="96" height="40" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="78" y="203" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">客户端 C</text>
+    <text x="78" y="218" text-anchor="middle" fill="var(--muted)" font-size="9">订阅服务 × N</text>
+    <rect x="256" y="66" width="88" height="160" rx="8" fill="var(--bg-accent)" stroke="var(--line)"/>
+    <text x="300" y="138" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">nacos</text>
+    <text x="300" y="154" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">server</text>
+    <text x="300" y="176" text-anchor="middle" fill="var(--muted)" font-size="9">挂起连接堆积</text>
+
+    <line x1="126" y1="74" x2="256" y2="74" stroke="var(--muted)" stroke-dasharray="4 3" marker-end="url(#ar5)"/>
+    <line x1="126" y1="90" x2="256" y2="90" stroke="var(--muted)" stroke-dasharray="4 3" marker-end="url(#ar5)"/>
+    <text x="191" y="68" text-anchor="middle" fill="var(--muted)" font-size="8">轮询/心跳 × N …</text>
+    <line x1="126" y1="134" x2="256" y2="134" stroke="var(--muted)" stroke-dasharray="4 3" marker-end="url(#ar5)"/>
+    <line x1="126" y1="150" x2="256" y2="150" stroke="var(--muted)" stroke-dasharray="4 3" marker-end="url(#ar5)"/>
+    <text x="191" y="128" text-anchor="middle" fill="var(--muted)" font-size="8">轮询/心跳 × N …</text>
+    <line x1="126" y1="194" x2="256" y2="194" stroke="var(--muted)" stroke-dasharray="4 3" marker-end="url(#ar5)"/>
+    <line x1="126" y1="210" x2="256" y2="210" stroke="var(--muted)" stroke-dasharray="4 3" marker-end="url(#ar5)"/>
+    <text x="191" y="188" text-anchor="middle" fill="var(--muted)" font-size="8">轮询/心跳 × N …</text>
+    <text x="190" y="252" text-anchor="middle" fill="var(--muted)" font-size="10">连接与定时任务 = 实例数 × 任务数，延迟最坏一个轮询周期</text>
+
+    <!-- 右：2.x -->
+    <rect x="392" y="14" width="348" height="26" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="566" y="31" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">2.x：一条 gRPC 长连接归一（9848）</text>
+    <rect x="402" y="66" width="96" height="40" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="450" y="83" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">客户端 A</text>
+    <text x="450" y="98" text-anchor="middle" fill="var(--muted)" font-size="9">一条长连接</text>
+    <rect x="402" y="126" width="96" height="40" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="450" y="143" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">客户端 B</text>
+    <text x="450" y="158" text-anchor="middle" fill="var(--muted)" font-size="9">一条长连接</text>
+    <rect x="402" y="186" width="96" height="40" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="450" y="203" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">客户端 C</text>
+    <text x="450" y="218" text-anchor="middle" fill="var(--muted)" font-size="9">一条长连接</text>
+    <rect x="628" y="66" width="96" height="160" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="676" y="138" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">nacos</text>
+    <text x="676" y="154" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">server</text>
+    <text x="676" y="176" text-anchor="middle" fill="var(--muted)" font-size="9">连接即实例视图</text>
+
+    <line x1="498" y1="86" x2="628" y2="86" stroke="var(--accent)" stroke-width="2" marker-end="url(#ar5a)" marker-start="url(#ar5b)"/>
+    <text x="563" y="80" text-anchor="middle" fill="var(--accent)" font-size="8">注册·心跳·订阅·推送</text>
+    <line x1="498" y1="146" x2="628" y2="146" stroke="var(--accent)" stroke-width="2" marker-end="url(#ar5a)" marker-start="url(#ar5b)"/>
+    <text x="563" y="140" text-anchor="middle" fill="var(--accent)" font-size="8">注册·心跳·订阅·推送</text>
+    <line x1="498" y1="206" x2="628" y2="206" stroke="var(--accent)" stroke-width="2" marker-end="url(#ar5a)" marker-start="url(#ar5b)"/>
+    <text x="563" y="200" text-anchor="middle" fill="var(--accent)" font-size="8">注册·心跳·订阅·推送</text>
+    <text x="566" y="252" text-anchor="middle" fill="var(--muted)" font-size="10">连接数 = 实例数，变更由服务端主动推、毫秒级触达</text>
+  </svg>
+  </div>
+
+  <p>2.x 的解法：<strong>一条 gRPC 长连接（就是第 2 期端口账本里的 9848）把注册、心跳、订阅、推送全装进去</strong>——连接数降为 O(实例)，变更由服务端主动推、毫秒级触达。更深一层：长连接让服务端第一次有了"连接视图"，<strong>连接断开本身就是死亡信号</strong>——心跳从应用层的定时任务下沉到连接层的保活，省掉的是心跳任务，换来的是更快的实例死亡判定。配套的断线重连与请求重放（redo）设计：断连期间未送达的注册/订阅请求先记进队列，重连成功后自动重放补齐。</p>
+</section>
+
+<!-- ================= 05 读码入口表 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>读码入口表：2.3.x 关键类对号</h2>
+  <p>三个决策讲完，下面这张表就是"按决策找类"的落点——每一行都是 2.x 源码里真实存在、社区分析密度最高的入口：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>读什么</th><th>入口（2.3.x）</th><th>一句话说明</th></tr></thead>
+    <tbody>
+      <tr><td>客户端注册链</td><td>NamingService → NacosNamingService → NamingGrpcClientProxy（client 模块）</td><td>SDK 注册调用走到底的三级路径，末端是 2.x 的 gRPC 代理</td></tr>
+      <tr><td>订阅与本地缓存</td><td>ServiceInfoHolder（client 模块）</td><td>内存服务表的持有者：推送更新、缓存落盘、failover 判定都在这条线</td></tr>
+      <tr><td>配置读取</td><td>NacosConfigService → ClientWorker（client 模块）</td><td>getConfig 背后真正干活的人：拉取、snapshot 落盘、监听注册</td></tr>
+      <tr><td>配置监听（2.x）</td><td>ClientWorker 内的 gRPC 监听通道</td><td>服务端推一个"变了"的通知，客户端收到后再拉新值——推通知、拉内容</td></tr>
+      <tr><td>服务端经典长轮询</td><td>LongPollingService（config 模块）</td><td>1.x 的配置变更监听：请求挂起 30 秒 + MD5 比对，面试高频；2.x 保留作兼容通道</td></tr>
+      <tr><td>Distro 入口</td><td>DistroProtocol（naming 模块，distro 包）</td><td>临时实例分片同步的总入口：同步、校验、快照传输</td></tr>
+      <tr><td>服务端 HTTP 入口</td><td>InstanceController（naming）/ ConfigController（config）</td><td>第 2 期那些 curl 的落点：注册与配置发布的 API 门面</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">类名以 GitHub tag 2.3.x 为准，方法签名以代码为准。3.x 有模块重排（persistence 拆分、console 独立），但主线类名大体延续——与第 3 期那张模块地图对照着看：主干模块名两边一致，先认模块再认类，不会迷路。</p>
+</section>
+
+<!-- ================= 06 读码路线图 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>读码路线图：三步走完主干</h2>
+  <p>入口有了，顺序也有讲究——<strong>从最贴近使用者心智的一侧进，最后才碰服务端</strong>：</p>
+  <div class="steps">
+    <div class="step">
+      <span class="step-n">1</span>
+      <div><strong>走通客户端 naming 链路：</strong>从 NamingService 的注册方法进 NacosNamingService，看请求怎么交到 NamingGrpcClientProxy、怎么变成 gRPC 调用、服务端怎么应答；再反方向跟一次订阅推送。<strong>预期看懂：</strong>一次注册在客户端侧的完整旅程，以及"订阅之后推送回来落在哪"。</div>
+    </div>
+    <div class="step">
+      <span class="step-n">2</span>
+      <div><strong>读 ServiceInfoHolder 的本地表与 failover 判定：</strong>推送到达后谁更新内存表、缓存何时落盘、failover 开关文件怎么被定时扫描、开关打开后读取路径怎么切换。<strong>预期看懂：</strong>第 03 节那套"读旧降级"在代码里的每一行落点。</div>
+    </div>
+    <div class="step">
+      <span class="step-n">3</span>
+      <div><strong>进服务端：长轮询 → Distro。</strong>先读 config 模块的 LongPollingService（挂起与 MD5 比对怎么实现），再进 naming 模块的 DistroProtocol 看分片同步。带着三个问题读：<strong>这条数据是哪类（临时还是持久）？一致性归属谁（Distro 还是 Raft）？节点挂掉谁兜底（客户端容灾还是集群同步）？</strong><strong>预期看懂：</strong>一次注册怎么在集群里传播、一条配置变更多久推到客户端。</div>
+    </div>
+  </div>
+  <p>三个问题正是第 02、03 节两个设计决策的读码版——每碰到一个类问一遍，基本能直接推出这个类为什么存在。</p>
+</section>
+
+<!-- ================= 07 源码跑起来 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>把源码跑起来：两条路</h2>
+  <p><strong>路线 A：发行包直接跑（最快）。</strong>GitHub Releases 下载 nacos-server 2.3.x 的 zip，解压进 bin 目录，一条命令起单机：</p>
+  <pre><code>:: Windows
+startup.cmd -m standalone
+# Linux / macOS
+sh startup.sh -m standalone</code></pre>
+  <p class="note">与第 2 期跑 3.x 的两点差异：2.x 的控制台挂在 <code>8848/nacos</code> 下（还没有独立 console）；鉴权默认关闭，首启不需要那套三件套。十分钟内能跑通，适合先建立运行直觉。</p>
+  <p><strong>路线 B：IDEA 拉源码断点调试。</strong>clone alibaba/nacos 后切到 2.3.x tag。JDK 版本以仓库根目录的官方构建说明（BUILDING）为准——主线开发按 17+ 准没错，2.3.x 时代用 JDK 8/11 也能编译。启动跑源码自带的 server 主进程入口（2.x 在 console 模块，对照仓库说明确认），或用 distribution 模块打包后启动。断点下在 <code>InstanceController</code> 的注册方法和 <code>ConfigController</code> 的发布方法，然后用第 2 期那条注册 curl 打进去——注意把 API 前缀从 <code>/nacos/v3</code> 换成 2.x 的 <code>/nacos/v1</code>（v3 是 3.x 才有的路径），参数同名。请求一进断点，调用栈就是一张现成的链路图。</p>
+  <p>务实建议：先 A 后 B——跑通建立直觉，再下断点验证你从第 06 节路线图里形成的判断。</p>
+</section>
+
+<!-- ================= 08 可借鉴清单 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>可借鉴清单：搬回自己系统的四条</h2>
+  <p>读开源项目源码的终点不是"我看过了"，是"我的系统能偷什么"。四条按可落地难度排序：</p>
+  <ul>
+    <li><strong>① 按数据类型选一致性等级，而非全局一刀切。</strong>给自己的数据分型：能自愈的（有 TTL、有事实源可重新同步）配最终一致，不能自愈的（账本类）才上强一致——多数系统里真正需要强一致的数据比想象中少。</li>
+    <li><strong>② 客户端快照容灾（读旧降级）。</strong>凡是被强依赖的中间件，都值得在客户端做"内存态 + 磁盘快照 + 人工开关"，把"中间件挂了"从全面瘫痪降级成短时间读旧值，配上告警。成本是一个目录几个文件，收益是故障时刻的全链路存活。</li>
+    <li><strong>③ 长连接推送归一。</strong>多任务共用一条长连接、断线重连加请求重放（redo），连接数从 O(实例 × 任务) 降到 O(实例)，变更从轮询窗口变成主动推送。自研网关、配置下发、消息通知类组件都适用。</li>
+    <li><strong>④ 控制面数据面分离。</strong>3.x 把 console 拆成独立部署是明确的趋势信号：管理界面独立演进升级，核心进程保持纯粹。自己系统里 admin 后台与核心服务分离，省掉"改个管理页要重启核心"式的互相拖累。</li>
+  </ul>
+</section>
+
+<!-- ================= 09 quiz ================= -->
+<section>
+  <h2><span class="sec-num">09</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. Nacos 里 Distro 和 Raft 的分工，哪个说法是对的？</p>
+      <ul class="quiz-options" data-answer="0">
+        <li class="quiz-option">Distro 管临时实例（AP，分片权威 + 异步同步），Raft 管配置等持久数据（多数派提交）</li>
+        <li class="quiz-option">Distro 管配置数据，Raft 管服务实例</li>
+        <li class="quiz-option">两个协议管同样的数据，互为主备</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. Nacos 2.x 客户端与服务端之间那一条 gRPC 长连接，承载了什么？</p>
+      <ul class="quiz-options" data-answer="2">
+        <li class="quiz-option">只有实例心跳保活</li>
+        <li class="quiz-option">注册和心跳仍走 HTTP，只有订阅推送走 gRPC</li>
+        <li class="quiz-option">注册、心跳、订阅、推送全在这一条连接上</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. LongPollingService（请求挂起 30 秒 + MD5 比对）是哪段历史？</p>
+      <ul class="quiz-options" data-answer="1">
+        <li class="quiz-option">2.x naming 模块的实例心跳处理器</li>
+        <li class="quiz-option">1.x 时代 config 模块的配置变更监听经典实现，2.x 里作为兼容通道保留</li>
+        <li class="quiz-option">3.x 独立 console 的会话管理</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 10 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：要给 Nacos 加"配置变更审计"能力（谁、何时、把哪条配置从什么改成什么），应该动哪里？</summary>
+    <div class="details-body">
+      <p>先看现成度：config 模块本身就有历史版本机制，每次发布都留痕、可回滚——审计要补的增量主要是<strong>操作者身份</strong>和<strong>统一的出口记录</strong>。候选扩展点有三层：<strong>(a) admin API 入口层</strong>——控制台和外部调用都从 admin API 发布配置，在入口统一记录（鉴权开启后操作者身份现成），覆盖面最广、侵入最浅，但拿不到模块内部细节；<strong>(b) 模块内变更事件</strong>——config 模块发布后有变更事件可订阅，能拿到 DataId 与前后内容，粒度最细，但挂载方式要贴着它的监听/事件体系做，别横插内部类；<strong>(c) 插件扩展点</strong>——Nacos 预留了 plugin 体系（数据源、trace、加密等 SPI），私有能力尽量以插件形态挂入，升级时零合并成本。为什么不建议直接改 config 模块源码？因为 fork 私有分支的那一刻起，你就背上了"每次社区升级都手动合并侵入改动"的长期债务——Nacos 迭代快、3.x 又是大重构，两三个版本后你的补丁会和主线越漂越远，最终被钉死在旧版本上，连安全补丁都吃不到。<strong>外围扩展换来的是"随社区升级的资格"，这个资格比任何单个功能都贵。</strong></p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：一个新节点加入 Distro 集群后，它负责分片的数据怎么恢复？推演全过程。</summary>
+    <div class="details-body">
+      <p>分三阶段。<strong>阶段一，启动加载：</strong>新节点起来后不立即对外宣称就绪，先从本地磁盘恢复自己上次的数据（若有），同时等集群成员关系收敛——其他节点通过成员发现机制看到它，开始向它同步。<strong>阶段二，全量校验：</strong>新节点向各分片的权威节点发起全量快照拉取（Distro 有 snapshot 全量传输机制），把自己负责分片的数据拉齐校验；期间到达的客户端请求不被拒绝——它先当学习者、不当裁判，这是 AP 系统的恢复姿态：先服务，再对齐。<strong>阶段三，加入正常同步：</strong>全量完成后标记就绪，进入常规节奏——变更触发的同步任务加周期性校验对账，正式接管自己分片的权威职责。为什么敢"先服务再对齐"？因为临时实例数据有心跳 TTL 兜底：就算恢复期间漏了一条过期记录，心跳一停它就会被摘掉，客户端重新注册会把正确数据顶上来——错误自愈。对照 Raft 新节点：日志回放必须严格对齐提交索引，一步不能少。你看，第 3 期思考题一的那个判断在恢复策略上再次生效：<strong>数据能否自愈，决定它配得上哪种一致性，也配得上哪种恢复节奏。</strong></p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 11 要点与系列收尾 ================= -->
+<section>
+  <h2><span class="sec-num">11</span>本期要点与系列收尾</h2>
+  <div class="card card-tip">
+    <p><strong>带走这四条：</strong></p>
+    <ul>
+      <li>一致性按数据类型分流：Distro 管临时实例（AP，分片权威 + 异步同步），Raft 管配置等持久数据（CP，多数派提交）——比"全局选一边"精细得多；</li>
+      <li>客户端容灾三件套：内存服务表（常态）、snapshot 快照（自动兜底）、failover 文件（人工闸刀），共同实现"读旧胜过读不得"；</li>
+      <li>2.x 一条 gRPC 长连接承载注册/心跳/订阅/推送，连接数 O(实例)、推送毫秒化，连接断开即实例死亡信号；</li>
+      <li>读码三步路线：客户端 naming 链路 → ServiceInfoHolder 本地表与 failover → 服务端长轮询与 Distro，全程带着"数据哪类 / 归谁管 / 挂了谁兜底"三问。</li>
+    </ul>
+  </div>
+  <p>五期走完一条完整的入门弧线：认识它（电话簿与遥控器）→ 跑起来（curl 冒烟）→ 认概念（三层坐标与一致性分工）→ 接进真实应用（Spring Cloud Alibaba 实战）→ 打开源码（三个设计决策与读码地图）。<strong>Nacos 的入门我们就聊到这里——下一期开启新项目 Netty</strong>，网络编程的教科书，到时见。</p>
+  <p><strong>延伸与出处：</strong>类名与模块归属建议读码时对照源码验证。Primary source：<a href="https://github.com/alibaba/nacos" target="_blank" rel="noopener">github.com/alibaba/nacos（源码仓库，读码请切到 2.3.x tag）</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0004-nacos-spring-cloud-in-action.html">← 上一期：实战场景</a>
+  <span class="next">下个系列：Netty（规划中）</span>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，正确答案已标绿。");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

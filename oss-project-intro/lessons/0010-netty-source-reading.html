@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Netty 系列第 5 期：架构与源码导读 | 2026-09-18</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0010</span>
+  <span><a href="../index.html">课程目录</a> · Netty 系列第 5 期 / 共 5 期 · <a href="https://netty.io" target="_blank" rel="noopener">netty.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · Netty 系列第 5 期：架构与源码导读</p>
+  <h1>Netty 架构与源码导读：值得学的设计与读码路线图</h1>
+  <p class="subtitle">前四期我们做到的是"会用"：事件模型、编解码、心跳与自定义协议、实战场景都过了一遍。收官这一期换挡，讲两件更值钱的事：哪些设计值得抄走，以及怎么把源码读得下去。四条主线——主从 Reactor 落地、ByteBuf 内存池、pipeline 双向传播、"零拷贝"的着落——最后汇成六步读码路线图，外加三段能搬回微服务的架构师视角。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 网络框架 · Java · Apache-2.0</span>
+    <span class="tag">📦 基于 4.2 主线（源码 tag netty-4.2.18.Final）</span>
+    <span class="tag-date">📅 2026-09-18 · 第 5 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 主从 Reactor 落地 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>主从 Reactor 的源码落地</h2>
+  <p>第 1 期我们用"老板接客、伙计干活"比喻过主从 Reactor，现在把它落到类上。<code>NioEventLoopGroup</code> 本身不干活，它是线程组工厂：构造时创建 N 个 <code>NioEventLoop</code>，每个 <code>NioEventLoop</code> 是一个<strong>绑定了专属线程和专属 Selector 的单线程执行器</strong>（源码位置 <code>io.netty.channel.nio.NioEventLoop</code>，transport 模块）。它的 <code>run()</code> 方法是个死循环：select 等 IO 就绪 → <code>processSelectedKeys()</code> 处理就绪事件 → <code>runAllTasks()</code> 跑任务队列。"一个线程一个 Selector"就是 Netty 高并发的地基。</p>
+  <p><code>ServerBootstrap.bind(port)</code> 之后到第一个连接进来之前，源码里发生了什么？两条调用链概述如下（只看主干）：</p>
+  <pre><code># bind 引导链：渠道创建 + 注册进 boss 组
+ServerBootstrap.bind(port)
+ └─ AbstractBootstrap.doBind()
+     └─ initAndRegister()
+         ├─ new NioServerSocketChannel()        // 建渠道 + 空 pipeline
+         ├─ init(channel)                       // 往 boss pipeline 塞接纳器
+         └─ config().group().register(channel)  // 交给 boss 组的某个 EventLoop
+             └─ AbstractUnsafe.register0()
+                 └─ doRegister()                // javaChannel().register(selector, 0)
+
+# accept 交接链：boss 收下连接，转手给 worker
+NioEventLoop.run() → processSelectedKeys()
+ └─ NioServerSocketChannel 读到 OP_ACCEPT
+     └─ AbstractNioMessageChannel.doReadMessages()
+         ├─ new NioSocketChannel(...)           // 子渠道在此诞生
+         └─ pipeline.fireChannelRead(child)     // 连接作为事件流过 boss pipeline
+             └─ ServerBootstrapAcceptor.channelRead()
+                 ├─ child.pipeline().addLast(...) // 用户 handler 装进子管道
+                 └─ childGroup.register(child)    // 从 worker 组挑一个 EventLoop
+                     └─ 子渠道注册 OP_READ，之后读写全在 worker 线程</code></pre>
+  <p>第二段链里的 <code>ServerBootstrapAcceptor</code> 是答案所在：它是 <code>ServerBootstrap.init()</code> 时<strong>自动加到 boss pipeline 尾部的内部 handler</strong>。boss accept 出的每个 <code>NioSocketChannel</code> 以 <code>channelRead</code> 事件流到它手上，它把 <code>childHandler()</code> 里的 handler 装进子管道，再 <code>childGroup.register(child)</code> 挑一个 worker。这就是"你从没写过 accept 代码，连接却总能落到 worker 上"的机制。</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar1a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+
+    <rect x="250" y="12" width="260" height="40" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="380" y="30" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">客户端连接 × N</text>
+    <text x="380" y="45" text-anchor="middle" fill="var(--muted)" font-size="9.5">connect 打向同一个监听端口</text>
+    <line x1="380" y1="52" x2="380" y2="76" stroke="var(--muted)" marker-end="url(#ar1)"/>
+
+    <rect x="120" y="80" width="520" height="74" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="380" y="100" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">boss · NioEventLoopGroup(1)</text>
+    <text x="380" y="118" text-anchor="middle" fill="var(--ink)" font-size="10.5">1 个 NioEventLoop = 1 线程 + 1 Selector</text>
+    <text x="380" y="141" text-anchor="middle" fill="var(--muted)" font-size="9.5">NioServerSocketChannel 注册于此 · 只关心 OP_ACCEPT</text>
+    <line x1="380" y1="154" x2="380" y2="182" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#ar1a)"/>
+    <text x="392" y="172" fill="var(--accent)" font-size="9.5">ServerBootstrapAcceptor.channelRead → childGroup.register(child)</text>
+
+    <rect x="120" y="186" width="520" height="80" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="380" y="206" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">worker · NioEventLoopGroup(N)</text>
+    <text x="380" y="223" text-anchor="middle" fill="var(--ink)" font-size="10.5">每个 NioEventLoop 独占线程 + Selector，管 OP_READ / OP_WRITE</text>
+    <text x="380" y="248" text-anchor="middle" fill="var(--muted)" font-size="9.5">一个 worker 可挂成百上千个 NioSocketChannel，全在同一个线程串行处理</text>
+
+    <rect x="20" y="284" width="720" height="38" rx="8" fill="var(--bg-accent)" stroke="var(--line)"/>
+    <text x="36" y="300" fill="var(--ink)" font-size="10.5" font-weight="700">渠道终身绑定：register 时定下 EventLoop，此后该 channel 的一切事件都在这个线程发生——handler 无锁的根源</text>
+    <text x="36" y="315" fill="var(--muted)" font-size="9.5">版本注：4.2 起 NioEventLoopGroup 已标 @Deprecated，推荐 MultiThreadIoEventLoopGroup(NioIoHandler.newFactory())，类路径 io.netty.channel.nio 不变</text>
+  </svg>
+  </div>
+
+  <p class="note"><span class="h">读码坐标（均在 4.2 分支核实存在）</span><code>io.netty.bootstrap.ServerBootstrap</code>、<code>io.netty.channel.nio.NioEventLoop / NioEventLoopGroup</code>、<code>io.netty.channel.socket.nio.NioServerSocketChannel / NioSocketChannel</code>、<code>io.netty.channel.AbstractChannelHandlerContext</code>。4.1 与 4.2 在这些包路径上一致，差异在 EventLoopGroup 构造方式与默认分配器（见第 02、09 节）。</p>
+</section>
+
+<!-- ================= 02 ByteBuf 与内存池 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>ByteBuf 与内存池：arena、chunk 与引用计数</h2>
+  <p>每秒几十万次 read，每次都向 JVM 要一块新内存再丢给 GC，分配和回收的成本都会被放大成性能墙。Netty 的解法是池化：<code>PooledByteBufAllocator</code>（<code>io.netty.buffer</code>，buffer 模块）的内存管理思想<strong>借鉴自 jemalloc</strong>，分三层看：</p>
+  <ul>
+    <li><strong>PoolArena——按线程分场。</strong>多个 arena 并存，分配时优先选当前线程绑定的那个，把锁竞争摊薄；</li>
+    <li><strong>PoolChunk——按页切块。</strong>一个 chunk 默认 16MB，按 8KB 一页组织成完全二叉树做伙伴式分配；不足一页的小块用 subpage 位图切分，大小分级各走各的路径；</li>
+    <li><strong>PoolThreadCache——线程本地回收站。</strong>release 归还的块先进线程本地缓存，下次同规格请求直接命中，连 arena 都不用碰。</li>
+  </ul>
+  <p>池化内存不归 GC 管，生命周期就得自己记账，这就是<strong>引用计数</strong>：<code>AbstractReferenceCountedByteBuf</code> 给每个 ByteBuf 维护 <code>refCnt</code>，初始为 1；要在异步链路上多传一手就 <code>retain()</code> 加一，谁最后用完谁 <code>release()</code> 减一，减到零归还内存池。纪律是"谁传递谁 retain、谁消费谁 release"——忘了 release 是泄漏，多 release 是 double free。</p>
+  <p>泄漏了怎么抓？<code>io.netty.util.ResourceLeakDetector</code>（common 模块）在对象创建时<strong>采样</strong>挂一个弱引用哨兵，若 GC 回收时引用计数还没归零，就打出 <code>LEAK: ByteBuf.release() was not called...</code> 和访问轨迹。四个级别：<code>DISABLED</code> 关闭、<code>SIMPLE</code> 默认（约 1% 采样，只报不记轨迹）、<code>ADVANCED</code>（采样并记完整轨迹，排障首选）、<code>PARANOID</code>（100% 全采样，压测专项）。开法一行：<code>-Dio.netty.leakDetection.level=ADVANCED</code>。</p>
+  <p class="note"><span class="h">版本注（4.2 的真变化）</span>4.1 的默认分配器就是 <code>PooledByteBufAllocator</code>；4.2 起<strong>默认换成 <code>AdaptiveByteBufAllocator</code></strong>——region 化、按负载自调优、不依赖 <code>sun.misc.Unsafe</code>、对虚拟线程友好的新实现。要回 arena 版池化，设 <code>-Dio.netty.allocator.type=pooled</code>。生产在 4.1、新项目在 4.2 的团队，看到的默认行为不一样；但读源码仍建议从 <code>PooledByteBufAllocator</code> 读起，arena/chunk 是理解一切池化的母题。</p>
+</section>
+
+<!-- ================= 03 Pipeline 双向传播 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>Pipeline 双向传播：一条链，两个方向</h2>
+  <p>每个 channel 一条 pipeline，链上是 head、若干 handler、tail。关键是<strong>事件分两个方向走</strong>：入站事件（channelRegistered / channelActive / channelRead……）由框架触发，从 <strong>head 向 tail</strong> 流，只经过 inbound handler；出站操作（write / flush / connect / bind……）由业务代码发起，从 <strong>tail 向 head</strong> 流，只经过 outbound handler。</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar2a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+
+    <line x1="60" y1="80" x2="700" y2="80" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#ar2)"/>
+    <text x="380" y="60" text-anchor="middle" fill="var(--muted)" font-size="11">入站 inbound：head → tail（框架触发：channelRead 等，途经解码器、业务 handler）</text>
+
+    <rect x="40" y="120" width="110" height="52" rx="8" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="95" y="142" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">head</text>
+    <text x="95" y="158" text-anchor="middle" fill="var(--muted)" font-size="9">链头/出站终点</text>
+    <rect x="190" y="120" width="130" height="52" rx="8" fill="var(--card)" stroke="var(--accent)"/>
+    <text x="255" y="142" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">Decoder</text>
+    <text x="255" y="158" text-anchor="middle" fill="var(--muted)" font-size="9">inbound</text>
+    <rect x="350" y="120" width="130" height="52" rx="8" fill="var(--card)" stroke="var(--accent-3)"/>
+    <text x="415" y="142" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">Encoder</text>
+    <text x="415" y="158" text-anchor="middle" fill="var(--muted)" font-size="9">outbound</text>
+    <rect x="510" y="120" width="130" height="52" rx="8" fill="var(--card)" stroke="var(--accent)"/>
+    <text x="575" y="142" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">Business</text>
+    <text x="575" y="158" text-anchor="middle" fill="var(--muted)" font-size="9">inbound</text>
+    <rect x="670" y="120" width="70" height="52" rx="8" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="705" y="142" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">tail</text>
+    <text x="705" y="158" text-anchor="middle" fill="var(--muted)" font-size="9">链尾</text>
+    <line x1="150" y1="146" x2="190" y2="146" stroke="var(--muted)"/>
+    <line x1="320" y1="146" x2="350" y2="146" stroke="var(--muted)"/>
+    <line x1="480" y1="146" x2="510" y2="146" stroke="var(--muted)"/>
+    <line x1="640" y1="146" x2="670" y2="146" stroke="var(--muted)"/>
+
+    <line x1="700" y1="222" x2="60" y2="222" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#ar2a)"/>
+    <text x="380" y="246" text-anchor="middle" fill="var(--accent)" font-size="11">出站 outbound：tail → head（业务发起：write/flush，途经编码器，终点是 head 里的 unsafe）</text>
+
+    <rect x="20" y="196" width="720" height="0" rx="8" fill="none"/>
+    <text x="380" y="284" text-anchor="middle" fill="var(--muted)" font-size="10">Business 里 ctx.write()：只从当前节点向 head 找出站 handler → Encoder 命中；若 Encoder 加在 Business 之后（更靠 tail），永远不在传播路径上</text>
+  </svg>
+  </div>
+
+  <p>这直接回答一个高频困惑：<strong>为什么 outbound handler 要放在发起写请求的 inbound handler 前面（更靠 head 侧）才生效？</strong>因为出站事件从 tail 向 head 传播，<code>ctx.write()</code> 只经过"当前节点到 head 之间"的出站处理器；编码器 addLast 在业务 handler 后面，根本不在路径上，等于白加。三个传播入口也就分清了：</p>
+  <ul>
+    <li><code>ctx.fireChannelRead(msg)</code>：向 <strong>tail 方向</strong>把接力棒交给下一个 inbound 节点——控制的是"下一个人是谁"，不传就短路整条入站链；</li>
+    <li><code>ctx.write(msg)</code>：从<strong>当前节点</strong>出发向 head 做出站传播，只经过自己前面的出站 handler；</li>
+    <li><code>channel.writeAndFlush(msg)</code>：从 <strong>tail</strong> 重新发起整条出站链，路上所有出站 handler 都会过一遍。</li>
+  </ul>
+  <p>传播的发动机在 <code>io.netty.channel.AbstractChannelHandlerContext</code>：<code>fireChannelRead</code> 调 <code>findContextInbound()</code> 找下一个入站节点，<code>write</code> 调 <code>findContextOutbound()</code> 反向找——所谓"传播"，不过是沿双向链表找下一个匹配者、递归 invoke 而已。</p>
+</section>
+
+<!-- ================= 04 零拷贝 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>Netty 的"零拷贝"到底指哪几处</h2>
+  <p>"零拷贝"是面试八股重灾区，因为它不是一次技术，而是<strong>四处（外加常被算上的第五处）各自独立的工程选择</strong>。逐处说清"省掉了哪一次拷贝"：</p>
+  <ul>
+    <li><strong>CompositeByteBuf 组合视图：</strong>把多个 ByteBuf 逻辑拼成一个整体（典型：协议头 + 包体），底层存储各归各，<strong>省掉了"把多段内容复制进一个大缓冲区"的那次拼接拷贝</strong>；</li>
+    <li><strong>slice / duplicate 视图：</strong>与原 buf 共享底层存储，只各持一套读写指针，<strong>省掉了"截取子区就要复制一份"的拷贝</strong>（注意视图与本体共享 refCnt 语义上的内存，释放要小心 retain）；</li>
+    <li><strong>FileRegion（sendfile）：</strong>静态文件下发走 <code>transferTo</code>，数据从内核页缓存直达网卡，<strong>省掉了"内核缓冲区 ↔ 用户态缓冲区"一进一出的两次 CPU 拷贝</strong>，文件传输全程不进用户态；</li>
+    <li><strong>writev 聚集写：</strong>多个 ByteBuf 一次系统调用批量写出（scatter/gather），由网卡按段自取，<strong>省掉了"先在用户态攒成一个大缓冲区"的拷贝</strong>——writev 对应读方向的 readv 亦然。</li>
+  </ul>
+  <p class="note"><span class="h">常被算上的第五处</span>堆外内存（DirectByteBuffer）：socket 写出时内核拿不到堆内地址，JVM 得先把堆内缓冲复制到堆外；Netty 默认分配堆外 ByteBuf，省掉了"堆内 → 堆外"那次拷贝。前两处是"用户态少拷贝"，后三处是"根本不过用户态"，混为一谈就答不真切。</p>
+</section>
+
+<!-- ================= 05 读码路线图 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>读码路线图：六步走完主干</h2>
+  <p>两百万行仓库别硬啃。方法：clone 后 checkout 到发布 tag（本文按 <code>netty-4.2.18.Final</code> 核对），从 example 跑通一个 echo，沿调用链自顶向下，每步只回答一个问题：</p>
+  <div class="steps">
+    <div class="step"><span class="step-n">1</span><div><strong>example 模块进：</strong><code>example/src/main/java/io/netty/example/echo/EchoServer.java</code>——回答"用户视角一次 echo 的生命周期是什么"（bind → accept → read → write → close）。</div></div>
+    <div class="step"><span class="step-n">2</span><div><strong>引导链：</strong><code>ServerBootstrap.bind()</code> → <code>AbstractBootstrap.initAndRegister() / doBind()</code>——回答"channel 在哪创建、pipeline 在哪组装、注册到了哪个线程"。</div></div>
+    <div class="step"><span class="step-n">3</span><div><strong>事件循环：</strong><code>NioEventLoop.run()</code>——回答"一个线程怎么同时伺候 IO 事件和任务队列"，顺带看它对 JDK select 空转 bug 的规避。</div></div>
+    <div class="step"><span class="step-n">4</span><div><strong>读路径分叉：</strong><code>AbstractNioMessageChannel</code>（accept 分支）与 <code>AbstractNioByteChannel</code>（read 分支）里的 Unsafe.read()——回答"一次 read 分配多大的 ByteBuf、谁来释放"。</div></div>
+    <div class="step"><span class="step-n">5</span><div><strong>传播机制：</strong><code>DefaultChannelPipeline / AbstractChannelHandlerContext</code>——回答"fire* 怎么找下一个入站节点、write 怎么反向找出站节点"。</div></div>
+    <div class="step"><span class="step-n">6</span><div><strong>内存收口：</strong><code>PooledByteBufAllocator → PoolArena / PoolChunk / PoolThreadCache</code> 与 <code>AbstractReferenceCountedByteBuf</code>——回答"一块内存在池里怎么进出、refCnt 谁加谁减"。</div></div>
+  </div>
+  <p>三条纪律：从 example 进不从 util 进（工具类没有上下文）；带着问题读，每步只追一条链，见分叉先跳过；用调试器别用眼睛——EchoServer 里打断点单步走一遍 bind 和 read，比盯两小时源码有效。</p>
+</section>
+
+<!-- ================= 06 架构师借鉴 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师视角：能搬回自己系统的三件事</h2>
+  <h3>串行无锁的线程模型</h3>
+  <p>Netty 敢在 handler 里不写锁，靠的是"channel 终身绑定一个 EventLoop"：同一连接的所有事件都在同一线程按序执行，竞争根本不存在。这套思路在微服务里的对应物是一切<strong>"每 X 一个串行队列"的场景</strong>——长连接网关（推送、IM、IoT）、按订单 ID 哈希到固定线程的消费模型。另一面同样重要：EventLoop 被阻塞，这条线程上几百个 channel 全卡死，所以 Netty 提供 <code>addLast(businessGroup, handler)</code> 把慢业务挪到独立线程组——对比 Tomcat"一请求一线程"，这是两种定价，网关类组件该选前者。</p>
+  <h3>责任链的工程化</h3>
+  <p>我们都在 Spring 里写过 HandlerInterceptor 和 Filter，Netty 把责任链做出了三个可抄的细节：<strong>节点拿 ctx 而不是整条链</strong>（传播控制权在节点手上，可短路可跳段，测试时 mock 一个 ctx 即可）；<strong>双向传播让编解码天然对称</strong>（同一条链正着走读、反着走写）；<strong>运行时热插拔</strong>。网关插件化——鉴权、限流、审计、协议转换各占一节，按路由动态装卸——照这个骨架搭，比 if-else 堆砌体面得多。</p>
+  <h3>池化与引用计数的成本观</h3>
+  <p>池化不是免费午餐：省下的是 GC 和 malloc，付出的是引用计数纪律与排障复杂度。Netty 的配套值得整体搬走——采样式泄漏检测（默认 1% 采样 + GC 兜底报告，生产常开成本可控，压测切 PARANOID 全量）。评估自己系统要不要池化，看四件事：分配频率、对象大小分布、GC 表现、出事后能不能查。4.2 把默认分配器换成自适应版，正是官方在"性能上限"与"新 JVM 兼容、运维简单"之间重新定价——<strong>连 Netty 都不把池化当信仰，只当账</strong>。</p>
+</section>
+
+<!-- ================= 07 quiz ================= -->
+<section>
+  <h2><span class="sec-num">07</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. boss 线程 accept 到新连接后，是通过什么机制把连接交给 worker 组的？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，Netty 不会为新连接临时起线程；连接注册进 worker 组某个 EventLoop 后由固定线程处理。","对。ServerBootstrap.init() 时自动把 ServerBootstrapAcceptor 加在 boss pipeline 尾部，accept 出的子渠道作为 channelRead 事件流过它，由它调用 childGroup.register(child)。","没有这样的轮询队列；交接走的是 boss pipeline 的事件传播，worker 从不主动来取。"]'>
+        <li class="quiz-option">为新连接临时创建一个线程去处理</li>
+        <li class="quiz-option">boss pipeline 尾部自动加入的 ServerBootstrapAcceptor 收到 channelRead(child) 后调用 childGroup.register(child)</li>
+        <li class="quiz-option">worker 组定时轮询 boss 维护的待交接连接队列</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 业务 handler（inbound）里发起的 ctx.write()，为什么要求编码器（outbound）加在它前面才生效？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对。出站事件从 tail 向 head 传播，ctx.write 只经过当前节点到 head 之间的出站 handler；编码器加在业务 handler 之后（更靠 tail 侧）就不在路径上。","方向说反了：入站才是 head 向 tail，且编码器不参与入站解码路径。","编码器与解码器不必成对注册，单向协议只有编码器的场景很常见。"]'>
+        <li class="quiz-option">出站事件从 tail 向 head 传播，ctx.write 只经过当前节点到 head 之间的出站 handler，编码器放后面不在路径上</li>
+        <li class="quiz-option">因为入站事件从 head 向 tail 传播，编码器必须抢在解码器之前拿到数据</li>
+        <li class="quiz-option">因为编码器和解码器必须在 pipeline 里成对注册才能工作</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. ResourceLeakDetector 的默认级别和推荐的排障开法是？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对。默认 SIMPLE 约 1% 采样只报不记轨迹；排障用 -Dio.netty.leakDetection.level=ADVANCED 看完整访问轨迹，压测可上 PARANOID 全量。","默认不是 DISABLED，生产环境它一直在低采样运行。","默认不是 PARANOID，全量采样对性能影响太大，只在压测专项时手动开。"]'>
+        <li class="quiz-option">默认 SIMPLE（约 1% 采样）；排障时用 -Dio.netty.leakDetection.level=ADVANCED 调高并记录访问轨迹</li>
+        <li class="quiz-option">默认 DISABLED，需要手动打开才有泄漏检测</li>
+        <li class="quiz-option">默认 PARANOID，对每个 ByteBuf 全量检测</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. FileRegion 走 sendfile 下发文件，"零拷贝"省掉的到底是哪次拷贝？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["用户态拼包省的是 CompositeByteBuf 或 writev 那两处，不是 sendfile。","对。transferTo 让数据从内核页缓存直达网卡 socket 缓冲，整个传输不进用户态，一进一出两次 CPU 拷贝都省了。","那是堆外 DirectBuffer 省的那次：写出时从堆内复制到堆外。"]'>
+        <li class="quiz-option">把多段 ByteBuf 拼成一个大缓冲区的用户态拷贝</li>
+        <li class="quiz-option">文件数据从内核页缓存拷到用户态缓冲区、再从用户态拷回内核 socket 缓冲区的两次 CPU 拷贝</li>
+        <li class="quiz-option">socket 写出时从 JVM 堆内复制到堆外内存的那次拷贝</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 08 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：如果让你给自己的 RPC 框架选线程模型，Netty 的方案里哪部分可以照抄，哪部分必须改？<span class="chev">展开解析 ▾</span></summary>
+    <div class="details-body">
+      <p>可以照抄的是骨架：<strong>IO 线程与业务线程分离</strong>（对应 addLast(businessGroup, handler) 的 EventExecutorGroup 机制），以及<strong>连接绑定单一线程串行处理</strong>——同一连接的请求有序、handler 无锁，这两条放在任何 RPC 框架上都成立。必须改的是假设：Netty 的 handler 契约是"非阻塞、绝不卡 EventLoop"，而业务侧全是阻塞调用（JDBC、慢 RPC、文件），所以框架层要强制兜底——业务线程池 + 超时熔断 + 背压拒绝策略，不能指望使用者自觉。此外 Netty 不处理的领域正是你要补的：请求级超时传递、优雅停机（排空在途请求）、连接级限流与隔离。一句话：抄它的线程模型，补它的业务语义。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：4.2 为什么敢把默认分配器从 PooledByteBufAllocator 换成 AdaptiveByteBufAllocator？这笔账对你评估自己系统"要不要池化"有什么启发？<span class="chev">展开解析 ▾</span></summary>
+    <div class="details-body">
+      <p>Netty 换默认的动机有三：<strong>新 JVM 兼容</strong>（arena 版重度依赖 sun.misc.Unsafe，而 Unsafe 在新 JDK 上持续收紧）、<strong>虚拟线程时代</strong>（ThreadLocal 缓存绑定平台线程的假设被动摇）、<strong>运维成本</strong>（arena 版参数多难查，Adaptive 按观测负载自调优）。注意它没有删除池化，只是把"默认信仰"换成了"可选项"（io.netty.allocator.type=pooled 一键切回）。启发是：池化是道算术题不是信仰题——分配频率高、大小分布稳定、GC 压力可测、有泄漏检测手段时才值得上；条件缺两个，先用朴素实现，把采样式泄漏检测这类兜底设施先建好，比提前池化更划算。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 09 收官 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>系列收官：五期带走什么</h2>
+  <div class="card card-tip">
+    <p><strong>Netty 入门系列五期回顾：</strong></p>
+    <ul>
+      <li>会用层（第 1-4 期）：事件模型与 Bootstrap、编解码与粘包拆包、心跳与自定义协议、实战场景；</li>
+      <li>会读层（本期）：主从 Reactor 调用链、arena/chunk 与引用计数、pipeline 双向传播、零拷贝四处；</li>
+      <li>能抄走的设计三个词：串行无锁、双向责任链、池化加引用计数；</li>
+      <li>读码路线一条：example → bind 引导链 → run() → read → pipeline 传播 → ByteBuf 分配，每步只回答一个问题；</li>
+      <li>版本感：4.1 与 4.2 的两处分水岭——EventLoopGroup 构造方式与默认分配器。</li>
+    </ul>
+    <p>Netty 入门系列到此收官。下一个项目我们开启 <strong>etcd</strong>——同样从"是什么、凭什么活下来"讲起。Primary source：<a href="https://netty.io/wiki/new-and-noteworthy.html" target="_blank" rel="noopener">官方 wiki · New and noteworthy</a> 与 <a href="https://github.com/netty/netty" target="_blank" rel="noopener">github.com/netty/netty 源码</a>（关键类路径与版本事实按 4.2 分支、tag <code>netty-4.2.18.Final</code> 核对）。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav"><a class="prev" href="0009-netty-custom-protocol.html">← 上一期：实战场景</a><span class="next">Netty 系列完 · 回课程目录</span></nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

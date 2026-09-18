@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Netty 系列第 4 期：自定义协议的 TCP 服务器 | 2026-09-18</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0009</span>
+  <span><a href="../index.html">课程目录</a> · Netty 系列第 4 期 / 共 5 期 · <a href="https://netty.io" target="_blank" rel="noopener">netty.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · Netty 系列第 4 期：实战场景</p>
+  <h1>自定义协议的 TCP 服务器：拆包、编解码、心跳一次打通</h1>
+  <p class="subtitle">看过五大核心概念，这一期把它们全部拧在一台真实机器上：从零定义一个"设备上报 / 消息推送"风格的自定义 TCP 协议，用 LengthFieldBasedFrameDecoder 解决粘包半包（五个参数逐个算给你看），写一对出站入站编解码器，加上 IdleStateHandler 心跳踢线，把阻塞任务隔离到业务线程池，再给两种与 Spring Boot 共存的形态，最后用模拟客户端把报文打进服务器、收回 ACK。跑通这一条链，第 3 期的概念就全落了地。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 网络框架 · Java · Apache-2.0</span>
+    <span class="tag">📦 基于 v4.2.18.Final（4.1 同 API，参数语义对照官方 javadoc 核实）</span>
+    <span class="tag-date">📅 2026-09-18 · 第 4 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 需求与报文 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>需求与报文：为什么 TCP 必须自己框边界</h2>
+  <p>目标场景很典型：<strong>海量设备长连接接入</strong>——设备连上服务器后定时上报数据（温度、坐标、状态），服务器偶尔反向推送指令。HTTP 头太重、连接太短；WebSocket 语义又不完全合身。很多团队的选择是在裸 TCP 上定义一个自己的报文格式，本期就用这个简单够用的五字段协议：</p>
+  <ul>
+    <li><strong>魔数（2B）</strong>：<code>0xCAFE</code>，第一眼识别"是不是自家协议"，防误连；</li>
+    <li><strong>版本（1B）</strong>：<code>0x01</code>，给未来的协议升级留逃生门；</li>
+    <li><strong>类型（1B）</strong>：<code>0x01</code> 上报 / <code>0x02</code> ACK 应答 / <code>0x10</code> 心跳；</li>
+    <li><strong>长度（4B）</strong>：大端整数 N，<strong>只统计"体"的字节数</strong>；</li>
+    <li><strong>体（NB）</strong>：JSON 或二进制载荷。</li>
+  </ul>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 220" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <rect x="20" y="12" width="720" height="24" rx="6" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="380" y="28" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">自定义协议报文（多字节字段一律大端 / big-endian）</text>
+
+    <!-- 字段盒 -->
+    <rect x="20"  y="52" width="110" height="56" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="75"  y="74" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">魔数 2B</text>
+    <text x="75"  y="94" text-anchor="middle" fill="var(--muted)" font-size="9.5" font-family="var(--font-mono)">0xCAFE</text>
+
+    <rect x="130" y="52" width="86" height="56" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="173" y="74" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">版本 1B</text>
+    <text x="173" y="94" text-anchor="middle" fill="var(--muted)" font-size="9.5" font-family="var(--font-mono)">0x01</text>
+
+    <rect x="216" y="52" width="86" height="56" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="259" y="74" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">类型 1B</text>
+    <text x="259" y="94" text-anchor="middle" fill="var(--muted)" font-size="9.5" font-family="var(--font-mono)">01/02/10</text>
+
+    <rect x="302" y="52" width="120" height="56" rx="6" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.6"/>
+    <text x="362" y="74" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">长度 4B</text>
+    <text x="362" y="94" text-anchor="middle" fill="var(--accent)" font-size="9.5" font-weight="700" font-family="var(--font-mono)">N（体的字节数）</text>
+
+    <rect x="422" y="52" width="318" height="56" rx="6" fill="var(--card)" stroke="var(--line)" stroke-dasharray="5 3"/>
+    <text x="581" y="74" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">体 NB（变长）</text>
+    <text x="581" y="94" text-anchor="middle" fill="var(--muted)" font-size="9.5">JSON / 二进制载荷</text>
+
+    <!-- 字节偏移标尺 -->
+    <line x1="20" y1="128" x2="740" y2="128" stroke="var(--muted)"/>
+    <line x1="20"  y1="122" x2="20"  y2="134" stroke="var(--muted)"/>
+    <line x1="130" y1="122" x2="130" y2="134" stroke="var(--muted)"/>
+    <line x1="216" y1="122" x2="216" y2="134" stroke="var(--muted)"/>
+    <line x1="302" y1="122" x2="302" y2="134" stroke="var(--muted)"/>
+    <line x1="422" y1="122" x2="422" y2="134" stroke="var(--accent)" stroke-width="2"/>
+    <line x1="740" y1="122" x2="740" y2="134" stroke="var(--muted)"/>
+    <text x="20"  y="150" text-anchor="middle" fill="var(--muted)" font-size="9.5" font-family="var(--font-mono)">0</text>
+    <text x="130" y="150" text-anchor="middle" fill="var(--muted)" font-size="9.5" font-family="var(--font-mono)">2</text>
+    <text x="216" y="150" text-anchor="middle" fill="var(--muted)" font-size="9.5" font-family="var(--font-mono)">3</text>
+    <text x="302" y="150" text-anchor="middle" fill="var(--muted)" font-size="9.5" font-family="var(--font-mono)">4</text>
+    <text x="422" y="150" text-anchor="middle" fill="var(--accent)" font-size="9.5" font-weight="700" font-family="var(--font-mono)">8</text>
+    <text x="740" y="150" text-anchor="middle" fill="var(--muted)" font-size="9.5" font-family="var(--font-mono)">8+N</text>
+    <text x="60"  y="150" text-anchor="middle" fill="var(--muted)" font-size="8.5">字节偏移</text>
+
+    <!-- 头部大括号区 -->
+    <line x1="20" y1="166" x2="422" y2="166" stroke="var(--accent-3)" stroke-width="2"/>
+    <line x1="20" y1="160" x2="20" y2="166" stroke="var(--accent-3)" stroke-width="2"/>
+    <line x1="422" y1="160" x2="422" y2="166" stroke="var(--accent-3)" stroke-width="2"/>
+    <text x="221" y="184" text-anchor="middle" fill="var(--accent-3)" font-size="10.5" font-weight="700">头部固定 8 字节</text>
+
+    <rect x="20" y="196" width="720" height="20" rx="6" fill="var(--bg-accent)" stroke="var(--line)"/>
+    <text x="380" y="210" text-anchor="middle" fill="var(--ink)" font-size="10">一条完整报文总长 = 8 + N；长度字段的值只统计"体"，不含头部</text>
+  </svg>
+  </div>
+
+  <p>有了格式，还要回答那个绕不开的问题：<strong>为什么必须由长度字段来框边界？</strong>因为 TCP 是<strong>字节流</strong>，它只承诺字节顺序不变，不承诺"你发几次我就收几次"。两种日常事故：<strong>粘包</strong>——客户端连发两条 40B 报文，服务端一次 <code>channelRead</code> 可能收到 80B；<strong>半包</strong>——一条 40B 报文先到 13B、再到 27B，长度字段自己都被截成了两半。这不是 bug，是 TCP 的本性（Nagle 合包、MSS 分段、接收缓冲区读取粒度都会促成）。所以应用层必须自带边界信息——长度字段就是干这个的：先凑够 8B 头，读出 N，再等齐 8+N 字节，切出完整一帧。</p>
+</section>
+
+<!-- ================= 02 拆包五参数 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>拆包：LengthFieldBasedFrameDecoder 五个参数逐个算</h2>
+  <p>框边界的活儿 Netty 早就做成了现成零件：<code>LengthFieldBasedFrameDecoder</code>（继承自 <code>ByteToMessageDecoder</code>），按长度字段把字节流切成一帧一帧。它的官方 javadoc 里有一句必须记住的<strong>默认假设</strong>：<strong>长度字段的值，表示它后面还跟着多少字节</strong>。我们的协议"长度只算体"正好踩在这个假设上。构造器五个参数，对着上面的报文图逐个算：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>参数</th><th>本协议取值</th><th>怎么算出来的</th></tr></thead>
+    <tbody>
+      <tr><td><code>maxFrameLength</code></td><td><code>1024 * 1024</code></td><td>防御上限：帧长超过它就抛 <code>TooLongFrameException</code>，防恶意长度值打爆内存</td></tr>
+      <tr><td><code>lengthFieldOffset</code></td><td><code>4</code></td><td>长度字段前面有几个字节：魔数 2 + 版本 1 + 类型 1 = 4</td></tr>
+      <tr><td><code>lengthFieldLength</code></td><td><code>4</code></td><td>协议规定长度字段本身占 4 字节（1/2/3/4/8 都支持）</td></tr>
+      <tr><td><code>lengthAdjustment</code></td><td><code>0</code></td><td>javadoc 原文：补偿值（加到长度字段的值上）。本协议长度只算"体"，而 offset + 字段宽 = 4 + 4 = 8 已覆盖整个头，无需补偿</td></tr>
+      <tr><td><code>initialBytesToStrip</code></td><td><code>0</code></td><td>切完帧从头丢掉几个字节。后续业务解码器还要读魔数/版本/类型，一个都不能丢</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>参数对不对，一条式子就能验证（也是 Netty 源码里帧长的计算逻辑）：</p>
+  <div class="codeblock">
+    <div class="code-head"><span>frame-length.txt</span><span class="dots"><i></i><i></i><i></i></span></div>
+    <pre><code>帧长度 = lengthFieldOffset + lengthFieldLength + lengthAdjustment + 长度字段的值
+      =      4        +        4         +       0         +     N
+      = 8 + N   <span class="c">✓ 正好 = 头 8 字节 + 体 N 字节</span>
+
+<span class="c">反例：若长度字段定义成"整包长度（含头）"，值为 8+N：</span>
+      =      4        +        4         +     (-8)         +    (8+N)
+      = 8 + N   <span class="c">✓ 多算进去的 8 字节头，用 -8 补偿回来</span></code></pre>
+  </div>
+  <p>所以 <code>lengthAdjustment</code> 不是玄学：长度字段"少算"了头，就补正数；"多算"了头，就补负数。改协议先写这条式子，参数自然落地。另外还有 <code>failFast</code> 变体构造器（超长帧是"发现即抛"还是"读完整帧再抛"），以及指定 <code>ByteOrder</code> 的七参版本，4.1 与 4.2 的签名完全一致。</p>
+</section>
+
+<!-- ================= 03 编解码器 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>编解码器：出站编码 + 入站解码，成对出现</h2>
+  <p>拆包器只负责"切出完整一帧"，帧里读字段、对象变字节，还要自己写两个小类。先看消息对象和<strong>出站编码器</strong>（<code>MessageToByteEncoder</code>）：泛型声明消息类型，Netty 在出站方向碰到这种消息就回调 <code>encode</code>，第三个参数 <code>out</code> 就是最终要写向网络的字节：</p>
+  <div class="codeblock">
+    <div class="code-head"><span>ProtocolEncoder.java</span><span class="dots"><i></i><i></i><i></i></span></div>
+    <pre><code><span class="k">public class</span> <span class="f">ProtocolEncoder</span> <span class="k">extends</span> <span class="f">MessageToByteEncoder</span>&lt;ProtocolMessage&gt; {
+    <span class="nd">@Override</span> <span class="k">protected void</span> <span class="f">encode</span>(ChannelHandlerContext ctx,
+                          ProtocolMessage msg, ByteBuf out) {
+        out.writeShort(ProtocolMessage.MAGIC);   <span class="c">// 魔数 2B</span>
+        out.writeByte(ProtocolMessage.VERSION);  <span class="c">// 版本 1B</span>
+        out.writeByte(msg.getType());            <span class="c">// 类型 1B</span>
+        <span class="k">byte</span>[] body = msg.getBody() == <span class="k">null</span> ? <span class="k">new byte</span>[0] : msg.getBody();
+        out.writeInt(body.length);               <span class="c">// 长度 4B：只算体</span>
+        out.writeBytes(body);                    <span class="c">// 体 NB</span>
+    }
+}</code></pre>
+  </div>
+  <p>再看<strong>入站解码器</strong>：直接继承 <code>LengthFieldBasedFrameDecoder</code>，把五参数封进构造器，然后在 <code>decode</code> 里先调 <code>super.decode</code> 拿到完整一帧，再顺着偏移读字段——<strong>拆包和解字段一个类搞定</strong>：</p>
+  <div class="codeblock">
+    <div class="code-head"><span>ProtocolDecoder.java</span><span class="dots"><i></i><i></i><i></i></span></div>
+    <pre><code><span class="k">public class</span> <span class="f">ProtocolDecoder</span> <span class="k">extends</span> <span class="f">LengthFieldBasedFrameDecoder</span> {
+    <span class="k">public</span> <span class="f">ProtocolDecoder</span>() {
+        <span class="k">super</span>(1024 * 1024, 4, 4, 0, 0);  <span class="c">// 第 02 节算出的五参数</span>
+    }
+
+    <span class="nd">@Override</span> <span class="k">protected</span> Object <span class="f">decode</span>(ChannelHandlerContext ctx, ByteBuf in) <span class="k">throws</span> Exception {
+        ByteBuf frame = (ByteBuf) <span class="k">super</span>.decode(ctx, in);
+        <span class="k">if</span> (frame == <span class="k">null</span>) <span class="k">return null</span>;         <span class="c">// 半包：字节不够，安静等下一批</span>
+        <span class="k">try</span> {
+            <span class="k">short</span> magic = frame.readShort();
+            <span class="k">if</span> (magic != ProtocolMessage.MAGIC)
+                <span class="k">throw new</span> <span class="f">DecoderException</span>(<span class="s">"bad magic"</span>); <span class="c">// 不是自家协议</span>
+            frame.readByte();                     <span class="c">// 版本：暂存兼容字段</span>
+            ProtocolMessage msg = <span class="k">new</span> <span class="f">ProtocolMessage</span>();
+            msg.setType(frame.readByte());
+            <span class="k">int</span> len = frame.readInt();            <span class="c">// 体长度（拆包器已保证够读）</span>
+            <span class="k">byte</span>[] body = <span class="k">new byte</span>[len];
+            frame.readBytes(body);
+            msg.setBody(body);
+            <span class="k">return</span> msg;                        <span class="c">// 传给下一个入站 handler</span>
+        } <span class="k">finally</span> {
+            frame.release();                       <span class="c">// 池化内存必须还，否则泄漏</span>
+        }
+    }
+}</code></pre>
+  </div>
+  <p>两段代码是镜像关系：<strong>编码时怎么写的，解码时就怎么读</strong>，共用同一张报文定义。装配时解码器放 pipeline 最前（否则后面的处理器拿到的是一锅字节粥），编码器放它后面：</p>
+  <div class="codeblock">
+    <div class="code-head"><span>ProtocolServer.java（装配核心）</span><span class="dots"><i></i><i></i><i></i></span></div>
+    <pre><code>b.group(boss, worker)
+ .channel(NioServerSocketChannel.class)
+ .childHandler(<span class="k">new</span> <span class="f">ChannelInitializer</span>&lt;SocketChannel&gt;() {
+     <span class="nd">@Override</span> <span class="k">protected void</span> <span class="f">initChannel</span>(SocketChannel ch) {
+         ch.pipeline().addLast(
+             <span class="k">new</span> <span class="f">ProtocolDecoder</span>(),          <span class="c">// 入站：拆包 + 解字段</span>
+             <span class="k">new</span> <span class="f">ProtocolEncoder</span>(),          <span class="c">// 出站：对象编回字节</span>
+             <span class="k">new</span> <span class="f">IdleStateHandler</span>(15, 0, 0), <span class="c">// 15s 读空闲</span>
+             <span class="k">new</span> <span class="f">ServerHandler</span>());           <span class="c">// 业务</span>
+     }
+ });
+b.bind(9000).sync();</code></pre>
+  </div>
+</section>
+
+<!-- ================= 04 心跳与空闲踢线 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>心跳与空闲踢线：IdleStateHandler + userEventTriggered</h2>
+  <p>长连接有个现实问题：设备断电、拔网线、进电梯，服务端<strong>未必收到任何断开通知</strong>，连接就变成挂在内存里的幽灵。Netty 的答案是空闲检测：<code>IdleStateHandler</code> 三个参数——<strong>readerIdleTime / writerIdleTime / allIdleTime</strong>（读空闲 / 写空闲 / 全空闲，单位秒，传 0 关闭对应检测）。到点没动静，它触发一个 <code>IdleStateEvent</code>，注意这条事件<strong>不走 channelRead，走 userEventTriggered</strong>，一条专门的旁路通道：</p>
+  <div class="codeblock">
+    <div class="code-head"><span>ServerHandler.java（空闲踢线）</span><span class="dots"><i></i><i></i><i></i></span></div>
+    <pre><code><span class="nd">@Override</span>
+<span class="k">public void</span> <span class="f">userEventTriggered</span>(ChannelHandlerContext ctx, Object evt) <span class="k">throws</span> Exception {
+    <span class="k">if</span> (evt <span class="k">instanceof</span> <span class="f">IdleStateEvent</span> e &amp;&amp; e.state() == IdleState.READER_IDLE) {
+        ctx.writeAndFlush(ProtocolMessage.heartbeat())  <span class="c">// 最后探测一次</span>
+           .addListener(f -&gt; ctx.close());               <span class="c">// 15s 没收到任何字节：踢线</span>
+    } <span class="k">else</span> {
+        ctx.fireUserEventTriggered(evt);                 <span class="c">// 别的事件继续往后传</span>
+    }
+}</code></pre>
+  </div>
+  <p>策略可以更温柔：记录连续读空闲次数，探测两三次都无响应再 <code>ctx.close()</code>，容忍瞬时抖动。设备端则应起定时器，安静超过半分钟就发一条心跳报文（类型 <code>0x10</code>，体为空），把服务端的读空闲计时器喂饱。心跳不只是保活，它同时也是 NAT 映射的续租手段。</p>
+</section>
+
+<!-- ================= 05 线程模型 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>线程模型：业务 handler 里别阻塞 EventLoop</h2>
+  <p>第 3 期讲过：一个 Channel 终身绑定一个 EventLoop 线程，而 worker 线程组默认只有 <strong>CPU 核数</strong>个线程，每个线程身上挂着一大把连接。在 <code>channelRead</code> 里查库、调第三方接口，卡 100ms，<strong>同一线程上几百条连接全部陪等</strong>——这是 Netty 服务端最常见的性能事故。正确姿势是把阻塞任务隔离到业务线程池，Netty 给的口子只要一个参数：</p>
+  <div class="codeblock">
+    <div class="code-head"><span>business-group.java</span><span class="dots"><i></i><i></i><i></i></span></div>
+    <pre><code><span class="c">// 业务线程池：落库、调接口等阻塞活在这里消化</span>
+EventLoopGroup businessGroup = <span class="k">new</span> <span class="f">DefaultEventLoopGroup</span>(8);
+
+ch.pipeline().addLast(
+    <span class="k">new</span> <span class="f">ProtocolDecoder</span>(),
+    <span class="k">new</span> <span class="f">ProtocolEncoder</span>(),
+    <span class="k">new</span> <span class="f">IdleStateHandler</span>(15, 0, 0));
+
+<span class="c">// 关键一行：指定执行线程组，之后的回调都在 businessGroup 里跑</span>
+ch.pipeline().addLast(businessGroup, <span class="k">new</span> <span class="f">ServerHandler</span>());</code></pre>
+  </div>
+  <p><code>addLast(EventLoopGroup, handler)</code> 的含义是：pipeline 从这个节点开始，该 handler 的事件回调都被派到指定线程组执行。于是 <code>channelRead0</code> 里可以放心写慢代码，EventLoop 只负责网络读写和纯内存计算，互不拖累。另一条路是在 handler 里自己 <code>submit</code> 任务到线程池，效果类似，但管道级切换让业务代码完全不用感知线程问题。</p>
+</section>
+
+<!-- ================= 06 与 Spring Boot 共存 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>与 Spring Boot 共存：两种形态</h2>
+  <ul>
+    <li><strong>形态一：Netty 独立进程。</strong>单独打包部署、端口独立，与 Web 应用彻底解耦，重启互不影响，还能单独扩容。设备接入网关、长连接推送层这类独立组件常这么干。</li>
+    <li><strong>形态二：嵌入 Spring 容器。</strong>Netty 跟业务应用同进程，handler 是 Spring 托管的 Bean，直接注入 service、事务和数据源；用 <code>SmartLifecycle</code> 把启停挂进容器生命周期。设备量不大的业务系统选它最省运维。</li>
+  </ul>
+  <div class="codeblock">
+    <div class="code-head"><span>NettyServer.java（嵌入形态最小骨架）</span><span class="dots"><i></i><i></i><i></i></span></div>
+    <pre><code><span class="nd">@Component</span>
+<span class="k">public class</span> <span class="f">NettyServer</span> <span class="k">implements</span> <span class="f">SmartLifecycle</span> {
+    <span class="k">private</span> EventLoopGroup boss, worker;
+    <span class="k">private</span> Channel serverChannel;
+    <span class="nd">@Resource</span> <span class="k">private</span> ServerHandler serverHandler;  <span class="c">// Spring 托管的业务 handler</span>
+
+    <span class="nd">@Override</span> <span class="k">public void</span> <span class="f">start</span>() {          <span class="c">// 容器 refresh 完成后自动回调</span>
+        boss = <span class="k">new</span> <span class="f">NioEventLoopGroup</span>(1);
+        worker = <span class="k">new</span> <span class="f">NioEventLoopGroup</span>();
+        <span class="c">// ServerBootstrap 装配同第 03 节，仅业务 handler 换成注入的单例</span>
+        serverChannel = bootstrap(serverHandler).bind(9000).channel();
+    }
+    <span class="nd">@Override</span> <span class="k">public void</span> <span class="f">stop</span>() {           <span class="c">// 容器关闭：优雅停机，不丢存量连接</span>
+        serverChannel.close();
+        boss.shutdownGracefully();
+        worker.shutdownGracefully();
+    }
+    <span class="nd">@Override</span> <span class="k">public boolean</span> <span class="f">isRunning</span>() { <span class="k">return</span> serverChannel.isActive(); }
+}</code></pre>
+  </div>
+  <p class="note"><span class="h">单例注入的代价：</span>同一个 handler 实例会被加进所有连接的 pipeline，必须给类标上 <code>@ChannelHandler.Sharable</code>，并保证它无连接级的可变成员变量（连接状态放进 <code>AttributeKey</code>）——否则第二个连接建立马抛异常，这是嵌入形态的头号翻车点。</p>
+</section>
+
+<!-- ================= 07 端到端验证 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>端到端验证：发一条报文，收一个 ACK</h2>
+  <p>二进制协议用 telnet 手敲太痛苦，十几行客户端代码最踏实（装配同服务端，只是去掉业务逻辑）：</p>
+  <div class="codeblock">
+    <div class="code-head"><span>ClientMain.java</span><span class="dots"><i></i><i></i><i></i></span></div>
+    <pre><code>Channel ch = <span class="k">new</span> <span class="f">Bootstrap</span>()
+    .group(<span class="k">new</span> <span class="f">NioEventLoopGroup</span>(1))
+    .channel(NioSocketChannel.class)
+    .handler(<span class="k">new</span> <span class="f">ChannelInitializer</span>&lt;SocketChannel&gt;() {
+        <span class="nd">@Override</span> <span class="k">protected void</span> <span class="f">initChannel</span>(SocketChannel c) {
+            c.pipeline().addLast(<span class="k">new</span> <span class="f">ProtocolDecoder</span>(),
+                                 <span class="k">new</span> <span class="f">ProtocolEncoder</span>());
+        }})
+    .connect(<span class="s">"127.0.0.1"</span>, 9000).sync().channel();
+
+ProtocolMessage msg = <span class="k">new</span> <span class="f">ProtocolMessage</span>();
+msg.setType(ProtocolMessage.TYPE_REPORT);
+msg.setBody(<span class="s">"{\"deviceId\":\"A-001\",\"temp\":26.5}"</span>.getBytes(StandardCharsets.UTF_8));
+ch.writeAndFlush(msg);   <span class="c">// 编码器自动转成协议字节流</span></code></pre>
+  </div>
+  <p>跑起来后，在服务端把收发的字节打成十六进制，整条链路肉眼可见：</p>
+  <div class="codeblock">
+    <div class="code-head"><span>运行结果</span><span class="dots"><i></i><i></i><i></i></span></div>
+    <pre><code>客户端发出 40 字节（头 8B + 体 32B）：
+  CA FE 01 01 00 00 00 20
+  7B 22 64 65 76 69 63 65 49 64 22 3A 22 41 2D 30 30 31 22 2C 22 74 65 6D 70 22 3A 32 36 2E 35 7D
+  <span class="c">// 即 {"deviceId":"A-001","temp":26.5}，N=0x20=32</span>
+
+服务端日志：
+  收到完整一包 40B：magic=CAFE version=01 type=REPORT len=32
+  业务线程入库完成，回 ACK 16 字节：
+  CA FE 01 02 00 00 00 08 4F 4B 3A 41 2D 30 30 31
+  <span class="c">// 头 8B（type=0x02 应答，len=8）+ 体 "OK:A-001"</span></code></pre>
+  </div>
+  <p>想复现粘包很简单：循环连发两条再 <code>flush</code>，服务端照样一条条解析——拆包器在前面框好了边界；再故意把 <code>lengthAdjustment</code> 改错，立刻解码错乱或抛 <code>TooLongFrameException</code>，反向验证第 02 节的公式。</p>
+</section>
+
+<!-- ================= 08 quiz ================= -->
+<section>
+  <h2><span class="sec-num">08</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1.（计算题）协议其他字段不变，但把长度字段的定义从"体的长度"改成"整包长度（含 8 字节头）"，此时 lengthAdjustment 应该填多少？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["正数是给“长度少算头部”的场景补长度，这里方向反了","值为 0 时帧长会算成 16+N，比真实报文多了 8 字节","长度值已含头 8 字节，公式 4+4+adj+(8+N)=8+N 解出 adj=-8：多算的部分要减回来"]'>
+        <li class="quiz-option">8</li>
+        <li class="quiz-option">0</li>
+        <li class="quiz-option">-8</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 本协议中 lengthFieldOffset = 4 是怎么算出来的？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["0 意味着长度字段顶在包开头，那魔数、版本、类型放哪","长度字段前面有魔数 2B + 版本 1B + 类型 1B = 4 字节，所以偏移是 4","8 是整个头部长度，不是长度字段的起点"]'>
+        <li class="quiz-option">从报文第 0 字节开始数，所以是 0</li>
+        <li class="quiz-option">魔数 2B + 版本 1B + 类型 1B = 4 字节，跳过它们才到长度字段</li>
+        <li class="quiz-option">头部固定 8 字节，所以是 8</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. IdleStateHandler 触发的 READER_IDLE 事件，应该在哪个回调里接收处理？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["channelRead 只收网络数据，空闲事件不是数据","exceptionCaught 是异常通道","空闲事件走 userEventTriggered 这条旁路，参数是 Object，需要自己 instanceof 判断"]'>
+        <li class="quiz-option">channelRead</li>
+        <li class="quiz-option">exceptionCaught</li>
+        <li class="quiz-option">userEventTriggered</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. 为什么本协议把 initialBytesToStrip 设为 0？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["0 不会带来性能差异，它只是切完帧后从头丢弃的字节数","后续业务解码器还要读魔数做校验、读版本和类型分发，头部必须完整保留","传 0 是完全合法的，只有想直接丢弃头部时才传正数"]'>
+        <li class="quiz-option">Netty 不允许传 0 以外的其他值给自定义协议</li>
+        <li class="quiz-option">后续业务解码器还要读魔数、版本、类型这些头部字段，一个字节都不能丢</li>
+        <li class="quiz-option">传 0 比传 8 解码速度快一倍</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 09 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：为什么"一次 channelRead 收到的 ByteBuf"几乎永远不等于"一条报文"？从 TCP 的交付机制说起。<span class="chev">展开解析 ▸</span></summary>
+    <div class="details-body">
+      <p>因为 TCP 对上层的交付单位是<strong>字节流片段</strong>，不是消息。发送端每次 write 只是把字节灌进发送缓冲区，内核按 MSS（最大分段大小）切成报文段发出，还可能被 Nagle 算法攒一攒再发；接收端内核把数据放进接收缓冲区，Netty 的 EventLoop 醒来时"手里有多少读多少"。于是：两次 write 的字节可能挤在同一次读里（粘包），一次 write 的大块字节可能分散在几次读里（半包），读到的边界跟发送边界之间<strong>没有任何对应关系</strong>——唯一保证的是字节顺序。这也解释了为什么"长度字段 + 等齐再切"是通用解：它把消息边界从内核的交付行为里拿回来，交还给应用层的协议自己定义。UDP 没这个问题（数据报天然有边界），但 UDP 不保证顺序、不保证到达、有报文大小上限，所以可靠有序的设备通道依然首选 TCP 加自定义拆包。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：既然怕阻塞，为什么不干脆把 worker 线程组调大到几百个线程，而要另建业务线程池？<span class="chev">展开解析 ▸</span></summary>
+    <div class="details-body">
+      <p>三个账。①<strong>绑定关系不变</strong>：NioEventLoopGroup 调大只是多了线程，但每个 Channel 仍绑定其中一个 EventLoop，你在 handler 里阻塞，卡住的还是这根线程以及挂在它身上的所有连接——调大线程数只是让"陪葬的连接"换了个分布，单连接的尾延迟一点没改善。②<strong>成本账</strong>：EventLoop 是注册在 Selector 上的 IO 线程，数量远超核数只会带来上下文切换和内存开销，浪费在"等数据库"上的线程纯粹是死重。③<strong>职责分离</strong>：IO 线程的理想的活是"读写 + 纯内存计算"，阻塞操作天然属于另一类资源池——连接池、异步客户端、业务线程组。Netty 的 <code>addLast(businessGroup, handler)</code> 让这个切换零成本落进 pipeline 结构里，慢活被隔离后，几百个连接共享十几个 IO 线程依然丝滑。一句话：线程多少不是关键，<strong>别让等外部资源的线程和跑网络 IO 的线程是同一批</strong>才是关键。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 10 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这三句话：</strong></p>
+    <ul>
+      <li>TCP 是字节流不是报文流，边界必须自己框：五参数对着报文格式逐个算，一条帧长公式保平安；</li>
+      <li>编解码成对出现（MessageToByteEncoder 出站 / 拆包器加字段读取站），心跳用 IdleStateHandler + userEventTriggered 踢线；</li>
+      <li>重活别在 EventLoop 里干：addLast(businessGroup, handler) 隔离到业务线程池，Spring 共存按规模选独立进程或嵌入容器。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 5 期《架构与源码导读》——Netty 系列收官。我们进到 Netty 肚子里：EventLoop 怎么用一个线程伺候几千条连接、ByteBuf 的池化与引用计数到底怎么运转、pipeline 的双向传播在源码里长什么样，顺便给出一条高效的源码阅读路线。</p>
+  <p><strong>延伸阅读：</strong>Primary source：<a href="https://netty.io/4.1/api/io/netty/handler/codec/LengthFieldBasedFrameDecoder.html" target="_blank" rel="noopener">LengthFieldBasedFrameDecoder 官方 javadoc</a>（参数定义与七个示例，4.1/4.2 语义一致，本期五参数取值即对照此文核实）。</p>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0008-netty-core-concepts.html">← 上一期：核心概念与整体架构</a>
+  <a class="next" href="0010-netty-source-reading.html">下一期：架构与源码导读 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>
