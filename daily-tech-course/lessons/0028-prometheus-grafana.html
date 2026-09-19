@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · Prometheus + Grafana 监控体系：让系统自己开口说话 | 2026-09-20</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0028</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0027-function-calling.html">上一期：Function Calling 与工具调用</a> · <a href="https://www.bilibili.com/video/BV12Lee6fExs" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">ARCH &amp; OPS · 架构与中间件运维通用系列第 2 讲（可观测性篇）</p>
+  <h1>让系统自己开口说话：Prometheus + Grafana 监控体系</h1>
+  <p class="subtitle">AI 三讲告一段落（RAG、向量库、工具调用的进阶主题后面再回来），今天开启新主线：可观测性。监控系统的本质不是"买一套软件"，而是回答四个问题：系统现在健不健康、哪里不健康、为什么（假设）、要不要现在处理——四个问题分别对应指标、日志、追踪、告警四类信号。指标监控的事实标准就是 Prometheus：拉模型、多维数据模型、PromQL、内置告警。这一讲把它的整条流水线拆开（数据怎么进来、怎么存、怎么查、怎么告警），再讲透架构师最容易栽的两个坑：高基数爆炸和 histogram 分位数误读，最后给出容量账与高可用拓扑。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🛠 架构运维</span>
+    <span class="tag-date">📅 2026-09-20 · 第 28 期</span>
+    <span class="tag time">⏱ 预计阅读 10 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>一次"大促前夜监控先死"的高基数爆炸复盘</h2>
+  <p>电商订单平台大促前两周压测，Prometheus 突然 OOM 重启。重启后更糟：WAL 回放几分钟、页面全空白，回放完没半小时又 OOM——监控先于业务挂掉，压测期间系统处于"盲飞"状态。</p>
+  <p>复盘抓到三个动作：</p>
+  <ul>
+    <li><strong>埋点同学</strong>为了排查方便，给订单接口指标加了个 <code>order_id</code> 标签——每个订单一条新时间序列，压测每小时百万订单，等于每小时凭空造出上百万序列；</li>
+    <li><strong>抓取配置</strong>没设 <code>sample_limit</code>，超量样本照单全收，没有任何刹车；</li>
+    <li><strong>扩容动作</strong>是内存翻倍——撑了两周，大促演练当天涨得更猛，再次爆炸。指标序列从 12 万涨到 420 万，多花的内存买来的是更慢的查询和更长的重启。</li>
+  </ul>
+  <p>复盘结论：<strong>Prometheus 的内存主账单不是业务流量，而是活跃时间序列数</strong>。一个标签的取值空间是百万级，它就不该是标签——该进日志或追踪。监控架构的第一课是给"什么能当标签"立规矩：<strong>枚举得出的是标签，认不出来的是维度爆炸</strong>。这一讲从数据模型讲起，你会发现后面所有容量、调优、高可用的决策，都从这一条推导出来。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：一条指标的一生</h2>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 360" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar28" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar28a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <text x="380" y="20" text-anchor="middle" fill="var(--muted)" font-size="13">Prometheus 流水线：数据自己走上来，告警自己发出去</text>
+
+    <!-- 目标发现层 -->
+    <rect x="20" y="40" width="150" height="96" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="95" y="62" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">服务发现</text>
+    <text x="95" y="80" text-anchor="middle" fill="var(--muted)" font-size="9.5">静态配置 / DNS</text>
+    <text x="95" y="96" text-anchor="middle" fill="var(--muted)" font-size="9.5">Kubernetes SD（Pod 变化</text>
+    <text x="95" y="112" text-anchor="middle" fill="var(--muted)" font-size="9.5">自动增删抓取目标）</text>
+    <line x1="170" y1="88" x2="208" y2="88" stroke="var(--muted)" marker-end="url(#ar28)"/>
+
+    <!-- 抓取层 -->
+    <rect x="212" y="40" width="180" height="96" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="302" y="62" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">拉取（scrape）</text>
+    <text x="302" y="80" text-anchor="middle" fill="var(--muted)" font-size="9.5">按 interval 主动 GET</text>
+    <text x="302" y="96" text-anchor="middle" fill="var(--muted)" font-size="9.5">/metrics 端点</text>
+    <text x="302" y="112" text-anchor="middle" fill="var(--muted)" font-size="9.5">relabel 过滤 · sample_limit 刹车</text>
+    <line x1="392" y1="88" x2="430" y2="88" stroke="var(--muted)" marker-end="url(#ar28)"/>
+
+    <!-- TSDB -->
+    <rect x="434" y="40" width="170" height="96" rx="10" fill="var(--code-bg)" stroke="var(--accent-3)"/>
+    <text x="519" y="62" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">TSDB 本地时序库</text>
+    <text x="519" y="80" text-anchor="middle" fill="var(--muted)" font-size="9.5">head 常驻内存（活跃序列）</text>
+    <text x="519" y="96" text-anchor="middle" fill="var(--muted)" font-size="9.5">2h 切 block 落盘 · 压缩</text>
+    <text x="519" y="112" text-anchor="middle" fill="var(--muted)" font-size="9.5">保留期（如 15d）后删除</text>
+
+    <!-- 规则与查询 -->
+    <rect x="20" y="168" width="360" height="92" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="200" y="190" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">PromQL 查询 + 预聚合规则（recording rules）</text>
+    <text x="200" y="208" text-anchor="middle" fill="var(--muted)" font-size="9.5">rate / histogram_quantile / 由标签任意聚合</text>
+    <text x="200" y="224" text-anchor="middle" fill="var(--muted)" font-size="9.5">大盘热查询预先算好存回 TSDB（Grafana 只读结果）</text>
+    <text x="200" y="240" text-anchor="middle" fill="var(--muted)" font-size="9.5">仪表盘每 5s 全量算一遍 = 雪上加霜，规则是解药</text>
+    <line x1="519" y1="136" x2="519" y2="164" stroke="var(--muted)" stroke-dasharray="4 3" marker-end="url(#ar28)"/>
+
+    <!-- Alertmanager -->
+    <rect x="410" y="168" width="194" height="92" rx="10" fill="var(--warn-bg)" stroke="var(--bad)"/>
+    <text x="507" y="190" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">Alertmanager（与告警解耦）</text>
+    <text x="507" y="208" text-anchor="middle" fill="var(--muted)" font-size="9.5">分组：一故障多报警并一条</text>
+    <text x="507" y="224" text-anchor="middle" fill="var(--muted)" font-size="9.5">抑制：级联故障只报根因</text>
+    <text x="507" y="240" text-anchor="middle" fill="var(--muted)" font-size="9.5">静默：发版窗口免打扰 · 路由分级</text>
+    <line x1="380" y1="214" x2="406" y2="214" stroke="var(--accent-3)" marker-end="url(#ar28a)"/>
+
+    <!-- 远端长期存储 -->
+    <rect x="20" y="284" width="360" height="58" rx="10" fill="var(--bg-accent)" stroke="var(--accent)"/>
+    <text x="200" y="306" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">长期存储与全局视图（可选层）：Thanos / Mimir / VictoriaMetrics</text>
+    <text x="200" y="324" text-anchor="middle" fill="var(--muted)" font-size="9.5">sidecar 上传 block 到对象存储 / remote write 直推 · 全局查询、降采样、长期保留</text>
+    <line x1="519" y1="260" x2="440" y2="292" stroke="var(--muted)" stroke-dasharray="4 3" marker-end="url(#ar28)"/>
+
+    <!-- Grafana -->
+    <rect x="620" y="168" width="120" height="92" rx="10" fill="var(--card)" stroke="var(--ok)"/>
+    <text x="680" y="192" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">Grafana</text>
+    <text x="680" y="210" text-anchor="middle" fill="var(--muted)" font-size="9.5">只做可视化</text>
+    <text x="680" y="226" text-anchor="middle" fill="var(--muted)" font-size="9.5">PromQL 当数据源</text>
+    <text x="680" y="242" text-anchor="middle" fill="var(--muted)" font-size="9.5">不存数据不管告警</text>
+    <line x1="604" y1="214" x2="616" y2="214" stroke="var(--muted)" marker-end="url(#ar28)"/>
+  </svg>
+  </div>
+
+  <p><strong>数据模型只有一句话：指标名 + 一组标签 = 一条时间序列</strong>。<code>http_requests_total{job="orders", path="/api/pay", status="200"}</code> 就是一条序列，每个抓取周期为它追加一个样本（时间戳 + 值）。这个设计的杀伤力在查询侧：标签是维度，聚合时想按服务看就 <code>sum by (job)</code>、想按接口看就 <code>sum by (path)</code>，一张表顶过去 Zabbix 时代给每个维度预建一万个监控项。它的反噬同样来自这里：<strong>每多一个标签，序列数就乘上它的取值空间</strong>——第 01 节的爆炸，根因就是这条乘法。</p>
+
+  <p><strong>为什么是"拉"不是"推"：</strong>Prometheus 周期性主动 GET 目标的 <code>/metrics</code> 端点。拉模型的好处全在运维侧——健康检查免费（抓不到就是故障信号）、目标集中管控（改采集频率不用动业务代码）、乱序推送天然免疫（节奏由服务端定）。代价是跨网络边界弱：目标在 NAT 后、批量短生命周期作业（今天的 CI、明天的批量任务）够不着，这两类场景分别用 Pushgateway 中转（作业级推、Prometheus 拉）与统一出口解决。抓到什么、丢什么，由 relabel 在抓取前过滤；<code>sample_limit</code> 是每个抓取目标的样本数上限，超了整次抓取作废并计数——宁可丢一次抓取告警出来，也别让一条坏目标拖垮实例，这就是"刹车"的位置。</p>
+
+  <p><strong>存储层的时间线：</strong>最新样本进 head 区（常驻内存，两小时窗口），攒满 2 小时切成不可变 block 落盘，后台压缩合并，超过保留期删除。OOM 重启要回放 WAL，序列越多回放越久——第 01 节"重启后几分钟空白"就是这么来的。<strong>活跃序列数是内存账单的第一自变量</strong>，这条事实贯穿后面的容量规划与所有高基数治理。</p>
+
+  <h3>PromQL：面向时间序列的一门小语言</h3>
+  <p>PromQL 的核心是三类算子：<strong>rate</strong> 类（把 counter 的递增量变成每秒速率）、<strong>聚合</strong>类（sum/avg/max/by/without 沿标签维度折叠）、<strong>函数</strong>类（分位数、直方图、预测）。典型一问"订单服务各接口的 5 分钟 P99 延迟"，翻译成 PromQL 就是：<code>histogram_quantile(0.99, sum by (path, le) (rate(http_request_duration_seconds_bucket[5m])))</code>——先 rate 求桶增速，再按接口与桶边界聚合，最后插值出分位数。这句话里埋着第 04 节要展开的经典陷阱（桶边界与 by 列表），先按下不表。</p>
+
+  <div class="callout">
+    <p class="callout-title">告警为什么独立成 Alertmanager</p>
+    <p>Prometheus 只负责"把规则算成true或false"（告警规则就是 PromQL），通知的分组、抑制、静默、路由全在 Alertmanager——两者解耦的深意：<strong>告警风暴的治理不在计算层，在通知层</strong>。一次网络抖动可能触发 200 条规则，直接推送就是一次自杀式电话轰炸；Alertmanager 把同组告警合并成一条、被引发的级联告警被根因抑制、发版窗口提前静默——值班同学的手机安静程度，取决于这一层的功力，而不是规则写得多精细。</p>
+  </div>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：分层、容量与高可用</h2>
+
+  <h3>四问四信号：先定"看什么"，再选"用什么"</h3>
+  <p>监控体系选型前先回答 SRE 的四个问题，它们分别落到不同信号上：<strong>健不健康</strong>→指标（Prometheus 的主场）；<strong>哪里出的事</strong>→日志（Loki/ELK）；<strong>为什么</strong>→追踪（SkyWalking/Tempo，后续专题展开）；<strong>要不要现在处理</strong>→告警分级与值班（Alertmanager + on-call）。<strong>指标只回答计数类问题，不回答识别类问题</strong>——"这个用户为什么下单失败"是日志与追踪的活，塞进指标就是第 01 节的爆炸。四类信号通过 <code>trace_id</code>、统一资源属性关联起来（OpenTelemetry 的语义约定正在统一这套词汇表，Prometheus 3.x 已原生接收 OTLP 指标），这是可观测性的整体观，别把预算全押在单一信号上。</p>
+
+  <h3>分域分片：水平扩展的官方答案</h3>
+  <p>单实例 Prometheus 不是为集群规模和高可用设计的——它是一个"域"的真相源：<strong>按边界切域（一个机房/一个集群/一条业务线），一域至少两副本实例，两副本互不感知，同为最终一致性</strong>（各自抓取，网络抖动时丢的样本不同）。要跨域全局视图与长期保留，上加 Thanos/Mimir/VictoriaMetrics 层：sidecar 把落盘 block 上传对象存储（或 remote write 直推），查询组件做全局聚合与降采样。<strong>单实例一百万活跃序列是个务实参考线</strong>：超过它，先治理基数，再考虑分域拆分——而不是给单实例加内存硬扛，第 01 节已经演示了这条路的下场。</p>
+
+  <div class="callout">
+    <p class="callout-title">容量三笔账（以 100 万活跃序列、15s 间隔为例）</p>
+    <p><strong>内存账：</strong>head 区每条活跃序列约 1~2KB 起步（含 label 对与样本chunk），100 万序列≈2~4GB 基线，再叠 head 查询缓存与抓取缓冲，<strong>经验公式：活跃序列数 × 2~4KB</strong>，再留 50% 余量应对峰值与 churn；<strong>磁盘账：</strong>每样本落盘约 1~2 字节（压缩后），100 万序列 ÷ 15s ≈ 6.7 万样本/秒 × 1.5B × 86400s ≈ 每日 8~9GB 原始，压缩 block 后打个折扣，按保留 15 天预留 100~150GB；<strong>churn 账：</strong>序列生灭速率（Pod 重建、扩缩容）决定 head 里"新旧序列叠加"的水位，HPA 频繁伸缩的集群序列数可以翻倍——容量规划要按"扩容后的目标数"算，不是按当前副本数算。内存买大了只救急：<strong>基数不治理，内存曲线永远向右上方走</strong>。</p>
+  </div>
+
+  <h3>USE / RED：两类资源的两套体检表</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>方法</th><th>对象</th><th>指标三件套</th><th>示例</th></tr>
+    <tr><td><strong>USE</strong>（资源视角）</td><td>CPU、内存、磁盘、网络等<strong>资源</strong></td><td>Utilization 使用率 · Saturation 饱和度 · Errors 错误</td><td>节点 CPU 使用率、磁盘 IO 队列长度、网卡丢包</td></tr>
+    <tr><td><strong>RED</strong>（服务视角）</td><td>每个 HTTP/RPC <strong>服务</strong></td><td>Rate 请求速率 · Errors 错误率 · Duration 延迟分布</td><td>订单服务 QPS、5xx 占比、P99 延迟</td></tr>
+  </table>
+  </div>
+  <p>落地顺序建议：<strong>先用 RED 把每个对外服务铺一遍（用户直接感知），再用 USE 把每个资源节点铺一遍（容量与硬件）</strong>，中间件（MySQL/Redis/Pulsar）各有官方 exporter 的现成大盘。两套方法合起来，"系统健不健康"就有了固定的检查清单——新服务上线没有 RED 三件套，等于没带体检报告。</p>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：一份带刹车的 prometheus.yml 与两个必踩的坑</h2>
+
+  <h3>抓取配置：relabel 过滤 + sample_limit 刹车</h3>
+  <pre><code><span class="c-com"># prometheus.yml —— 关键段落</span>
+global:
+  scrape_interval: 15s          <span class="c-com"># 默认抓取节奏</span>
+  evaluation_interval: 15s      <span class="c-com"># 告警/预聚合规则的计算节奏</span>
+
+scrape_configs:
+  - job_name: <span class="c-str">"k8s-pods"</span>
+    kubernetes_sd_configs:
+      - role: pod               <span class="c-com"># Pod 增删，目标自动跟着变</span>
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        regex: <span class="c-str">"true"</span>          <span class="c-com"># 只抓带注解的 Pod</span>
+        action: keep
+    metric_relabel_configs:     <span class="c-com"># 采集后入库前的最后一道过滤</span>
+      - regex: <span class="c-str">"order_id|user_id|request_id"</span>
+        action: labeldrop       <span class="c-com"># 无界标签直接丢，第01节的爆炸在此拆除引信</span>
+    sample_limit: 5000          <span class="c-com"># 单目标样本数上限：超限作废本次抓取并计数告警</span>
+
+  - job_name: <span class="c-str">"pushgateway"</span>   <span class="c-com"># 短生命周期批量作业的中转</span>
+    honor_labels: true          <span class="c-com"># 保留作业自带的 job/instance 标签</span>
+    static_configs:
+      - targets: [<span class="c-str">"pushgateway:9091"</span>]</code></pre>
+
+  <h3>histogram 的正确读法：先建桶，再查分位数</h3>
+  <pre><code><span class="c-com"># Micrometer（Spring Boot Actuator 底层）：为订单接口配桶边界</span>
+<span class="c-com"># management.metrics.distribution.slo.orders=50ms,100ms,200ms,500ms,1s,2s</span>
+
+<span class="c-com"># PromQL：各接口 5 分钟 P99 —— by 里必须有 le（桶边界标签）</span>
+histogram_quantile(<span class="c-num">0.99</span>,
+  sum by (path, le) (rate(http_request_duration_seconds_bucket[<span class="c-num">5m</span>])))
+
+<span class="c-com"># 对比错误写法：by 里漏了 le —— 桶被聚没了，分位数算出来是错的</span>
+<span class="c-com"># histogram_quantile(0.99, sum by (path) (rate(..._bucket[5m])))</span></code></pre>
+
+  <div class="warn">
+    <p><strong>两个必踩的坑：</strong>① <strong>桶边界决定精度上限</strong>——histogram_quantile 是在相邻桶之间线性插值，桶边界 200ms 和 500ms 之间的 P99 只能估成 350ms 附近；两条曲线的桶不同，分位数不可互相比较（A 服务最细桶 100ms，B 服务最细桶 500ms，同查 P99 就是在比两把不同的尺子）。桶要按服务的 SLO 上下游配（SLO 是 300ms，桶就配 200/300/500ms），别用默认桶。② <strong>labeldrop 治已病，评审治未病</strong>——无界标签该在代码评审阶段被拦下（"这个标签在生产的取值个数，你能在白板上枚举吗？"），落入生产再由 metric_relabel 兜底。两道防线都要有，顺序不能反。</p>
+  </div>
+
+  <div class="card card-tip">
+    <h4>✅ 上线体检清单</h4>
+    <p>☐ 抓取配置带 sample_limit，超限有告警　☐ metric_relabel 兜底丢弃无界标签（order_id/user_id/request_id 一类）　☐ 代码评审有"标签取值空间"检查项　☐ 盯 <code>prometheus_tsdb_head_series</code> 曲线：平稳=健康，持续爬升=基数失控（比内存告警早几天发现）　☐ <code>topk(20, count by (__name__)({__name__=~".+"}))</code> 定期排出序列数 Top 榜并治理　☐ histogram 桶按 SLO 配置，跨服务对比分位数前先对桶　☐ 预聚合规则覆盖大盘热查询，Grafana 面板不裸算复杂表达式　☐ Alertmanager 配好分组/抑制/静默，发版窗口静默是默认动作　☐ 每域两副本，跨域长期存储（Thanos/Mimir/VictoriaMetrics）方案已定　☐ 延迟指标用 OTLP 直发 3.x 或 Micrometer 暴露，不自己造轮子</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>指标名 + 标签 = 时间序列：</strong>标签是查询时的维度武器，也是存储时的基数炸弹——每加一个标签，序列数乘以它的取值空间。枚举得出的是标签，认不出来的是维度爆炸。</li>
+    <li><strong>拉模型、单域真相源：</strong>Prometheus 主动拉 /metrics，健康检查免费、节奏服务端定；单实例管一个域，跨网络与短作业用 Pushgateway 中转，全局视图交给 Thanos/Mimir 层。</li>
+    <li><strong>内存账单 = 活跃序列数：</strong>经验公式序列数 × 2~4KB，churn 与扩缩容要算进水位；治理优先于扩容——加内存只是把爆炸日期往后挪。sample_limit 与 relabel 是入库前的两道闸。</li>
+    <li><strong>告警计算与通知解耦：</strong>Prometheus 只判真假，分组/抑制/静默/路由在 Alertmanager——值班手机的安静程度取决于通知层功力；预聚合规则替大盘挡掉重复计算。</li>
+    <li><strong>USE 管资源、RED 管服务：</strong>新服务上线 RED 三件套（速率/错误/延迟）是体检底线；histogram 分位数先对桶再比较，桶边界按 SLO 配。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目一：Prometheus 又一次 OOM。指标显示活跃序列 12 万→300 万，内存从 4GB 涨到 32GB，曲线仍在爬升；业务方要求"监控不能有任何盲区，一条序列都不能丢"。① 你的止血动作排序？② 如何定位是哪个标签在引爆基数？③ "一条都不能丢"这个要求怎么回应？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>止血三步，顺序不能乱：</strong>第一步先上 metric_relabel_configs 把无界标签（user_id/order_id/URL 原文一类）labeldrop 掉——配置热加载立即生效，把入流量的水龙头关小，这是唯一能在几分钟内见效的动作；第二步调低高吞吐目标的抓取频率（15s→30s/60s），内存与磁盘压力直接减半再减半，代价只是故障发现变慢一点；第三步才是临时扩内存——注意它是给前两步争取时间，不是解决方案。反过来先扩内存，就是第 01 节复盘的原样重演。做完三步再排重启窗口：WAL 回放时长与序列数成正比，止血后回放会快得多。</p>
+      <p>② <strong>定位三板斧：</strong>先看总量与走势——<code>prometheus_tsdb_head_series</code> 确认爆炸时间点与斜率（突发陡升=新上线的东西带了坏标签，缓升=业务自然增长叠 churn）；再排 Top 榜——<code>topk(20, count by (__name__)({__name__=~".+"}))</code> 找出序列数最多的指标名；最后拆维度——对嫌疑指标执行 <code>count by (label_name) (嫌疑指标名)</code>，逐个标签数一下取值个数，取值空间在涨的那个就是引信。三个查询两分钟出结果，比翻代码快。</p>
+      <p>③ <strong>回应口径："盲区"和"全保留"是两个问题。</strong>盲区问题用"降精度不瞎眼"解决：无界标签去掉后，服务级/接口级的聚合指标仍在，故障发现与定位到服务的能力不受影响——丢掉的只是"用指标回答个体问题"的能力，而这件事本来就该由日志和追踪干（成本模型完全不同）。全保留问题算三笔账给他看：300 万序列≈6~12GB head 内存起步且持续爬升、查询 fan-out 变慢拖垮大盘、每 2 小时 block 的 compaction 压力上升——若确有个体级分析需求（如按租户计费），正解是那部分数据走日志/追踪或单独的时序库，与指标监控分仓，而不是让全局监控为它陪葬。<strong>架构师的职责是把"什么数据进指标"变成一条显式决策，而不是照单全收。</strong></p>
+    </div>
+  </details>
+
+  <details class="q-card">
+    <summary>题目二：值班同学抱怨：一次小区网网络抖动，两分钟收到 137 条告警；每轮 K8s 发版，滚动重启又准时来一波"实例下线"告警；而真正让业务受损的一次 MySQL 连接池耗尽，告警却晚了八分钟才到。① 三类问题分别该怎么治？② 连接池耗尽这类"渐变型故障"，告警为什么天然滞后，怎么补？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>三类告警噪音，三个不同的药方：</strong>网络抖动的 137 条是典型告警风暴——根因是"每条规则独立推送"，药方在 Alertmanager：<code>group_by</code> 按集群/服务分组（同一故障的多条告警并成一条通知）、<code>group_wait</code> 稍等几秒让同批告警归组、再配 inhibit 规则（目标 down 了就抑制它上面的所有指标告警——实例都抓不到了，它的 CPU 高不高没有意义）；发版窗口的"实例下线"是计划内事件——提前 <code>amtool silence</code> 静默（发版平台在发布流水线里自动创建定时静默，比人工记得住），或规则层给这类告警加"持续 N 分钟才报"的 <code>for</code>，让滚动窗口内的正常重启根本不触发；<strong>两个药方作用层不同：分组抑制在通知层，for 与静默在触发层，组合用才安静。</strong></p>
+      <p>② <strong>渐变型故障的滞后是阈值告警的结构性缺陷：</strong>连接池耗尽前，连接数在缓慢爬升、等待队列在慢慢变长——静态阈值（"连接数 &gt; 80% 告警"）要么设得贴着水位（平时频繁误报，最后被静音，真来事时没人看），要么设得离水位远（等触发时已经出事八分钟）。补法有三层：<strong>信号前移</strong>——对饱和度类指标（连接数、队列长度、线程数）用 <code>predict_linear(饱和度[1h], 3600)</code> 外推"照这个速度一小时后会不会满"，提前一小时而不是迟到八分钟；<strong>多窗口burn rate</strong>——SLO 错误预算的消耗速率做双窗口判断（5m 快窗+1h 慢窗组合），快烧快报、慢烧低优先级报，比单阈值稳定一个量级；<strong>告警分级</strong>——page（打电话）只留给"用户已受损或即将受损"，ticket/IM 通道接走"该修但不急"，值班同学的注意力分配本身就是告警系统的一部分。回到复盘：那次八分钟滞后里，连接池水位的渐变信号其实一直在图上——缺的不是数据，是把渐变翻译成提前量的那行规则。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>Prometheus 官方文档（数据模型、拉模型、PromQL、告警与配置的权威参考，本期原理侧口径来源）：<br>
+    <a href="https://prometheus.io/docs/introduction/overview/" target="_blank" rel="noopener">https://prometheus.io/docs/introduction/overview/</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>Grafana 官方文档（仪表盘与数据源配置）：<a href="https://grafana.com/docs/" target="_blank" rel="noopener">grafana.com/docs</a>。可观测性的整体方法论见 <a href="https://sre.google/sre-book/toc/">Google SRE Book</a> 的 Monitoring 与 Alerting 章；四类信号如何用 OpenTelemetry 统一词汇表，云原生前沿系列再展开。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0027-function-calling.html">← 上一期：Function Calling 与工具调用</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 28 期 · 架构与中间件运维通用系列 · 下一期预告：SkyWalking 链路追踪——回答"为什么"的那类信号</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>

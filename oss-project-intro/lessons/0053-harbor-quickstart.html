@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Harbor 系列第 2 期：5 分钟跑起来 Harbor | 2026-09-20</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0053</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0052-harbor-what-and-why.html">上一期:0052</a> · Harbor 系列第 2 期 / 共 4 期 · <a href="0054-harbor-core-concepts-architecture.html">下一期:0054</a> · <a href="https://goharbor.io" target="_blank" rel="noopener">goharbor.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · HARBOR 系列第 2 期：快速上手</p>
+  <h1>5 分钟跑起来 Harbor：一条命令装好全套，推进第一张镜像</h1>
+  <p class="subtitle">上一期我们认识了 Harbor——企业级云原生镜像管理中心：存储、扫描、签名、复制、权限五件事一个平台管，存储只是起点。这一期把认识变成动手。<strong>本期成果很具体：从官方安装包起一套 Harbor 全套服务（脚本背后就是一条 docker compose 命令）、登录一次管理控制台、推进仓库的第一张镜像，外加一套对照官方口径的跑通判定标准。</strong>全部命令逐条核对官方文档（goharbor.io 2.15 线 + v2.15.2 打包清单），HTTP 学习路线为主、HTTPS 生产口径单独立一条，跟着敲就能通。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">📦 镜像仓库与交付 · Go · Apache-2.0（CNCF 毕业项目）</span>
+    <span class="tag">📦 基于 v2.15.2（GitHub Latest）</span>
+    <span class="tag-date">📅 2026-09-20 · 第 2 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 00 本期要点 ================= -->
+<section>
+  <h2><span class="sec-num">00</span>本期要点</h2>
+  <div class="card card-tip">
+    <ul>
+      <li><strong>环境口径（官方前置条件表）：</strong>最低 2 核 CPU、4 GB 内存、40 GB 磁盘（建议 4 核 8 GB / 160 GB），Docker Engine 20.10+ 与 Docker Compose 2.3+（新版 Engine 自带）；</li>
+      <li><strong>安装三步：</strong>下载离线安装包解压 → 最小化改 harbor.yml（必改只有 hostname，禁用 localhost/127.0.0.1/0.0.0.0）→ <code>sudo ./install.sh --with-trivy</code>；</li>
+      <li><strong>首次登录两件事：</strong>用 admin / Harbor12345 登录后先改默认密码，再建项目 demo——项目是镜像的命名空间，不建项目推送直接被拒；</li>
+      <li><strong>HTTP 仓库要报备：</strong>客户端 daemon.json 配 <code>insecure-registries</code> 并重启 Docker，然后 login → tag → push 三步把第一张镜像推进去；</li>
+      <li><strong>跑通判定四条：</strong>控制台登得进、UI 里看得见、docker 拉得回、（带 Trivy 安装时）扫描报告出得来——全绿才算跑通。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= 01 环境要求 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>环境要求：官方前置条件表，普通服务器就行</h2>
+  <p>Harbor 官方给的安装前置条件是一张明确的表（goharbor.io《Harbor Installation Prerequisites》，2026-09 核对）：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>项目</th><th>最低</th><th>建议</th></tr></thead>
+    <tbody>
+      <tr><td>CPU</td><td><strong>2 核</strong></td><td>4 核</td></tr>
+      <tr><td>内存</td><td><strong>4 GB</strong></td><td>8 GB</td></tr>
+      <tr><td>磁盘</td><td><strong>40 GB</strong></td><td>160 GB</td></tr>
+      <tr><td>Docker Engine</td><td colspan="2"><strong>Version &gt; 20.10</strong></td></tr>
+      <tr><td>Docker Compose</td><td colspan="2"><strong>Version &gt; 2.3</strong>（新版 Engine 自带）</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>两点提醒。<strong>其一，磁盘别抠：</strong>40 GB 是官方下限，镜像仓库的本分就是存东西，离线安装包自身也有 GB 级体量，建议按 160 GB 口径给。<strong>其二，"5 分钟装完"不等于"5 分钟资源"：</strong>Harbor 是十来个容器的全家桶（数据库、缓存、仓库、核心服务、日志各自独立），4 GB 内存是实打实的下限，内存不足容器会起来又挂。官方安装脚本面向 Linux 主机，需要 sudo 权限。</p>
+</section>
+
+<!-- ================= 02 钉版本 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>动手前先钉版本：v2.15.2（GitHub Latest）</h2>
+  <p class="note"><img src="../output/0053-harbor-quickstart/images/harbor-github-releases.png" alt="GitHub goharbor/harbor Releases 页 v2.15.2 Latest 卡片" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">GitHub Releases：v2.15.2 标记 Latest（released Jul 2，即 2026-07-02 UTC）；左侧列表可见 2.15.3-rc1 预发布与 2.15.2-rc 系列，上方 Upgrade Notice 提示 v2.15.2 内置数据库升级事项（2026-09-20 截图）。本系列全部口径锚定 v2.15.2。</p>
+  <p>安装包就挂在这个版本下面：<code>harbor-offline-installer-v2.15.2.tgz</code>（离线包）与 <code>harbor-online-installer-v2.15.2.tgz</code>（在线包），认准包名里的版本号下载就不会错。官方文档站（goharbor.io/docs/2.15.0/）按 2.15 线编写，命令口径一致。</p>
+</section>
+
+<!-- ================= 03 安装包选型 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>安装包二选一：离线包更大，反而更稳</h2>
+  <p>官方《Download the Harbor Installer》对两种包的定位只有一句话的区别：离线包 <strong>contains pre-built images</strong>（内含预构建镜像），适合部署主机<strong>没有外网连接</strong>的场景；在线包<strong>安装时从 Docker Hub 拉取全部镜像</strong>，所以包体极小，安装流程两者几乎一样。</p>
+  <p>上手期我们选<strong>离线包</strong>，理由是反直觉但实在的：<strong>更大的包反而更稳</strong>——下载一次就断网能装，不撞上一期讲的 Docker Hub 匿名限流（每 IP 六小时 100 次），安装进度自己说了算；内网机器也一样能装。在线包省的是下载流量，赌的是安装那一刻的公网与限流状态，学习路线没必要赌。</p>
+</section>
+
+<!-- ================= 04 第一步 下载解压 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>第一步：下载离线包，解压出 harbor 目录</h2>
+  <pre class="codeblock"><code># 包名带版本号，认准 Releases 页（2.15 线文档口径）
+curl -O https://github.com/goharbor/harbor/releases/download/v2.15.2/harbor-offline-installer-v2.15.2.tgz
+tar xzvf harbor-offline-installer-v2.15.2.tgz
+cd harbor</code></pre>
+  <p>解压出一个 <code>harbor</code> 目录，关键两样：<code>harbor.yml.tmpl</code>（配置<strong>模板</strong>）和 <code>install.sh</code>（官方安装脚本）。<strong>容易踩的点：v2.15.2 打包清单里配置文件是带 <code>.tmpl</code> 后缀的模板</strong>（已按该 tag 的 Makefile 核对），要先复制一份再改：</p>
+  <pre class="codeblock"><code>cp harbor.yml.tmpl harbor.yml</code></pre>
+  <p class="note"><img src="../output/0053-harbor-quickstart/images/harbor-docs-install-config.png" alt="官方 Installation Process 六阶段列表" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方《Installation and Configuration》总览页：标准安装过程六阶段——环境前置条件、下载安装包、配置 HTTPS、配置 harbor.yml、启用内部 TLS、运行安装脚本（2026-09-20 截图，只裁正文主栏）。本期逐阶段走，HTTPS 两阶段从简。</p>
+</section>
+
+<!-- ================= 05 第二步 改配置 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>第二步：最小化改 harbor.yml，必改只有一处</h2>
+  <p>官方对配置文件的原话是：<strong>"At the very least, you must update the hostname parameter."</strong>——必改最小集只有 hostname 一项。它填部署主机的访问地址（IP 或域名），<strong>官方明令禁止 localhost、127.0.0.1、0.0.0.0</strong>，因为 registry 服务必须能被外部客户端访问。最小改动长这样（字段与默认值对照官方《Configure the Harbor YML File》，2.15 线）：</p>
+  <pre class="codeblock"><code>hostname: 192.168.1.10            # 本机 IP 或域名；禁用 localhost / 127.0.0.1
+http:
+  port: 80                        # 默认 80，被占用再改（如 8080）
+
+# https 段：本期整段注释，走 HTTP 学习路线
+harbor_admin_password: Harbor12345  # admin 初始密码，装完登录就改
+data_volume: /data                  # 数据目录，升级重建不丢</code></pre>
+  <p>三点说明：<strong>HTTP 端口默认 80</strong>，被占用就换一个（官方页面对 http 端口的说明原文：Port number for HTTP, for both Harbor portal and Docker commands. The default is 80.）；<strong>https 段本期整段注释</strong>，走学习路线，生产口径见第 08 节；<strong>harbor_admin_password</strong> 是 admin 账号的初始密码，官方文档写明默认值 admin / Harbor12345——它只在首次启动生效，装完第一时间在界面改掉。</p>
+  <p class="note"><img src="../output/0053-harbor-quickstart/images/harbor-docs-configure-yml.png" alt="官方 Configure the Harbor YML File 必填参数一节" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方《Configure the Harbor YML File》Required Parameters 一节：At the very least, you must update the hostname parameter；IMPORTANT 段原文——HTTP 仅适用于隔离的测试或开发环境，生产环境始终用 HTTPS（2026-09-20 截图，只裁正文主栏）。</p>
+</section>
+
+<!-- ================= 06 第三步 安装 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>第三步：跑安装脚本，一条命令起全套</h2>
+  <pre class="codeblock"><code>sudo ./install.sh --with-trivy   # 连漏洞扫描器一起装
+# 不带参数 = 只装核心（官方默认不含 Trivy）
+# 之后改了 harbor.yml，重新跑一遍脚本生效</code></pre>
+  <p>脚本背后就是一条 <code>docker compose</code> 命令：按顺序拉起 harbor-log、harbor-db（PostgreSQL）、harbor-redis、registry、harbor-core、harbor-portal、harbor-jobservice 这一串容器。装成功后脚本的最后一行回显（已对照 v2.15.2 tag 的 install.sh 原文）：</p>
+  <pre class="codeblock"><code>✔ ----Harbor has been installed and started successfully.----</code></pre>
+  <p>看到它，全套服务就起来了，浏览器打开你配置的 hostname 就能见到登录页。两个补充：<code>--with-trivy</code> 是官方推荐的加分项，把漏洞扫描器一起装上（上一期讲过 Clair 自 v2.2 起移出默认扫描器）；之后如果改了 harbor.yml，按官方 Reconfigure 流程<strong>重新执行一遍 install.sh</strong> 即可生效，不用拆掉重装。</p>
+</section>
+
+<!-- ================= 07 第四步 登录与建项目 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>第四步：首次登录控制台，两件事必须做</h2>
+  <p>浏览器打开 <code>http://&lt;你的 hostname&gt;</code>，用 <strong>admin / Harbor12345</strong> 登录（官方文档原话：the default administrator username and password are admin and Harbor12345）。首次登录两件事必须做：</p>
+  <ul>
+    <li><strong>改默认密码：</strong>右上角头像进设置修改——这个默认密码印在公开文档上，不改等于没锁门；</li>
+    <li><strong>新建项目 demo：</strong>项目（Project）是 Harbor 里镜像的一级命名空间，镜像名里斜杠后面第一段就是项目名。<strong>不先建项目，推送会被直接拒绝</strong>——这是新手第一大坑，报错形如 <code>project demo not found</code>。</li>
+  </ul>
+</section>
+
+<!-- ================= 08 第五步 login 报备 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>第五步：HTTP 仓库，先给客户端报备再登录</h2>
+  <p>HTTP 私仓有个前置动作。Docker 客户端默认只信 HTTPS，对 HTTP 仓库直接 login/push 会吃证书校验错误（经典的 <code>x509</code> 一族）。按官方《Run the Installer Script》Connecting to Harbor via HTTP 一节的口径：HTTP 安装必须给<strong>客户端</strong>的 Docker 守护进程加 <code>--insecure-registry</code> 选项，写进 <code>/etc/docker/daemon.json</code>：</p>
+  <pre class="codeblock"><code># /etc/docker/daemon.json（客户端机器上改）
+{ "insecure-registries": ["192.168.1.10"] }
+
+# 官方三步生效（在 harbor 目录里执行后两步）：
+sudo systemctl restart docker
+docker compose down -v
+docker compose up -d</code></pre>
+  <p>注意口径：<strong>改的是你敲 docker 命令的那台机器</strong>（开发机、CI 机），Harbor 服务端什么都不用动；官方文档同时提醒 <code>insecure</code> 只用于测试环境，生产请走 HTTPS。报备完成后登录：</p>
+  <pre class="codeblock"><code>docker login 192.168.1.10 -u admin
+# Password: 输入你改过的新密码
+# Login Succeeded</code></pre>
+  <p class="note"><img src="../output/0053-harbor-quickstart/images/harbor-docs-http-insecure.png" alt="官方 Connecting to Harbor via HTTP 一节" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方《Run the Installer Script》Connecting to Harbor via HTTP 一节：HTTP 安装必须给客户端 Docker 守护进程加 --insecure-registry 选项，daemon.json 样例原文在图中；更新后重启 Docker Engine 并按官方三步重启 Harbor（2026-09-20 截图，正文主栏）。</p>
+</section>
+
+<!-- ================= 09 第六步 push ================= -->
+<section>
+  <h2><span class="sec-num">09</span>第六步：打标推送，第一张镜像进仓</h2>
+  <pre class="codeblock"><code>docker pull hello-world:latest
+docker tag hello-world:latest 192.168.1.10/demo/hello-world:latest
+docker push 192.168.1.10/demo/hello-world:latest
+
+# 推送回显（有节选）：
+# The push refers to repository [192.168.1.10/demo/hello-world]
+# latest: digest: sha256:… size: 525
+# latest: pushed</code></pre>
+  <p>命令模式对照官方《Pulling and Pushing Images》：和推 Docker Hub 一字不差，<strong>只有地址变了</strong>——镜像名斜杠前是仓库地址，斜杠后第一段是项目名，这是 Docker 的命名规则，应用与脚本零改动。上一期讲的"协议兼容、换地址就能用"，这回亲手验证了。推送成功后回显一个 digest（内容摘要），刷新控制台，项目 demo 下面这个仓库和镜像 tag 已经在了；带了 <code>--with-trivy</code> 的话，点开镜像详情还能看到自动生成的漏洞扫描报告。</p>
+</section>
+
+<!-- ================= 10 跑通判定 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>跑通判定：四条全绿才算数</h2>
+  <div class="card">
+    <ul>
+      <li><strong>① 控制台登得进：</strong><code>http://&lt;hostname&gt;</code> 打开，admin 新密码登录成功——服务在跑；</li>
+      <li><strong>② UI 里看得见：</strong>项目 demo 下出现 hello-world 仓库与镜像 tag——存储与元数据链路通；</li>
+      <li><strong>③ docker 拉得回：</strong>任意一台报备过的机器 login 后 <code>docker pull</code> 成功——对外的拉取链路通；</li>
+      <li><strong>④ 扫描报告出得来：</strong>带 <code>--with-trivy</code> 安装时，镜像详情页自动生成漏洞报告——安全链路通。</li>
+    </ul>
+  </div>
+  <p>服务在跑只是前提，<strong>镜像存得进、看得到、拉得动、扫得出</strong>才是结果。以后装任何一套基础软件，都可以照这个思路先写判定、再动手装。</p>
+</section>
+
+<!-- ================= 11 高频报错 ================= -->
+<section>
+  <h2><span class="sec-num">11</span>高频报错与解法速查（按出现概率）</h2>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>现象</th><th>原因与解法</th></tr></thead>
+    <tbody>
+      <tr><td><code>push</code> 报证书错误（x509 / HTTPS 握手失败）</td><td>HTTP 仓库客户端没报备——按第 08 节把仓库地址写进 <code>insecure-registries</code> 并重启 Docker；官方口径 insecure 仅用于测试环境</td></tr>
+      <tr><td><code>push unauthorized: authentication required</code></td><td>没登录或密码错：先 <code>docker login</code>；镜像名第一段必须是已建项目，项目名写错也一样报未授权</td></tr>
+      <tr><td>80 / 443 端口被占，安装失败或起不来</td><td>装前改 harbor.yml 的 <code>http.port</code>（如 8080）；装后改端口按官方 Reconfigure 文档操作</td></tr>
+      <tr><td><code>push</code> 被拒：denied 或超项目配额</td><td>项目设了存储配额：项目设置里调限额，或清掉旧镜像腾空间</td></tr>
+      <tr><td><code>project demo not found</code> / unknown project</td><td>项目没建或名字不一致：先在控制台建项目，镜像名里的项目段要一模一样</td></tr>
+      <tr><td>在线包安装卡在拉镜像</td><td>公网限流或网络抖动：停掉换离线包路线，装时不联网</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ================= 12 HTTP vs HTTPS ================= -->
+<section>
+  <h2><span class="sec-num">12</span>HTTP 还是 HTTPS：学习与生产两条线</h2>
+  <p>本期主线走 HTTP，是因为安装器默认无证书、起步最快；但官方文档有一句必须划线的原话：<strong>"In production environments, always use HTTPS."</strong>（IMPORTANT 段原文，上一节截图里可见）——HTTP 明文传输和自签证书都有中间人风险，<code>insecure-registries</code> 也被官方明确限定在测试场景。所以两条线要分清：</p>
+  <ul>
+    <li><strong>HTTP 学习线（本期）：</strong>隔离的测试或开发环境，配合跑通判定，五分钟见效，客户端报备一处即可；</li>
+    <li><strong>HTTPS 生产线：</strong>配 CA 签发或自签证书，打开 harbor.yml 的 https 段填证书与私钥路径，官方有《Configure HTTPS Access to Harbor》专页逐步教。上生产前把这一步补上，别把今天的五分钟环境直接扛进机房。</li>
+  </ul>
+</section>
+
+<!-- ================= 13 quiz ================= -->
+<section>
+  <h2><span class="sec-num">13</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. 按官方口径，harbor.yml 必改的最小配置集是什么？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，HTTPS 段学习路线反而要先注释掉，不是必改项。","不对，数据目录用默认 /data 就行，不是必改项。","对的：官方原话 At the very least, you must update the hostname parameter——必改只有 hostname。"]'>
+        <li class="quiz-option">https 段的证书与私钥路径</li>
+        <li class="quiz-option">data_volume 数据目录</li>
+        <li class="quiz-option">hostname，且禁用 localhost / 127.0.0.1 / 0.0.0.0</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 对 HTTP 私仓 docker login 报证书校验错误，第一步该做什么？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，服务端不用动，官方口径改的是客户端的 Docker 守护进程。","对的：在客户端 daemon.json 的 insecure-registries 里加上仓库地址，重启 Docker 后再登录。","不对，x509 报错和账号密码无关，先解决信任问题。"]'>
+        <li class="quiz-option">去 Harbor 服务端重装一次</li>
+        <li class="quiz-option">客户端 daemon.json 配 insecure-registries 并重启 Docker</li>
+        <li class="quiz-option">换一个管理员账号重新登录</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 下列哪组属于本期的"跑通判定"？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：登得进、看得见、拉得回、（带扫描时）报告出得来，四条全绿才算跑通。","不对，安装脚本跑完只是前提，镜像进没进去才是判定。","不对，漏了最关键的验证：镜像要能从仓库拉回来才算通。"]'>
+        <li class="quiz-option">控制台登得进、项目里看得见镜像、docker 拉得回、扫描报告出得来</li>
+        <li class="quiz-option">install.sh 回显成功、容器全是 running、端口 80 在监听</li>
+        <li class="quiz-option">控制台登得进、改了默认密码、建好了项目</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 14 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">14</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：离线安装包更大、下载更慢，为什么上手反而更稳？把"把依赖前置"这个思路推广到软件交付，你能想到哪些同款设计？</summary>
+    <div class="details-body">
+      <p>在线包把<strong>不确定性</strong>留在了安装那一刻：公网可达性、Docker Hub 限流（匿名每 IP 六小时 100 次）、镜像层下载的并发与断点，任何一环抖动都让安装卡在半路；离线包则把这套不确定性<strong>前置到了下载一次</strong>——包体大 1 GB，换来的是安装过程零外部依赖、可断点重来、可在完全隔离的内网复现。本质上这是<strong>"把变化的部分冻结、把不变的部分固化"</strong>：镜像集合在打包那一刻就定死了，装出来的环境天然一致。同款设计到处都是：Go/Rust 把依赖编译进单个静态二进制，Kubernetes 的 Helm chart 打包 values 与模板，Java 的 fat jar、Python 的 wheels 离线源、以及企业里"带安装介质进场"的传统交付包，都是同一个思路的变体。反过来它的代价也值得记：<strong>前置意味着牺牲时效</strong>——离线包里的镜像不会自动更新，安全补丁要靠重新下载整包，所以 Harbor 才保留了在线包给"想紧跟上游"的用户。选哪种，取决于你的环境里"网络确定性"和"版本时效性"哪个更稀缺。做自研工具交付时同理：先搞清楚用户环境里什么最不可控，就把什么前置掉。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：官方为什么坚持"生产环境 always use HTTPS"？本期 HTTP 学习线与生产线的差距，具体差在哪几环？给本期环境列一份升级到生产级的最小改造清单。</summary>
+    <div class="details-body">
+      <p>HTTP 线省掉的每一环，都是生产上真实存在的攻击面。<strong>第一环是传输：</strong>HTTP 明文意味着登录凭据、镜像层在网络上可被窃听篡改——镜像供应链投毒的经典路径就是在传输中替换镜像层，HTTPS 的证书校验让"你连的确实是那台仓库"成立，中间人失去位置。<strong>第二环是客户端信任模型：</strong>insecure-registries 本质是"这个地址不验证书也放行"，它防不了任何主动攻击，只能证明"我们自己决定不设防"，所以官方把它限定在 air-gapped 测试/开发环境。<strong>第三环是身份与签名的地基：</strong>Harbor 的机器人账号、内容签名、Notation/cosign 验签链，都默认建立在传输可信之上——传输都不可信，签名验证的意义会被架空。最小改造清单（按官方文档顺序）：<strong>其一</strong>，按《Configure HTTPS Access to Harbor》签发证书（生产用 CA 签发，测试可自签），harbor.yml 打开 https 段填证书与私钥路径；<strong>其二</strong>，客户端撤掉 insecure-registries，改为把 CA 根证书装入系统信任库；<strong>其三</strong>，改掉 harbor_admin_password 与 database.password（官方对后者原话：生产部署必须修改）；<strong>其四</strong>，按官方建议给 data_volume 做持久化与备份规划，并重新跑 install.sh 应用全部变更。做完这四步，今天这套五分钟环境才算拿到进机房的资格。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 15 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">15</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>环境按官方前置条件表：最低 2 核 / 4 GB / 40 GB 磁盘，Docker Engine 20.10+ 与 Compose 2.3+（2026-09 核对）；</li>
+      <li>安装三步：离线包解压 → 必改 hostname（禁 localhost/127.0.0.1/0.0.0.0）→ <code>sudo ./install.sh --with-trivy</code>，脚本背后就是 docker compose 拉起全套容器；</li>
+      <li>首次登录 admin / Harbor12345 后两件事必须做：改默认密码、建项目 demo（不建项目推送直接被拒）；</li>
+      <li>HTTP 仓库客户端先配 insecure-registries 再 login → tag → push，命令与推 Docker Hub 一字不差；</li>
+      <li>判定四条全绿才算跑通：登得进、看得见、拉得回、扫描报告出得来；生产始终用 HTTPS（官方原话）。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>Harbor 已经跑起来、第一张镜像也推上去了。下一期我们拆开看它的核心概念与整体架构——项目、制品、复制策略这些词逐一落到你今天亲手点过的界面上，再给一张仓库顶层模块地图。</p>
+  <p><strong>Primary source：</strong><a href="https://goharbor.io/docs/2.15.0/install-config/" target="_blank" rel="noopener">Harbor 官方文档 · Installation and Configuration（v2.15.0，与 v2.15.2 同线）</a>——本期安装步骤、配置字段与 HTTP 口径均出自该文档：前置条件见 <a href="https://goharbor.io/docs/2.15.0/install-config/installation-prereqs/" target="_blank" rel="noopener">Installation Prerequisites</a>，下载安装包见 <a href="https://goharbor.io/docs/2.15.0/install-config/download-installer/" target="_blank" rel="noopener">Download the Harbor Installer</a>，配置文件见 <a href="https://goharbor.io/docs/2.15.0/install-config/configure-yml-file/" target="_blank" rel="noopener">Configure the Harbor YML File</a>，安装脚本与 HTTP 接入见 <a href="https://goharbor.io/docs/2.15.0/install-config/run-installer-script/" target="_blank" rel="noopener">Run the Installer Script</a>；版本与安装包见 <a href="https://github.com/goharbor/harbor/releases" target="_blank" rel="noopener">GitHub Releases</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0052-harbor-what-and-why.html">← 上一期：Harbor 是什么</a></span>
+  <a class="next" href="0054-harbor-core-concepts-architecture.html">下一期：核心概念与整体架构 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Harbor 系列第 4 期：实战与源码导读 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0055</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0054-harbor-core-concepts-architecture.html">上一期:0054</a> · Harbor 系列第 4 期 / 共 4 期 · <a href="https://goharbor.io/docs/2.15.0/" target="_blank" rel="noopener">goharbor.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · HARBOR 系列第 4 期：实战与源码导读（收官）</p>
+  <h1>Harbor 实战与源码导读：跨实例复制 + 扫描拦截一次跑通</h1>
+  <p class="subtitle">系列收官期，实战为主、源码为辅（约七三开）。上期我们铺开了概念地图——镜像推入之后 core、jobservice、registry 这些组件如何接力；今天把地图通电：做一次企业里最常见的端到端实战——<strong>把 Docker Hub 的官方基础镜像定时同步进私有 Harbor，再让带高危漏洞的镜像挡在拉取门外</strong>。复制规则怎么建、任务列表怎么看、拦截策略怎么配，每一步都对照官方文档（v2.15 口径，2026-09-19 核对）；最后轻读一眼源码，看看 UI 上一次点击背后的异步任务长什么样。你带走三样东西：一条能照着配的复制链、一套能照着开的安全卡点、一张 jobservice 读码地图。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">📦 镜像仓库与交付 · Go</span>
+    <span class="tag">📦 基于 v2.15.2（GitHub Latest）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 4 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 回顾与需求 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>需求：两句话翻译成一张作战地图</h2>
+  <p>先把需求摆上桌，这是一家企业环境里最常见的两句话：<strong>其一</strong>，Docker Hub 上的官方基础镜像（ubuntu、redis 这类 <code>library/</code> 官方镜像）要定时同步到私有 Harbor，让 CI 和集群走内网拉取——还记得第 1 期算过的账吗？匿名拉取每 IP 六小时限 100 次，中型团队一天的构建就能用光；<strong>其二</strong>，镜像里有已知漏洞没关系，但<strong>高危的必须挡在生产门外</strong>，不能等安全部门事后找上门。</p>
+  <p>翻译成 Harbor 的能力清单，正好是它的两块招牌：<strong>跨实例复制</strong>管同步，<strong>漏洞扫描 + 部署安全策略</strong>管拦截。一张作战地图如下：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>需求</th><th>用到的能力</th><th>验收标准</th></tr></thead>
+    <tbody>
+      <tr><td>Docker Hub 官方镜像定时同步进私有仓库</td><td>复制规则：Pull-based 模式 + Scheduled 定时触发</td><td>复制执行的任务列表全部成功</td></tr>
+      <tr><td>高危漏洞镜像不得被拉取</td><td>项目配置：推入自动扫描 + 按严重级别阻止拉取</td><td>拉取高危镜像被拒绝</td></tr>
+      <tr><td>全程可回查、可审计</td><td>复制执行记录 + 任务日志 + 扫描报告</td><td>每张镜像每次同步有据可查</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>本期的纪律照旧：<strong>不在本机部署 Harbor</strong>，所有界面操作按官方文档步骤转写，每张截图标出处；命令行验证用的是 Docker CLI 的标准行为。跟着走，配出来的东西在生产环境成立。</p>
+</section>
+
+<!-- ================= 02 演示① 建复制规则 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>演示①：一条复制规则，三个要素</h2>
+  <p>先钩子后操作。<strong>钩子一：Harbor 的复制不是 cp 命令。</strong>它是一条<strong>声明式规则</strong>——你不搬镜像，你描述"什么镜像、到哪去、什么时候搬"，剩下的事仓库自己安排。对照官方文档《Creating a Replication Rule》（2.15，2026-09 核对），一条规则由三要素组成：<strong>源</strong>（Source resource filter：Name / Tag / Label / Resource 四类过滤器，支持 <code>**</code>、<code>{a,b}</code> 通配）、<strong>目标</strong>（目的仓库 + 目标命名空间，不填则沿用源命名空间）、<strong>触发器</strong>（Trigger Mode）。<strong>特别提醒</strong>：要同步 Docker Hub 官方镜像，名字过滤器必须带上 <code>library</code> 前缀，官方文档原话是 "You must add <code>library</code> if you want to replicate the official artifacts of Docker Hub"——这是新手第一个坑。</p>
+  <p class="note"><img src="../output/0055-harbor-in-action-source-reading/images/harbor-docs-replication-filter.png" alt="官方文档 Source resource filter 段" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档《Creating a Replication Rule》：Source resource filter 四类过滤器与通配模式表（library/* 只匹配一层，library/** 跨层匹配）（goharbor.io，2026-09-19 截图）。</p>
+  <p>本期的场景参数照抄即可：Pull-based 模式（Harbor 从上游拉）、源仓库选 Docker Hub 端点、Name 填 <code>library/**</code>、Resource 选 Images、目标命名空间填 <code>base</code>——以后 CI 一律从 <code>harbor.example.com/base/ubuntu:24.04</code> 取基础镜像。触发模式是三选一（官方口径）：<strong>Manual</strong>，需要时手动执行；<strong>Scheduled</strong>，按 cron 定时规则周期执行；<strong>Event Based</strong>，新制品推入或重新打标签时立即复制。三者的口径是删除操作默认不会被复制（Event Based 勾选 "Delete remote resources when locally deleted" 才会联动删除）。</p>
+  <p class="note"><img src="../output/0055-harbor-in-action-source-reading/images/harbor-docs-replication-trigger.png" alt="官方文档 Trigger Mode 段" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档同页 Trigger Mode 段：Manual 按需手动、Scheduled 按 cron 定时规则周期执行、Event Based 推入或重新打标签立即复制（goharbor.io，2026-09-19 截图）。</p>
+</section>
+
+<!-- ================= 03 演示② 执行复制 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>演示②：执行一次复制，盯着任务列表看它跑完</h2>
+  <p>规则保存后先别等定时，手动执行一遍验证链路。官方文档《Running Replication Manually》的步骤（2026-09 核对）：系统管理员登录 → 展开 <strong>Administration → Replications</strong> → 选中规则点 <strong>Replicate</strong>，规则命中的资源立即开始从源仓库向目标复制；点规则看执行状态，点执行的 <strong>ID</strong> 进入详情与<strong>任务列表</strong>。两个阅读任务列表的细节值得记住：汇总里的 <code>IN PROGRESS</code> 计数同时包含 <code>Pending</code> 与 <code>In Progress</code> 两种状态；某条任务失败不必慌，官方口径是失败任务几分钟后自动重新调度、重试若干次。每条任务旁边有日志图标，点开能看到这张镜像逐层的复制明细。</p>
+  <p class="note"><img src="../output/0055-harbor-in-action-source-reading/images/harbor-docs-replication-tasks.png" alt="官方文档手动执行复制与任务列表步骤" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档《Running Replication Manually》：Replicate 按钮触发 → 点规则看执行 → 点 ID 看任务列表 → 日志图标看单任务明细（goharbor.io，2026-09-19 截图）。</p>
+  <p>任务列表全部变成成功状态后，验收拉取。从新地址拉同一张镜像，Docker CLI 的动作和第 1 期完全一样——这正是协议兼容的福利：</p>
+  <pre class="codeblock"><code>docker pull harbor.example.com/base/ubuntu:24.04</code></pre>
+  <pre class="codeblock"><code>24.04: Pulling from base/ubuntu
+Digest: sha256:9c0b0a…  Status: Downloaded newer image</code></pre>
+  <p>回显的 digest 与上游一致——复制是逐字节搬运，摘要值可验证。到这里，同步链路闭环：<strong>声明规则 → 触发执行 → 任务列表 → 内网拉取</strong>。注意整个过程 UI 只是"下指令看结果"，真正搬镜像的是后台的异步任务——这个伏笔在源码导读揭晓。</p>
+</section>
+
+<!-- ================= 04 演示③ 扫描拦截 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>演示③：把高危镜像挡在拉取门外</h2>
+  <p>同步进来的基础镜像不等于安全，还差一道体检和一道门禁。两步都在<strong>项目的 Configuration 标签页</strong>里完成（需要项目管理员权限，官方文档《Project Configuration》，2026-09 核对）：<strong>第一步</strong>，勾选 <code>Automatically scan images on push</code>——官方原话，激活"新镜像推入项目即触发一次漏洞扫描"；<strong>第二步</strong>，勾选 <code>Prevent vulnerable images from running</code> 并在下拉里选严重级别。拦截的判定口径是这句："Images cannot be pulled if their level is equal to or higher than the selected level of severity"——<strong>等于或高于所选级别的镜像无法被拉取</strong>；同时文档明确：<code>negligible</code> 级别的漏洞不会被拦截，给运维留了余地。</p>
+  <p class="note"><img src="../output/0055-harbor-in-action-source-reading/images/harbor-docs-vuln-prevent.png" alt="官方文档项目配置：Prevent vulnerable images 与自动扫描" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档《Project Configuration》：Configuration 标签页里 Prevent vulnerable images from running 勾选框、严重级别选择与 Automatically scan images on push（goharbor.io，2026-09-19 截图）。</p>
+  <p>扫描引擎是系列老朋友 <strong>Trivy</strong>（第 2 期安装时用 <code>--with-trivy</code> 带上的那个），对镜像做静态漏洞分析，报告按 Critical、High、Medium、Low、Negligible 分级列出 CVE 清单。策略生效后再 <code>docker pull</code> 一张命中级别的镜像，拉取请求会被 Harbor 直接拒绝——<strong>钩子二：扫描结果为什么能挡住 docker pull？</strong>因为这道策略钩在<strong>拉取链</strong>上而不是推送链上：Harbor 的仓库服务在响应拉取请求时先查该制品的扫描结论，命中策略就回绝。放在拉取侧有三个好处：推送不受影响，CI 产出照常入库；消费端把关，谁要上生产谁被拦；未扫描的镜像按保守原则同样不放行。真机上你会看到拉取报错被拒——这是策略命中的信号，而不是仓库故障。</p>
+</section>
+
+<!-- ================= 05 源码导读① 读码三站 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>源码导读①：本期读码三站（基于 tag v2.15.2）</h2>
+  <p>实战里你点下的每一次"Replicate"、每一条"任务成功"，背后都是同一套机制在转：<strong>异步任务框架</strong>。第 3 期的架构地图里 jobservice 只是一个名字，今天在源码里给它三站的位置（路径逐条核对自 <code>goharbor/harbor</code> 仓库 tag <code>v2.15.2</code>，2026-09-19）：</p>
+  <div class="diagram">
+  <svg viewBox="0 0 760 250" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar55" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="14" y="40" width="224" height="150" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="126" y="66" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">① job 接口与登记表</text>
+    <text x="126" y="90" text-anchor="middle" fill="var(--muted)" font-size="9.5">src/jobservice/job</text>
+    <text x="126" y="112" text-anchor="middle" fill="var(--muted)" font-size="9.5">interface.go 定下"重活"的样子</text>
+    <text x="126" y="132" text-anchor="middle" fill="var(--muted)" font-size="9.5">known_jobs.go 登记 REPLICATION、</text>
+    <text x="126" y="152" text-anchor="middle" fill="var(--muted)" font-size="9.5">IMAGE_SCAN、RETENTION 等工种</text>
+    <text x="126" y="178" text-anchor="middle" fill="var(--muted)" font-size="9">一切重活都是 job</text>
+    <rect x="268" y="40" width="224" height="150" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="380" y="66" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">② 周期投递与执行器</text>
+    <text x="380" y="90" text-anchor="middle" fill="var(--muted)" font-size="9.5">src/jobservice/period · runner</text>
+    <text x="380" y="112" text-anchor="middle" fill="var(--muted)" font-size="9.5">policy_store 存定时策略（cron）</text>
+    <text x="380" y="132" text-anchor="middle" fill="var(--muted)" font-size="9.5">enqueuer 到点投递执行队列</text>
+    <text x="380" y="152" text-anchor="middle" fill="var(--muted)" font-size="9.5">runner 领取并运行、回写状态</text>
+    <text x="380" y="178" text-anchor="middle" fill="var(--muted)" font-size="9">定时复制的"心跳"在这</text>
+    <rect x="522" y="40" width="224" height="150" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="634" y="66" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">③ 复制的接线层</text>
+    <text x="634" y="90" text-anchor="middle" fill="var(--muted)" font-size="9.5">src/controller/replication</text>
+    <text x="634" y="110" text-anchor="middle" fill="var(--muted)" font-size="9.5">policy.go 定时触发经 pkg/scheduler</text>
+    <text x="634" y="130" text-anchor="middle" fill="var(--muted)" font-size="9.5">注册回调投出复制任务</text>
+    <text x="634" y="150" text-anchor="middle" fill="var(--muted)" font-size="9.5">src/server/v2.0/handler/replication.go</text>
+    <text x="634" y="170" text-anchor="middle" fill="var(--muted)" font-size="9.5">REST API 入口，UI 点的就是它</text>
+    <text x="634" y="190" text-anchor="middle" fill="var(--muted)" font-size="9"></text>
+    <line x1="238" y1="115" x2="262" y2="115" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar55)"/>
+    <line x1="492" y1="115" x2="516" y2="115" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar55)"/>
+    <text x="16" y="230" fill="var(--muted)" font-size="9.5">读法：从 ③ 的 UI 入口进 → 看任务如何投递到 ② → 在 ① 认识"任务"这个抽象本身；tag v2.15.2 实测路径</text>
+  </svg>
+  </div>
+  <p>三站读完，你对"一次定时复制在源码里的旅程"就有完整链路了：UI 调 REST 接口建规则 → 到点由周期调度投出任务 → runner 执行复制并把状态回写 → UI 任务列表里看到的 Success 就是这条链的终点。</p>
+</section>
+
+<!-- ================= 06 源码导读② job 接口 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>源码导读②：job 接口——"一切重活都是 job"</h2>
+  <p>第一站看抽象。<code>src/jobservice/job/interface.go</code> 里定义了 job 的接口（节选，注释有删减）：</p>
+  <pre class="codeblock"><code>// src/jobservice/job/interface.go (tag v2.15.2)，节选
+type Interface interface {
+    MaxFails() uint                       // 允许的失败次数，0 取默认值 4
+    MaxCurrency() uint                    // 同类任务的最大并发，0 为不限制
+    ShouldRetry() bool                    // 失败后是否还重试
+    Validate(params Parameters) error     // 入参合法性校验
+    Run(ctx Context, params Parameters) error  // 业务逻辑本体
+}</code></pre>
+  <p>五个方法读出三层设计：<strong>可靠性写死在接口里</strong>（失败次数、重试意愿），新任务类型不用自己发明重试；<strong>并发是任务自己的属性</strong>（MaxCurrency），复制这种重活可以限速不让扫描饿死；<strong>参数是键值对</strong>（Parameters），接口只管约定形状，不关心业务语义。再看登记表 <code>known_jobs.go</code>，能一次认全 Harbor 的所有重活：REPLICATION（复制）、IMAGE_SCAN（扫描）、GARBAGE_COLLECTION（垃圾回收）、RETENTION（保留策略）、P2P_PREHEAT（分发预热）……全注册到同一个框架上跑。</p>
+  <p class="note"><img src="../output/0055-harbor-in-action-source-reading/images/harbor-jobservice-interface-blob.png" alt="GitHub blob：v2.15.2 jobservice job 接口" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">GitHub goharbor/harbor @ v2.15.2：src/jobservice/job/interface.go 第 17~54 行实拍——Interface 五方法与官方注释（2026-09-19 截图）。</p>
+</section>
+
+<!-- ================= 07 源码导读③ 周期任务与复制接线 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>源码导读③：周期任务执行器，与复制在哪里接线</h2>
+  <p>第二站看"定时"怎么实现。jobservice 把任务分三种（<code>src/jobservice/job/kinds.go</code>）：<code>Generic</code> 跑一次、<code>Scheduled</code> 定时跑一次、<code>Periodic</code> 周期跑。<code>src/jobservice/period/</code> 包是周期任务的执行器：<code>policy_store.go</code> 保存定时策略（cron 表达式存在任务元数据里），<code>enqueuer.go</code> 周期扫描这些策略，把到点的任务投进执行队列，再由 <code>src/jobservice/runner/</code> 下的执行器领取运行、回写状态。第三站看复制的接线：<code>src/controller/replication/policy.go</code> 里，规则的 Scheduled 触发并不是自己起定时器，而是把一个名为 <code>REPLICATION_CALLBACK</code> 的回调注册到 <code>src/pkg/scheduler</code>——到点回调再投出复制执行。这印证了本期的核心观察：<strong>UI 只是写下一份策略声明，执行永远是 jobservice 里的异步任务</strong>；策略与执行分离，策略可以随时改，执行器按任务跑，两边互不拖累。</p>
+</section>
+
+<!-- ================= 08 可借鉴点 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>可借鉴点：把这两手带回去</h2>
+  <div class="card card-tip">
+    <ul>
+      <li><strong>异步任务框架的通用形态：</strong>登记（接口约定 + 任务注册表）→ 投递（队列 + 到点投递）→ 执行（runner 领取）→ 回写（状态 + 日志）→ 重试（失败次数与重试意愿进接口）→ 通知（状态钩子回调）。你自研系统里要做"后台重活"——对账、补偿、批量迁移——照这个骨架搭，能少踩一大片坑；</li>
+      <li><strong>策略与执行分离：</strong>复制规则、拦截策略都是"声明"（什么条件下做什么），真正干活的是统一的任务底座。改策略不动执行器，换执行器不碰策略；这条分离线也是 Harbor 能把扫描、复制、GC 长在同一座仓库上的原因；</li>
+      <li><strong>把安全卡点放在消费侧：</strong>高危镜像拦在"拉取"而不是"推送"，CI 节奏不被打断，风险在离生产最近的一步被拦下——同样的思路适用于制品晋级、配置下发这类"生产准入"场景。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= 09 本期要点与系列收尾 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>本期要点与系列收尾</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>复制是声明式规则不是 cp 命令：源（四类过滤器）/ 目标（仓库 + 命名空间）/ 触发器（Manual、Scheduled、Event Based）三要素，Docker Hub 官方镜像记得带 <code>library</code> 前缀；</li>
+      <li>复制链路验收：Administration → Replications → Replicate 执行，任务列表看明细，失败任务自动重试，digest 与上游一致即搬运无损；</li>
+      <li>拦截策略两勾选：Automatically scan images on push 推入即扫，Prevent vulnerable images from running 按级别拦拉取——等于或高于所选级别即拒绝，negligible 不拦；</li>
+      <li>源码三站（v2.15.2）：src/jobservice/job 定抽象，period + runner 管周期与执行，src/controller/replication 做策略接线——策略是声明，执行是任务；</li>
+      <li>可借鉴：异步任务框架六件套（登记/投递/执行/回写/重试/通知），安全卡点放消费侧。</li>
+    </ul>
+  </div>
+  <p><strong>系列收尾：</strong>Harbor 的入门就聊到这里——四期走完，认识它、跑起来、看懂架构、实战收官。下期开启新项目 <strong>Spring Cloud Gateway</strong>，公司技术栈里的网关，还是老路数：先问它为谁而生，再上手、再读源码。</p>
+  <p><strong>Primary source：</strong><a href="https://goharbor.io/docs/2.15.0/administration/configuring-replication/" target="_blank" rel="noopener">Harbor 官方文档 · Configuring Replication（v2.15.0）</a>——本期复制规则、触发模式与任务列表口径均出自该文档；拉取拦截见 <a href="https://goharbor.io/docs/2.15.0/working-with-projects/project-configuration/" target="_blank" rel="noopener">Project Configuration</a> 与 <a href="https://goharbor.io/docs/2.15.0/administration/vulnerability-scanning/" target="_blank" rel="noopener">Vulnerability Scanning</a>；源码路径核对自 <a href="https://github.com/goharbor/harbor/tree/v2.15.2/src/jobservice" target="_blank" rel="noopener">goharbor/harbor @ v2.15.2 · src/jobservice</a>。</p>
+</section>
+
+<!-- ================= 10 Quiz ================= -->
+<section>
+  <h2><span class="sec-num">10</span>随堂小测（点击选项即时反馈）</h2>
+  <div class="quiz">
+    <div class="quiz-q">
+      <p class="quiz-question">1. 要定时同步 Docker Hub 的官方 ubuntu 镜像，名字过滤器该怎么写？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["少了 library 前缀，官方镜像在 Docker Hub 都挂在 library 命名空间下。","对：官方文档明确要带 library，library/** 跨层匹配最稳。","** 单独出现不是合法路径组件，双星要作为路径段使用。","这是复制模式混淆了：Pull-based 才是从上游拉。"]'>
+        <li class="quiz-option">ubuntu:latest</li>
+        <li class="quiz-option">library/**</li>
+        <li class="quiz-option">**ubuntu**</li>
+        <li class="quiz-option">Push-based 模式自动匹配</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 复制任务列表里 IN PROGRESS 计数的含义是？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["只算了一半，官方文档说明它还包含 Pending。","正好说反了。","对：官方口径，IN PROGRESS 同时包含 Pending 与 In Progress 两种状态的任务。","复制任务是自动重试的，不需要重新点。"]'>
+        <li class="quiz-option">只有正在传输的任务</li>
+        <li class="quiz-option">只有等待调度的任务</li>
+        <li class="quiz-option">Pending 与 In Progress 之和</li>
+        <li class="quiz-option">失败待人工重跑的任务</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. Prevent vulnerable images from running 选了 High，哪张镜像拉不下来？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对：等于或高于所选级别即拦，High 和 Critical 都被拒，Negligible 官方明确不拦。","Low 低于阈值，放行。","Negligible 官方原话不会拦截。","Medium 低于 High，放行。"]'>
+        <li class="quiz-option">最高漏洞级别为 Critical 的镜像</li>
+        <li class="quiz-option">最高漏洞级别为 Low 的镜像</li>
+        <li class="quiz-option">最高漏洞级别为 Negligible 的镜像</li>
+        <li class="quiz-option">最高漏洞级别为 Medium 的镜像</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. 复制规则的 Scheduled 触发，在源码里靠什么实现？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["方向反了：jobservice 是执行底座，复制定时靠注册到调度器的回调。","对：policy.go 把 REPLICATION_CALLBACK 注册到 src/pkg/scheduler，到点投出复制执行。","UI 只是写声明，前端定时器不承担服务端任务。","crond 是系统工具，Harbor 用的是自己的调度器。"]'>
+        <li class="quiz-option">UI 前端设个定时器到点发请求</li>
+        <li class="quiz-option">注册回调到 src/pkg/scheduler，到点投任务</li>
+        <li class="quiz-option">依赖操作系统 crond 定时调 API</li>
+        <li class="quiz-option">目标仓库定期来拉取</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 11 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">11</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：Manual 与 Scheduled 触发的复制默认不复制删除操作，Event Based 要手动勾选才联动删除。为什么默认"只加不删"？这对你设计同步系统有什么启发？</summary>
+    <div class="details-body">
+      <p>先把事实钉牢：官方文档在 Manual 与 Scheduled 的说明里都写着 "Deletion operations are not replicated"，只有 Event Based 勾选 "Delete remote resources when locally deleted" 后，本地删除才会联动删掉目标端制品。为什么默认只加不删？<strong>第一层是安全语义</strong>：跨实例复制最常见的用途是灾备与分发，灾备库的底线是"源库出事我有货"——如果源库误删（脚本写错、项目清理、恶意操作）立即扩散到所有副本，灾备就变成了风险的放大器；只加不删让下游天然多一层保留窗口，事故恢复时还能从副本找回归档。<strong>第二层是语义差异</strong>：新增是幂等的（同一张镜像重复复制结果一致），删除却依赖严格的顺序与意图确认——批量规则命中范围变大时，一次误匹配的"删除联动"可能清空目标仓库，而复制任务的重试机制会把这种破坏性操作放大。所以 Harbor 把"要不要同步删除"做成显式勾选，把判断权交还给人。<strong>对你的启发</strong>：设计同步/备份系统时，把"写扩散"和"删扩散"当成两种风险等级处理——写扩散最多浪费空间，删扩散会毁数据；默认值应该保护数据，破坏性联动必须显式开启，并且最好配上保留窗口（Harbor 的对应物是保留策略与回收站）。一句话：同步系统的默认倾向，应该是"宁可多占空间，不让数据凭空消失"。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：本期源码里，复制规则的定时触发不是自起定时器，而是注册回调给统一的调度器；扫描、GC、保留策略也都是注册到 jobservice 的 job。这种"底座统一 + 插件式接入"的结构，代价与收益各是什么？</summary>
+    <div class="details-body">
+      <p><strong>收益先看</strong>。统一底座意味着横切能力只实现一次：失败重试（MaxFails/ShouldRetry 进接口）、并发上限（MaxCurrency）、状态查询与日志（任务列表能逐任务点开）、执行历史（审计）。每种新业务——复制、扫描、GC——只要实现五个方法加一个登记名，就"免费"获得全部这些；反过来，运维只需盯一个 jobservice 的监控面。插件式接入还带来<strong>可替换性</strong>：第 1 期提过扫描器从 Clair 换成 Trivy，业务侧没有伤筋动骨，因为扫描器也只是登记在底座上的一种 job 供给方。<strong>再看代价</strong>。抽象层不是免费的：所有任务都要适应"参数是键值对、上下文靠注入"的通用形状，业务个性化（比如复制要限速、要分块）只能靠往 Parameters 里塞约定字段，类型安全弱化；状态机统一后，个别业务的特殊语义（复制的 IN PROGRESS 兼含 Pending）会被"削足适履"；调试链路变长——UI 一次点击穿过 handler、controller、scheduler、jobservice 四层，排障要跨包追日志。<strong>判断标准</strong>：当你的系统里同类"后台重活"超过三种、且每种都要重试/限流/留痕时，统一底座的摊薄成本就开始划算；只有一两种重活时，直接写反而简单。这个阈值判断，比模式本身更值得带走。</p>
+    </div>
+  </details>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0054-harbor-core-concepts-architecture.html">← 上一期：Harbor 核心概念与架构</a></span>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

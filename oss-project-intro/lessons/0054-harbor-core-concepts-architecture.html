@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Harbor 系列第 3 期：核心概念与整体架构 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0054</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0053-harbor-quickstart.html">上一期:0053</a> · Harbor 系列第 3 期 / 共 4 期 · <a href="0055-harbor-in-action-source-reading.html">下一期:0055</a> · <a href="https://goharbor.io/docs/2.15.0/" target="_blank" rel="noopener">goharbor.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · HARBOR 系列第 3 期：核心概念与整体架构</p>
+  <h1>Harbor 核心概念与整体架构：一次 push 之后发生了什么</h1>
+  <p class="subtitle">上一期我们用一条命令把 Harbor 跑了起来，还推进了第一张镜像——但镜像落库之后发生了什么，一直没拆开看。本期你带走一张概念地图：<strong>从一次 docker push 出发，看 project / repository / artifact 这些术语怎么组织，复制、扫描、签名三条链路怎么协作</strong>，外加一张自绘整体架构图和 tag v2.15.2 的源码顶层模块地图。两个钩子问题贯穿全程：<strong>push 回显成功之后发生了什么？扫描报告怎么挡住一次拉取？</strong>全部概念逐条核对官方文档（2.15）与 v2.15.2 源码树。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">📦 镜像仓库与交付 · Go · Apache-2.0（CNCF 毕业项目）</span>
+    <span class="tag">📦 基于 v2.15.2（GitHub Latest）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 3 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 本期要点 ================= -->
+<section>
+  <h2><span class="sec-num">00</span>本期要点</h2>
+  <div class="card card-tip">
+    <ul>
+      <li><strong>术语三层：</strong>project 是隔离与权限的第一道边界；repository 住 artifact（OCI 制品，不止镜像）；tag 可变、digest（内容摘要）不变；</li>
+      <li><strong>push 之后有两条线：</strong>同步线换令牌、传层、交清单就结束；异步线把扫描、复制登记成任务交给 jobservice 排队跑；</li>
+      <li><strong>复制规则三要素：</strong>过滤器 + 目标 + 触发；Pull/Push 两种模式，手动/定时/事件三种触发，任务级执行、失败自动重试；</li>
+      <li><strong>架构五角色：</strong>nginx 统一入口 · core 中枢（API/认证/策略）· registry 存储（上游 Distribution，不自研）· jobservice 任务引擎 · trivy-adapter 扫描适配；</li>
+      <li><strong>安全双闸：</strong>prevent_vul 按严重级别挡"带病"拉取；content_trust 挡"无签名"拉取——字段逐字见 v2.15.2 swagger。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= 01 术语体系 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>术语体系：项目、仓库、制品三层套娃</h2>
+  <p>Harbor 的术语体系是三层套娃，每层各管一件事。官方文档《Create Projects》的开篇原话：<strong>"A project in Harbor contains all repositories of an application. Images cannot be pushed to Harbor before a project is created."</strong>——项目包含一个应用的全部仓库，<strong>不建项目连推都推不进来</strong>。权限（基于角色的访问控制，开发者/维护者/项目管理员分角色）也以项目为边界（goharbor.io，2026-09 核对）。</p>
+  <p>第三层的"制品"是理解 Harbor 的钥匙：Harbor 2.0 起按 OCI（开放容器标准）规范统一承载内容，<strong>镜像和 Helm Chart 在它眼里是同一种东西——artifact</strong>，所以扫描、签名、保留、复制这些策略能一套管到底。把一条镜像地址拆开，三层结构一目了然（地址规则对照官方文档《Pulling and Pushing Images》，2026-09 核对）：</p>
+  <pre class="codeblock"><code># Docker 命名规则：仓库地址/项目/仓库:标签
+harbor.demo.com/demo/app:v1.2
+# 同一制品还有个不变的名字：按内容算出的摘要（digest）
+harbor.demo.com/demo/app@sha256:9c0b0a…</code></pre>
+  <p>标签是给人看的别名，可以改可以删；<strong>摘要按内容算出，改一个字节就变</strong>——生产流水线认摘要不认标签，防的就是同名覆盖。推镜像的"人"也分两种：人用真人账号，流水线用<strong>机器人账号（robot account）</strong>——名字带 <code>robot$</code> 前缀，密码是只显示一次的 secret，默认 30 天过期，权限按项目细粒度勾选（官方文档《System Robot Accounts》，2026-09 核对）。审计日志里人机分明，密钥泄露影响面也只有单个项目。</p>
+  <p>仓库管久了还会胖，项目配置里还有四件治理工具：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>概念</th><th>管什么</th><th>一句话规则</th></tr></thead>
+    <tbody>
+      <tr><td><strong>标签保留策略</strong>（tag retention）</td><td>旧镜像堆积</td><td>按规则只留最近 N 个标签，其余自动清</td></tr>
+      <tr><td><strong>标签不可变规则</strong>（immutability）</td><td>同名覆盖</td><td>锁定的标签禁止再推，防"悄悄换货"</td></tr>
+      <tr><td><strong>项目配额</strong>（quota）</td><td>存储失控</td><td>给项目设存储上限，默认不限量；官方文档细节：清单后到，超限不一定是推的那一下被拒</td></tr>
+      <tr><td><strong>垃圾回收</strong>（GC）</td><td>删除后的死重</td><td>清掉无引用的层，空间才真正回来</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ================= 02 钩子一 push 链路 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>钩子一：push 回显成功，事情才刚开始</h2>
+  <p>第二期推完镜像，你看到的是一句回显加一个摘要值。但那只是<strong>同步路径</strong>的终点；真正的重头戏在<strong>异步任务链</strong>上——扫描、复制这些"增值动作"全都不是推送当场跑完的，而是登记成任务排队执行。两条线画在一张图上：</p>
+  <div class="diagram">
+  <svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar54" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <text x="16" y="30" font-size="12.5" font-weight="700" fill="var(--ink)">同步线（推送当场走完）</text>
+    <rect x="16" y="44" width="150" height="72" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="91" y="74" text-anchor="middle" font-size="12" font-weight="700" fill="var(--ink)">docker 客户端</text>
+    <text x="91" y="96" text-anchor="middle" font-size="9.5" fill="var(--muted)">真人 / 机器人账号</text>
+    <rect x="220" y="44" width="160" height="72" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="300" y="74" text-anchor="middle" font-size="12" font-weight="700" fill="var(--ink)">core 认证</text>
+    <text x="300" y="96" text-anchor="middle" font-size="9.5" fill="var(--muted)">登录换临时令牌</text>
+    <rect x="434" y="44" width="170" height="72" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="519" y="74" text-anchor="middle" font-size="12" font-weight="700" fill="var(--ink)">registry 存储</text>
+    <text x="519" y="96" text-anchor="middle" font-size="9.5" fill="var(--muted)">逐层上传 · 提交清单</text>
+    <rect x="652" y="58" width="92" height="44" rx="22" fill="var(--ok-bg, #eef7ee)" stroke="var(--line)"/>
+    <text x="698" y="78" text-anchor="middle" font-size="10.5" font-weight="700" fill="var(--ink)">回显摘要</text>
+    <text x="698" y="94" text-anchor="middle" font-size="9" fill="var(--muted)">推送完成</text>
+    <line x1="166" y1="80" x2="214" y2="80" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar54)"/>
+    <line x1="380" y1="80" x2="428" y2="80" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar54)"/>
+    <line x1="604" y1="80" x2="646" y2="80" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar54)"/>
+
+    <line x1="519" y1="116" x2="519" y2="176" stroke="var(--accent-3)" stroke-width="1.8" stroke-dasharray="5 4" marker-end="url(#ar54)"/>
+    <text x="530" y="150" font-size="9.5" fill="var(--muted)">推送事件</text>
+
+    <text x="16" y="206" font-size="12.5" font-weight="700" fill="var(--ink)">异步线（登记成任务，排队执行）</text>
+    <rect x="220" y="220" width="160" height="72" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="300" y="250" text-anchor="middle" font-size="12" font-weight="700" fill="var(--ink)">core 登记事件</text>
+    <text x="300" y="272" text-anchor="middle" font-size="9.5" fill="var(--muted)">任务记录先落账</text>
+    <rect x="434" y="220" width="170" height="72" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="519" y="250" text-anchor="middle" font-size="12" font-weight="700" fill="var(--ink)">jobservice 任务引擎</text>
+    <text x="519" y="272" text-anchor="middle" font-size="9.5" fill="var(--muted)">取任务 · 执行 · 回写状态</text>
+    <rect x="652" y="220" width="92" height="72" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="698" y="248" text-anchor="middle" font-size="10.5" font-weight="700" fill="var(--ink)">扫描 / 复制</text>
+    <text x="698" y="266" text-anchor="middle" font-size="9" fill="var(--muted)">排队执行</text>
+    <line x1="380" y1="256" x2="428" y2="256" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar54)"/>
+    <line x1="604" y1="256" x2="646" y2="256" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar54)"/>
+    <text x="16" y="318" font-size="9.5" fill="var(--muted)">图例：同步线换令牌→上传→回显；异步线 core 登记事件、jobservice 派发（概念图，组件职责按官方文档与 v2.15.2 源码目录核对）</text>
+  </svg>
+  </div>
+  <p>异步链四个环节：<strong>事件登记</strong>——推送、扫描、复制都先写成任务记录，不是当场跑完的函数调用，接口才能秒回；<strong>jobservice 统一派发</strong>——专用任务引擎取任务、执行、回写状态，与接口进程互不拖累；<strong>失败自动重试</strong>——复制任务失败隔几分钟再试（官方文档《Configuring Replication》明说的行为）；<strong>面板可查</strong>——Job Service Dashboard 看队列与状态。所以"推送快"不等于"处理完"，扫描报告要等任务跑完才出。这套"接口秒回 + 任务落账 + 引擎派发"的模式，你自己设计系统时也用得上。</p>
+</section>
+
+<!-- ================= 03 复制链路 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>复制链路：Pull 与 Push 两种模式，跨实例分发</h2>
+  <p class="note"><img src="../output/0054-harbor-core-concepts-architecture/images/harbor-docs-replication.png" alt="Harbor 官方文档 Configuring Replication" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档《Configuring Replication》：Replication allows users to replicate resources, namely images and charts, between Harbor and non-Harbor registries, in both pull or push mode——每个匹配资源各起一个复制任务，失败隔几分钟重试；不同版本 Harbor 之间不支持复制（2026-09-19 截图，正文主栏）。</p>
+  <p>复制解决的是"一份镜像，多个机房/多云要用"的分发问题。官方口径：<strong>Harbor 与非 Harbor 仓库之间都能复制，拉取（pull）与推送（push）两种模式</strong>。一条复制规则三要素——<strong>过滤器 + 目标 + 触发方式</strong>：</p>
+  <ul>
+    <li><strong>Pull 模式（本地 ← 远端）：</strong>把上游镜像拉进来，代理缓存与灾备预热常用；</li>
+    <li><strong>Push 模式（本地 → 远端）：</strong>把本地制品推出去，多机房分发、灾备同步靠它；</li>
+    <li><strong>触发三选一：</strong>手动点一次 / 定时按表跑 / 事件触发（推入即复制）。细节：签名跟着制品一起复制，但事件触发暂不覆盖签名，只支持手动与定时（官方文档《Sign Artifacts with Cosign or Notation》，2026-09 核对）。</li>
+  </ul>
+  <p>每个匹配的资源各起一个<strong>复制任务</strong>，目标端命名空间不存在会自动建，任务失败隔几分钟自动重试——复制本质上是第 2 节那条异步任务链上的一种任务。做灾备还有一句要划重点：<strong>不同版本的 Harbor 之间不支持复制</strong>，主备两端版本要对齐。</p>
+</section>
+
+<!-- ================= 04 整体架构 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>整体架构：五个角色一张图</h2>
+  <div class="diagram">
+  <svg viewBox="0 0 760 380" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar55" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="14" y="150" width="140" height="76" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="84" y="180" text-anchor="middle" font-size="12" font-weight="700" fill="var(--ink)">客户端</text>
+    <text x="84" y="200" text-anchor="middle" font-size="9.5" fill="var(--muted)">docker · CI 机器人账号</text>
+    <rect x="204" y="150" width="110" height="76" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="259" y="180" text-anchor="middle" font-size="12" font-weight="700" fill="var(--ink)">nginx</text>
+    <text x="259" y="200" text-anchor="middle" font-size="9.5" fill="var(--muted)">统一入口</text>
+    <rect x="364" y="40" width="170" height="88" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="449" y="70" text-anchor="middle" font-size="12.5" font-weight="700" fill="var(--ink)">core 核心服务</text>
+    <text x="449" y="92" text-anchor="middle" font-size="9.5" fill="var(--muted)">REST API · 认证 · 策略</text>
+    <text x="449" y="112" text-anchor="middle" font-size="9.5" fill="var(--muted)">登记扫描/复制任务</text>
+    <rect x="364" y="220" width="170" height="88" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="449" y="250" text-anchor="middle" font-size="12.5" font-weight="700" fill="var(--ink)">registry 制品存储</text>
+    <text x="449" y="272" text-anchor="middle" font-size="9.5" fill="var(--muted)">上游 Distribution 2.8.3</text>
+    <text x="449" y="292" text-anchor="middle" font-size="9.5" fill="var(--muted)">registryctl 管控（GC 等）</text>
+    <rect x="596" y="40" width="150" height="88" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="671" y="70" text-anchor="middle" font-size="12" font-weight="700" fill="var(--ink)">jobservice</text>
+    <text x="671" y="92" text-anchor="middle" font-size="9.5" fill="var(--muted)">异步任务引擎</text>
+    <text x="671" y="112" text-anchor="middle" font-size="9.5" fill="var(--muted)">复制 · 扫描 · GC · 保留</text>
+    <rect x="596" y="220" width="150" height="88" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="671" y="250" text-anchor="middle" font-size="12" font-weight="700" fill="var(--ink)">trivy-adapter</text>
+    <text x="671" y="272" text-anchor="middle" font-size="9.5" fill="var(--muted)">扫描适配器</text>
+    <text x="671" y="292" text-anchor="middle" font-size="9.5" fill="var(--muted)">可换外部扫描引擎</text>
+    <rect x="204" y="330" width="330" height="40" rx="10" fill="var(--warn-bg, #faf3e6)" stroke="var(--line)"/>
+    <text x="369" y="355" text-anchor="middle" font-size="10.5" font-weight="700" fill="var(--ink)">存储后端：文件系统 / S3　·　PostgreSQL · Redis 托底</text>
+    <line x1="154" y1="188" x2="198" y2="188" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar55)"/>
+    <line x1="314" y1="170" x2="358" y2="100" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar55)"/>
+    <line x1="314" y1="206" x2="358" y2="250" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar55)"/>
+    <line x1="534" y1="84" x2="590" y2="84" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar55)"/>
+    <text x="546" y="74" font-size="9" fill="var(--muted)">派任务</text>
+    <line x1="671" y1="128" x2="671" y2="214" stroke="var(--accent-3)" stroke-width="1.8" marker-end="url(#ar55)"/>
+    <text x="680" y="176" font-size="9" fill="var(--muted)">取制品扫描</text>
+    <line x1="449" y1="308" x2="449" y2="324" stroke="var(--accent-3)" stroke-width="1.8" marker-end="url(#ar55)"/>
+    <line x1="596" y1="264" x2="540" y2="264" stroke="var(--accent-3)" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#ar55)"/>
+    <text x="544" y="254" font-size="9" fill="var(--muted)">扫描结果回写</text>
+    <text x="14" y="30" font-size="12.5" font-weight="700" fill="var(--ink)">读图三条线</text>
+    <text x="14" y="54" font-size="9.5" fill="var(--muted)">入口线：流量全走 nginx；主链：core 管策略、registry 存制品；异步链：core 派任务、jobservice 驱动扫描</text>
+    <text x="14" y="374" font-size="9.5" fill="var(--muted)">portal（Web 控制台）、日志、exporter 等组件见 v2.15.2 安装模板 docker-compose.yml.jinja（2026-09-19 核对）</text>
+  </svg>
+  </div>
+  <p>读三条线：<strong>入口线</strong>，所有流量先过 nginx 反向代理；<strong>主链</strong>，core 管接口、认证、策略，制品本体存在 registry 里——<strong>registry 就是上游 Distribution（组件表版本 2.8.3），Harbor 没有重写存储协议，这是"协议兼容零迁移成本"的根基</strong>；<strong>异步链</strong>，core 派任务，jobservice 驱动 trivy-adapter 完成扫描，核心不亲自扫。底下 PostgreSQL 与 Redis 托底，portal 出 Web 控制台，另配日志与 exporter。官方安装模板（v2.15.2 的 <code>docker-compose.yml.jinja</code>）里这 11 个容器一个不差：nginx、portal、core、jobservice、registry、registryctl、trivy-adapter、db、redis、log、exporter——注意里面<strong>没有 ChartMuseum</strong>，原因见第 6 节。</p>
+  <p class="note"><img src="../output/0054-harbor-core-concepts-architecture/images/harbor-docs-components.png" alt="Harbor 官方文档 Harbor Components 组件表" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档《Installation and Configuration》的 Harbor Components 组件表：Postgresql 15.10 · Redis 7.2.6 · Beego 2.3.4（core 的 Web 框架）· Distribution/Distribution 2.8.3（registry 本体）· Helm 2.9.1 · Swagger-ui 5.9.1（2026-09-19 截图）。</p>
+</section>
+
+<!-- ================= 05 源码模块地图 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>源码模块地图：tag v2.15.2 的 src 顶层</h2>
+  <p class="note"><img src="../output/0054-harbor-core-concepts-architecture/images/harbor-github-src-tree.png" alt="GitHub goharbor/harbor tag v2.15.2 src 目录" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">github.com/goharbor/harbor/tree/v2.15.2/src：core、jobservice、registryctl、server、pkg 等目录一屏可见；左侧文件树定位在 src，标签选择器 v2.15.2（UTC 时区，2026-09-19 截图）。读码前先锁定这个标签，主干演进很快。</p>
+  <p>架构要落到代码才踏实。src 顶层每个目录一句话（目录名逐个核对于 tag v2.15.2 仓库树，2026-09-19）：</p>
+  <pre class="codeblock"><code>harbor @ v2.15.2 · src/ 顶层
+├─ core/        核心服务主程序：REST API、认证鉴权、事件
+├─ server/      HTTP 服务装配：v2.0 接口处理器与中间件
+├─ jobservice/  异步任务引擎：复制、扫描、保留、GC 队列
+├─ registryctl/ registry 管控端：健康检查与垃圾回收
+├─ pkg/         业务逻辑层：47 个子包（项目/制品/扫描/策略）
+├─ controller/  控制器层：接口与业务之间的流程编排
+├─ portal/      Web 控制台前端（Angular）
+├─ lib/         通用库：配置、日志、工具
+├─ cmd/         辅助入口：exporter、swagger、迁移工具
+└─ common/ migration/ testing/  公共配置 · 迁移 · 测试脚手架</code></pre>
+  <p>对照上一节的架构图，每个框都能找到自己的目录。一个反直觉的点值得单独说：<strong>registry 本体不在源码树里</strong>——它是上游 Distribution 的现成镜像，Harbor 用 <code>registryctl</code> 这个管控端指挥它做健康检查和垃圾回收。存储协议是公开标准就不必重造，把研发力量花在策略与管理面上，这个"复用而不重造"的决策很值得学。第 4 期读码入口从 <code>core/</code> 与 <code>jobservice/</code> 进。</p>
+</section>
+
+<!-- ================= 06 安全链路 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>安全链路：扫描挡"带病"，签名挡"假货"</h2>
+  <p><strong>钩子二的答案：扫描结果通过"部署安全"策略挡住拉取。</strong>项目配置里一个开关（官方 API 字段 <code>prevent_vul</code>）+ 一档阈值（<code>severity</code>，合法值 none/low/medium/high/critical），规则一句话：<strong>达到或超过阈值的漏洞，镜像一律拒拉</strong>——swagger 原文 "If the vulnerability is high than severity defined here, the images can't be pulled."。扫描时机有三种：推入自动扫（<code>auto_scan</code>）、按周期定时扫、手动扫。扫描器是适配器机制：内置 Trivy（<code>--with-trivy</code> 启用），也能接企业自有的扫描引擎，换引擎不动架构（官方文档《Vulnerability Scanning》《Deployment Security》，2026-09 核对）。</p>
+  <p class="note"><img src="../output/0054-harbor-core-concepts-architecture/images/harbor-docs-deployment-security.png" alt="Harbor 官方文档 Deployment Security" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档《Deployment Security》：Harbor has 'deployment security' which can prevent artifacts from being pulled if vulnerabilities are discovered——按制品逐个校验，多架构镜像只看所拉平台（2026-09-19 截图，正文主栏）。</p>
+  <p>四行项目配置就是两条安全防线的真身（字段与描述逐字取自 v2.15.2 的 <code>api/v2.0/swagger.yaml</code>，2026-09-19 核对）：</p>
+  <pre class="codeblock"><code># 项目元数据（api/v2.0/swagger.yaml @ v2.15.2 原文字段）
+prevent_vul: "true"          # 启用部署安全拦截
+severity:    "high"          # 阈值：high 及以上拒拉
+auto_scan:   "true"          # 推入自动触发扫描
+enable_content_trust: "true" # 未签名制品拒绝拉取</code></pre>
+  <p>签名这条线也在换代，值得单独讲。Harbor 2.5 集成 <strong>Cosign</strong>，签名以 accessory（附属制品）形式挂在原制品名下，保留与复制策略连它一起管；2.8 起 <strong>ChartMuseum 整体移除</strong>（官方发布说明原文："Starting with version v2.8.0, Harbor no longer includes ChartMuseum in either the user interface or the backend."），Chart 全面走 OCI 制品；2.9 起 <strong>Notary 移除、Notation 加入</strong>，与 Cosign 组成签名双引擎。项目开启内容信任（<code>enable_content_trust</code>）后，<strong>未签名的制品直接拒绝拉取</strong>（官方文档《Sign Artifacts with Cosign or Notation》，2026-09 核对）。</p>
+  <p>两条拦截链正面看：<strong>扫描拦截防"带病"</strong>——内容有没有毒，解法是修漏洞（升级基础镜像或调阈值）；<strong>签名拦截防"假货"</strong>——来路是不是你，解法是流水线签名一体化。组件会退役，架构模式不变：适配器 + 策略，换引擎不换骨架。</p>
+</section>
+
+<!-- ================= 07 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：Harbor 自己不写存储，直接用上游 Distribution 当 registry。这种"核心自研薄、标准复用厚"的架构分界，划在哪、凭什么？</summary>
+    <div class="details-body">
+      <p>分界线划在<strong>"协议"与"策略"之间</strong>。Docker Registry API 是公开标准，registry 只要老老实实实现存取语义就行——这部分 Harbor 一行不写，直接拿 Distribution 的镜像来用，只在旁边配一个 <code>registryctl</code> 管控端做健康检查和垃圾回收。这样做有三重收益：<strong>其一</strong>，兼容性白拿——Docker 客户端、K8s kubelet、各家 CI 对接的是标准协议，registry 换成任何标准实现都不破坏；<strong>其二</strong>，维护成本外包给上游社区——存储引擎的 bug、性能优化由 Distribution 项目扛，Harbor 升级只需跟版本号；<strong>其三</strong>，差异化聚焦——Harbor 的竞争力在扫描、签名、复制、RBAC、审计这些"协议管不了但企业必须管"的策略层，全部长在 core 与 jobservice 里，与存储解耦。反例是重写存储协议：短期看似自主可控，长期每一分兼容性都要自己还。判别式一句话：<strong>标准化的部分换件不造件，差异化的部分深耕成护城河</strong>。你自己设计中间件平台时，先问"这一层有没有事实标准"，有就站在标准肩膀上。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：扫描拦截（按漏洞级别拒拉）和签名拦截（无签名拒拉）都是"拉取时拦"，为什么要两道闸？只留一道行不行？</summary>
+    <div class="details-body">
+      <p>两道闸回答的是<strong>两个不同的问题</strong>。扫描拦截回答"这个镜像里有没有已知的问题"——它校验的是<strong>内容</strong>：Trivy 静态分析出 CVE 报告，达到 <code>severity</code> 阈值就拒拉。但它有个盲区：它只能认得"已知漏洞"，且不关心镜像从哪来、中途被谁换过。签名拦截回答"这个镜像是不是我方构建、未被篡改"——它校验的是<strong>来路</strong>：Cosign/Notation 签名绑定构建身份与内容摘要，内容信任开启后无签名拒拉。只留扫描闸：攻击者投毒一个"无已知漏洞"的恶意镜像照样能进生产——内容干净但来路不明；只留签名闸：签名的镜像里可能带着高危 CVE——来路正统但带病上岗。供应链安全的两个正交维度（完整性与安全性）必须分别设防。再看工程实现：两道闸共用同一个挂载点（拉取时的策略检查），开关与阈值都收在项目配置四行字段里，边际成本几乎为零——这也是"策略统一收口"的好处：防线可以叠加，检查点不必重复建设。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 08 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>随堂小测</h2>
+  <div class="quiz">
+    <div class="quiz-q">
+      <p class="quiz-question">1. 一次 docker push 回显成功之后，扫描和复制是怎么执行的？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，扫描复制不是推送当场跑完的，接口才能秒回。","对的：推送事件登记成任务，jobservice 统一派发排队执行，所以推送快不等于处理完。","不对，扫描复制在服务端异步执行，不需要客户端等待。"]'>
+        <li class="quiz-option">推送请求里同步等扫描做完才返回</li>
+        <li class="quiz-option">登记为异步任务，由 jobservice 排队执行</li>
+        <li class="quiz-option">客户端收到摘要后自己触发扫描</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 项目开启 prevent_vul 并把 severity 设为 high 之后，会发生什么？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，触发的是自动扫描，拦截要靠 prevent_vul。","不对，Harbor 不会自动删除镜像，只是拒绝拉取。","对的：漏洞达到或超过 high 级别的制品无法被拉取，镜像仍在仓库里。"]'>
+        <li class="quiz-option">高危镜像推送时直接被删除</li>
+        <li class="quiz-option">高危镜像只扫描不拦截</li>
+        <li class="quiz-option">漏洞达到或超过 high 的制品无法被拉取</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 09 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>术语三层：project 管隔离与权限，repository 住 artifact（OCI 制品，不止镜像）；tag 可变、digest 不变；</li>
+      <li>push 两条线：同步线换令牌、传层、交清单就结束；异步线登记任务交给 jobservice，失败自动重试；</li>
+      <li>复制规则 = 过滤器 + 目标 + 触发：Pull/Push 两模式，手动/定时/事件三触发，跨实例灾备与分发的根基；</li>
+      <li>架构五角色：nginx 入口 · core 中枢 · registry（上游 Distribution 2.8.3）存储 · jobservice 任务引擎 · trivy-adapter 扫描适配；registry 本体不在源码树，用 registryctl 管控；</li>
+      <li>安全双闸：prevent_vul 按级别挡"带病"，content_trust 挡"无签名"——Cosign（v2.5）+ Notation（v2.9），ChartMuseum 已于 v2.8 移除。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 4 期《实战与源码导读》——把复制、扫描、签名这些能力串成一次端到端实战：建项目、配机器人账号、开扫描拦截、建一条复制规则，再轻读一眼 <code>core/</code> 与 <code>jobservice/</code> 的源码入口。</p>
+  <p><strong>Primary source：</strong><a href="https://goharbor.io/docs/2.15.0/" target="_blank" rel="noopener">Harbor 官方文档 · v2.15.0</a>——本期概念均出自该文档：复制见 <a href="https://goharbor.io/docs/2.15.0/administration/configuring-replication/" target="_blank" rel="noopener">Configuring Replication</a>，漏洞扫描与拦截见 <a href="https://goharbor.io/docs/2.15.0/administration/vulnerability-scanning/deployment-security/" target="_blank" rel="noopener">Deployment Security</a>，项目见 <a href="https://goharbor.io/docs/2.15.0/working-with-projects/create-projects/" target="_blank" rel="noopener">Create Projects</a>，签名见 <a href="https://goharbor.io/docs/2.15.0/working-with-projects/working-with-images/sign-images/" target="_blank" rel="noopener">Sign Artifacts with Cosign or Notation</a>；源码目录核对见 <a href="https://github.com/goharbor/harbor/tree/v2.15.2/src" target="_blank" rel="noopener">github.com/goharbor/harbor @ v2.15.2/src</a>，组件版本见官方文档 Harbor Components 表（Distribution 2.8.3 · PostgreSQL 15.10 · Redis 7.2.6）。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0053-harbor-quickstart.html">← 上一期：5 分钟跑起来 Harbor</a></span>
+  <a class="next" href="0055-harbor-in-action-source-reading.html">下一期：Harbor 实战与源码导读 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>
