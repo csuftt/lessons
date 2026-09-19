@@ -15,7 +15,7 @@
 </header>
 
 <div class="hero">
-  <p class="issue">OSS PROJECT INTRO · TDENGINE 系列第 5 期:架构与源码导读</p>
+  <p class="issue">OSS PROJECT INTRO · TDengine 5/5:架构与源码导读</p>
   <h1>TDengine 架构与源码导读:vnode 存算一体与缓存降采样</h1>
   <p class="subtitle">上一期我们把设备数据端到端接进了 TDengine:模拟设备、写入落库、查询回读一次打通。最后一期换挡进源码——但不逐行读,C 项目重架构轻读码,我们抓三个最值得学的设计决策:标签与数据为什么分家存、vnode 的"存算一体"到底一体化在哪、最新值缓存与流计算怎么把读压力降下来。每个决策都给足三件事:为什么这么设计、解决什么问题、换种做法会怎样,最后合成一张读码路线图。所有文件路径与函数行号逐个核对自 GitHub tag <strong>ver-3.4.1.6</strong>(2026-09-19),读码时先切到这个 tag。</p>
   <div class="lesson-meta">
@@ -245,7 +245,7 @@ vnodeCommit.c: vnodeCommit(322)
 
 <!-- ================= 09 收官 ================= -->
 <section>
-  <h2><span class="sec-num">09</span>系列收束:五期带走什么</h2>
+  <h2><span class="sec-num">09</span>本期要点与系列收束:五期带走什么</h2>
   <div class="card card-tip">
     <p><strong>TDengine 入门系列五期回顾:</strong></p>
     <ul>
@@ -260,7 +260,7 @@ vnodeCommit.c: vnodeCommit(322)
 </section>
 
 <nav class="lesson-nav">
-  <a class="prev" href="0030-tdengine-in-action.html">← 上一期:实战场景</a>
+  <a class="prev" href="0030-tdengine-in-action.html">← 上一期:实战 JDBC 写入与窗口聚合</a>
   <span class="next">TDengine 系列完 · 回课程目录</span>
 </nav>
 

@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Redis 系列第 1 期：不只是缓存的内存数据结构服务器 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0032</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0031-tdengine-source-reading.html">上一期:0031</a> · Redis 系列第 1 期 / 共 5 期 · <a href="0033-redis-quickstart.html">下一期:0033</a> · <a href="https://redis.io" target="_blank" rel="noopener">redis.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · REDIS 系列第 1 期：认识项目</p>
+  <h1>Redis 是什么：不只是缓存的内存数据结构服务器</h1>
+  <p class="subtitle">开源项目入门系列的每个新项目，都从三个问题开始：它解决什么痛点、凭什么活下来、什么场景该选它。上一个项目我们聊完了 TDengine，今天开启新项目 Redis——大多数人对它的第一印象是"缓存"，但官方文档开篇第一句是 <strong>"Redis is a data structure server"：它是一台内存数据结构服务器</strong>，字符串、哈希、有序集合、流，每类结构自带一套原子操作，缓存只是其中一个组合用法。本期不装任何软件，素材全部来自官方文档与官方仓库，每张图都标出处；你带走四样东西：热数据的痛点、这张心智模型、一份五方选型对比，外加 Redis 许可证风波四年的来龙去脉。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 缓存与数据结构 · C · RSALv2/SSPLv1/AGPLv3 三许可</span>
+    <span class="tag">📦 基于 8.10.2（GitHub Latest）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 1 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 痛点 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>痛点：热数据在磁盘数据库里排队</h2>
+  <p>先看一类每个系统都会遇到的压力。一个电商大促页，商品详情、库存余量、秒杀计数器，一秒钟被读写几十万次；一条热搜话题，排行榜名次每秒钟重算上百回。这类被反复摸的<strong>热数据</strong>，放进 MySQL 这类磁盘数据库，很快撞上三堵墙：</p>
+  <ul>
+    <li><strong>读写延迟上不去：</strong>磁盘库的 B+ 树页不可能全常驻内存，一旦命中磁盘，单次访问从内存的纳秒级跳到磁盘的毫秒级，差着五六个数量级；</li>
+    <li><strong>高并发读扛不住：</strong>磁盘库的连接数与查询吞吐有天花板，大促流量先压垮数据库，连带拖死整条业务链路；</li>
+    <li><strong>简单操作太重：</strong>计数、去重、排行榜、限流这类操作，本质是"对一个结构做一次原子运算"，走 SQL 解析、事务、索引维护的全链路，纯属杀鸡用牛刀。</li>
+  </ul>
+  <p>三堵墙的根源是同一句错配：<strong>磁盘数据库为"数据量大、持久第一"设计，热数据场景要的是"数据量小、延迟第一"</strong>。解法顺理成章——把热数据整个放进内存，把操作降到数据结构级。2009 年，Salvatore Sanfilippo（网名 antirez）为此写出了 Redis，后来它成了这个位置的事实标准。</p>
+</section>
+
+<!-- ================= 02 是什么 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>是什么：内存数据结构服务器，数据结构是主角</h2>
+  <p>官方文档的开篇值得逐词读（redis.io《Redis data types》，2026-09 核对）：<strong>"Redis is a data structure server."</strong>——Redis 是一台数据结构服务器。不是"缓存工具"，不是"键值存储"这么简单：键值只是寻址外壳，真正的主角是它内存里内置的十几类数据结构，每类都配了一组原子命令。Redis Open Source 当前实现的类型包括：Strings（含 Bitmaps、Bitfields）、Lists、Hashes、Sets、Sorted sets、Streams、Geospatial indexes、JSON、Time series、Vector sets，外加 Bloom filter、Cuckoo filter、HyperLogLog、t-digest、Top-K 等概率类型——其中 JSON、时间序列、向量集合与五种概率结构，是 2025 年 5 月 Redis 8 把原 Stack 模块收编进内核后的新成员。</p>
+  <pre class="codeblock"><code>&gt; SET bike:1 Deimos
+OK
+&gt; GET bike:1
+"Deimos"
+&gt; ZADD racer_scores 10 "Norem"   # 有序集合：成员挂分数，写入即排序
+(integer) 1</code></pre>
+  <p>样例出自官方文档《Redis strings》《Sorted sets》。注意 <code>ZADD</code> 的形状：一条命令，写入成员与分数，顺带维护好排名——传统方案要一张带索引的表加 ORDER BY 查询，这里写完即排好。把心智模型画成一张图：</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 340" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar32" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+
+    <rect x="16" y="108" width="150" height="120" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="91" y="140" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">客户端</text>
+    <text x="91" y="162" text-anchor="middle" fill="var(--muted)" font-size="9.5">redis-cli · 各语言 SDK</text>
+    <text x="91" y="182" text-anchor="middle" fill="var(--muted)" font-size="9.5">GET · SET · ZADD …</text>
+
+    <line x1="166" y1="168" x2="238" y2="168" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar32)"/>
+    <text x="202" y="152" text-anchor="middle" fill="var(--muted)" font-size="8.5">RESP 协议</text>
+
+    <rect x="242" y="108" width="170" height="120" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="327" y="138" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">单线程事件循环</text>
+    <text x="327" y="160" text-anchor="middle" fill="var(--muted)" font-size="9.5">命令逐条执行·无锁竞争</text>
+    <text x="327" y="180" text-anchor="middle" fill="var(--muted)" font-size="9.5">IO 读写可多线程</text>
+    <text x="327" y="200" text-anchor="middle" fill="var(--accent-3)" font-size="8.5">多核靠多实例横向扩</text>
+
+    <line x1="412" y1="168" x2="484" y2="168" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar32)"/>
+    <text x="448" y="152" text-anchor="middle" fill="var(--muted)" font-size="8.5">内存操作</text>
+
+    <rect x="488" y="30" width="256" height="176" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="616" y="56" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">内存数据结构（主角）</text>
+    <text x="616" y="80" text-anchor="middle" fill="var(--muted)" font-size="9.5">String · List · Hash · Set · Zset</text>
+    <text x="616" y="100" text-anchor="middle" fill="var(--muted)" font-size="9.5">Stream · JSON · Time series</text>
+    <text x="616" y="120" text-anchor="middle" fill="var(--muted)" font-size="9.5">Vector set · Bloom · HyperLogLog …</text>
+    <text x="616" y="146" text-anchor="middle" fill="var(--accent-3)" font-size="9">每类结构自带原子命令</text>
+    <text x="616" y="166" text-anchor="middle" fill="var(--accent-3)" font-size="9">ZADD 写入即排序 · INCR 天然原子</text>
+    <text x="616" y="190" text-anchor="middle" fill="var(--muted)" font-size="8.5">值上限 512 MB（普通字符串）</text>
+
+    <rect x="488" y="228" width="256" height="76" rx="10" fill="var(--warn-bg)" stroke="var(--line)"/>
+    <text x="616" y="256" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">过期删除 + 内存淘汰</text>
+    <text x="616" y="278" text-anchor="middle" fill="var(--muted)" font-size="9">TTL 到期清理 · 内存满时按策略驱逐</text>
+    <text x="616" y="296" text-anchor="middle" fill="var(--muted)" font-size="9">缓存场景的"自动换血"机制</text>
+    <line x1="616" y1="206" x2="616" y2="224" stroke="var(--muted)" marker-end="url(#ar32)"/>
+
+    <text x="16" y="326" fill="var(--muted)" font-size="9.5">图例：客户端经 RESP 协议发命令，单线程事件循环逐条执行，操作落在内存数据结构上——"内存 + 数据结构 + 单线程命令执行"三个词，是理解 Redis 所有设计的根</text>
+  </svg>
+  </div>
+
+  <p>记住这张图，Redis 的一半设计就懂了：<strong>快，是因为数据全在内存、操作是结构级的原生运算；简，是因为命令执行在单线程事件循环里逐条跑，没有锁、没有并发冲突</strong>——官方 benchmark 文档原话："Redis is, mostly, a single-threaded server from the POV of commands execution"（从命令执行的视角看，Redis 大多是单线程的）。要用满多核，标准做法是一台机器起多个实例。至于"单线程为什么还能扛住十万级每秒"，第 04 节用官方数字拆。</p>
+</section>
+
+<!-- ================= 03 关键数据 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>关键数据与版本基准：热度、性能与采用</h2>
+  <p>社区面上（2026-09-19 核对）：redis/redis 仓库 <strong>Star 76.4k、Fork 24.8k</strong>，C 语言编写，About 自我定位"the preferred, fastest, and most feature-rich cache, data structure server, and document and vector query engine"；Docker Hub 官方镜像页挂着 <strong>1B+ 次拉取、10K+ 星标</strong>，Maintained by Redis LTD。性能看官方《Redis benchmark》文档的回显：50 个并发连接压 SET，<strong>每秒 180180 次、p50 延迟 0.143 毫秒</strong>；官方博客口径，Redis 8 相对 7.2.5 在 149 项基准中九成命令更快，p50 延迟最高下降 87.4%。注意性能均为官方自报口径，选型前拿自己的负载实测。</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>版本线</th><th>当前（2026-09）</th><th>定位</th></tr></thead>
+    <tbody>
+      <tr><td>8.10（当前稳定）</td><td><strong>8.10.2</strong>（2026-09-17，GitHub Latest，安全修复）</td><td>本系列基准</td></tr>
+      <tr><td>8.8 / 8.6</td><td>8.8.3 / 8.6.7（同日发补丁）</td><td>并行维护的多条稳定线</td></tr>
+      <tr><td>8.2 / 8.4</td><td>Releases 列表内仍在收补丁</td><td>旧稳定线，维护窗口内</td></tr>
+      <tr><td>8.0</td><td>GA 于 2025-05-01</td><td>AGPL 选项回归 · Stack 并入 · 更名 Open Source</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">数据来源：GitHub 仓库页与 Releases、redis.io 下载页（当前稳定线标 8.10）、Redis 8 GA 官方博客（2025-05-01），2026-09-19 核对。Redis 8 之后采用多条稳定线并行维护的节奏，升级前先确认自己在哪条线。</p>
+</section>
+
+<!-- ================= 04 许可证风波 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>钩子一：许可证风波——退出开源又回归的四年</h2>
+  <p>Redis 这四年把"开源商业化"的矛盾演了一遍，时间线值得每个用开源的人记一遍（口径核对自 Redis 官方博客与 Wikipedia，2026-09-19）：</p>
+  <div class="card">
+    <ul>
+      <li><strong>2009—2024 · BSD 时代：</strong>核心一直以 BSD-3 条款开源，15 年长成缓存组件的事实标准；</li>
+      <li><strong>2024-03-20 · 退出 OSI 开源：</strong>官方宣布自 7.4 起改用 RSALv2 与 SSPLv1 双许可——两者都不是 OSI 认可的开源协议，RSALv2 禁止把软件商业化或作为托管服务提供给他人，矛头直指"免费托管 Redis 转手卖钱"的大型云厂商；</li>
+      <li><strong>2024-03 · 社区分叉 Valkey：</strong>Linux 基金会牵头，用最后一个 BSD 版本分叉出 Valkey，Google、AWS、Oracle 等云厂商跟进支持，BSD-3 路线得以延续；</li>
+      <li><strong>2025-05-01 · AGPL 回归：</strong>Redis 8 GA，把 AGPLv3 加回第三选项，形成 RSALv2 / SSPLv1 / AGPLv3 三许可任选；同时 Redis Stack 并入核心、免费产品更名 Redis Open Source，官方称分叉已达到"拉平竞争环境"的目的。</li>
+    </ul>
+  </div>
+  <p>对使用者的实际含义：<strong>自用、内部托管，三个许可都不限制</strong>；要改造后对外分发或做托管服务，AGPLv3 是唯一不开商业授权的选择（注意它的传染性），或者直接选 BSD-3 的 Valkey。这也是"选型对比"绕不开的一节——下一节正面对比。</p>
+</section>
+
+<!-- ================= 05 对比 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>与同类对比：一个主角，四个对手</h2>
+  <p>"Redis 兼容"已经成了一个协议生态，赛道上的玩家各有立场（数据均为各仓库/官网公开口径，2026-09-19 核对）：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>项目</th><th>定位与技术路线</th><th>协议兼容</th><th>许可证</th><th>热度（2026-09）</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Redis 8.10</strong></td><td>内存数据结构服务器；8.0 收编 JSON/时序/向量/概率结构</td><td>事实标准本身</td><td>RSALv2/SSPLv1/AGPLv3 三选一</td><td>76.4k Stars</td></tr>
+      <tr><td>Memcached</td><td>纯缓存键值，多线程；无数据结构、无持久化</td><td>独立协议（部分工具兼容）</td><td>BSD-3</td><td>14.3k Stars</td></tr>
+      <tr><td>Valkey</td><td>Redis 7.2 最后 BSD 版的分叉，Linux 基金会托管</td><td>命令与协议兼容 Redis</td><td>BSD-3</td><td>27.3k Stars</td></tr>
+      <tr><td>KeyDB</td><td>Snap 维护的多线程分叉，Snap 缓存基础设施在用</td><td>协议兼容 Redis</td><td>BSD-3</td><td>12.5k Stars</td></tr>
+      <tr><td>Dragonfly</td><td>thread-per-core 多线程新内核（非分叉），官方口径 25 倍 QPS</td><td>兼容 Redis 与 Memcached API</td><td>BSL 1.1（2030-11 转 Apache-2）</td><td>31.6k Stars</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>怎么选？<strong>要数据结构纵深与最厚生态，Redis 本尊；要纯缓存够用就好，Memcached 至今称职；许可证上要彻底开源、社区中立，Valkey 是官方指定的"开源续作"；多线程新内核的大内存极限性能，Dragonfly 值得评估，但 BSL 不是开源协议，商用托管需留意条款。</strong>没有全能冠军，只有约束匹配——把许可证约束和数据形状想清楚，答案通常自己浮出来。</p>
+</section>
+
+<!-- ================= 06 场景 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>什么场景该选它（以及什么场景是错配）</h2>
+  <div class="card">
+    <p><strong>✅ 适合：</strong></p>
+    <ul>
+      <li><strong>热点数据缓存：</strong>给磁盘数据库挡读写并发，毫秒级变微秒级——最经典也最大宗的用法；</li>
+      <li><strong>计数器 / 排行榜 / 去重 / 限流：</strong>INCR、ZADD、Set、滑动窗口，一个结构一条命令，天然原子；</li>
+      <li><strong>会话、购物车这类带过期的热状态：</strong>TTL 到期自动清理，配合持久化可当轻量主存储；</li>
+      <li><strong>队列与事件流：</strong>List 阻塞读、Stream 消费组，轻量消息场景不必先上重型队列。</li>
+    </ul>
+    <p><strong>❌ 错配：</strong></p>
+    <ul>
+      <li><strong>大数据量的冷数据主存储：</strong>数据集装不进内存，成本随数据量线性走，持久化终究是补充而非替代；</li>
+      <li><strong>强事务与复杂关联查询：</strong>没有跨表 JOIN 与多行事务语义，账务订单交给关系数据库；</li>
+      <li><strong>当主存储却没配持久化与容灾：</strong>内存库怕断电，持久化、复制与哨兵是"当存储用"的前置条件。</li>
+    </ul>
+  </div>
+  <p>一条判断捷径：<strong>数据是"热的、结构简单的、要求延迟低的"，Redis 进候选；数据是"冷的、关系复杂的、要求绝对不丢的"，留在磁盘数据库。</strong>数据结构用法、缓存三大问题、分布式锁与性能调优这些"怎么用好"的主题，每日微课程线已有七期专题，本系列不换皮重讲，选三篇最相关的作为延伸阅读：</p>
+  <div class="note">
+    <p><strong>延伸阅读（每日微课程线，使用与调优不重讲）：</strong></p>
+    <ul>
+      <li><a href="../../daily-tech-course/lessons/0005-redis-data-structures.html">第 0005 期 · Redis 数据结构与选型</a>——五大数据结构的命令级用法与场景匹配；</li>
+      <li><a href="../../daily-tech-course/lessons/0008-redis-cache-patterns.html">第 0008 期 · Redis 缓存设计模式</a>——穿透、击穿、雪崩的系统化治理；</li>
+      <li><a href="../../daily-tech-course/lessons/0010-redis-performance-tuning.html">第 0010 期 · Redis 性能调优</a>——慢查询、大 Key、热 Key 与全链路延迟排查。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= 07 quiz ================= -->
+<section>
+  <h2><span class="sec-num">07</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. 官方文档给 Redis 的定位，哪句最准确？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不够准：缓存只是字符串类型加过期时间的一种用法，官方第一句说的是数据结构服务器。","对的：官方文档开篇 Redis is a data structure server——键值是外壳，数据结构是主角。","不对：Redis 默认无表结构、不做关系与 JOIN，不是关系数据库。"]'>
+        <li class="quiz-option">它是一个高性能关系缓存数据库</li>
+        <li class="quiz-option">它是一台内存数据结构服务器</li>
+        <li class="quiz-option">它是一个轻量级关系数据库</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 关于许可证风波，下列说法正确的是？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，分叉出的是 Valkey，Redis 本尊没有改名。","不对，2024 年 3 月改的是 RSALv2 与 SSPLv1，两者都不是 OSI 认可的开源协议。","对的：2025 年 5 月 1 日 Redis 8 GA 起三许可任选，AGPLv3 是其中唯一的 OSI 认可开源协议。"]'>
+        <li class="quiz-option">2024 年分叉后，Redis 项目更名为 Valkey</li>
+        <li class="quiz-option">Redis 至今仍在使用 RSALv2/SSPLv1 双许可，没有开源选项</li>
+        <li class="quiz-option">2025 年 5 月起 Redis 8 提供 RSALv2/SSPLv1/AGPLv3 三许可任选</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 按本期的判断捷径，哪个场景最不该选 Redis？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：几 TB 冷数据装不进内存，成本随数据量线性走，这是硬边界，该交给磁盘数据库。","不对，计数与排行榜是有序集合加 INCR 的主场。","不对，会话与购物车带 TTL，是经典热状态场景。"]'>
+        <li class="quiz-option">几 TB 历史订单的归档主存储</li>
+        <li class="quiz-option">秒杀活动的实时计数与排行榜</li>
+        <li class="quiz-option">登录会话与购物车，带过期时间</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. "单线程"这个说法，对 Redis 而言准确的理解是？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，整个进程并非单线程，网络读写等早就是多线程。","对的：官方口径是从命令执行视角看大多是单线程——内存操作加事件循环无需锁，Redis 8 又把 IO 线程重写加强。","不对，恰恰相反，多实例是标准做法，官方 benchmark 文档明确说明单实例不吃多核。"]'>
+        <li class="quiz-option">整个 Redis 进程只有一个线程，任何工作都不并行</li>
+        <li class="quiz-option">命令执行大多在单线程里逐条跑，网络 IO 等可以是多线程</li>
+        <li class="quiz-option">单线程是历史包袱，多实例部署是被废弃的旧方案</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 08 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：把缓存从"进程内 HashMap"换成"独立 Redis 服务"，多了一次网络往返，为什么大家反而觉得更快了？这笔账应该怎么算？</summary>
+    <div class="details-body">
+      <p>直觉的账只算了一头：本机 HashMap 访问是百纳秒级，走一次网络到 Redis 要零点几毫秒，看起来慢了几千倍。但真实系统里，<strong>瓶颈很少在"单次访问"，而在"数据库被击穿之后的连锁反应"</strong>。算总账要看四笔：其一，<strong>兜底对象的速度</strong>——缓存未命中时回源的是磁盘数据库，单次几毫秒到几十毫秒，Redis 的零点几毫秒是"快两个数量级之上的缓冲层"，进程内 HashMap 挡不住这一层，因为它是每个实例各存一份，命中率低还互相不一致；其二，<strong>一致性成本</strong>——多实例部署时进程内缓存要自己解决实例间失效同步，Redis 把状态集中到一处，失效逻辑天然单一；其三，<strong>数据结构红利</strong>——排行榜、去重、限流这些操作在 HashMap 里要自己写线程安全代码，Redis 一条 ZADD/INCR 就带原子语义；其四，<strong>故障与容量边界</strong>——Redis 独立部署可以单独扩容、单独重启、配淘汰策略，进程内缓存与业务进程同生共死。所以结论不是"网络往返不贵"，而是<strong>"用一次可预算的网络往返，换掉磁盘数据库被击穿时不可预算的雪崩"</strong>。什么时候进程内缓存反而对？单实例部署、数据只读且极小、对延迟敏感到微秒级——这时别引入网络，本地缓存加主动刷新更合理。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：2024 年 Redis 改许可证后云厂商集体转向 Valkey，2025 年 Redis 又把 AGPL 加了回来。这场博弈里，谁赢了？如果你在选型，这个历史会如何影响你在 Redis 与 Valkey 之间的取舍？</summary>
+    <div class="details-body">
+      <p>先别急着站队，把三方的得失摆开。<strong>Redis 公司：</strong>短期看是让步——AGPL 回归等于承认"用许可证挡云厂商"没挡住；但它换来了生态回流的可能性，并且把 Stack 模块全部并进免费核心，产品反而更完整。<strong>云厂商：</strong>拿到了彻底开源（BSD-3）、社区中立的 Valkey，托管服务不再受制于人，这是它们最初的目标。<strong>社区与普通使用者：</strong>表面上多了一个可选项，实际上要面对一个新问题——两个兼容项目从此分头演进，新特性、性能修复、安全补丁的节奏开始分叉。给使用者的选型框架，我建议按四步走：<strong>一看许可证约束</strong>——自用与内部托管两家都行；要把改造版对外分发，Valkey 的 BSD-3 最干净，Redis 需走 AGPL 或商业授权；<strong>二看功能需求</strong>——要用 JSON、向量检索、时间序列、概率结构，Redis 8 已内建，Valkey 的对应扩展在跟进中，选型时逐项核对当下版本；<strong>三看运维生态</strong>——托管服务、云产品、监控工具、客户端兼容矩阵，Redis 仍是最厚的；<strong>四看演进风险</strong>——兼容双雄并存意味着"Redis 协议"已是公共财产，锁定风险两侧都可控。我的倾向：<strong>新项目默认 Redis 官方开源版，许可证有硬约束或明确要社区中立治理时选 Valkey</strong>——把决策依据写在架构文档里，比选哪一个本身更重要。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 09 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>Redis = 内存数据结构服务器，不只是缓存——键值是外壳，十几类内置数据结构才是主角（官方口径，Redis Open Source 实现）；</li>
+      <li>它解决热数据的延迟与并发痛点：内存操作加单线程事件循环，官方基准单机每秒 18 万次起步、p50 零点一四毫秒；</li>
+      <li>数据面：76.4k Stars、Docker Hub 1B+ 拉取（2026-09-19 核对）；性能与采用均为官方口径，选型前自测；</li>
+      <li>许可证风波：2024 年 RSALv2/SSPLv1 双许可退出开源，社区分叉 Valkey，2025 年 5 月 Redis 8 加回 AGPLv3 三许可任选；</li>
+      <li>版本基准 8.10.2（GitHub Latest，2026-09-17）；选型捷径：热的、结构简单的、要求延迟低的数据进候选，冷数据与强事务留给磁盘库。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 2 期《5 分钟跑起来》——从安装到第一条命令：用 Docker 或官方包把 Redis 跑起来，进 redis-cli 把今天的 SET、GET、ZADD 亲手敲一遍，再跑一次官方基准看自己机器上的数字，命令与预期输出逐条对照官方文档。</p>
+  <p><strong>Primary source：</strong><a href="https://redis.io/docs/latest/develop/data-types/" target="_blank" rel="noopener">Redis 官方文档 · Redis data types</a>——"数据结构服务器"定位与内置类型清单均出自该页；版本与发布记录见 <a href="https://github.com/redis/redis/releases" target="_blank" rel="noopener">GitHub Releases</a>，基准数字见 <a href="https://redis.io/docs/latest/operate/oss_and_stack/management/optimization/benchmarks/" target="_blank" rel="noopener">官方文档 · Redis benchmark</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0031-tdengine-source-reading.html">← 上一期：TDengine 架构与源码导读</a></span>
+  <a class="next" href="0033-redis-quickstart.html">下一期：5 分钟跑起来 Redis →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>
