@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Prometheus 系列第 5 期：架构与源码导读 | 2026-09-20</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0046</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0045-prom-in-action.html">上一期:0045</a> · Prometheus 系列第 5 期 / 共 5 期 · <a href="https://prometheus.io/docs/" target="_blank" rel="noopener">prometheus.io/docs ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · PROMETHEUS 系列第 5 期：架构与源码导读（收官）</p>
+  <h1>读进 Prometheus 源码：一条指标的旅程</h1>
+  <p class="subtitle">上一期我们给一个 Web 服务装上了监控三曲线。本期是系列收官，也是本线的灵魂期：沿着<strong>一条指标的生命周期</strong>读源码——服务发现交给名单、抓取循环按点上门、Head 落内存并写 WAL、两小时压缩成不可变 block、PromQL 引擎按 step 求值——讲透三个设计决策：<strong>TSDB 两级存储</strong>、<strong>抓取循环与服务发现的配合</strong>、<strong>PromQL 的分层查询</strong>，最后合成一张读码路线图。本期引用的每个目录、文件与类型名，均逐条核对自源码 tag v3.14.0（路径核对自 tag v3.14.0）。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🔍 监控告警 · Go · Apache-2.0</span>
+    <span class="tag tech">📦 基于 v3.14.0 · 源码 tag（GitHub Latest，2026-08-17）</span>
+    <span class="tag-date">📅 2026-09-20 · 第 5 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 本期要点 ================= -->
+<section>
+  <h2><span class="sec-num">00</span>本期要点</h2>
+  <div class="key-points">
+    <ul>
+      <li>Go 项目读法与 C/Java 不同：<strong>按"数据走哪条路、锁在哪、落盘在哪"三问读</strong>，顺着一条指标走，不从 main 顺读；</li>
+      <li>TSDB 两级存储：<strong>内存保写（head）、磁盘保洁（block）、WAL 保不丢</strong>——与 Redis AOF、ES translog 同族，读码入口在 <code>tsdb/</code> 包；</li>
+      <li>抓取循环：<strong>服务发现把目标变更推给 scrape pool</strong>，scrapeLoop 按 interval 抓取并追加，重载配置不重启的机制也在这条链上（<code>scrape/</code> 与 <code>discovery/</code>）；</li>
+      <li>PromQL 敢做重计算：<strong>数据本地、列式 chunk、按需加载</strong>，即时与区间查询同一引擎按 step 评估（<code>promql/engine.go</code>）；</li>
+      <li>一张读码路线图：discovery.Manager → scrapeLoop → headAppender+WAL → compaction → promql.Engine，全部类名与路径核对自 tag v3.14.0。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= 01 上期回顾与本期的打开方式 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>从三曲线到读码路线图</h2>
+  <p>上一期我们端到端做了一次实战：给一个 Web 服务装上了监控三曲线——QPS、延迟、错误率，配了告警规则，也踩了 relabel 的坑。那些环节里点过名的词——抓取、时序库、PromQL——本期全部落到<strong>目录、文件和类型</strong>上。本期结束时你应该能回答三个问题：<strong>一条指标从被抓到被查出来，源码里经过哪几站？为什么 head 只留两小时？PromQL 凭什么敢当场算几百条序列？</strong></p>
+  <p>老规矩先钉版本：本期所有路径、类型与代码逐条核对自源码 tag <strong>v3.14.0</strong>（GitHub Latest，2026-08-17）。主干演进很快，跟读前先把仓库切到这个标签——类会搬家，决策不会。</p>
+</section>
+
+<!-- ================= 02 Go 项目怎么读 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>Go 项目怎么读：带着三个问题进门</h2>
+  <p>读 Go 项目和读 C/Java 项目手感不同：Go 社区习惯<strong>小接口、按包分职责</strong>，没有深到几十层的继承树，所以不建议从 main 第一行顺着读——会陷进装配代码里。更有效的姿势是带着三个问题，沿一条数据的路径走：</p>
+  <div class="card card-tip">
+    <ul>
+      <li><strong>数据走哪条路？</strong>——从被抓目标到查询结果，中间经过哪些包、哪些类型，路径上的每一站就是本期路线图；</li>
+      <li><strong>锁在哪？</strong>——Go 的并发无处不在，找到"谁持锁、锁什么"，就找到了这个系统的性能敏感区（Prometheus 的答案在 <code>stripeSeries</code> 的分片锁）；</li>
+      <li><strong>落盘在哪？</strong>——内存里的东西断电就没，找到顺序写的日志和封口的块，就找到了可靠性设计的全部底牌。</li>
+    </ul>
+  </div>
+  <p>Prometheus 恰好是练习这套读法的绝佳样本：它的三个核心包——<code>tsdb</code>、<code>scrape</code>、<code>promql</code>——正好对应三问的落盘、路径与计算。下面逐站展开。</p>
+</section>
+
+<!-- ================= 03 仓库顶层模块地图 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>仓库顶层模块地图：四个包是主战场</h2>
+  <div class="codeblock"><pre>prometheus/prometheus @ v3.14.0 · 顶层目录（本期出场加粗）
+├─ cmd/prometheus   main 所在：装配各管理器并启动（本期接线看这里）
+├─ tsdb/            本地时序库：Head 写入、WAL、compaction、查询
+├─ scrape/          抓取循环：目标池 scrapePool、抓取循环 scrapeLoop
+├─ discovery/       服务发现框架：各机制的目标变更汇入 Manager
+├─ promql/          查询引擎：解析、规划、按 step 求值
+├─ config/          配置加载与校验（prometheus.yml 的家）
+├─ rules/           告警与记录规则的评估
+├─ web/             HTTP API 与内置网页界面
+└─ storage/         外部存储接口（remote read/write 等）
+另有 model/、util/、notifier/ 等支撑包，README 与 docs/ 在仓库根</pre></div>
+  <p class="note">目录名逐个核对于 tag v3.14.0（路径核对自 tag v3.14.0）。本期主战场是四个包：<code>tsdb</code>、<code>scrape</code>、<code>discovery</code>、<code>promql</code>。WAL 的实现在 <code>tsdb/wlog/</code> 子目录，别在 <code>tsdb/</code> 根目录找 <code>wal.go</code>——它不存在，这是网上旧文章的高频错误。上方 <code>tsdb/</code> 目录（compact.go 至 head_wal.go 窗口）实拍见课程视频第 4 页：db.go、head.go、head_append.go、compact.go，决策一的全部出场文件都在这（来源：github.com/prometheus/prometheus/tree/v3.14.0/tsdb，2026-09-20 实拍）。</p>
+</section>
+
+<!-- ================= 04 读码路线图 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>本期主成果：一条指标的读码路线图</h2>
+  <p>顺着一条指标走，整条链路自己浮出来。假设某个 Pod 的 <code>http_requests_total</code> 刚刚被采走一次，从它进入 Prometheus 到被你查出来，源码里一共五站：</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar46" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+    <rect x="10" y="34" width="138" height="92" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="79" y="58" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">① 服务发现</text>
+    <text x="79" y="80" text-anchor="middle" fill="var(--muted)" font-size="9.5">discovery/manager.go</text>
+    <text x="79" y="98" text-anchor="middle" fill="var(--muted)" font-size="9.5">Manager.syncCh 推名单</text>
+    <text x="79" y="116" text-anchor="middle" fill="var(--accent-3)" font-size="9">第 07 节展开</text>
+
+    <line x1="148" y1="80" x2="178" y2="80" stroke="var(--accent)" stroke-width="2" marker-end="url(#ar46)"/>
+
+    <rect x="180" y="34" width="138" height="92" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="249" y="58" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">② 抓取</text>
+    <text x="249" y="80" text-anchor="middle" fill="var(--muted)" font-size="9.5">scrape/scrape.go</text>
+    <text x="249" y="98" text-anchor="middle" fill="var(--muted)" font-size="9.5">scrapeLoop 按 interval</text>
+    <text x="249" y="116" text-anchor="middle" fill="var(--accent-3)" font-size="9">第 07 节展开</text>
+
+    <line x1="318" y1="80" x2="348" y2="80" stroke="var(--accent)" stroke-width="2" marker-end="url(#ar46)"/>
+
+    <rect x="350" y="34" width="138" height="92" rx="8" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="419" y="58" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">③ 写入 Head</text>
+    <text x="419" y="80" text-anchor="middle" fill="var(--muted)" font-size="9.5">tsdb/head_append.go</text>
+    <text x="419" y="98" text-anchor="middle" fill="var(--muted)" font-size="9.5">Appender 进内存</text>
+    <text x="419" y="116" text-anchor="middle" fill="var(--muted)" font-size="9.5">同时 wal.Log 落盘</text>
+
+    <line x1="488" y1="80" x2="518" y2="80" stroke="var(--accent)" stroke-width="2" marker-end="url(#ar46)"/>
+
+    <rect x="520" y="34" width="138" height="92" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="589" y="58" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">④ 压缩出块</text>
+    <text x="589" y="80" text-anchor="middle" fill="var(--muted)" font-size="9.5">tsdb/compact.go</text>
+    <text x="589" y="98" text-anchor="middle" fill="var(--muted)" font-size="9.5">两小时封只读 block</text>
+    <text x="589" y="116" text-anchor="middle" fill="var(--accent-3)" font-size="9">决策一 · 第 05 节</text>
+
+    <rect x="310" y="176" width="348" height="96" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="484" y="202" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">⑤ 查询 promql/engine.go</text>
+    <text x="484" y="226" text-anchor="middle" fill="var(--muted)" font-size="10">Engine 按序列取数，向量化批量计算</text>
+    <text x="484" y="246" text-anchor="middle" fill="var(--muted)" font-size="10">即时查询一个点 · 区间查询按 step 步进</text>
+    <text x="484" y="266" text-anchor="middle" fill="var(--accent-3)" font-size="9">决策三 · 第 08 节 · head 与 block 一起作答</text>
+
+    <path d="M 589 126 C 589 165, 640 176, 640 176" fill="none" stroke="var(--accent)" stroke-width="2" marker-end="url(#ar46)"/>
+    <text x="655" y="160" fill="var(--muted)" font-size="9">查询时</text>
+    <text x="10" y="292" fill="var(--muted)" font-size="10">照这条线打断点，调用栈自己展开——全部类型与路径核对自 tag v3.14.0</text>
+  </svg>
+  </div>
+
+  <p class="note">读法建议：第①②站认一个类型就够（Manager、scrapeLoop），把时间花在第③⑤站——head 的写入路径与引擎的求值路径，才是 Prometheus 的灵魂。</p>
+</section>
+
+<!-- ================= 05 决策一：TSDB 两级存储 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>决策一 · TSDB 两级存储：内存保写、磁盘保洁、WAL 保不丢</h2>
+  <p><strong>为什么这么设计？</strong>监控写入的特点是高频小样本：默认十五秒一个点，每秒可能有成千上万条序列各进一个点。磁盘最怕这种"为每个点付一次寻址"的写法；但数据又不能不放磁盘，否则存不下也查不快。Prometheus 的答案是把存储拆成两级：当前写入的<strong>head block 常驻内存</strong>，靠<strong>WAL 顺序日志兜底</strong>；每攒满两小时，封口成一个<strong>不可变的磁盘 block</strong>，后台再 compaction 合并成更长的块。写入路径的真实次序写在 <code>tsdb/head_append.go</code> 里：</p>
+  <div class="codeblock"><pre>/* 摘自 tsdb/head_append.go (tag v3.14.0)，节选 */
+func (h *Head) Appender(context.Context) storage.Appender {  // ① 入口：拿记账员
+...
+func (a *headAppender) Append(ref storage.SeriesRef,
+    lset labels.Labels, t int64, v float64) (storage.SeriesRef, error) {
+...                                                          // ② 样本进批量缓冲
+// log writes all headAppender's data to the WAL.
+func (a *headAppenderBase) log() error {
+    if a.head.wal == nil { return nil }
+    ...
+    if err := a.head.wal.Log(rec); err != nil {              // ③ Commit 时整批写 WAL</pre></div>
+  <p class="note">次序是关键：Append 只攒缓冲，Commit 时才由 log() 把整批编码成记录、一次 <code>wal.Log</code> 顺序写——WAL 实现在 <code>tsdb/wlog/wlog.go</code>，段文件默认 128 MB（<code>DefaultSegmentSize</code>）。内存负责快，顺序日志负责不丢，这是本系列第三次见到这个模式：Redis 的 AOF、ES 的 translog 都是它的同族。</p>
+  <p>head 里的序列长什么样？<code>tsdb/head.go</code> 的 <code>memSeries</code> 给出答案：每条序列一个结构，<strong>mmappedChunks 指着已落盘但还没进 block 的块，headChunks 是内存里正在写的最新块</strong>——注释里甚至自带一张 compaction 前后指针平移的示意图：before compaction 时 <code>mmappedChunks=[p5,p6,p7,p8,p9]</code>，前两个 chunk 存进 block 后指针平移成 <code>[p7,p8,p9]</code>、<code>firstChunkID</code> 从 5 变 7（memSeries 声明实拍见课程视频第 9 页；来源：github.com/prometheus/prometheus/blob/v3.14.0/tsdb/head.go，2026-09-20 实拍）。</p>
+  <p>官方文档对这套布局的口径更直接——<strong>"进行中的块保留在内存里，并未完整持久化"，由可回放的 WAL 保护；样本按两小时分组进块；WAL 以 128MB 段存放在 wal 目录，最少保留三个段以便覆盖至少两小时原始数据</strong>（官方《Storage》On-disk layout 节实拍见课程视频第 10 页；数据目录里每个 ULID 目录就是一个 block，内含 chunks、index、meta.json）。</p>
+  <p><strong>换种做法会怎样？</strong>每条样本直接落盘：每次写入付一次寻址与 fsync，吞吐被磁盘吃掉，监控反而是最先拖垮业务机的那个；全部只留内存：断电全丢、存不下历史，查询也退化成全内存扫描。两级设计的账是——<strong>写吞吐归内存，读性能与压缩率归不可变块，崩溃安全归 WAL，三个承诺各找最便宜的机制兑现</strong>。</p>
+</section>
+
+<!-- ================= 06 钩子一：head 为什么只留 2 小时 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>钩子一 · 为什么 head 只留两小时</h2>
+  <p>两小时这个数写在 <code>tsdb/db.go</code>：常量 <code>DefaultBlockDuration = 2 * time.Hour</code>，默认最小与最大块时长都是它。为什么不大一点、少压缩几次？因为 head 的内存账是<strong>"活跃序列数 × 每条序列的最近样本"</strong>：序列基数上万时，哪怕每条只留两小时，head 也要养着全部活跃序列的索引、标签与未封口的块——时间窗口每放大一倍，内存水位就抬高一截，而查询热点其实集中在最近的曲线。封口成 block 后数据变成只读列式压缩（官方口径平均每样本 1~2 字节），内存立刻卸下担子。顺带一提：默认数据保留期是十五天（<code>RetentionDuration</code>），更久的历史交给 remote storage 方案。两小时是官方在<strong>内存压力与压缩效率之间挑的平衡点</strong>，可调，但默认值别轻易动。</p>
+</section>
+
+<!-- ================= 07 决策二：抓取循环与服务发现 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>决策二 · 抓取循环与服务发现：Pull 不是"定时轮询"四个字</h2>
+  <p>很多人把 Pull 模型理解成"监控端定时轮询所有目标"。源码里的真相是<strong>两条异步流水线的配合</strong>：服务发现这边的 <code>discovery.Manager</code> 收到各机制（K8s、file_sd、consul……）的目标变更，聚合成"每个 job 的目标名单"，经 <code>syncCh</code> 通道<strong>推</strong>给抓取侧；抓取侧的 <code>scrape.Manager</code> 按名单维护每个 job 的 <code>scrapePool</code>——名单变了就 <code>sync()</code> 增删 <code>scrapeLoop</code>，每个循环按自己的 interval 抓取。两条线在 main 里接起来，就一行（main.go 第 1310~1321 行实拍见课程视频第 15 页）：</p>
+  <div class="codeblock"><pre>/* 摘自 cmd/prometheus/main.go (tag v3.14.0)，节选 */
+err := scrapeManager.Run(discoveryManagerScrape.SyncCh())
+// 抓取管理器的输入，就是发现管理器的输出通道；
+// 源码注释原话：要等配置完全加载后才开始（we wait until the config is fully loaded）</pre></div>
+  <p>抓取循环本体在 <code>scrape/scrape.go</code> 的 <code>scrapeLoop.run</code>（第 1257~1289 行实拍见课程视频第 14 页）：一个标准的 Go 定时器循环，但有三处讲究——<strong>先等一个随机 offset 错开各目标的抓取时刻</strong>（避免整点惊群），<strong>ticker 按配置间隔复位</strong>，抓到的样本经 <code>scrapeAndReport</code> 解析后从 Appender 走第③站写入 head；目标下线时还要补一个 stale marker，让曲线干净地断掉而不是拖出假平台：</p>
+  <p><strong>重载配置不重启的机制也在这条链上。</strong>收到 SIGHUP 或 <code>/-/reload</code> 时，main 里的 reloader 列表逐个调用各组件的 <code>ApplyConfig</code>：发现管理器按新配置增删 discoverer，抓取管理器重建 scrapePool 的参数——抓取间隔变了，不用杀进程，循环里的 ticker 下个周期自然按新值走。第 2 期那条 <code>kill -s SIGHUP</code> 热加载命令，落到源码就是这条 reloader 链。这也顺带回答了"Pull 和 Push 选哪个"：目标名单由发现机制实时推送、抓取节奏由监控端统一定夺，扩缩容和调频都不需要目标一侧参与。</p>
+</section>
+
+<!-- ================= 08 决策三：PromQL 分层查询 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>决策三 · PromQL 引擎：分层查询，向量化按序列批量算</h2>
+  <p>PromQL 的执行在 <code>promql/engine.go</code> 的 <code>Engine</code> 里分三层：<strong>解析</strong>（parser 把表达式变成语法树）→ <strong>规划与求值</strong>（<code>evaluator</code> 递归下降，按表达式类型选执行路径）→ <strong>取数</strong>（storage 接口按序列拉 chunk）。即时查询和区间查询是同一个引擎的两种参数——<code>NewInstantQuery</code> 的起止时刻相同、step 为零；<code>NewRangeQuery</code> 给出起点、终点和 step。区间求值的主循环只有两行核心：</p>
+  <div class="codeblock"><pre>/* 摘自 promql/engine.go (tag v3.14.0)，节选 */
+func (ng *Engine) NewInstantQuery(ctx context.Context, q storage.Queryable,
+    opts QueryOpts, qs string, ts time.Time) (Query, error) {
+    pExpr, qry := ng.newQuery(q, qs, opts, ts, ts, 0*time.Second) // 起=终，单点
+...
+// rangeEval：
+numSteps := int((ev.endTimestamp-ev.startTimestamp)/ev.interval) + 1
+for ts := ev.startTimestamp; ts <= ev.endTimestamp; ts += ev.interval { // 按 step 步进</pre></div>
+  <p class="note">第 3 期讲过 PromQL 眼中只有即时向量与区间向量两种主力结果：即时查询回答"每条序列此刻的值"，区间查询按 step 逐步评估、一次算出整条曲线。向量化体现在按<strong>序列批量</strong>取数与计算：一次拉一条序列在窗口内的整段 chunk，算完再换下一条，摊平解释开销。</p>
+  <p><strong>为什么 PromQL 敢做这么重的计算？</strong>三个前提都是架构送它的：<strong>数据本地</strong>——查询不跨网络RPC，磁盘就在本机；<strong>列式 chunk</strong>——同类数值紧挨着存放，解压一批算一批；<strong>block 不可变</strong>——历史块永不修改，倒排索引可以放心缓存，不用考虑失效。反过来说，如果把 Prometheus 的存储换成远程数据库、每次求值都走网络取数，这套当场算几百条序列的打法立刻就会被带宽和延迟拖死——PromQL 的激进，是两级存储喂出来的底气。</p>
+</section>
+
+<!-- ================= 09 可借鉴点 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>三个能搬回自己项目的模式</h2>
+  <div class="card card-tip">
+    <ul>
+      <li><strong>内存态 + 日志兜底</strong>——head 保写吞吐、WAL 保崩溃安全：凡"高频写、可重放"的数据，都可以用这套组合，不必每个写操作都做昂贵的一致性落盘；</li>
+      <li><strong>不可变数据块</strong>——两小时封口、永不修改：不可变换来免锁读、高压缩率与放心缓存，日志系统、时序库、消息存储都在用它；</li>
+      <li><strong>调度与执行分离</strong>——发现只出名单、抓取只管执行，配置热加载只改参数不换进程：把"谁该干活"和"怎么干活"拆成两层，系统才改得动。</li>
+    </ul>
+  </div>
+  <p>再看一眼第 04 节那张路线图：五个站、四个包、三个决策，Prometheus 的架构骨架就这么多。剩下的细节——索引格式、查询超时、内存上限——都在这条主线上长出来，需要时顺着路线图找即可。</p>
+</section>
+
+<!-- ================= 10 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>随堂小测</h2>
+  <div class="quiz">
+    <div class="quiz-q">
+      <p class="quiz-question">Prometheus 刚写进 head 的一个样本，此刻进程突然断电。重启后这个样本还在吗？靠什么？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，恰恰不会丢：Append 攒批后 Commit 时已经 wal.Log 顺序落盘。","对：Commit 时整批样本已写入 WAL，重启回放补回 head；这也是官方文档说 head「由 WAL 保护」的含义。","不对，两小时封块是低频动作，断电时刻大概率还没封块，但不丢。","不对，内存里的 head 数据本身确实没了，但 WAL 里有底，回放后原样回来。"]'>
+        <li class="quiz-option">A. 丢了——head 还没封成 block</li>
+        <li class="quiz-option">B. 不丢——重启时从 WAL 回放补回</li>
+        <li class="quiz-option">C. 不丢——样本必然已随上次 compaction 落盘</li>
+        <li class="quiz-option">D. 看配置——开了内存快照才不丢</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 11 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">11</span>思考题</h2>
+  <details class="q-card">
+    <summary>思考一：把 block 时长从两小时改成两天，系统各环节分别会发生什么？反过来改成两分钟呢？</summary>
+    <div class="details-body">
+      <p>改成两天：head 的内存水位先炸——活跃序列的最近样本、索引与未封口块在内存里多驻留二十四倍的时间，序列基数大的实例直接 OOM；同时每次封块的数据量变大，compaction 从"小步快跑"变成"大块慢炖"，单次压缩占用更长 I/O，失败重试的代价也更大；查询最新数据仍走 head，读热点不受影响。改成两分钟：内存压力骤降，但磁盘上出现海量小 block——每个 block 都要一份索引与 meta，打开一个查询要合并的块数暴涨，倒排缓存的命中率也随碎片化下降，compaction 反而要不停地把这些碎块再合并回去，写放大登场。两小时的本质是<strong>内存账与磁盘账的交点</strong>：head 承受"多久的写缓冲"成本最低、block 做到"多大"读放大与压缩率最划算。这类"分界参数"在自己的系统里同样存在——批处理攒多大、缓存留多久，答案都从两条成本曲线的交点来，而不是拍脑袋。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：假设把 Prometheus 改成 Push 模型（目标主动推指标），服务发现与抓取循环这两条流水线要怎么改？会失去什么？</summary>
+    <div class="details-body">
+      <p>先看要改什么：scrapeLoop 的定时器循环可以删掉，换成接推送的接收端；但 scrapePool 的名单管理反而要留着——你得知道"哪些目标应该出现"，否则无法发现失联的目标。第一笔失去的账是<strong>up 信号的语义</strong>：Pull 模型里"抓取失败"是监控端亲历的事实，up 归零立刻可知；Push 模型里"没收到"有两种解释——目标挂了还是网络抖了？故障时的集体重试还可能反过来压垮监控端。第二笔是<strong>节奏控制权</strong>：interval 是监控端手里的旋钮，调密度、错峰、限流都不用惊动目标；Push 之后采样口径碎片化，rate 需要的固定窗口对齐也更难做。第三笔是<strong>配置热加载</strong>：现在改抓取间隔只需 ApplyConfig 加 reloader，Push 模型则要逐个目标通知变更，配置生效变成分布式协调问题。这套流水线的真正价值不是"谁请求谁"，而是<strong>监控端集中掌握名单、节奏与失败信号</strong>——这也是它敢用"笨办法"双实例做高可用的底气：每个实例独立全量抓取，挂一个另一个照常工作。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 12 收官与延伸 ================= -->
+<section>
+  <h2><span class="sec-num">12</span>系列收官</h2>
+  <p><strong>Prometheus 的入门系列就聊到这里</strong>：五期一条线——认识它、跑起来、看懂架构、接上实战、读进源码。留个作业：切到 tag v3.14.0，顺着第 04 节的路线图，亲手把一条指标从 syncCh 走到 PromQL 求值。下期开启新项目 <strong>SkyWalking</strong>，APM 与链路追踪，还是这套从设计决策读起的老路数。</p>
+  <p><strong>Primary source：</strong><a href="https://prometheus.io/docs/prometheus/latest/storage/" target="_blank" rel="noopener">Prometheus 官方文档 · Storage（On-disk layout 与 compaction 的官方口径）</a>；源码入口：<a href="https://github.com/prometheus/prometheus/tree/v3.14.0" target="_blank" rel="noopener">prometheus/prometheus tag v3.14.0 仓库树</a>（本期引用目录：<code>tsdb/</code>（含 <code>wlog/</code>）· <code>scrape/</code> · <code>discovery/</code> · <code>promql/</code> · <code>cmd/prometheus/</code>，路径核对自 tag v3.14.0）。前情回看：<a href="0044-prom-core-concepts-architecture.html">第 3 期 · 核心概念与架构</a> · <a href="0045-prom-in-action.html">第 4 期 · 实战场景</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0045-prom-in-action.html">← 上一期：Prometheus 实战</a></span>
+  <a class="next" href="../index.html">课程目录 · Prometheus 系列完 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

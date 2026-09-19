@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Prometheus 系列第 4 期:给 Web 服务装上监控 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0045</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0044-prom-core-concepts-architecture.html">上一期:0044</a> · <a href="0046-prom-source-reading.html">下一期:0046</a> · Prometheus 系列第 4 期 / 共 5 期 · <a href="https://prometheus.io" target="_blank" rel="noopener">prometheus.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · PROMETHEUS 系列第 4 期:实战场景</p>
+  <h1>Prometheus 实战:给 Web 服务装上监控</h1>
+  <p class="subtitle">上一期我们拿到了 Prometheus 的概念地图——四种指标类型、PromQL 的向量模型、整体架构。这一期把地图用起来:端到端给一个真实的 Web 服务装上监控,从应用侧埋点暴露,到 Prometheus 抓取,再到亲手查出 QPS、错误率、P99 延迟三条曲线,外加一条告警规则。全文基于 Prometheus 3.14.0(系列基准)、Spring Boot 4.1.1(spring.io 当前 GA)与 Micrometer 1.17.1(由 Boot 4.1.1 依赖清单托管,Maven Central 核对),命令、配置与表达式逐字对照官方文档。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧭 指标监控与告警 · 实战期 · Spring Boot 接入</span>
+    <span class="tag">📦 Prometheus v3.14.0 + Spring Boot 4.1.1 + Micrometer 1.17.1</span>
+    <span class="tag-date">📅 2026-09-19 · 第 4 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 本期路线 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>本期路线:一个服务,三条曲线,一条演示链</h2>
+  <p>场景设定:一个普通的 Spring Boot Web 服务在线上跑着,老板和值班同学只关心三件事——<strong>现在多少请求量、有多少在报错、最慢的用户等了多久</strong>。演示链一条贯穿:<strong>应用侧暴露指标 → Prometheus 侧配置抓取 → Target 变绿 → PromQL 三连 → 运行结果解读 + 告警规则</strong>。</p>
+  <div class="card">
+    <ul class="steps">
+      <li>① <strong>需求与方案:</strong>三条曲线加一条告警,各自由哪个指标、哪个函数接住;</li>
+      <li>② <strong>应用侧:</strong>两个依赖、一行配置,curl 亲眼看到指标吐出来;</li>
+      <li>③ <strong>Prometheus 侧:</strong>追加一个 job,官方检查工具把关,目标变绿;</li>
+      <li>④ <strong>PromQL 三连:</strong>QPS 用 rate、错误率按 outcome 标签算比例、P99 用 histogram_quantile;</li>
+      <li>⑤ <strong>结果解读:</strong>三条曲线怎么互相佐证,告警规则怎么把曲线变成哨兵。</li>
+    </ul>
+  </div>
+  <p>上期的概念这期全都用得上:计数器与直方图两种类型决定了两个查询姿势,up 指标是抓取链路的判定器,Pull 模型是整条演示链的骨架——概念落到实地,这才是实战期的意思。</p>
+</section>
+
+<!-- ================= 02 需求与方案 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>需求与方案:一张表定指标</h2>
+  <p>三条曲线先摆上桌,选型思路一句话:<strong>先看要回答什么问题,再挑指标和函数</strong>。</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>要回答的问题</th><th>指标来源</th><th>关键函数</th><th>为什么是它</th></tr></thead>
+    <tbody>
+      <tr><td>现在流量多大(QPS)</td><td><code>http_server_requests_seconds_count</code>(计数器)</td><td><code>rate(...[1m])</code></td><td>计数器只增不减,看每秒增长率才是流量</td></tr>
+      <tr><td>错误占多少比例</td><td>同一计数器,按 <code>outcome</code> 标签切分</td><td>分子分母各取 rate 后相除</td><td>标签是多维模型的筛子,一行表达式切出错误流量</td></tr>
+      <tr><td>最慢的用户等多久(P99)</td><td><code>http_server_requests_seconds_bucket</code>(直方图)</td><td><code>histogram_quantile(0.99, ...)</code></td><td>分位数在服务端按桶估算,应用侧零开销</td></tr>
+      <tr><td>错误率超标要有人管</td><td>上面算出的错误率表达式</td><td>告警规则 <code>expr + for</code></td><td>曲线变哨兵,阈值加持续时间防毛刺误报</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">这四行就是本期的"总纲"。指标名 <code>http_server_requests_seconds_*</code> 是 Spring Boot 默认指标 <code>http.server.requests</code> 按 Prometheus 命名惯例转换后的样子——点变下划线,计时器自动补基本单位后缀 <code>_seconds</code>(Micrometer 官方文档口径)。前两条曲线共用一个计数器,P99 单独依赖直方图桶,这是后面第二个钩子的伏笔。</p>
+</section>
+
+<!-- ================= 03 应用侧 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>应用侧:两个依赖、一行配置、一次 curl</h2>
+  <p>版本先钉死(2026-09-19 核对):Spring Boot <strong>4.1.1</strong> 是 spring.io 当前 GA 线;它的依赖清单(spring-boot-dependencies 4.1.1)托管 <strong>micrometer 1.17.1</strong>——正好也是 Maven Central 上 micrometer-registry-prometheus 的最新稳定版(其上的 1.18.0-M1 是里程碑预发布,生产不追)。<strong>依赖里连版本号都不用写</strong>。</p>
+  <pre><code>&lt;dependency&gt;
+  &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+  &lt;artifactId&gt;spring-boot-starter-actuator&lt;/artifactId&gt;
+&lt;/dependency&gt;
+&lt;dependency&gt;
+  &lt;groupId&gt;io.micrometer&lt;/groupId&gt;
+  &lt;artifactId&gt;micrometer-registry-prometheus&lt;/artifactId&gt;
+&lt;/dependency&gt;</code></pre>
+  <p class="note">Spring Boot 官方文档的原话:运行时类路径上有 micrometer-registry-{system},Spring Boot 就自动配置对应的注册表。起步器 actuator 负责把运维端点装进应用,注册表负责把指标变成 Prometheus 认的暴露格式——一个管"端点",一个管"格式",分工清楚。</p>
+  <p>第二步,暴露端点。默认只开放 health,把 prometheus 端点加进白名单(<code>src/main/resources/application.yml</code>):</p>
+  <pre><code>management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics,prometheus</code></pre>
+  <p class="note">官方 endpoints 文档口径:web 侧默认只暴露 health;prometheus 端点"要求类路径上有 micrometer-registry-prometheus 依赖"。动手前先钉版本、再核默认值,不凭记忆写。</p>
+  <p>启动应用,亲自看一眼指标长什么样:</p>
+  <pre><code>curl -s http://localhost:8080/actuator/prometheus | head</code></pre>
+  <pre><code># TYPE http_server_requests_seconds gauge
+http_server_requests_seconds_count{method="GET",outcome="SUCCESS",status="200",uri="/api/greet"} 3.0
+http_server_requests_seconds_sum{method="GET",outcome="SUCCESS",status="200",uri="/api/greet"} 0.047
+http_server_requests_seconds_max{method="GET",outcome="SUCCESS",status="200",uri="/api/greet"} 0.021</code></pre>
+  <p class="note">输出为可复现的演示回显:序列结构与字段严格对照 Micrometer 官方文档的 Timer 口径——计时器固定输出 <code>_count</code>(调用次数)、<code>_sum</code>(总耗时)、<code>_max</code>(窗口内最大耗时)三条序列;标签 exception/method/outcome/status/uri 是 Spring Boot 官方文档列出的默认标签。同一个指标名靠标签区分维度,这就是上期"指标名加标签集是序列身份证"的活体标本。此时还没开直方图,所以看不到 <code>_bucket</code> 序列——伏笔再次出现。</p>
+</section>
+
+<!-- ================= 04 Prometheus 侧 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>Prometheus 侧:一个 job,目标变绿</h2>
+  <img src="../output/0045-prom-in-action/images/spring-boot-docs-prometheus.png" alt="Spring Boot 官方文档 Prometheus 段" style="max-width:100%">
+  <p class="note">Spring Boot 官方文档实拍:Prometheus 期望逐个抓取应用实例,所以 Boot 提供 <code>/actuator/prometheus</code> 端点;默认不可用,必须显式暴露。下方抓取示例同样是文档原文——job_name "spring"、metrics_path 指向 actuator 端点。来源:docs.spring.io/spring-boot/reference/actuator/metrics.html(2026-09-19 实拍)。</p>
+  <p>照着官方示例改 <code>prometheus.yml</code>,在抓取配置里追加一个作业:</p>
+  <pre><code>scrape_configs:
+  - job_name: "spring"
+    metrics_path: "/actuator/prometheus"
+    static_configs:
+      - targets: ["localhost:8080"]</code></pre>
+  <pre><code>$ ./promtool check config prometheus.yml
+Checking prometheus.yml
+  SUCCESS: 0 rule files found</code></pre>
+  <p class="note">小规模练习用静态名单就够了;上期讲的服务发现(K8s 里按 Pod 自动发现)是同一件事的自动化版本,延伸阅读在文末。改完先让第二期认识的官方检查工具把关,再热加载或重启。</p>
+  <p>判定时刻——打开 9090 的 Status → Targets 页,或者直接查官方合成指标:</p>
+  <pre><code>up{job="spring"}</code></pre>
+  <pre><code>up{instance="localhost:8080", job="spring"} 1</code></pre>
+  <p class="note">State 一栏是绿色的 Up,对应 up 指标记 1;抓取失败记 0。这个绿的意义:Pull 模型打通了最后一公里,你的应用第一次被监控系统按时上门拜访。没变绿别慌——翻车清单在文末,先对号入座。</p>
+</section>
+
+<!-- ================= 05 PromQL 三连 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>PromQL 三连:三条曲线逐条查</h2>
+
+  <h3>① QPS:计数器要看增长率,不能直接看值</h3>
+  <pre><code>sum by (uri) (rate(http_server_requests_seconds_count{job="spring"}[1m]))</code></pre>
+  <pre><code>{uri="/api/greet"} 0.83
+{uri="/actuator/prometheus"} 0.066</code></pre>
+  <p class="note">官方函数文档口径:rate 计算"范围向量内时间序列每秒的平均增长率",并且"先取 rate,再做聚合"。为什么不能直接看计数器当前值?上期讲类型时说过:计数器只增不减,进程重启还从零再来——单调的数字没有剧情,增长率才是流量。数值为演示值:主接口一分钟约 50 次,折合每秒 0.83。</p>
+
+  <h3>② 错误率:outcome 标签当分子,全体当分母</h3>
+  <pre><code>sum(rate(http_server_requests_seconds_count{outcome="SERVER_ERROR"}[1m]))
+  / sum(rate(http_server_requests_seconds_count[1m]))</code></pre>
+  <pre><code>0.041</code></pre>
+  <p class="note">outcome 是 Spring Boot 官方文档列的默认标签:2xx 记 SUCCESS、5xx 记 SERVER_ERROR(还有 4xx 的 CLIENT_ERROR 可按需切换)。分子取服务器错误的增长率,分母取全部请求的增长率,相除得比例——返回 0.041 即错误率约 4.1%(演示值)。曲线平缓说明稳,突然抬头就按 uri 标签下钻找元凶。</p>
+
+  <h3>③ P99 延迟:先开直方图桶,分位数才有米下锅</h3>
+  <p>直方图桶<strong>默认不开</strong>。先在 application.yml 加一行,重启生效:</p>
+  <pre><code>management:
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true</code></pre>
+  <pre><code>histogram_quantile(0.99,
+  sum by (le) (rate(http_server_requests_seconds_bucket{job="spring"}[1m])))</code></pre>
+  <pre><code>0.187</code></pre>
+  <p class="note">Micrometer 官方文档原话:启用百分位直方图会新增 <code>${name}_seconds_bucket</code> 序列,"如果需要 histogram_quantile() 这类基于桶的查询,就启用百分位直方图"——不提前给桶,再好的分位数函数也算不出,这是本期第二个钩子。表达式形状对齐 Prometheus 官方函数文档:分位参数在前,桶序列先取 rate、按 le 标签聚合在后(官方示例 <code>histogram_quantile(0.9, sum by (le) (rate(http_request_duration_seconds_bucket[10m])))</code>);按接口下钻时把 uri 加进 by 列表即可。返回 0.187(演示值):最慢的 1% 请求等在这条线附近。</p>
+  <img src="../output/0045-prom-in-action/images/prom-docs-histogram-quantile.png" alt="Prometheus 官方 histogram_quantile() 函数文档" style="max-width:100%">
+  <p class="note">官方函数文档实拍:每个桶样本必须带 le 标签(桶上界),"Use the rate() function to specify the time window for the quantile calculation"——分位数的时间窗口由 rate 指定。来源:prometheus.io/docs/prometheus/latest/querying/functions(2026-09-19 实拍)。</p>
+</section>
+
+<!-- ================= 06 告警与解读 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>告警规则与曲线解读</h2>
+  <p>三条曲线齐了,最后把错误率变成哨兵。规则文件 <code>web-alerts.yml</code>(挂进主配置的 <code>rule_files</code> 列表):</p>
+  <pre><code>groups:
+  - name: web.rules
+    rules:
+      - alert: WebHighErrorRate
+        expr: sum(rate(http_server_requests_seconds_count{outcome="SERVER_ERROR"}[1m]))
+              / sum(rate(http_server_requests_seconds_count[1m])) &gt; 0.05
+        for: 1m</code></pre>
+  <pre><code>ALERTS{alertname="WebHighErrorRate", alertstate="firing"} 1</code></pre>
+  <p class="note">表达式就是 05 节算过的错误率,阈值 5%,for 一分钟——持续超标才触发,毛刺不误报。触发后 Prometheus 自动生成 ALERTS 序列(官方《Alerting rules》口径)。再往下游的 Alertmanager 去重、分组、路由,第 1 期的架构图里给过位置,本系列点到为止。</p>
+  <p><strong>曲线会说话,而且要互相佐证:</strong></p>
+  <div class="card">
+    <ul>
+      <li><strong>QPS 掉坑:</strong>要么上游没流量,要么自己挂了半边——先看 up 是不是还等于 1;</li>
+      <li><strong>错误率抬头:</strong>按 uri 标签下钻,锁定哪条路径在报 5xx,再去日志对时间戳;</li>
+      <li><strong>P99 抬升而均值平稳:</strong>长尾在恶化,慢查询、锁竞争、Full GC 都是嫌疑人——均值看不见的痛,P99 替用户说出来。</li>
+    </ul>
+  </div>
+  <p class="note">这套读法没有玄学:每一条都对应今天亲手查过的表达式和标签。指标选对了,排障就是"先看曲线、再下钻",而不是登服务器翻箱倒柜。</p>
+</section>
+
+<!-- ================= 07 quiz ================= -->
+<section>
+  <h2><span class="sec-num">07</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. 查 QPS 为什么用 rate(http_server_requests_seconds_count[1m]),而不是直接查计数器当前值?</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对,直接看值也有数据,只是没有意义——单调上涨的累计值不是流量。","对的:计数器只增不减、重启归零,只有增长率才反映每秒流量;官方口径 rate 计算范围向量内每秒平均增长。","不对,与一分钟窗口长短无关,窗口只影响平滑程度。"]'>
+        <li class="quiz-option">因为直接查当前值会超时</li>
+        <li class="quiz-option">计数器只增不减,增长率才是流量</li>
+        <li class="quiz-option">因为一分钟是官方规定的窗口</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 不加任何配置,P99 分位数为什么算不出来?</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对,histogram_quantile 是服务端函数,不需要应用自己算。","不对,_bucket 永远不会自动出现,是配置控制的。","对的:直方图桶默认不发布,没有 _bucket 序列分位数函数就无米下锅;加 percentiles-histogram 配置并重启才有。"]'>
+        <li class="quiz-option">因为分位数只能在应用内算</li>
+        <li class="quiz-option">因为 _bucket 会自动出现但延迟很大</li>
+        <li class="quiz-option">直方图桶默认不发布,要先开配置</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 错误率表达式的分子分母各取了 rate 之后才相除,为什么不拿两个计数器当前值直接相除?</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的:累计值相除得到的是开天辟地以来的总错误率,增长率相除才是「最近一分钟」的错误率;官方口径先 rate 再聚合。","不对,计数器相除语法合法,只是语义错了。","不对,outcome 标签两边的计数器都有。"]'>
+        <li class="quiz-option">累计值相除是历史总错误率,不是当前趋势</li>
+        <li class="quiz-option">因为计数器当前值之间不能做除法</li>
+        <li class="quiz-option">因为 outcome 标签只有一边有</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. prometheus.yml 里指向 Spring Boot 的 job,关键的两行是?</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对,9090 是 Prometheus 自己,被监控应用默认在 8080。","对的:官方示例 metrics_path: \"/actuator/prometheus\" 加 targets: [\"localhost:8080\"],路径指到 Boot 的指标端点。","不对,/metrics 是 Prometheus 自身端点的路径,Boot 的端点在 /actuator/prometheus。"]'>
+        <li class="quiz-option">metrics_path: "/metrics" + targets: ["localhost:9090"]</li>
+        <li class="quiz-option">metrics_path: "/actuator/prometheus" + targets: ["localhost:8080"]</li>
+        <li class="quiz-option">metrics_path: "/actuator/health" + targets: ["localhost:8080"]</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 08 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>思考题(点击展开解析)</h2>
+  <details class="q-card">
+    <summary>思考一:本期 P99 表达式用 sum by (le) 聚合了所有接口。如果改成 sum by (le, uri),结果会有什么不同?两种各适合什么场景?</summary>
+    <div class="details-body">
+      <p>分位数<strong>不能跨桶集合平均</strong>:histogram_quantile 只对"一组完整的桶"计算,sum by 决定了桶怎么分组,也就决定了分位数的粒度。<strong>sum by (le)</strong> 把所有接口的桶合并成一组,算出的是全服务 P99——适合回答"用户体验整体如何",接口之间的快慢互相稀释,一个慢接口可能被大流量快接口淹没。<strong>sum by (le, uri)</strong> 按接口各算各的,能立刻看到"哪个接口在拖后腿"——适合排障下钻;代价是序列条数乘上接口数,告警规则要逐条配或者配合 label_replace。官方函数文档给的聚合示例正是 sum by (job, le):聚合维度按需选择,但 le 永远必须在 by 列表里——漏掉它,不同桶上界的样本混在一起,结果直接作废。这题的元认知:<strong>直方图的聚合粒度是查询时决定的,这也是把桶放到服务端而不是应用端算分位数的原因之一</strong>。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二:错误率告警阈值定 5%、for 1m,这个口径合不合适?如果把 for 去掉、阈值改 0.1%,各会发生什么?</summary>
+    <div class="details-body">
+      <p>先说结论:<strong>阈值和持续时间都是"信噪比"参数,要按业务的痛感定,而不是抄模板</strong>。<strong>去掉 for</strong>:评估间隔(本期 15 秒)里任何一个毛刺——一次部署重启、一秒网络抖动——都会立刻触发告警,值班同学被狼来了训练两周后,真故障来了也没人看群了;for 1m 要求错误率连续约 4 个评估周期超标才开火,专门过滤这种抖动。<strong>阈值改 0.1%</strong>:对内网工具可能合理(千分之一的错误都算事故),对面向用户的服务则太苛刻——依赖方偶发超时、爬虫打出的 4xx 都能顶破它,告警天天响;<strong>反过来阈值放到 20%</strong>,等它触发时用户早就在社交媒体上替你告警了。实操上还有一层:错误率表达式在"分母趋近零"(没流量)时会出现 NaN 或被放大,严谨的规则要加 <code>and sum(rate(...[1m])) &gt; 0</code> 这类流量守卫。这套"阈值 + 持续时间 + 守卫条件"的三件套,就是从曲线到告警的全部工程学。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 09 要点 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这四条:</strong></p>
+    <ul>
+      <li>接入极薄:两个依赖(Actuator 起步器 + Micrometer 注册表)、一行配置暴露端点,curl 亲眼验证指标吐出来——版本 Spring Boot 4.1.1 + Micrometer 1.17.1(Boot 依赖清单托管);</li>
+      <li>抓取就位:prometheus.yml 追加 job(metrics_path 指向 /actuator/prometheus,官方文档原文口径),promtool 把关,up{job="spring"} 等于 1 即目标变绿;</li>
+      <li>三条曲线:QPS 用 rate 看增长率(计数器不能直接看值)、错误率按 outcome 标签算比例、P99 用 histogram_quantile——前提是先开直方图桶,不提前给桶分位数算不出;</li>
+      <li>曲线变哨兵:告警规则 = 错误率表达式 + 阈值 5% + for 一分钟,触发即生成 ALERTS 序列。</li>
+    </ul>
+  </div>
+  <p>这套监控你已经能照着装上。下一期我们进源码,看抓取、存储与查询是怎么实现的——Pull 的调度循环长什么样、时序数据怎么落盘、PromQL 引擎怎么把表达式跑成结果。Primary source:<a href="https://docs.spring.io/spring-boot/reference/actuator/metrics.html" target="_blank" rel="noopener">Spring Boot 官方文档 · Metrics(Actuator)</a>——/actuator/prometheus 端点、暴露属性与抓取配置示例的出处;PromQL 函数口径见 <a href="https://prometheus.io/docs/prometheus/latest/querying/functions/" target="_blank" rel="noopener">Prometheus 官方 Query Functions</a>;依赖坐标见 <a href="https://central.sonatype.com/artifact/io.micrometer/micrometer-registry-prometheus/1.17.1" target="_blank" rel="noopener">Maven Central · micrometer-registry-prometheus 1.17.1</a>。</p>
+  <div class="note">
+    <p><strong>延伸阅读(本站其他课程线,不重讲):</strong></p>
+    <ul>
+      <li><a href="0021-k8s-what-and-why.html">K8s 系列(第 0021-0026 期)</a>——把应用部署进 Kubernetes 后,静态名单换成本期讲过的服务发现,Prometheus 按 Pod 自动找目标;<a href="0024-k8s-deploy-in-action.html">第 0024 期部署实战</a>与<a href="0026-k8s-ecosystem.html">第 0026 期生态</a>可作衔接;</li>
+      <li>Prometheus 系列第 2 期(0043)——promtool 检查、Targets 页与 Graph 页的第一次使用都在那期铺过底。</li>
+    </ul>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0044-prom-core-concepts-architecture.html">← 上一期:核心概念与整体架构</a>
+  <a class="next" href="0046-prom-source-reading.html">下一期:架构与源码导读 →</a>
+</nav>
+
+<script>
+(function () {
+  document.querySelectorAll(".quiz-options").forEach(function (ul) {
+    var done = false;
+    var answer = parseInt(ul.getAttribute("data-answer"), 10);
+    var notes = JSON.parse(ul.getAttribute("data-notes") || "[]");
+    var fb = ul.parentElement.querySelector(".quiz-feedback");
+    ul.querySelectorAll(".quiz-option").forEach(function (li, i) {
+      li.addEventListener("click", function () {
+        if (done) return;
+        done = true;
+        li.classList.add(i === answer ? "correct" : "wrong");
+        if (fb) { fb.textContent = notes[i] || ""; fb.classList.add(i === answer ? "ok" : "bad"); }
+      });
+    });
+  });
+})();
+</script>
+
+</body>
+</html>

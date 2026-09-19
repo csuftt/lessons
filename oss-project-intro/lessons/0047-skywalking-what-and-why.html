@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · SkyWalking 系列第 1 期：无侵入的链路追踪 APM | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0047</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0046-prom-source-reading.html">上一期:0046</a> · SkyWalking 系列第 1 期 / 共 5 期 · <a href="0048-skywalking-quickstart.html">下一期:0048</a> · <a href="https://skywalking.apache.org" target="_blank" rel="noopener">skywalking.apache.org ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · SKYWALKING 系列第 1 期：认识项目</p>
+  <h1>SkyWalking 是什么：无侵入的链路追踪 APM</h1>
+  <p class="subtitle">开源项目入门系列的每个新项目，都从三个问题开始：它解决什么痛点、凭什么活下来、什么场景该选它。上一个项目我们聊完了 Prometheus，今天开启新项目 SkyWalking——上一个系列的选型清单里写过"调用链归 APM"，说的就是它。官方定义一句话：<strong>an open source observability platform…a modern APM, specially designed for cloud native, container based distributed systems</strong>，一个开源的可观测平台、面向云原生分布式系统的现代 APM。一句话心智模型：<strong>Java agent 字节码增强，应用一行代码不改，调用链自动上网</strong>。本期不装任何软件，素材全部来自官方文档与官方仓库，每张图都标出处；你带走四样东西："慢在哪一跳"的痛点、无侵入链路追踪这个心智模型、手动埋点与自动增强的本质差别，外加一份五方选型对比。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">📡 链路追踪与 APM · Java · Apache-2.0（Apache 顶级项目）</span>
+    <span class="tag">📦 基于 v11.0.0（GitHub Latest）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 1 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 痛点 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>痛点："接口慢了，慢在哪一跳？"翻日志答不上来</h2>
+  <p>微服务排障有一句灵魂拷问：<strong>接口慢了，慢在哪一跳？</strong>一个下单请求从网关进来，路过订单、库存、支付、通知四五个服务，每个服务再调自己的数据库和中间件——任何一个环节抖一下，用户体验到的都是"同一个接口慢了"。没上链路追踪前，应答方式是三件套：翻日志、看监控、靠猜，很快撞上三堵墙：</p>
+  <ul>
+    <li><strong>日志翻不完：</strong>一次请求在十几个服务各留几行日志，要把同一笔请求的碎片捞齐、按时间拼回完整路径，人工做是灾难——每台机器的日志格式、时区、精度还各不相同；</li>
+    <li><strong>监控看不到调用关系：</strong>指标能告诉你"订单服务 P99 延迟涨了"，但它不认识"这次变慢是因为调库存服务的那一步慢了"——监控各自为战，看得见症状，看不见路径；</li>
+    <li><strong>影响面靠人工连线：</strong>数据库慢查询出现后，波及哪些服务哪些接口？只能靠记住的架构图逐个去猜、逐个去验证。</li>
+  </ul>
+  <p>解法是给每次请求发一张"全程通行证"：<strong>请求进入系统时生成唯一的追踪标识（Trace ID），跨服务传递，沿途每一跳都记录自己的一段路径（Span）</strong>，最后把同一张通行证的记录拼起来——就是这次请求的完整调用链。这就是<strong>分布式链路追踪（Distributed Tracing）</strong>。它和另外两种可观测数据是分工关系，不是替代关系：</p>
+  <div class="diagram">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar47" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+
+    <rect x="16" y="40" width="220" height="100" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="126" y="72" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">指标 Metrics</text>
+    <text x="126" y="96" text-anchor="middle" fill="var(--muted)" font-size="9.5">数值型时序：QPS · 延迟 · 错误率</text>
+    <text x="126" y="118" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">看症状：哪里不对劲了</text>
+
+    <rect x="270" y="40" width="220" height="100" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="380" y="72" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">日志 Logs</text>
+    <text x="380" y="96" text-anchor="middle" fill="var(--muted)" font-size="9.5">离散文本：异常栈 · 业务流水</text>
+    <text x="380" y="118" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">看细节：到底发生了什么</text>
+
+    <rect x="524" y="40" width="220" height="100" rx="10" fill="var(--warn-bg)" stroke="var(--line)"/>
+    <text x="634" y="72" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">链路 Tracing</text>
+    <text x="634" y="96" text-anchor="middle" fill="var(--muted)" font-size="9.5">路径明细：请求经过了哪些服务</text>
+    <text x="634" y="118" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">看路径：慢在哪一跳</text>
+
+    <line x1="236" y1="90" x2="266" y2="90" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar47)"/>
+    <line x1="490" y1="90" x2="520" y2="90" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar47)"/>
+
+    <rect x="150" y="196" width="460" height="72" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="380" y="226" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">排障动线：指标发现异常 → 链路定位到哪一跳 → 日志看清根因</text>
+    <text x="380" y="250" text-anchor="middle" fill="var(--muted)" font-size="9.5">三者用同一枚 Trace ID 串联——这是可观测性三支柱的标准协作方式</text>
+
+    <text x="16" y="292" fill="var(--muted)" font-size="9.5">图例：三种可观测数据的分工——指标看症状、日志看细节、链路看路径（概念图）</text>
+  </svg>
+  </div>
+  <p>上一期 Prometheus 的选型清单里写过：数值型问题找它，明细型问题去日志与链路。今天的 SkyWalking，就是"链路"这一支柱的主力选手——而且它把三根支柱都装进了同一个平台。</p>
+</section>
+
+<!-- ================= 02 是什么 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>是什么：官方定义与一句话心智模型</h2>
+  <p>官方文档的定义值得逐词读（skywalking.apache.org《Concepts and Designs · Overview》，v11.0.0，2026-09 核对）：<strong>"SkyWalking is an open source observability platform used to collect, analyze, aggregate and visualize data from services and cloud native infrastructures. … It is a modern APM, specially designed for cloud native, container based distributed systems."</strong>——一个开源可观测平台，采集、分析、聚合、可视化服务与云原生基础设施的数据；是一个专门为云原生、容器化分布式系统设计的现代 APM。同页列出它覆盖的五类数据：<strong>Tracing（链路）、Metrics（指标）、Logging（日志）、Profiling（性能剖析）、Event（事件）</strong>。</p>
+  <p>一句话心智模型：<strong>无侵入的链路追踪 APM——Java agent 字节码增强，应用一行不改，调用链自动上网。</strong>"无侵入"是它最值钱的三个字，接入方式长这样（命令出自官方《Setup java agent》文档，2026-09 核对）：</p>
+  <pre class="codeblock"><code># 官方《Setup java agent》：在 -jar 之前加 -javaagent 参数
+java -javaagent:/path/to/skywalking-agent/skywalking-agent.jar \
+     -Dskywalking.agent.service_name=order-service \
+     -Dskywalking.collector.backend_service=oap-address:11800 \
+     -jar your-app.jar</code></pre>
+  <p>对，就这一行 JVM 参数。应用代码、框架配置、依赖版本全都不用动，启动后 Tomcat、Spring MVC、MySQL、Redis、Kafka 这些调用就自动被记录并上报。<strong>注意默认后端地址是 127.0.0.1:11800</strong>——agent 通过 gRPC 把数据发给 OAP 后端，11800 是它的接收端口。架构上官方把它拆成四个逻辑部分（同一份文档）：<strong>探针（Probes）负责采集，平台后端（OAP）负责聚合分析与流式处理，存储（Storage）可插拔——Elasticsearch、MySQL、自研 BanyanDB 等，UI 负责可视化</strong>。数据进来后，系统能自动画出服务拓扑图、算出各服务的吞吐与延迟、还能把日志和链路用同一枚 Trace ID 关联起来。第 3 期会逐个模块拆，今天先记分工。</p>
+  <p class="note"><img src="../output/0047-skywalking-what-and-why/images/skywalking-docs-overview.png" alt="SkyWalking 官方文档 Overview：定义与五类可观测数据" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档《Overview》：开源可观测平台 + 现代 APM 的定位，与 Tracing/Metrics/Logging/Profiling/Event 五类数据清单（2026-09-19 截图）。</p>
+</section>
+
+<!-- ================= 03 钩子一 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>钩子一：手动埋点 vs 字节码自动增强</h2>
+  <p>链路追踪不是 SkyWalking 发明的，Google Dapper 论文（2010）之后各家公司都造过轮子。传统玩法是<strong>手动埋点</strong>：引入 SDK，在业务代码里手写"开一个 Span、塞上下文、结束 Span"，或者给 HTTP 客户端一个个注册拦截器。SkyWalking 换了一条路：<strong>Java agent 在类加载时改写字节码，把埋点逻辑织进 Tomcat、Spring、MySQL 驱动这些类的内部</strong>——你一行代码没写，埋点已经生效了。两条路线正面对比：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>维度</th><th>手动埋点（SDK / 拦截器）</th><th>自动增强（Java agent 字节码增强）</th></tr></thead>
+    <tbody>
+      <tr><td><strong>代码侵入</strong></td><td>业务代码里到处是追踪逻辑，忘记清理就是线上事故源</td><td><strong>零侵入</strong>：应用代码、依赖、配置一行不改</td></tr>
+      <tr><td><strong>覆盖范围</strong></td><td>覆盖靠自觉：新框架、新中间件上线，埋点往往被遗漏</td><td>插件清单即覆盖清单：Java agent 官方支持列表 130+ 条目（v9.7.0 文档，2026-09 核对）</td></tr>
+      <tr><td><strong>升级成本</strong></td><td>追踪 SDK 升级要回归测试整个应用</td><td>换 agent 包即可，业务应用无感；插件可按需启用/禁用</td></tr>
+      <tr><td><strong>灵活度</strong></td><td>想在任意业务逻辑里打标、加属性，随手就来</td><td>业务级自定义要靠注解（@Trace）或插件开发补——灵活性让渡给省心</td></tr>
+      <tr><td><strong>适用</strong></td><td>个别关键路径的深度定制</td><td>整个应用集群的默认开启</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>无侵入是怎么做到的？点到为止：JVM 提供了 <code>java.lang.instrument</code> 接口，允许 agent 在<strong>类加载进 JVM 之前拦截并改写字节码</strong>——SkyWalking 把"对 Tomcat 某方法的调用前后插入上报逻辑"这类改写规则做成一个个插件，类加载时命中规则就织入，命中不了原样放行。改的是<strong>字节码</strong>，不是<strong>你的代码</strong>。这套"agent + 插件模型"是它最值得读的设计，第 5 期源码导读专门拆。</p>
+</section>
+
+<!-- ================= 04 生态 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>生态盘点：一个 agent，一个后端，一张拓扑图</h2>
+  <p>SkyWalking 的生态围绕"采集 → 分析 → 存储 → 展示"四层展开（各组件角色为官方文档口径，2026-09 核对）：</p>
+  <ul>
+    <li><strong>语言 agent 生态：</strong>Java agent 最成熟（独立仓库 apache/skywalking-java），官方支持列表 130+ 条目覆盖 HTTP 服务、RPC、消息队列、数据库、缓存、连接池、日志框架；另有 C#、Node.js、Go、PHP、Python 自动插桩 agent 与 C++、Rust、Nginx Lua 手动 SDK；</li>
+    <li><strong>OAP 后端：</strong>可观测分析平台，接收 agent 与各路探针数据，做流式聚合与分析——拓扑、服务级指标、告警规则都在这一层算出来；</li>
+    <li><strong>BanyanDB：</strong>自研的可观测专用数据库，v10 起成为默认推荐存储——时序指标、链路、日志的存储引擎问题自包内解决（也可选 Elasticsearch、MySQL 等）；</li>
+    <li><strong>UI 与周边：</strong>v11 起新一代 Horizon UI 转正（1.0 GA）；还有轻量采集网关 Satellite、eBPF 探针 Rover、K8s 部署的 Helm chart 与 Operator；</li>
+    <li><strong>兼容入口：</strong>Zipkin v1/v2 格式、OpenTelemetry OTLP、Prometheus、Telegraf 数据都能收——已有埋点的应用"换上报地址"即可迁入。</li>
+  </ul>
+  <p class="note"><img src="../output/0047-skywalking-what-and-why/images/skywalking-java-supported.png" alt="SkyWalking Java agent 支持插件清单" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">Java agent 官方支持清单（节选）：仅 HTTP Server 一类就有 24 个条目，全清单 130+ 条目（2026-09-19 截图，v9.7.0 文档）。</p>
+  <p>跟上一期的 Prometheus 什么关系？<strong>互补，不是替代：</strong>指标告警链路（Prometheus + Alertmanager + Grafana）照常运转，SkyWalking 补上"调用路径"这一层——它甚至能直接接收 Prometheus 格式的指标数据，把两套系统收拢进同一张拓扑图。日志那一线也一样：检索归 Elasticsearch 一族，但 SkyWalking 会用 Trace ID 给日志打标，让"看路径"和"看细节"一键互通。</p>
+</section>
+
+<!-- ================= 05 关键数据 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>关键数据与版本基准</h2>
+  <p class="note"><img src="../output/0047-skywalking-what-and-why/images/skywalking-github-repo.png" alt="GitHub apache/skywalking 仓库主页" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">apache/skywalking 仓库主页：About 自述 APM, Application Performance Monitoring System · Apache-2.0 license · Star 25.0k · Fork 6.6k · Releases 65，最新 11.0.0（2026-09-19 截图）。</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>指标</th><th>数值</th><th>来源与口径</th></tr></thead>
+    <tbody>
+      <tr><td>GitHub Stars（主仓库）</td><td><strong>25.0k</strong></td><td>apache/skywalking 仓库页，2026-09-19 核对</td></tr>
+      <tr><td>GitHub Stars（全家桶）</td><td>35.1K+</td><td>官网口径：SkyWalking 生态多仓库合计，另有 1,023 位贡献者</td></tr>
+      <tr><td>Java agent 插件</td><td><strong>130+</strong></td><td>官方支持清单 133 条链路插件 + 26 条 metrics 插件（v9.7.0 文档，2026-09）</td></tr>
+      <tr><td>Apache 顶级项目</td><td><strong>2019-04 毕业</strong></td><td>ASF 2019-04-24 官宣；2017-12 进入孵化器——中国首个个人主导的 Apache 顶级项目</td></tr>
+      <tr><td>生产验证</td><td>10+ 年</td><td>官网口径：10+ years in production，单集群每秒处理 100B+ 条遥测数据</td></tr>
+      <tr><td>开源许可</td><td>Apache-2.0</td><td>仓库 license 栏，商用友好</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>版本基准（GitHub Releases，UTC，2026-09-19 核对）：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>组件</th><th>当前版本</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>OAP 后端 / 主仓库</td><td><strong>v11.0.0</strong>（2026-08-28，Latest）</td><td>"Horizon Ready, Runtime Rule Hot-Update and Live DSL Debugger"——本系列全部口径锚定它</td></tr>
+      <tr><td>Java agent</td><td>v9.7.0</td><td>官方文档索引 latest；与 OAP 版本线各自独立演进</td></tr>
+      <tr><td>BanyanDB</td><td>0.11.0</td><td>官方 quickstart 脚本配套版本；v10.3 起新版 trace 模型落库于此</td></tr>
+      <tr><td>Horizon UI</td><td>1.0.0</td><td>v11 起成为主流 UI</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">注意主仓库 25.0k 与官网 35.1K+ 两个星数并存：后者是 SkyWalking 全家桶（agent、BanyanDB、Rover 等多仓库）合计口径，引用时别混。</p>
+</section>
+
+<!-- ================= 06 演进史 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>钩子二：从个人项目到 Apache 顶级项目的十一年</h2>
+  <div class="card">
+    <ul>
+      <li><strong>2015 · 个人项目起步：</strong>吴晟为帮新人理解分布式系统创建 SkyWalking，同年 10 月在 GitHub 开源——最初监控的是电信级微服务核心系统（公开访谈口径）；</li>
+      <li><strong>2017-12 · 进入 Apache 孵化器：</strong>2017-12-19 IPMC 接纳，成为<strong>中国首个由个人主导进入 Apache 孵化器的项目</strong>；</li>
+      <li><strong>2019-04 · 毕业为顶级项目：</strong>ASF 于 2019-04-24 官宣 SkyWalking 毕业（Top-Level Project）——<strong>中国首个个人主导的 Apache 顶级项目</strong>；</li>
+      <li><strong>2026-08 · v11.0.0 发布：</strong>"Horizon Ready"——新一代 Horizon UI 转正、运行时规则热更新与 DSL 调试器上线，从链路追踪长成覆盖 AI 可观测的全家桶平台。</li>
+    </ul>
+  </div>
+  <p>个人项目 → Apache 孵化器 → 顶级项目，这条路每一步都有明确日期可查。它说明两件事：治理上，社区足够中立健康（Apache 基金会背书，企业敢深度依赖）；功能上，十一年持续演进，从单一链路追踪长成指标、日志、剖析、事件全都要的平台——这也是为什么选型时它的"一体化"是最大的差异化。</p>
+</section>
+
+<!-- ================= 07 对比 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>与同类对比：一个主角，四个对手</h2>
+  <p>链路追踪这条赛道玩家不少，各就各位（定位为各项目官方公开口径，2026-09 核对）：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>方案</th><th>定位与技术路线</th><th>侵入性</th><th>生态与差异</th></tr></thead>
+    <tbody>
+      <tr><td><strong>SkyWalking v11</strong></td><td>一体化 APM：链路 + 指标 + 日志 + 剖析 + 拓扑，OAP 流式聚合，BanyanDB 自研存储</td><td>Java agent 零侵入自动埋点为主</td><td>Apache 顶级项目；Java 生态最深；中文文档友好；开源自建</td></tr>
+      <tr><td>Zipkin</td><td>链路追踪元老（Twitter 开源）：只管 trace 的采集存储查询</td><td>SDK 手动埋点为主，侵入较多</td><td>轻量、组件小，存储/告警/指标要自己拼装</td></tr>
+      <tr><td>Jaeger</td><td>Uber 开源、CNCF 托管的链路追踪系统，云原生阵营主力</td><td>SDK/手动埋点为主</td><td>Go 技术栈亲和；同样只管 trace，搭配 Prometheus 用</td></tr>
+      <tr><td>OpenTelemetry（OTel）</td><td><strong>标准而非实现</strong>：统一 API/SDK/OTLP 协议，不含存储与 UI</td><td>自动插桩覆盖多语言（Java/Go/Python…）</td><td>厂商中立的采集标准；后端可换——SkyWalking 就是它的后端之一</td></tr>
+      <tr><td>商用 APM（Datadog 等）</td><td>托管全家桶，开箱即用，产品化最完整</td><td>Agent 自动安装</td><td>按量计费成本随规模涨，数据在第三方；不想养运维的省心选项</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>怎么选？<strong>Java 微服务为主、要无侵入 + 一张拓扑图管全部数据，SkyWalking 默认答案；已有 Zipkin 且没痛点，不必为迁移而迁移；Go/Python 主栈要自动插桩生态，OpenTelemetry 更顺——而且它不锁后端，SkyWalking/ Jaeger/商用方案都收 OTLP；不想养运维、预算充足，商用 APM 花钱买省心。</strong>没有全能冠军，只有场景匹配。</p>
+</section>
+
+<!-- ================= 08 场景 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>什么场景该选它（以及什么场景是错配）</h2>
+  <div class="card">
+    <p><strong>✅ 适合：</strong></p>
+    <ul>
+      <li><strong>Java 微服务要无侵入链路追踪：</strong>一行 -javaagent 参数接入全链路，130+ 插件覆盖主流框架，改造成本近乎为零；</li>
+      <li><strong>要"一张拓扑图管全部"的一体化 APM：</strong>链路、指标、日志、剖析、事件收进同一个平台，拓扑图自动生成，排障动线不跨系统；</li>
+      <li><strong>自建可观测平台要数据自主：</strong>Apache-2.0 + Apache 顶级项目治理，私有化零门槛，BanyanDB 免去另购存储的耦合。</li>
+    </ul>
+    <p><strong>❌ 错配：</strong></p>
+    <ul>
+      <li><strong>非 Java 主栈且依赖自动插桩：</strong>字节码增强是 JVM 特性，Go/Python 等语言走 SDK 或 eBPF 路线，无侵入体验打折——多语言场景 OTel 生态更顺；</li>
+      <li><strong>只要指标监控与告警：</strong>那是 Prometheus 的主场——指标告警链路已建好就没必要为"看曲线"引入一个 APM；</li>
+      <li><strong>已深度绑定其他追踪系统且无新痛点：</strong>Zipkin 埋点资产健全、没被排障效率卡住脖子，迁移收益有限——SkyWalking 也能直接收 Zipkin 数据，先并后迁更稳。</li>
+    </ul>
+  </div>
+  <p>一条判断捷径，接着上一期的口径说：<strong>问"现在/过去一段时间系统表现如何"的数值型问题，找 Prometheus；问"某一笔请求经历了什么"的明细型问题，找 SkyWalking——它把"慢在哪一跳"从人工连线变成一眼看图。</strong></p>
+</section>
+
+<!-- ================= 09 quiz ================= -->
+<section>
+  <h2><span class="sec-num">09</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. 官方给 SkyWalking 的定位，哪句最准确？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，日志检索是 Elasticsearch 一族的主场，SkyWalking 只是把日志与链路关联。","不对，那是纯链路追踪系统（Zipkin/Jaeger）的定位，SkyWalking 覆盖链路、指标、日志、剖析、事件五类数据。","对的：官方定义 an open source observability platform…a modern APM for cloud native, container based distributed systems。"]'>
+        <li class="quiz-option">一个专门做日志检索的分析引擎</li>
+        <li class="quiz-option">一个只做分布式链路追踪的组件</li>
+        <li class="quiz-option">一个面向云原生的开源可观测平台 / 现代 APM</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. SkyWalking 的"无侵入"，无侵入的到底是什么？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，数据还是要上报给 OAP 后端的，「无侵入」说的不是不联网。","对的：Java agent 在类加载时改写字节码、织入埋点逻辑——应用代码、依赖、配置一行不改。","不对，恰恰相反，JDK/依赖要满足 agent 的兼容要求，动的是字节码不是应用代码。"]'>
+        <li class="quiz-option">不上报任何数据，全部在应用本地分析</li>
+        <li class="quiz-option">应用代码一行不改：agent 在类加载时改写字节码完成埋点</li>
+        <li class="quiz-option">不需要 JDK，也不需要任何依赖变更</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 指标、日志、链路三种数据，SkyWalking 最不可替代的是哪种能力？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：链路把一次请求跨服务的完整路径拼出来，「慢在哪一跳」一眼看图——指标和日志都答不了这个问题。","不对，看错误率曲线是指标的事，Prometheus 一线更对口。","不对，翻异常栈是日志检索的事，Elasticsearch 一线更对口。"]'>
+        <li class="quiz-option">把一次请求的跨服务调用路径拼出来，定位慢在哪一跳</li>
+        <li class="quiz-option">画出接口错误率的七天趋势曲线</li>
+        <li class="quiz-option">按关键词检索海量异常日志</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. 一个以 Go 为主的微服务团队想上自动插桩追踪，最顺的路线是？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，字节码增强是 JVM 特性，Go 应用没有 Java agent 这条路。","不对，手动埋点能用但改造量大，且这不是「最顺」的自动插桩路线。","对的：OTel 的 Go SDK/自动插桩生态更成熟，且 OTLP 不锁后端——SkyWalking、Jaeger、商用方案都能接。"]'>
+        <li class="quiz-option">给 Go 服务也挂 SkyWalking 的 Java agent</li>
+        <li class="quiz-option">在业务代码里手写全部埋点逻辑</li>
+        <li class="quiz-option">走 OpenTelemetry 生态做插桩，OTLP 上报（SkyWalking 可作后端）</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 10 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：Java agent 改写字节码，等于在运行时"改了别人的代码"。这么做风险和收益各在哪？为什么几乎所有 Java 链路追踪产品都选了这条路？</summary>
+    <div class="details-body">
+      <p>先把机制说准。JVM 的 <code>java.lang.instrument</code> 接口允许 agent 在<strong>类加载的入口</strong>拿到字节码并返回修改后的版本——SkyWalking 的做法是把改写规则做成插件：类加载时按"类名 + 方法签名"匹配规则，命中就把"调用前后记录 Span、传递上下文"的指令织进去，未命中原样放行。所以它改的是<strong>字节码</strong>，不是<strong>你的源代码</strong>，应用仓库里连一行 diff 都不会有。<strong>收益侧：</strong>覆盖与改造解耦——130+ 插件等于一张现成的埋点清单，新应用接入成本从"人月"降到"一行启动参数"；升级追踪逻辑不用碰业务代码，对几十上百个服务的组织来说是数量级的收益。<strong>风险侧也真实存在：</strong>其一，agent 与第三方库版本强相关，框架升级可能踩插件兼容坑，所以官方清单里每个插件都标着适用版本区间；其二，织入发生在类加载期，agent 自身的 bug 会直接表现为应用异常——这正是 SkyWalking 把插件做成可按需启停、并在第 5 期要读的"插件隔离与字节码守卫"设计的原因；其三，每个请求多了一次记录与（通常是异步的）上报，开销换可观测性，官方一直在做性能优化并允许 metrics-only 模式。<strong>为什么大家都选它？</strong>因为链路追踪要"全"，手动埋点天生凑不齐覆盖率——漏埋的那一段恰恰最可能是没被关注、最容易出事的一段。无侵入把"要不要埋点"从每个团队的工程决策，变成了平台的一次性决策，这是 Java 生态里 APM 产品的共同底座。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：指标、日志、链路三种数据在排障时怎么配合？为什么说链路数据"贵"，但贵得有道理？</summary>
+    <div class="details-body">
+      <p>把三种数据的形状摆在一起看。<strong>指标是预聚合的数值时序：</strong>便宜、可长期留存、能画曲线和触发告警，但聚合不可逆——从"订单服务 P99 涨了 3 倍"无法还原出"哪一笔请求、卡在哪一步"。<strong>日志是离散的文本事件：</strong>信息密度最高、离根因最近，但同一笔请求的日志散落在十几个服务里，没有"路径"概念。<strong>链路是结构化的路径明细：</strong>每一笔请求记录完整调用树（哪个服务、哪个方法、耗时多少、谁是谁的父调用），天然回答"慢在哪一跳"。<strong>排障动线因此是三段式：</strong>指标发现异常（什么时候、什么症状）→ 链路定位到跳（哪条路径、哪一跳慢）→ 日志看清根因（那一跳里到底抛了什么）。三段之间靠同一枚 Trace ID 串联——SkyWalking 甚至自动把 Trace ID 写进应用日志，第三段就不用人工对时间线了。<strong>链路为什么贵？</strong>因为它是逐请求的全量明细：QPS 一万、每笔请求二十跳，就是每秒二十万条记录，存储与计算成本远超预聚合的指标。贵得有道理在于：<strong>指标的聚合丢了明细，日志的离散丢了结构，只有链路同时保住了"逐笔"和"结构化"两个性质</strong>——它是唯一能回答"这一笔怎么了"的数据。工程上的平衡术也围绕这一点展开：采样率控制、头部采样与尾部采样取舍、把高频低价值数据降级为指标……这些取舍正是第 3、4 期的主线。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 11 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">11</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>SkyWalking = 面向云原生的开源可观测平台、现代 APM——官方口径（v11.0.0 文档）；</li>
+      <li>它解决"慢在哪一跳"：指标看症状、日志看细节、链路看路径——链路把一笔请求的跨服务路径拼出来；</li>
+      <li>心智模型：Java agent 字节码增强，应用一行不改，调用链自动上网；改的是字节码不是你的代码；</li>
+      <li>数据面：25.0k Stars（主仓库）、130+ Java 插件、2017-12 入孵化器 / 2019-04 毕业 Apache 顶级项目（2026-09-19 核对）；</li>
+      <li>版本基准 v11.0.0（GitHub Latest，2026-08-28）+ agent v9.7.0；选型捷径：明细型问题找它，Java 主栈无侵入首选，非 Java 主栈看 OTel。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 2 期《5 分钟跑起来》——照官方 quickstart 一条命令拉起 OAP + BanyanDB + UI，挂上 agent 跑通第一个应用，在拓扑图里亲眼看到调用链上网，命令与预期输出逐条对照官方文档。</p>
+  <p><strong>Primary source：</strong><a href="https://skywalking.apache.org/docs/main/v11.0.0/en/concepts-and-designs/overview/" target="_blank" rel="noopener">SkyWalking 官方文档 · Concepts and Designs · Overview</a>——本期定义、四层架构与五类数据均出自该文档（与 v11 匹配）；Java agent 接入见 <a href="https://skywalking.apache.org/docs/skywalking-java/latest/en/setup/service-agent/java-agent/readme/" target="_blank" rel="noopener">Setup java agent</a>，插件清单见 <a href="https://skywalking.apache.org/docs/skywalking-java/latest/en/setup/service-agent/java-agent/supported-list/" target="_blank" rel="noopener">supported list</a>，版本与发布记录见 <a href="https://github.com/apache/skywalking/releases" target="_blank" rel="noopener">GitHub Releases</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0046-prom-source-reading.html">← 上一期：Prometheus 架构与源码导读</a></span>
+  <a class="next" href="0048-skywalking-quickstart.html">下一期：5 分钟跑起来 SkyWalking →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

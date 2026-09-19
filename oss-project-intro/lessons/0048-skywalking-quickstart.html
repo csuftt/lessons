@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · SkyWalking 系列第 2 期：5 分钟跑起来 | 2026-09-20</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0048</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0047-skywalking-what-and-why.html">上一期:0047</a> · SkyWalking 系列第 2 期 / 共 5 期 · <a href="0049-skywalking-core-concepts-architecture.html">下一期:0049</a> · <a href="https://skywalking.apache.org" target="_blank" rel="noopener">skywalking.apache.org ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · SKYWALKING 系列第 2 期：5 分钟跑起来</p>
+  <h1>5 分钟跑起来 SkyWalking：Docker 起全家，亲手看见第一条调用链</h1>
+  <p class="subtitle">上一期我们认识了 SkyWalking——无侵入的链路追踪 APM，心智模型是"Java agent 字节码增强，应用一行代码不改，调用链自动上网"。今天把认识变成动手。本期结束，你将亲手做出四样东西：<strong>一套跑起来的 OAP + UI 后端、一个挂上 agent 的示例应用、Trace 页里的第一条调用链瀑布、拓扑图上带调用关系的服务节点</strong>。全部命令逐条对照官方文档（2026-09-20 核对），跟着敲就能通；最后给一份"三条全绿才算跑通"的判定清单和六个高频翻车点的解法。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">📡 链路追踪与 APM · Java · Apache-2.0（Apache 顶级项目）</span>
+    <span class="tag">📦 基于 v11.0.0（OAP）+ agent v9.7.0（GitHub Latest，2026-09-20 核对）</span>
+    <span class="tag-date">📅 2026-09-20 · 第 2 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 本期目标 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>本期目标：跑通长什么样，先说清楚</h2>
+  <p>上一期留了一个尾巴：接入的全部仪式感，就是启动命令里的一行 JVM 参数。今天验证它。先给本期定一个能自测的目标——不是"大概会用了"，而是下面这条端到端演示链，每一环都有官方口径的预期结果：</p>
+  <ul>
+    <li><strong>起后端：</strong>一条官方脚本拉起 OAP + BanyanDB + Horizon UI 三件套，浏览器打开本机 8080 端口能看到登录页；</li>
+    <li><strong>挂 agent：</strong>下载官方 Java agent 包，给两个最小的 Spring Boot 服务挂上 <code>-javaagent</code> 启动；</li>
+    <li><strong>发请求：</strong>对入口服务连发几次 HTTP 请求，触发链路数据；</li>
+    <li><strong>看结果：</strong>UI 里 Trace 列表出现记录、点开是跨两个服务的调用链瀑布、拓扑图出现两个服务节点和一条调用边。</li>
+  </ul>
+  <p>为什么示例要起两个服务？因为<strong>拓扑图的"边"至少要两个节点才画得出来</strong>——单服务只能看到孤零零一个点，体现不出 SkyWalking 最值钱的跨服务串联。所以本期做一个最小的两跳调用：入口服务 <code>demo-app</code> 通过 HTTP 调用后端服务 <code>demo-api</code>，两个都挂 agent。五分钟的口径也从这来：命令本身几分钟敲得完，第一次拉镜像的时间取决于网速，耐心等它下完。</p>
+</section>
+
+<!-- ================= 02 环境与版本 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>动手前：环境要求与版本钉子</h2>
+  <p><strong>环境要求只有一条硬的：装好 Docker（含 Docker Compose）。</strong>官方《Backend setup on Docker》文档的快速启动脚本只依赖 Docker，Linux、macOS、Windows（WSL 或 PowerShell）都能跑。内存方面官方文档没有给"最低多少 G"的硬指标，但有个实打实的口径：<strong>官方 docker-compose 示例里 OAP 默认堆是 <code>-Xms2048m -Xmx2048m</code></strong>——也就是光 OAP 一个容器就要吃 2 GB 堆，加上存储和 UI，<strong>给 Docker 分 4 GB 以上可用内存</strong>再动手，能避开"容器反复重启"这个最常见的首跑翻车。</p>
+  <p><strong>版本钉子。</strong>SkyWalking 的后端和语言 agent 是两个仓库、两条独立演进的版本线，版本号不同步是常态，别互相"配对"：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>组件</th><th>本期基准</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><strong>OAP 后端</strong></td><td><strong>v11.0.0</strong>（2026-08-28，GitHub Latest）</td><td>与上一期选型期的口径一致，本系列全程锚定它</td></tr>
+      <tr><td><strong>Java agent</strong></td><td><strong>v9.7.0</strong>（2026-08-14）</td><td>apache/skywalking-java 仓库 Latest；与 OAP 版本线独立</td></tr>
+      <tr><td>BanyanDB 存储</td><td>0.11.0</td><td>快速启动脚本内置默认，OAP 11 配套</td></tr>
+      <tr><td>Horizon UI</td><td>1.0.0</td><td>v11 起的新一代 UI，镜像 tag 形如 horizon-1.0.0</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note"><img src="../output/0048-skywalking-quickstart/images/skywalking-github-releases.png" alt="apache/skywalking GitHub Releases：11.0.0 标记 Latest" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">apache/skywalking 的 GitHub Releases 页：11.0.0 挂 Latest（2026-09-20 截图，UTC）。注意页面 Notice 原文提示<strong>别从这里下源码包</strong>——二进制发布统一走 skywalking.apache.org/downloads/，agent 包也一样。</p>
+</section>
+
+<!-- ================= 03 第一步 起全家 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>第一步：一条命令起全家（OAP + 存储 + UI）</h2>
+  <p>官方文档给的最快路径是一条管道命令：下载并执行官方快速启动脚本。它先检查 Docker，再让你选一次存储，然后自动拉起三件套（命令逐字对照《Backend setup on Docker》，2026-09-20 核对）：</p>
+  <pre class="codeblock"><code># Linux / macOS / Windows(WSL)：官方 Quick start with docker-compose
+bash &lt;(curl -sSL https://skywalking.apache.org/quickstart-docker.sh)
+
+# Windows PowerShell 等价命令（官方同页原文，节选）：
+# Invoke-Expression ([System.Text.Encoding]::UTF8.GetString(
+#   (Invoke-WebRequest -Uri https://skywalking.apache.org/quickstart-docker.ps1 -UseBasicParsing).Content))</code></pre>
+  <p>脚本会让你<strong>选存储：1 是 Elasticsearch，2 是 BanyanDB</strong>。上手期选 2（BanyanDB）——它是 SkyWalking 自研的可观测数据库，v10 起的默认推荐存储，单容器就跑起来，不像 ES 还要单独调堆内存。选完脚本拉起三个容器（镜像与版本为脚本内置默认值）：<code>apache/skywalking-oap-server:11.0.0</code>、<code>apache/skywalking-banyandb:0.11.0</code>、<code>apache/skywalking-ui:horizon-1.0.0</code>，项目名固定为 <code>skywalking-quickstart</code>——拆除时也要用这个名字。</p>
+  <p class="note"><img src="../output/0048-skywalking-quickstart/images/skywalking-docs-backend-docker.png" alt="官方 backend-docker 文档的快速启动一节" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方《Backend setup on Docker》"Start the storage, OAP and Booster UI with docker-compose"一节原文：一键脚本（Linux/macOS/WSL 与 PowerShell 两版）加拆除命令（2026-09-20 截图）。对我们这套 OAP 11 来说，容器里跑的是新一代 Horizon UI。</p>
+  <p>几十秒到几分钟后（首次拉镜像看网速），打开<strong>http://localhost:8080</strong>。v11 的 Horizon UI 带登录页，快速启动脚本配置的账号是<strong>用户名 skywalking / 密码 skywalking</strong>（脚本明确标注这是 quickstart 专用凭据，生产环境必须换掉）。把起之后"谁在哪个端口"列成一张表，后面排障全靠它：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>端口</th><th>谁在听</th><th>你什么时候碰它</th></tr></thead>
+    <tbody>
+      <tr><td><strong>8080</strong></td><td>Horizon UI（容器内 8081 映射而来）</td><td>浏览器打开看板，账号 skywalking/skywalking</td></tr>
+      <tr><td><strong>11800</strong></td><td>OAP 的 gRPC 接收端口</td><td><strong>agent 上报数据指它</strong>（backend_service 参数）</td></tr>
+      <tr><td><strong>12800</strong></td><td>OAP 的 HTTP 端口（GraphQL 查询 / REST）</td><td>UI 查数据走它；<strong>agent 不用它</strong></td></tr>
+      <tr><td>9200</td><td>Elasticsearch（选 ES 存储时才有）</td><td>ES 存储路线的节点端口</td></tr>
+      <tr><td>17912 / 17913</td><td>BanyanDB 数据口 / Web 界面</td><td>BanyanDB 路线；17913 可看存储自带界面</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>官方 backend-setup 文档的原话值得记一句："OAP listens on 0.0.0.0/11800 for gRPC APIs and 0.0.0.0/12800 for HTTP APIs"——<strong>11800 收数据（gRPC），12800 出数据（HTTP 查询）</strong>。这一收一出，就是下一节 agent 参数和第 08 节高频报错的根源。</p>
+</section>
+
+<!-- ================= 04 第二步 下载 agent ================= -->
+<section>
+  <h2><span class="sec-num">04</span>第二步：下载 Java agent，认认它的目录</h2>
+  <p>agent 从哪拿？从 <strong>skywalking.apache.org/downloads/</strong> 的官方发布包里拿（仓库归属 apache/skywalking-java，最新 v9.7.0，2026-09-20 核对）。下载对应版本的压缩包，解压后是一个 <code>agent</code> 目录。<strong>注意别把两个名字搞混：目录叫 <code>agent</code>，目录里的 jar 叫 <code>skywalking-agent.jar</code></strong>——<code>-javaagent</code> 参数要指向的是后者。目录结构（官方《Setup java agent》文档原文口径）：</p>
+  <pre class="codeblock"><code>agent/
++-- skywalking-agent.jar      # agent 本体：-javaagent 指向它
++-- config/
+|   +-- agent.config          # 配置文件（可用 -D 系统属性逐项覆盖）
++-- plugins/                  # 已启用插件：在这里的全部生效
++-- optional-plugins/         # 可选插件（如 gson）：想用就拷进 plugins
++-- bootstrap-plugins/        # 引导类插件（如 jdk-http-plugin）
++-- activations/  logs/       # 日志桥接激活器 / agent 运行日志</code></pre>
+  <p>两个要点。第一，<strong>plugins 目录即生效清单</strong>：官方文档原话是"All plugins in /plugins folder are active. Remove the plugin jar, it disabled."——Tomcat、Spring、HttpClient、Dubbo 这些常用插件默认就在里面，你的应用大概率开箱即被覆盖；不想追踪某个组件，把对应 jar 挪走即可。第二，<strong>agent 支持 JDK 8 到 25</strong>（同页原文），老项目和新技术栈都能挂。排障时最先看的是 <code>logs/</code> 下的 <code>skywalking-api.log</code>——agent 有没有连上后端、有没有上报，日志全记得清清楚楚。</p>
+  <p class="note"><img src="../output/0048-skywalking-quickstart/images/skywalking-docs-agent-setup.png" alt="官方 Setup java agent 文档：接入步骤与目录结构" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方《Setup java agent》：五步接入清单（JDK 8-25、agent.service_name、collector.backend_service 默认 127.0.0.1:11800、-javaagent 要放在 -jar 之前）与新包目录结构（2026-09-20 截图）。</p>
+</section>
+
+<!-- ================= 05 第三步 挂 agent ================= -->
+<section>
+  <h2><span class="sec-num">05</span>第三步：给两个示例服务挂上 agent</h2>
+  <p>示例应用用两个最小的 Spring Boot 服务（任意能跑的 Spring Boot 项目都行，关键是挂上 agent）。<code>demo-app</code> 是入口，收到请求后通过 HTTP 调用 <code>demo-api</code>，这样一次请求会跨两个 JVM 进程——链路与拓扑才有戏唱：</p>
+  <pre class="codeblock"><code>// demo-api：被调方，一个最简端点（8081）
+@RestController
+public class ApiController {
+    @GetMapping("/api")
+    public String api() { return "ok"; }
+}
+
+// demo-app：入口，用 RestClient 转调 demo-api（8080）
+@RestController
+public class WebController {
+    RestClient client = RestClient.create();
+    @GetMapping("/hello")
+    public String hello() {
+        return client.get().uri("http://127.0.0.1:8081/api").retrieve().body(String.class);
+    }
+}</code></pre>
+  <p>启动命令就是上一期预告过的"一行 JVM 参数"，两个服务各起一份，<strong>只有三处不同：jar 名、service_name、端口</strong>。注意 <code>-javaagent</code> 必须放在 <code>-jar</code> 参数<strong>之前</strong>（官方文档强调的顺序）；agent 默认读 <code>config/agent.config</code>，但官方支持用 <code>-Dskywalking.*</code> 系统属性逐项覆盖，命令行传参比改配置文件更适合演示：</p>
+  <pre class="codeblock"><code># 先起被调方，再起入口（-javaagent 在 -jar 之前；路径换成你的解压路径）
+java -javaagent:/path/to/agent/skywalking-agent.jar \
+  -Dskywalking.agent.service_name=demo-api \
+  -Dskywalking.collector.backend_service=localhost:11800 \
+  -jar demo-api.jar --server.port=8081
+
+java -javaagent:/path/to/agent/skywalking-agent.jar \
+  -Dskywalking.agent.service_name=demo-app \
+  -Dskywalking.collector.backend_service=localhost:11800 \
+  -jar demo-app.jar --server.port=8080</code></pre>
+  <p>三个参数各自的角色：<code>service_name</code> 是服务在 UI 里的名字（官方要求英文，起有业务含义的名字，别用默认 Your_ApplicationName）；<code>collector.backend_service</code> 是 OAP 的 gRPC 地址，默认 127.0.0.1:11800，本机跑就写 localhost:11800；agent 自己不需要任何端口，它是纯客户端，只出不进。应用代码、pom.xml、application.yml 一行没改——这就是上一期说的"改的是字节码，不是你的代码"。</p>
+</section>
+
+<!-- ================= 06 第四步 触发与查看 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>第四步：发几个请求，看见第一条调用链</h2>
+  <p>对入口服务连发几次请求，把链路数据"打"出来。第一次访问要等 agent 完成字节码织入，稍慢属正常：</p>
+  <pre class="codeblock"><code># 连发 5 次请求触发 trace（Windows 用浏览器刷 5 次也一样）
+for i in 1 2 3 4 5; do curl -s http://localhost:8080/hello; done</code></pre>
+  <p>终端会回显 5 个 <code>ok</code>。这时打开 http://localhost:8080（账号 skywalking/skywalking），按这个顺序看三处：</p>
+  <ol>
+    <li><strong>General Service 服务面板：</strong>登录后在 GENERAL 层的服务列表里能看到 <code>demo-app</code> 和 <code>demo-api</code> 两个名字。点进服务详情，KPI 卡片区开始出现<strong>吞吐量（每分钟请求数）、P99/P95 延迟、错误率</strong>的数字——OAP 的流式聚合算出来的，UI 默认展示最近的时间窗，数字没出现就把时间范围拉到最近 15 分钟刷新一下；</li>
+    <li><strong>Trace 页：</strong>左侧菜单进 Trace（追踪）页，列表里出现刚才那 5 条 <code>/hello</code> 记录。<strong>点开任意一条</strong>：上半场是这次请求的 Span 瀑布图——<code>demo-app</code> 的 HTTP Span 在最上面，下面挂着它调用 <code>demo-api</code> 的子 Span，各自的耗时、网络开销一目了然。这条瀑布，就是上一期说的"完整调用链"第一次在你眼前成形；</li>
+    <li><strong>Topology 拓扑页：</strong>画布上出现 <code>demo-app</code> 指向 <code>demo-api</code> 的一条有向边。Horizon UI 的节点带健康状态的圆环，边上有调用量的着色标注。你一行埋点代码没写，拓扑图自动长出来了。</li>
+  </ol>
+  <p class="note"><img src="../output/0048-skywalking-quickstart/images/skywalking-dockerhub-ui.png" alt="Docker Hub apache/skywalking-ui 镜像页" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">Docker Hub 的 apache/skywalking-ui 镜像页（2026-09-20 截图）：一个镜像托管两代 UI——现役生产版 Booster UI（tag 9.x/10.x）与新一代 Horizon UI（tag horizon-X.Y.Z，dark-first 设计，功能覆盖分层面板、拓扑、Trace 瀑布、日志、告警）。镜像页同时注明这些镜像"not official ASF releases"，生产建议固定具体版本 tag。</p>
+</section>
+
+<!-- ================= 07 跑通判定 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>跑通判定：三条全绿才算数</h2>
+  <p>"服务起来了"只是前提，"数据上得来、看得见"才是结果。本期的跑通判定三条，全部可以在 UI 里当场自测：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>#</th><th>判定</th><th>在哪看</th><th>为什么它算数</th></tr></thead>
+    <tbody>
+      <tr><td>①</td><td><strong>Trace 列表有记录</strong></td><td>Trace 页，服务选 demo-app</td><td>agent 织入、上报、OAP 接收落库，整条收数链路全通了</td></tr>
+      <tr><td>②</td><td><strong>点开有跨服务瀑布</strong></td><td>任意一条 trace 的详情</td><td>demo-app 下挂 demo-api 的子 Span——跨进程上下文传播成功</td></tr>
+      <tr><td>③</td><td><strong>拓扑有节点有边</strong></td><td>Topology 页</td><td>OAP 从链路数据聚合出服务依赖关系——拓扑引擎在工作</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>三条分别验证了<strong>采集、串联、聚合</strong>三件事：① 证明 agent 到 OAP 的数据通路是好的；② 证明 Trace ID 跨进程传递是好的（"链路"区别于"分散日志"的本质）；③ 证明 OAP 的流式分析在把明细加工成全局视图。组件活着不算跑通，数据成链才算。三条全绿，SkyWalking 就算在你机器上完整地转起来了。</p>
+</section>
+
+<!-- ================= 08 高频翻车 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>高频翻车与解法（首跑六坑）</h2>
+  <p>按首跑出现概率排序。绝大多数"跑不通"集中在前三条，而且<strong>先看 agent 日志（logs/skywalking-api.log）再动手</strong>能省一半时间：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>症状</th><th>原因与解法</th></tr></thead>
+    <tbody>
+      <tr><td><strong>agent 挂了，UI 就是无数据</strong></td><td>九成是 <code>backend_service</code> 地址错或网络不通。逐项查：地址是不是 OAP 的（别写成 UI 的 8080）；agent 在宿主机跑时依赖 compose 的端口映射，<code>docker ps</code> 确认 11800 映射存在；防火墙有没有拦。agent 日志里搜 gRPC / 报错关键字。</td></tr>
+      <tr><td><strong>把 12800 填给了 agent</strong></td><td>11800 与 12800 分工不同：<strong>11800 是 gRPC 收数口（agent 专用），12800 是 HTTP/GraphQL 查询口（UI 专用）</strong>。填反了 agent 永远连不上。记住"收 11 出 12"。</td></tr>
+      <tr><td><strong>拓扑有节点，Trace 列表是空的</strong></td><td>多半是时间窗或时钟问题：UI 看板默认时间范围不含刚才的请求，拉到最近 15 分钟刷新；agent 与 OAP 所在机器时钟差太多，记录会"落"到所选窗口外。另外确认发过请求——拓扑由聚合产生，不等于有明细。</td></tr>
+      <tr><td><strong>重启容器，数据全没了</strong></td><td>快速启动是演示配置，BanyanDB 数据写在容器临时目录，<code>down</code> 即清空。要留数据得换正式部署：给存储配持久化卷（官方 docker 部署文档有扩展配置的挂载说明）。</td></tr>
+      <tr><td><strong>OAP 容器反复重启 / 一直 unhealthy</strong></td><td>先查内存：官方 compose 里 OAP 默认堆 2 GB，Docker 可用内存不够就会起来又挂。给 Docker 加内存，或降堆（改 JAVA_OPTS 环境变量）。<code>docker compose ps</code> 看健康状态，<code>logs</code> 看启动日志。</td></tr>
+      <tr><td><strong>下了"源码包"找不到 agent 目录</strong></td><td>GitHub Releases 页的 Notice 明确写了别下 Source code（那是源码归档）。二进制统一从 skywalking.apache.org/downloads/ 拿，agent 包解压出来才是带 skywalking-agent.jar 的 agent 目录。</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ================= 09 数据流与清场 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>一图回看数据流，然后学会"清场"</h2>
+  <p>跑通之后，把今天发生的事画成一张图——四个角色各说了一句话，第 3 期会逐个拆开：</p>
+  <div class="diagram">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar48" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="14" y="30" width="170" height="96" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="99" y="58" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">demo-app / demo-api</text>
+    <text x="99" y="80" text-anchor="middle" fill="var(--muted)" font-size="9.5">挂 agent 的两个 Java 服务</text>
+    <text x="99" y="102" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">织入埋点 · 产出 Span</text>
+    <rect x="14" y="180" width="170" height="76" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="99" y="212" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">你的浏览器</text>
+    <text x="99" y="234" text-anchor="middle" fill="var(--muted)" font-size="9.5">localhost:8080 · skywalking/skywalking</text>
+    <rect x="300" y="30" width="170" height="96" rx="10" fill="var(--warn-bg)" stroke="var(--line)"/>
+    <text x="385" y="58" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">OAP 11.0.0</text>
+    <text x="385" y="80" text-anchor="middle" fill="var(--muted)" font-size="9.5">流式聚合：指标/拓扑/告警</text>
+    <text x="385" y="102" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">今天的大脑</text>
+    <rect x="586" y="30" width="160" height="96" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="666" y="58" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">BanyanDB 0.11.0</text>
+    <text x="666" y="80" text-anchor="middle" fill="var(--muted)" font-size="9.5">自研可观测存储</text>
+    <text x="666" y="102" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">数据落在它那</text>
+    <rect x="300" y="180" width="170" height="76" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="385" y="212" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">Horizon UI 1.0.0</text>
+    <text x="385" y="234" text-anchor="middle" fill="var(--muted)" font-size="9.5">容器内 8081 → 宿主 8080</text>
+    <line x1="184" y1="70" x2="294" y2="70" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar48)"/>
+    <text x="239" y="60" text-anchor="middle" fill="var(--muted)" font-size="9.5">gRPC 上报 :11800</text>
+    <line x1="470" y1="70" x2="580" y2="70" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar48)"/>
+    <text x="525" y="60" text-anchor="middle" fill="var(--muted)" font-size="9.5">落库</text>
+    <line x1="385" y1="126" x2="385" y2="176" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar48)"/>
+    <text x="478" y="155" text-anchor="middle" fill="var(--muted)" font-size="9.5">GraphQL 查询 :12800</text>
+    <line x1="296" y1="218" x2="184" y2="140" stroke="var(--line)" stroke-width="1.5" stroke-dasharray="5 4"/>
+    <text x="212" y="188" text-anchor="middle" fill="var(--muted)" font-size="9.5">看板</text>
+    <text x="16" y="290" fill="var(--muted)" font-size="9.5">图例：本期端到端数据流——agent 收数（11800）→ OAP 聚合 → BanyanDB 落库；UI 查询（12800）→ 你的浏览器（概念图，第 3 期逐模块拆）</text>
+  </svg>
+  </div>
+  <p>最后学会<strong>清场</strong>——这条比"跑起来"更常用。快速启动的整套东西用一个固定的 compose 项目名管理，拆除一条命令（官方文档口径）：</p>
+  <pre class="codeblock"><code>docker compose --project-name=skywalking-quickstart down</code></pre>
+  <p><code>down</code> 会把三个容器和演示数据一起删掉——它本来就没做持久化，重跑一遍启动脚本就又是一条"好汉"。两个服务的 <code>java</code> 进程直接 Ctrl-C 结束即可，agent 随进程消亡，不在你的应用里留任何东西——无侵入的最后一层含义：<strong>不想要了，去掉那行启动参数就行</strong>。</p>
+</section>
+
+<!-- ================= 10 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：为什么 agent 的地址参数必须填 11800？如果把 UI 能正常打开的 12800 填给 agent，数据会丢在哪一环？</summary>
+    <div class="details-body">
+      <p>把链路数据的一生拆成四段看：<strong>agent 产出 → 网络传输 → OAP 接收 → 存储落库</strong>，问题一定出在你能定位到的最早一段。11800 是 OAP 的 gRPC 端口，职责是"收"——native agent、OpenTelemetry 等探针的上报走它；12800 是 OAP 的 HTTP 端口，职责是"出"——UI 的 GraphQL 查询和 REST 查询走它（官方 backend-setup 文档原话：OAP listens on 0.0.0.0/11800 for gRPC APIs and 0.0.0.0/12800 for HTTP APIs）。把 12800 填给 agent 后，agent 会尝试与 12800 建立 gRPC 连接——协议对不上，握手失败，数据在 <strong>agent 侧就发不出去</strong>，一环都没进。此时 OAP 日志岁月静好（它根本不知道有 agent 来过），应用也完全正常（agent 的失败被设计成不影响业务，日志里默默重试），唯一说真话的是 <code>logs/skywalking-api.log</code> 里的连接错误。这个坑的本质：<strong>"端口通"和"协议对、职责对"是两回事</strong>——telnet 能连通 12800，不代表 agent 能用它上报。排查可观测系统的问题，先画收数链路再逐段验证，比在 UI 里反复刷新有效得多。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：快速启动为什么不配持久化？如果想保留今天的数据，正确姿势是什么？为什么"直接给 quickstart 的 BanyanDB 容器挂个卷"不算完整答案？</summary>
+    <div class="details-body">
+      <p>快速启动的定位是<strong>"最小代价看见第一条调用链"</strong>，官方把它做成一次性演示环境：镜像版本内置、存储单机临时目录、凭据 skywalking/skywalking 公开写死。数据丢失不是缺陷，是取舍——演示环境越接近"随时可拆"，新手越敢放开折腾。想保留数据，正确的姿势是<strong>换正式部署形态</strong>，按官方 backend-docker 文档的扩展机制逐项补课：给 BanyanDB（或 Elasticsearch）配持久化卷、把 <code>horizon.yaml</code> 里的凭据换成自己的（local 认证支持配置用户与 RBAC 角色）、按需固定镜像版本 tag。"只给 BanyanDB 容器挂个卷"为什么不算完整答案？因为持久化只解决了四分之一的问题：数据留下了，但<strong>凭据还是公开的、版本还是演示内置的、单机存储没有容量与可靠性规划</strong>——这种环境放到公网或多人共用的开发机上，等于一个无鉴权的全公司调用链数据库。可观测平台存的是全系统明细，安全等级应按"比业务库更敏感"对待。上手期用 quickstart 认识它，上生产前把官方部署文档过一遍，两步不要混成一步。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 11 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">11</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>一条官方脚本起全家：OAP 11.0.0 + BanyanDB 0.11.0 + Horizon UI 1.0.0，UI 在 localhost:8080，quickstart 账号 skywalking/skywalking；</li>
+      <li>端口记"收 11 出 12"：11800 是 agent 的 gRPC 上报口，12800 是 UI 的 HTTP/GraphQL 查询口，填反必丢数据；</li>
+      <li>agent 三件套：目录叫 agent，jar 叫 skywalking-agent.jar，-javaagent 放在 -jar 之前；service_name 与 backend_service 两个参数定生死；</li>
+      <li>跑通判定三条全绿：Trace 列表有记录、点开有跨服务瀑布、拓扑有节点有边——分别验证采集、串联、聚合；</li>
+      <li>quickstart 是演示配置：down 即清空，上生产要补持久化、换凭据、固定版本。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 3 期《核心概念与整体架构》——今天 UI 里那些名词（Service、Endpoint、Trace、Span）到底是什么关系，OAP 怎么把 Span 明细流式聚合成拓扑和指标，BanyanDB 为什么值得自研一个数据库。今天的每一步操作，都会在那里得到原理解释。</p>
+  <p><strong>Primary source：</strong><a href="https://skywalking.apache.org/docs/main/v11.0.0/en/setup/backend/backend-docker/" target="_blank" rel="noopener">SkyWalking 官方文档 · Backend setup on Docker（v11.0.0）</a>——本期启动脚本、存储选择与拆除命令均出自该页（与所用版本匹配）；Java agent 接入与目录结构见 <a href="https://skywalking.apache.org/docs/skywalking-java/latest/en/setup/service-agent/java-agent/readme/" target="_blank" rel="noopener">Setup java agent</a>，端口语义见 <a href="https://skywalking.apache.org/docs/main/v11.0.0/en/setup/backend/backend-setup/" target="_blank" rel="noopener">Backend setup</a>，版本发布记录见 <a href="https://github.com/apache/skywalking/releases" target="_blank" rel="noopener">GitHub Releases</a> 与 <a href="https://github.com/apache/skywalking-java/releases" target="_blank" rel="noopener">skywalking-java Releases</a>。</p>
+</section>
+
+<section>
+  <h2><span class="sec-num">12</span>随堂小测</h2>
+  <div class="quiz">
+    <div class="quiz-q">
+      <p class="quiz-question">1. 快速启动脚本拉起的三件套是？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["OAP 是后端没错，但 UI 和存储不是它拉起来的两个名字。","对：OAP 11.0.0 + BanyanDB 0.11.0 + Horizon UI 1.0.0，一条命令全起。","agent 是挂在应用进程里的，不属于后端三件套。"]'>
+        <li class="quiz-option">OAP + Tomcat + MySQL</li>
+        <li class="quiz-option">OAP + BanyanDB + Horizon UI</li>
+        <li class="quiz-option">agent + OAP + Zipkin</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. -Dskywalking.collector.backend_service 应该填哪个地址？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["8080 是 Horizon UI 的端口，agent 不该连它。","12800 是 OAP 的 HTTP/GraphQL 查询口，UI 专用，agent 走 gRPC 不走它。","对：11800 是 OAP 的 gRPC 接收端口，agent 上报专用——记「收 11 出 12」。"]'>
+        <li class="quiz-option">localhost:8080（UI 的端口）</li>
+        <li class="quiz-option">localhost:12800（OAP 的 HTTP 口）</li>
+        <li class="quiz-option">localhost:11800（OAP 的 gRPC 口）</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 拓扑图上要出现"两个节点一条边"，本期示例的关键设计是？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对：入口服务通过 HTTP 调用后端服务，两个都挂 agent，拓扑才有边。","一个服务只能产生一个孤立节点，拓扑无边。","服务名不影响拓扑结构，两个实例同名还是一个节点。"]'>
+        <li class="quiz-option">起两个服务（demo-app 调 demo-api）并都挂上 agent</li>
+        <li class="quiz-option">给同一个服务起两个不同的 service_name</li>
+        <li class="quiz-option">在 UI 里手动把两个服务连起来</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. 用完 quickstart 执行 down 之后想保留 trace 数据，正确的做法是？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["数据写在容器临时目录里，down 即清空，重启救不回来。","UI 的导出只导当前查询结果，不是数据留存方案。","对：quickstart 是一次性演示环境，留数据要按官方文档换正式部署并配持久化。"]'>
+        <li class="quiz-option">用 docker compose restart 重启容器保数据</li>
+        <li class="quiz-option">在 UI 里把 Trace 导出成文件</li>
+        <li class="quiz-option">换正式部署形态：存储配持久化卷、换掉演示凭据、固定版本</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0047-skywalking-what-and-why.html">← 上一期：SkyWalking 是什么</a></span>
+  <a class="next" href="0049-skywalking-core-concepts-architecture.html">下一期：核心概念与整体架构 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>
