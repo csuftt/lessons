@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · TDengine 系列第 1 期：为时序数据而生的数据库 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0027</span>
+  <span><a href="../index.html">课程目录</a> · TDengine 系列第 1 期 / 共 5 期 · <a href="https://www.taosdata.com" target="_blank" rel="noopener">taosdata.com ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · TDENGINE 系列第 1 期：认识项目</p>
+  <h1>TDengine 是什么：为时序数据而生的数据库</h1>
+  <p class="subtitle">开源项目入门系列的每个新项目，都从三个问题开始：它解决什么痛点、凭什么活下来、什么场景该选它。上两个系列我们聊完了 etcd 和 Kubernetes，今天开启新项目 TDengine——官方自我定义是"高性能、集群开源、云原生的时序数据库"，最特别的地方不在"又一个数据库"，而在数据模型：<strong>一个数据采集点一张表，超级表管一类设备</strong>。这条建模思路贯穿全系列，也是它敢把缓存、流式计算、数据订阅内建进内核的底气。公司主栈也在用它，本期带你把它认清楚。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 时序数据库 · C · AGPL-3.0</span>
+    <span class="tag">📦 基于 3.4.1.6（GitHub Latest）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 1 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 痛点 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>痛点：设备一多，通用数据库先撑不住</h2>
+  <p>先算一笔账。十万块智能电表，每块每秒上报 1 条读数，<strong>一天就是 86.4 亿行</strong>——这还只是一个数据源、一种指标。这类数据叫时序数据：按时间追加、只写不改，查询关心的是"最近一小时均值多少""昨晚哪台越限了"这类聚合。塞进 MySQL 这类通用关系库，很快撞上三堵墙：</p>
+  <ul>
+    <li><strong>写入吞吐撑不住：</strong>每秒几十上百万条追加写入，走索引加事务的开销路径，磁盘开销花在"维护有序结构"而不是"存数据"，峰值前就先排队；</li>
+    <li><strong>存储成本扛不住：</strong>传感器读数模式高度重复（电压永远在 220 上下抖），通用行存压缩率很低，磁盘增长曲线几个月就打穿预算；</li>
+    <li><strong>降采样查询等不起：</strong>监控最常用的"每 10 秒聚合一次"这类窗口查询，在亿级行里逐行扫描，等查出来告警窗口早过了。</li>
+  </ul>
+  <p>三堵墙的根源是同一句话：<strong>通用数据库为"行的事务"设计，时序场景要的是"列的聚合"</strong>，硬捏在一起等于用记账本去接消防水管。于是时序数据库（TSDB）品类出现，TDengine 是其中一员——它的差异化打法，下一节讲。</p>
+</section>
+
+<!-- ================= 02 是什么 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>是什么：一个数据采集点一张表，超级表管一类设备</h2>
+  <p>官方文档的定义值得逐词读：<strong>"TDengine TSDB 是一款高性能、集群开源、云原生的时序数据库，专为物联网平台、工业互联网、电力、IT 运维等场景设计并优化"</strong>，并且"内建缓存、流式计算、数据订阅"等组件（docs.taosdata.com《产品简介》，2026-09 核对）。高性能、云原生各家都在说，真正独特的是数据建模这一层——"一个数据采集点一张表"：</p>
+  <ul>
+    <li><strong>一个数据采集点一张表：</strong>每台设备（一块电表、一个传感器）单独建一张子表，结构完全相同，数据按设备分表有序追加——写入变成最朴素的追加写，压缩与查询都顺了；</li>
+    <li><strong>超级表管一类设备：</strong>同类型设备的"模板"叫超级表（STABLE），采集列（电压、电流、相位）写在模板里，设备间差异（厂区、型号、分组）作为静态标签挂在子表上——建子表时引用超级表，标签写死，不随每条数据重复存储；</li>
+    <li><strong>查询时超级表当一张表用：</strong>查询自动下发到所有子表再聚合，还能按标签分组——"各厂区的平均电流"一条 SQL 出结果。这一步同时缓解了时序场景最头疼的高基数（high cardinality）问题。</li>
+  </ul>
+  <pre class="codeblock"><code>CREATE STABLE meters (ts TIMESTAMP, current FLOAT, voltage INT, phase FLOAT)
+  TAGS (location BINARY(64), groupId INT);
+-- 一张子表 = 一个采集点，标签在建表时写死（语法对照官方文档）
+CREATE TABLE d1001 USING meters TAGS ('北京.厂区A', 2);</code></pre>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 360" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar27" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar27a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+
+    <rect x="16" y="52" width="236" height="220" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="134" y="80" text-anchor="middle" fill="var(--ink)" font-size="13" font-weight="700">超级表 meters · 一类设备的模板</text>
+    <text x="134" y="100" text-anchor="middle" fill="var(--muted)" font-size="9.5">不是存数据的实体，只是结构模板</text>
+    <rect x="32" y="114" width="204" height="64" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="134" y="134" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">采集列（每条数据都带）</text>
+    <text x="134" y="152" text-anchor="middle" fill="var(--muted)" font-size="9.5">ts · current · voltage · phase</text>
+    <text x="134" y="168" text-anchor="middle" fill="var(--muted)" font-size="8.5">随时间变化的量测值</text>
+    <rect x="32" y="190" width="204" height="64" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="134" y="210" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">标签列（建表时写死）</text>
+    <text x="134" y="228" text-anchor="middle" fill="var(--muted)" font-size="9.5">location · groupId</text>
+    <text x="134" y="244" text-anchor="middle" fill="var(--muted)" font-size="8.5">设备的静态属性，不重复存储</text>
+
+    <rect x="360" y="40" width="200" height="76" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="460" y="66" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">子表 d1001</text>
+    <text x="460" y="84" text-anchor="middle" fill="var(--muted)" font-size="9">北京.厂区A · groupId=2</text>
+    <text x="460" y="102" text-anchor="middle" fill="var(--accent-3)" font-size="8.5">一台电表的全部读数</text>
+    <rect x="360" y="128" width="200" height="76" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="460" y="154" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">子表 d1002</text>
+    <text x="460" y="172" text-anchor="middle" fill="var(--muted)" font-size="9">北京.厂区A · groupId=3</text>
+    <text x="460" y="190" text-anchor="middle" fill="var(--accent-3)" font-size="8.5">另一台电表</text>
+    <rect x="360" y="216" width="200" height="76" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="460" y="242" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">子表 d1003 …… d9999</text>
+    <text x="460" y="260" text-anchor="middle" fill="var(--muted)" font-size="9">上海.厂区B · groupId=7</text>
+    <text x="460" y="278" text-anchor="middle" fill="var(--accent-3)" font-size="8.5">设备有多少张，子表有多少张</text>
+
+    <line x1="252" y1="110" x2="356" y2="78" stroke="var(--muted)" marker-end="url(#ar27)"/>
+    <line x1="252" y1="160" x2="356" y2="166" stroke="var(--muted)" marker-end="url(#ar27)"/>
+    <line x1="252" y1="214" x2="356" y2="254" stroke="var(--muted)" marker-end="url(#ar27)"/>
+    <text x="300" y="52" fill="var(--muted)" font-size="8.5">按模板建表</text>
+
+    <rect x="612" y="88" width="132" height="150" rx="10" fill="var(--warn-bg)" stroke="var(--accent)"/>
+    <text x="678" y="116" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">查超级表</text>
+    <text x="678" y="138" text-anchor="middle" fill="var(--muted)" font-size="9">自动下发到</text>
+    <text x="678" y="156" text-anchor="middle" fill="var(--muted)" font-size="9">全部子表聚合</text>
+    <text x="678" y="180" text-anchor="middle" fill="var(--muted)" font-size="9">可按标签分组：</text>
+    <text x="678" y="198" text-anchor="middle" fill="var(--ink)" font-size="9">"各厂区平均电流"</text>
+    <text x="678" y="220" text-anchor="middle" fill="var(--muted)" font-size="8.5">一条 SQL 出结果</text>
+    <line x1="560" y1="160" x2="608" y2="160" stroke="var(--accent-3)" marker-end="url(#ar27a)"/>
+
+    <text x="16" y="318" fill="var(--muted)" font-size="9.5">图例：设备一台一张子表，同类设备共享超级表模板，标签静态存储——查询始终从超级表出发；这套组合让"设备数量爆炸"不再拖垮索引，是应对高基数的核心思路</text>
+  </svg>
+  </div>
+
+  <p>把这张图记住，TDengine 的一半设计就懂了：<strong>写路径天然按设备分表追加，读路径始终从超级表出发聚合</strong>。官方把它包装成"全栈时序数据处理平台"：缓存、流式计算、数据订阅长在内核里，原本要四件套搭的管道一个项目顶上，这是"极简"卖点的由来。内核用 C 写成、无第三方依赖，第 3 期再拆 vnode 架构。</p>
+</section>
+
+<!-- ================= 03 关键数据 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>关键数据与版本演进：国产时序库的十年</h2>
+  <p>社区面上（2026-09-19 核对）：taosdata/TDengine 仓库 <strong>25.1k Stars、5.0k Forks</strong>，C 语言编写，<strong>AGPL-3.0</strong> 协议，About 自我定位"面向工业物联网场景的高性能、可扩展时序数据库"（GitHub 仓库页）。官方 README 给出另一个有分量的数字：<strong>全球超过 73 万个运行实例</strong>。性能口径，官方《产品简介》自报：<strong>读写较通用数据库快 10 倍以上、存储成本不到 1/10</strong>，TSBS 基准领先 TimescaleDB 与 InfluxDB——注意是官方自报，选型前拿自己的数据集实测。</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>版本线</th><th>当前（2026-09）</th><th>定位</th></tr></thead>
+    <tbody>
+      <tr><td>3.4.1（当前主线）</td><td><strong>3.4.1.6</strong>（2026-04-30，GitHub Latest）</td><td>本系列基准</td></tr>
+      <tr><td>3.4.0</td><td>3.4.0.0（2026-01-08）</td><td>3.4 大版本起点，产品线命名 TDengine TSDB</td></tr>
+      <tr><td>3.3.8</td><td>3.3.8.8（2025-12-02）</td><td>上一代稳定线</td></tr>
+      <tr><td>3.3.6</td><td>官方文档标注 LTS，持续补丁</td><td>长期支持线，仍在发版</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">数据来源：GitHub Releases 与仓库页、docs.taosdata.com 版本选择器（当前线 v3.4.1），2026-09-19 核对。社区版（TSDB-OSS）文档全部公开，企业版另计。</p>
+  <p>演进看四个节点：<strong>2019 年 7 月 12 日</strong>，涛思数据把核心代码放上 GitHub，冲上趋势榜全球第一；<strong>2020 年 8 月</strong>，2.0 发布，分布式集群功能彻底开源；<strong>2022 年 8 月 13 日</strong>，3.0 重构分布式架构、引入 Raft，官方口径支持 10 亿时间线、100 数据节点，同年推出全托管云服务；<strong>2026 年</strong>，3.4 线把产品线命名为 TDengine TSDB，旁边长出 AI 原生工业数据管理平台 IDMP。十年，它从"国产创业项目"长成了时序赛道被认真讨论的选项。</p>
+</section>
+
+<!-- ================= 04 对比 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>与同类对比：三条技术路线，三种取舍</h2>
+  <p>时序库这个赛道玩家不少，选型视角一句话画像（均为公开事实，2026-09 核对）：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>项目</th><th>技术路线</th><th>许可证</th><th>现状（2026-09）</th></tr></thead>
+    <tbody>
+      <tr><td><strong>TDengine 3.4.1</strong></td><td>自研 C 内核；超级表模型；缓存/流计算/订阅内建</td><td>AGPL-3.0</td><td>活跃，Latest 3.4.1.6（2026-04-30），25.1k Stars</td></tr>
+      <tr><td>InfluxDB</td><td>1.x/2.x 为 Go 写的 TSM 引擎；3.x 用 Rust + Apache Arrow/DataFusion 推倒重写（2025-04 GA）</td><td>MIT/Apache-2.0</td><td>活跃；3.x 不再支持 Flux 语言，查询改 SQL/InfluxQL</td></tr>
+      <tr><td>TimescaleDB</td><td>PostgreSQL 扩展，完整 SQL 生态直接复用</td><td>Apache-2.0（2023 年 4 月起含压缩与连续聚合）</td><td>活跃；PG 生态加时序能力的首选之一</td></tr>
+      <tr><td>OpenTSDB</td><td>架构在 HBase 上的老一代时序库</td><td>LGPL-2.1</td><td>最新稳定版停在 2.4.1（2021-09），社区基本停更</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>TDengine 赢在哪？不是"每个指标都最强"——TimescaleDB 的 SQL 兼容更好，InfluxDB 的生态牌子更老。<strong>它赢在数据模型与产品形态的匹配度</strong>：设备多、类型规整的物联网场景里，"一个数据采集点一张表 + 超级表"把建模、压缩、聚合查询一起解决；缓存、流式计算、数据订阅内建，部署面少一串组件，运维成本是真金白银的差价。代价也要看清：<strong>AGPL-3.0 对"改造后对外分发 SaaS"的公司不友好</strong>，自用无碍；自研内核意味着 SQL 方言与工具链要跟着它走，通用性不如 PG 系。没有全能冠军，只有场景匹配。</p>
+</section>
+
+<!-- ================= 05 场景 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>什么场景该选它（以及什么场景是杀鸡用牛刀）</h2>
+  <div class="card">
+    <p><strong>✅ 适合：</strong></p>
+    <ul>
+      <li><strong>物联网 / 工业数据采集：</strong>设备多、上报频繁、指标规整——电表、水气表、网关、车联网，超级表模型正对口；</li>
+      <li><strong>IT 运维监控指标：</strong>服务器、中间件的指标采集与告警聚合，写入与降采样都是强项；</li>
+      <li><strong>想收敛部署面：</strong>缓存、流式计算、数据订阅内建，替代"消息队列 + 缓存 + 时序库 + 流计算"一长串管道（公司主栈正看中这层）；</li>
+      <li><strong>数据只进不改、以时间为轴：</strong>追加写 + 聚合读的模式越纯粹，它跑得越快。</li>
+    </ul>
+    <p><strong>❌ 不必：</strong></p>
+    <ul>
+      <li><strong>强事务业务库：</strong>订单、账务这类要跨表事务、复杂关联更新的场景，交给 MySQL/PostgreSQL，别硬塞时序库；</li>
+      <li><strong>单机小量数据：</strong>一天几千行的设备日志，SQLite 就够，引入分布式时序库是杀鸡用牛刀；</li>
+      <li><strong>深度依赖 PG 生态：</strong>已有大量 PostgreSQL 工具链与 DBA 积累的团队，TimescaleDB 的迁移成本低得多。</li>
+    </ul>
+  </div>
+  <p>一条判断捷径：<strong>先看数据形状——本质是"设备按时间追加、读时按窗口聚合"的量测值，TDengine 进候选；"既要写又要改还要连表事务"，留在通用数据库。</strong>建模方法的细节与写读性能调优，每日微课程线已有两期专题，本系列不重复展开：</p>
+  <div class="note">
+    <p><strong>延伸阅读（每日微课程线，建模与调优不重讲）：</strong></p>
+    <ul>
+      <li><a href="../../daily-tech-course/lessons/0015-tdengine-supertable.html">第 0015 期 · TDengine 超级表与子表数据建模</a>——建模方法与四条架构权衡，从使用视角讲；</li>
+      <li><a href="../../daily-tech-course/lessons/0022-tdengine-write-read-performance.html">第 0022 期 · TDengine 时序数据写入与查询性能优化</a>——建库参数、攒批写入与查询改造。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= 06 quiz ================= -->
+<section>
+  <h2><span class="sec-num">06</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. "一个数据采集点一张表"是什么意思？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，子表通常包含多个采集列（电流、电压等），不是一列一张表。","对的：每台设备一张子表，同类设备共享超级表模板，差异用标签描述。","不对，所有设备挤一张大表正是它要避免的高基数困境。"]'>
+        <li class="quiz-option">每个采集指标单独建一张表</li>
+        <li class="quiz-option">每台设备一张子表，同类设备共用超级表模板</li>
+        <li class="quiz-option">所有设备的数据合并进一张大宽表</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 超级表的"标签列"存的是什么？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，随时间变化的量测值是采集列，标签不存这些。","不对，标签在建子表时就写死了，不随每条数据写入。","对的：标签是设备的静态属性（厂区、分组、型号），存在子表上、不随数据重复存储，查询时用来分组筛选。"]'>
+        <li class="quiz-option">随时间变化的量测值，每条数据都带</li>
+        <li class="quiz-option">每条上报数据的附加字段，逐条写入</li>
+        <li class="quiz-option">设备的静态属性，建子表时写死在子表上</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 关于 TDengine 的许可证与版本，下列说法正确的是？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：社区版采用 AGPL-3.0，公司内部自用没有问题；对外改造分发时要留意协议传染性。","不对，仓库许可证是 AGPL-3.0，不是 Apache-2.0。","不对，分布式集群功能在 2.0（2020 年 8 月）就已开源。"]'>
+        <li class="quiz-option">社区版采用 AGPL-3.0，自用无碍、对外分发需谨慎</li>
+        <li class="quiz-option">采用 Apache-2.0，可以随意闭源商用</li>
+        <li class="quiz-option">集群功能只在企业版提供，社区版没有</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. 按本期的判断捷径，哪个场景最不该选 TDengine？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，这是典型的物联网采集场景，超级表模型正对口。","不对，监控指标的追加写与降采样聚合是它的强项。","对的：跨表事务、复杂关联更新的业务系统该交给通用关系库，硬塞时序库两头别扭。"]'>
+        <li class="quiz-option">十万块电表，每秒上报读数，按厂区聚合分析</li>
+        <li class="quiz-option">服务器监控指标采集，每 10 秒出聚合告警</li>
+        <li class="quiz-option">订单系统要跨表事务与复杂关联更新</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 07 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：设备几十上百万台，"一个数据采集点一张表"不会把表数量爆炸成灾难吗？MySQL 分表为什么撑不住，TDengine 却撑得住？</summary>
+    <div class="details-body">
+      <p>直觉的顾虑来自 MySQL 时代的教育：表多了元数据膨胀、文件句柄暴涨、跨表查询要人肉 UNION。但这些痛点的根子不在"表多"本身，而在通用数据库为"少量大表"设计——每张表都是一等公民，元数据全局共享、索引逐表维护。TDengine 敢这么做，靠三件事：<strong>其一，子表不是一等公民</strong>——它只是超级表模板的实例化，元数据为时序场景专门设计，单节点可管理十万到百万级子表；<strong>其二，分而治之是设计目标</strong>——子表按设备分布到 vnode，"表多"摊薄成"每节点适度多"，写入并行度随设备数提升；<strong>其三，查询从超级表进</strong>——聚合下发由内核完成，跨表成本被引擎内部化。反观 MySQL 手工分表：分表键之外的第二维查询全靠人排，结构变更要逐表执行——TDengine 用模板把"结构"收敛成一份、把"数据"摊开成千万份，正好吃定时序场景"结构同构、数据异构"的特点。一句话：<strong>表爆炸是不是灾难，取决于引擎为哪种数据形状设计——TDengine 为时序设计，表多反而是主场。</strong></p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：公司已经用 MySQL 按月分表存了几年的设备数据，现在评估迁到 TDengine，收益与成本各该怎么算？给出你的评估框架。</summary>
+    <div class="details-body">
+      <p>这种迁移的陷阱是只算"性能收益"，按四步框架过一遍。<strong>一算查询匹配度：</strong>把现有慢查询清单列出来——大都是"按设备 + 时间窗口聚合"，超级表 + 降采样就是降维打击；若大量是跨维度复杂关联，收益打折，那部分数据本就不该进时序库。<strong>二算存储账：</strong>对比现网 MySQL 磁盘占用与压缩后体积（官方口径 1/10，实测为准），乘以年增长量与单价，这是最硬的钱；<strong>三算迁移与双写成本：</strong>历史数据导入、新数据双写验证、SQL 方言改写，逐项估人天——历史数据可只迁聚合结果或冷归档，不必全量搬家；<strong>四算运维与合规：</strong>团队养不养得起新内核的运维技能，AGPL-3.0 对使用形态（自用/对外分发）有无影响。我的倾向：<strong>先拿最痛的一条查询链路做影子验证——双写两周，对比查询耗时与磁盘曲线，用数据说服团队。</strong>公司主栈已在用它的场景，迁移还多一层"运维技能现成"的加成，评估时别漏计。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 08 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>时序数据的三堵墙：写入吞吐、存储成本、降采样查询——通用数据库为"行的事务"设计，时序场景要"列的聚合"；</li>
+      <li>TDengine = 高性能、集群开源、云原生时序库 + 内建缓存/流式计算/数据订阅，主打"极简时序数据平台"；</li>
+      <li>心智模型：一个数据采集点一张子表，超级表管一类设备——采集列随数据走，标签写死在子表，查询从超级表进；</li>
+      <li>数据面：25.1k Stars（2026-09-19）；73 万+ 运行实例（README 口径）；AGPL-3.0；基准版本 3.4.1.6（GitHub Latest，2026-04-30）；</li>
+      <li>选型捷径：数据是"设备按时间追加、按窗口聚合"就进候选；强事务、深度依赖 PG 生态就绕道。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 2 期《5 分钟跑起来》——从安装到第一张超级表：装好社区版，进 taos 命令行，亲手建超级表、写设备数据，用官方演示工具把写入跑出性能数字，命令与输出逐条对照官方文档。</p>
+  <p><strong>Primary source：</strong><a href="https://docs.taosdata.com/product-intro/" target="_blank" rel="noopener">TDengine 官方文档 · 产品简介</a>——本期定位、内建组件与性能口径均出自该页；版本与发布记录见 <a href="https://github.com/taosdata/TDengine/releases" target="_blank" rel="noopener">GitHub Releases</a>，快速体验命令见 <a href="https://docs.taosdata.com/get-started/docker/" target="_blank" rel="noopener">官方文档 · 用 Docker 快速体验</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev">← 课程目录</span>
+  <a class="next" href="0028-tdengine-quickstart.html">下一期：5 分钟跑起来 TDengine →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

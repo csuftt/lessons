@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · TDengine 系列第 2 期:5 分钟跑起来 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0028</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0027-tdengine-what-and-why.html">上一期:0027</a> · TDengine 系列第 2 期 / 共 5 期 · <a href="https://www.taosdata.com" target="_blank" rel="noopener">taosdata.com ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · TDENGINE 系列第 2 期:5 分钟跑起来</p>
+  <h1>5 分钟跑起来 TDengine:Docker 起服务,亲手建出第一张超级表</h1>
+  <p class="subtitle">上一期立住了心智模型:TDengine 是为时序数据而生的数据库,"一个数据采集点一张表"加超级表是它的招牌设计。这一期把这句话变成实物——Docker 一条命令起服务,进命令行建库、建超级表、建子表,用自动建表 INSERT 写入设备数据再查回来,最后用官方压测工具 taosBenchmark 一条命令灌进 1 亿条看看成色。全文基于 v3.4.x 稳定线(文档站 Latest v3.4.2;Docker Hub 社区镜像 tdengine/tsdb:latest 当前为 3.4.2.8,2026-08-31 更新;GitHub Releases Latest 为 ver-3.4.1.6,2026-04-30 发布——发布页更新滞后于镜像线,以官方文档与镜像为准,2026-09-19 复核),命令与预期输出逐字对照 docs.taosdata.com 官方文档,安装选型与高频报错一并给全,跑不通先对号入座再怀疑人生。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 时序数据库 · C · AGPL-3.0</span>
+    <span class="tag">📦 基于 v3.4.x(镜像 3.4.2.8)</span>
+    <span class="tag-date">📅 2026-09-19 · 第 2 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 路线 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>本期路线与跑通判定</h2>
+  <p>五步路线:<strong>起容器 → 判就绪 → 建库建超级表 → 写入 → 查询验证</strong>。全部走完,三条判定都满足才算跑通:</p>
+  <div class="card">
+    <ul class="steps">
+      <li>① <strong>容器健康:</strong><code>docker ps</code> 的 STATUS 字段显示 <code>Up ... (healthy)</code>——这是官方文档给出的判定口径,不是"转起来了就行";</li>
+      <li>② <strong>命令行就位:</strong><code>taos</code> 进入 shell 后提示符 <code>taos&gt;</code> 出现,<code>show databases;</code> 能看到 information_schema 与 performance_schema 两个系统库(官方文档原样输出);</li>
+      <li>③ <strong>数据闭环:</strong>写进去的数据查得回来——自己建的子表能 SELECT 出刚写入的行,官方压测后 <code>SELECT COUNT(*)</code> 返回 100000000(官方文档原样输出)。</li>
+    </ul>
+  </div>
+  <p>上一期我们认识了 TDengine:一颗专为时序数据设计的心脏,25,127 个 GitHub stars(2026-09-19 数据),物联网、IT 运维这些"设备疯狂吐数"的场景是它的主场。本期你会亲手用到它最招牌的三件套——<strong>超级表、子表、标签</strong>——看看它们在 SQL 里长什么样。</p>
+</section>
+
+<!-- ================= 02 选型 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>安装方式选型:三条路,本期走 Docker</h2>
+  <p>官方快速上手栏目给的三条路:<strong>Docker 快速体验</strong>、<strong>安装包快速体验</strong>、<strong>云服务快速体验</strong>。加上 Debian/Ubuntu 可用的官方 apt 仓库,常见四条路:</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>方式</th><th>怎么装</th><th>适合谁</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Docker(本期主线)</strong></td><td><code>docker pull</code> + <code>docker run</code> 两条命令,一条命令卸载:<code>docker rm -f</code></td><td>最快跑起来、环境干净不污染系统,官方快速上手首推</td></tr>
+      <tr><td>安装包(tar.gz)</td><td>解压后 <code>sudo ./install.sh</code>,systemd 管理服务(<code>systemctl status taosd</code>)</td><td>生产 Linux 服务器、无容器环境</td></tr>
+      <tr><td>apt 仓库(Debian/Ubuntu)</td><td>官方源 <code>repos.taosdata.com/tdengine-stable</code>,<code>sudo apt-get install tdengine</code></td><td>Debian/Ubuntu 长期使用、方便升级</td></tr>
+      <tr><td>云服务</td><td>免安装的托管版(TDengine Cloud)</td><td>不想管运维、直接写应用</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p><strong>本期选 Docker</strong>,图的是命令能逐字对照官方文档、用完即删。动手前先认清镜像名——官方文档有一条例程必读的注记:<strong>自 3.3.7.0 版本起,社区版镜像由 <code>tdengine/tdengine</code> 改名为 <code>tdengine/tsdb</code>,企业版由 <code>tdengine/tdengine-ee</code> 改名为 <code>tdengine/tsdb-ee</code></strong>。老教程里随处可见的 <code>tdengine/tdengine</code> 已停更(停留在 3.3.6.x),开源系列用社区版 <code>tdengine/tsdb</code>。</p>
+  <div class="note">
+    <p><strong>版本三渠道,别只盯一处:</strong>官方文档站 Latest 为 v3.4.2;Docker Hub 社区镜像 <code>tdengine/tsdb:latest</code> 当前为 3.4.2.8(2026-08-31 更新);而 GitHub Releases 页的 Latest 还停在 ver-3.4.1.6(2026-04-30 发布)——发布页的更新节奏滞后于镜像与文档线。安装类操作以官方文档和镜像仓库为准,这也是读开源项目版本的基本功:同一个项目,不同渠道的"最新"可能不同步。</p>
+  </div>
+  <p>顺带一条冷知识:想让 Windows 直接装服务端?社区版不支持——官方 README 原话,自 3.1.0.0 版本起 Windows 仅在 TSDB-Enterprise 版本中支持。<strong>Windows 用户的正解就是本期主角:Docker</strong>。</p>
+</section>
+
+<!-- ================= 03 安装 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>第一步:拉镜像、起容器(两条命令的事)</h2>
+  <pre><code>docker pull tdengine/tsdb:latest
+
+docker run -d --name tdengine \
+  -p 6030:6030 -p 6041:6041 \
+  tdengine/tsdb:latest</code></pre>
+  <p>对照官方口径说三点。<strong>其一,镜像名</strong>:官方快速上手页用企业镜像 <code>tdengine/tsdb-ee</code> 演示完整功能,社区版把镜像名换成 <code>tdengine/tsdb</code> 即可,启动参数一致。<strong>其二,端口</strong>:官方完整示例映射了 6030、6041、6043、6060、6044-6049(TCP/UDP)、6050、6055 一大串;本期最小化只映射两个——<strong>6030 是服务端 taosd 的原生连接端口</strong>,<strong>6041 是 taosAdapter 组件提供的 HTTP 服务端口(RESTful 与 WebSocket 都走它)</strong>。官方运维文档甚至给过只映射 6041 的最小形态。<strong>其三,数据卷</strong>:认真使用建议按官方运维文档挂载数据与日志目录(<code>-v ~/data/taos/dnode/data:/var/lib/taos</code>、<code>-v ~/data/taos/dnode/log:/var/log/taos</code>),删容器不丢数据;纯练习可省略。</p>
+  <p class="note">默认用户名 / 密码:<code>root / taosdata</code>——后面 REST 验证和登录都用它,先记下。</p>
+</section>
+
+<!-- ================= 04 就绪 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>第二步:判定就绪,进入 taos 命令行</h2>
+  <p>容器起了不等于服务就绪,官方给的判定是看 STATUS 字段:</p>
+  <pre><code>$ docker ps -f name=tdengine
+CONTAINER ID   IMAGE                  STATUS         PORTS          NAMES
+e6f1c2ab9087   tdengine/tsdb:latest   Up 30 seconds (healthy)   0.0.0.0:6030-&gt;6030/tcp, 0.0.0.0:6041-&gt;6041/tcp   tdengine</code></pre>
+  <p class="warn">STATUS 显示 <code>Up ... (healthy)</code> 才算就绪(官方文档原话:"如果该状态的值为 Up ... (healthy), 说明容器已经启动并正常运行")。刚启动的几十秒内可能是 <code>health: starting</code>,等它翻绿再往下走;PORTS 列格式随 Docker 版本略有差异。</p>
+  <p>不进命令行也能先验证服务——taosAdapter 的 REST 接口(官方运维文档原样命令,注意默认密码):</p>
+  <pre><code>curl -u root:taosdata -d "show databases" localhost:6041/rest/sql</code></pre>
+  <p>返回一段 JSON 且 <code>code</code> 为 0,说明 6041 的 HTTP 服务通了。然后进容器、进命令行:</p>
+  <pre><code>$ docker exec -it tdengine bash
+[root@e6f1c2ab9087 /]# taos
+
+taos&gt; show databases;
+              name              |
+=================================
+ information_schema             |
+ performance_schema             |
+Query OK, 2 rows in database (0.033802s)</code></pre>
+  <p>看到 <code>taos&gt;</code> 提示符和两个系统库,跑通判定第②条达成(输出为官方文档原样)。三件事记住:<strong>SQL 以分号结尾才会执行</strong>;系统库 information_schema / performance_schema 存元数据,别往里写;退出命令行输入 <code>q</code> 或 <code>quit</code> 或 <code>exit</code>(官方 CLI 文档口径)。</p>
+</section>
+
+<!-- ================= 05 建模 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>第三步:建库、建超级表、建子表</h2>
+  <p>主菜来了。先建一个库(官方数据建模文档示例,参数看注释):</p>
+  <pre><code>CREATE DATABASE power PRECISION 'ms' KEEP 3650 DURATION 10 BUFFER 16;
+USE power;
+-- PRECISION 'ms':毫秒精度时间戳;KEEP 3650:数据留 3650 天
+-- DURATION 10:每 10 天一个数据文件;BUFFER 16:16MB 写入内存池</code></pre>
+  <p>然后是本期主角——<strong>超级表</strong>(官方建模文档示例,一块智能电表场景:电流、电压、相位三个采集量,位置、分组两个标签):</p>
+  <pre><code>CREATE STABLE meters (
+    ts timestamp,
+    current float,
+    voltage int,
+    phase float
+) TAGS (
+    location varchar(64),
+    group_id int
+);</code></pre>
+  <p>两个语法要点:第 1 列必须是时间戳(<code>ts timestamp</code>);<code>TAGS</code> 括号里定义的是<strong>标签</strong>——设备的静态属性。再建第一张<strong>子表</strong>(官方示例,USING 指定模板,TAGS 给这台设备的标签值):</p>
+  <pre><code>CREATE TABLE d1001
+USING meters (
+    location,
+    group_id
+) TAGS (
+    "California.SanFrancisco",
+    2
+);</code></pre>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 250" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <rect x="20" y="30" width="200" height="190" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="120" y="58" text-anchor="middle" fill="var(--ink)" font-size="13" font-weight="700">超级表 meters(模板)</text>
+    <text x="120" y="82" text-anchor="middle" fill="var(--muted)" font-size="10">列:ts / current / voltage / phase</text>
+    <text x="120" y="100" text-anchor="middle" fill="var(--muted)" font-size="10">标签:location / group_id</text>
+    <text x="120" y="126" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">自身不存数据</text>
+    <text x="120" y="146" text-anchor="middle" fill="var(--muted)" font-size="10">改模板,所有子表立即生效</text>
+    <text x="120" y="176" text-anchor="middle" fill="var(--muted)" font-size="9.5">CREATE STABLE meters (...)</text>
+    <text x="120" y="194" text-anchor="middle" fill="var(--muted)" font-size="9.5">TAGS (location, group_id)</text>
+
+    <rect x="310" y="30" width="200" height="86" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="410" y="54" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">子表 d1001</text>
+    <text x="410" y="74" text-anchor="middle" fill="var(--muted)" font-size="9.5">标签:SanFrancisco · 2</text>
+    <text x="410" y="94" text-anchor="middle" fill="var(--muted)" font-size="9.5">存这一台电表的全部数据行</text>
+    <rect x="310" y="134" width="200" height="86" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="410" y="158" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">子表 d1002</text>
+    <text x="410" y="178" text-anchor="middle" fill="var(--muted)" font-size="9.5">标签:SanFrancisco · 2</text>
+    <text x="410" y="198" text-anchor="middle" fill="var(--muted)" font-size="9.5">由 INSERT 自动建表创建</text>
+
+    <rect x="580" y="72" width="160" height="106" rx="10" fill="var(--warn-bg)" stroke="var(--accent)"/>
+    <text x="660" y="98" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">查询超级表</text>
+    <text x="660" y="120" text-anchor="middle" fill="var(--muted)" font-size="9.5">= 聚合全部子表</text>
+    <text x="660" y="140" text-anchor="middle" fill="var(--muted)" font-size="9.5">可用标签筛选设备</text>
+    <text x="660" y="162" text-anchor="middle" fill="var(--muted)" font-size="9">WHERE location = '...'</text>
+
+    <defs>
+      <marker id="ar28" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar28a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <line x1="220" y1="73" x2="306" y2="73" stroke="var(--muted)" marker-end="url(#ar28)"/>
+    <line x1="220" y1="177" x2="306" y2="177" stroke="var(--muted)" marker-end="url(#ar28)"/>
+    <text x="262" y="64" text-anchor="middle" fill="var(--muted)" font-size="8.5">CREATE .. USING</text>
+    <text x="262" y="168" text-anchor="middle" fill="var(--muted)" font-size="8.5">INSERT .. USING</text>
+    <line x1="510" y1="90" x2="576" y2="110" stroke="var(--accent-3)" marker-end="url(#ar28a)"/>
+    <line x1="510" y1="160" x2="576" y2="140" stroke="var(--accent-3)" marker-end="url(#ar28a)"/>
+    <text x="20" y="242" fill="var(--muted)" font-size="9.5">一个数据采集点一张子表,超级表是它们的模板与聚合入口——本期先会用,第 3 期拆原理</text>
+  </svg>
+  </div>
+
+  <p>把三个词一次说清(点到为止,原理留给下期):<strong>超级表</strong>是同类设备的模板,自己不存一行数据;<strong>子表</strong>才真正存数据,且"一个数据采集点一张表";<strong>标签</strong>是挂在子表上的静态属性,建表时给值,之后随时可改。对超级表查询时,TDengine 先按标签筛出子表、再聚合时序数据——这就是"千万设备轻松聚合"的入口。</p>
+</section>
+
+<!-- ================= 06 写入查询 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>第四步:写入与查询——自动建表是灵魂</h2>
+  <p>实战里最常用的写入姿势是<strong>自动建表</strong>(官方建模文档示例):设备 d1002 的表还不存在?一条 INSERT 先建表再写入:</p>
+  <pre><code>INSERT INTO d1002
+USING meters
+TAGS (
+    "California.SanFrancisco",
+    2
+) VALUES (
+    NOW,
+    10.2,
+    219,
+    0.32
+);
+-- NOW = 当前时间戳;子表已存在则直接写入,不存在先自动建表(官方文档口径)</code></pre>
+  <p>它还支持一条语句写多张表——官方文档给的三表九条数据的例子,<code>INSERT INTO d1001 USING meters TAGS (...) VALUES (...),(...),(...) d1002 USING meters TAGS (...) VALUES ... d1003 ...</code>,官方说明:这条语句共写入 9 条数据。批量上报场景就是它。写入之后验证(查询列名与输出格式随数据而异,能查回刚写入的行即达成判定③):</p>
+  <pre><code>taos&gt; SELECT * FROM d1002;
+taos&gt; SELECT AVG(current), MAX(voltage), MIN(phase) FROM meters;
+-- 查超级表 = 聚合全部子表;加 WHERE location = '...' 即按标签筛选</code></pre>
+
+  <p>最后加个彩蛋,亲手感受一下它的写入成色。官方自带压测工具 taosBenchmark,一条命令:</p>
+  <pre><code>taosBenchmark -y</code></pre>
+  <p>它会自动在 test 库创建超级表 meters,<strong>10,000 张子表(表名 d0 到 d9999)、每张 10,000 条记录,总共写入 1 亿条</strong>——官方文档原话:即便在普通 PC 服务器上,这个过程通常也只需要十几秒。然后查总数(官方文档原样输出):</p>
+  <pre><code>taos&gt; SELECT COUNT(*) FROM test.meters;
+
+         count(*)         |
+==========================
+              100000000 |
+Query OK, 1 row(s) in set (0.075247s)</code></pre>
+  <p class="note">1 亿条,总数查询 0.075 秒返回(官方文档样例耗时);聚合查询 AVG / MAX / MIN 官方口径约 0.09 秒。上一期说的"为写入而生",到这里你亲手摸过了。想停?练习环境直接 <code>docker rm -f tdengine</code> 连容器带数据一起清掉,重来零成本。</p>
+</section>
+
+<!-- ================= 07 报错 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>高频报错速查:现象 → 原因 → 解法</h2>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>现象</th><th>原因</th><th>解法</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>docker pull</code> 卡住、超时</td>
+        <td>访问 Docker Hub 网络不稳,第一高频翻车点</td>
+        <td>配置镜像加速器;或从官方产品下载中心的 Docker 镜像下载页取离线镜像,<code>docker load</code> 后按页面提示改名称与标签(官方口径)</td>
+      </tr>
+      <tr>
+        <td>容器 STATUS 一直 <code>Restarting</code> 或 <code>unhealthy</code></td>
+        <td>宿主机端口被占用,或容器初始化失败</td>
+        <td><code>docker logs tdengine</code> 看日志定位;确认宿主机 6030/6041 没被别的进程占用</td>
+      </tr>
+      <tr>
+        <td>启动报端口冲突</td>
+        <td>6041/6030 已被本机其他服务或旧容器占用</td>
+        <td><code>docker ps -a</code> 清理旧容器,或改映射端口如 <code>-p 6042:6041</code></td>
+      </tr>
+      <tr>
+        <td>taos 报连接失败、进不去</td>
+        <td>服务端未就绪(<code>health: starting</code>)或在容器外直连</td>
+        <td>等 STATUS 变 healthy;进容器执行 taos;官方提醒:从容器外用原生连接比较复杂,RESTful/WebSocket(6041)是最简单的方法</td>
+      </tr>
+      <tr>
+        <td>原生连接报客户端/服务端不兼容</td>
+        <td>客户端驱动 taosc 与服务端 taosd 版本不一致</td>
+        <td>官方文档原话:"为避免客户端驱动和服务端不兼容,请使用一致的版本";更推荐 WebSocket 连接——无需安装客户端驱动,走 6041</td>
+      </tr>
+      <tr>
+        <td>Windows 安装服务端失败</td>
+        <td>社区版不提供 Windows 服务端(3.1.0.0 起仅企业版支持)</td>
+        <td>Windows 上用 Docker 跑社区版,或使用官方企业版安装包</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ================= 08 quiz ================= -->
+<section>
+  <h2><span class="sec-num">08</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. Docker 起的 TDengine 容器,官方文档判定"启动成功"的口径是什么?</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对,容器进程在跑不等于服务就绪,官方以健康检查为准。","不对,Exit 状态说明容器已经退出,那是启动失败。","对的:官方文档原话——STATUS 字段显示 Up ... (healthy) 说明容器已启动并正常运行。"]'>
+        <li class="quiz-option">容器进程存在即为成功</li>
+        <li class="quiz-option">STATUS 显示 Exited (0) 也算成功</li>
+        <li class="quiz-option">STATUS 显示 Up ... (healthy)</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 端口 6041 上跑的是什么服务?</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对,6030 才是服务端 taosd 的原生连接端口。","对的:6041 是 taosAdapter 提供的 HTTP 服务端口,RESTful 与 WebSocket 都走它。","不对,SSH 是 22 端口的事,与 TDengine 无关。"]'>
+        <li class="quiz-option">taosd 的原生连接端口</li>
+        <li class="quiz-option">taosAdapter 的 HTTP 服务(RESTful/WebSocket)</li>
+        <li class="quiz-option">容器 SSH 登录端口</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 关于超级表与子表的关系,哪个说法是对的?</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的:超级表是模板,自身不存数据,数据都存在子表里;对超级表查询即聚合全部子表。","不对,恰恰相反:数据永远存在子表里,超级表一行数据都没有。","不对,子表隶属于超级表,用 CREATE TABLE .. USING / INSERT .. USING 关联。"]'>
+        <li class="quiz-option">超级表是模板不存数据,数据都在子表里</li>
+        <li class="quiz-option">数据存在超级表里,子表只是视图</li>
+        <li class="quiz-option">子表和超级表是两套独立的表</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. 执行 INSERT INTO d1002 USING meters TAGS (...) VALUES (...) 时子表 d1002 不存在,会发生什么?</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对,报错就不叫自动建表了,官方设计就是为简化设备接入。","不对,建空表不写数不符合语义,这条语句就是写入语句。","对的:官方文档口径——子表不存在时先自动创建该子表,再执行写入;已存在则直接写入。"]'>
+        <li class="quiz-option">报错,必须先 CREATE TABLE 再写入</li>
+        <li class="quiz-option">只建空表,数据被丢弃</li>
+        <li class="quiz-option">先自动创建子表,再写入这条数据</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 09 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>思考题(点击展开解析)</h2>
+  <details class="q-card">
+    <summary>思考一:TDengine 坚持把"一台设备"拆成"一张子表",而不是像传统关系库那样把所有设备塞进一张大宽表——这个反直觉的设计,到底换来了什么?</summary>
+    <div class="details-body">
+      <p>官方数据建模文档把账算得很清楚,收益全在时序数据的特性上。<strong>其一写入无锁</strong>:一张子表只有一个写入者(这台设备自己),不同设备互不干扰,不需要锁保护——大宽表里成千上万个写入者挤一张表,网络时序一乱就得加锁排队;<strong>其二追加写</strong>:单设备数据按时间递增,写入就是顺序追加,这是磁盘最喜欢的访问模式;<strong>其三读得快</strong>:一台设备的数据连续成块存储,查它的时间段数据几乎不碰随机读;<strong>其四压缩率高</strong>:块内列式存储,电流电压这种缓变量相邻值高度相似,压缩算法吃得很饱。代价是什么?单表没法跨设备聚合——于是超级表来补:模板统一结构、标签负责筛选,聚合时先按标签选子表再合并。所以这套设计不是"为了拆而拆",而是<strong>把"写"和"跨设备查"拆到两种结构里,各自做到最优</strong>。你今天敲的 CREATE STABLE 加 TAGS,就是这套权衡的语法入口。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二:本期是"一个容器跑一切"的单机沙盘。它与生产环境的 TDengine 集群差在哪?今天学的哪些东西到了集群里依然成立?</summary>
+    <div class="details-body">
+      <p>分两层看。<strong>今天学到的东西大部分是集群通用的</strong>:SQL 语法面(建库建表、自动建表写入、超级表查询)、标签与子表的建模方式、taos 命令行与 REST 接口的用法——这些在单机和集群上完全一致,因为 TDengine 从设计之初就是分布式架构,单机只是"副本数为 1 的最小集群"。<strong>沙盘形态特有的至少三处</strong>:其一,没有多节点与数据分片——生产集群里数据按 vnode 分布在多个 dnode 上,官方运维文档的集群部署一节讲了 firstEp、TAOS_FQDN 这些今天没出现的配置,官方甚至给了三节点 docker-compose 示例;其二,没有副本与高可用——生产用 <code>replica</code> 参数多副本容错,单容器挂了数据就没了(这也是练习环境敢用 <code>docker rm -f</code> 的原因);其三,资源与容量——KEEP、BUFFER、DURATION 这些今天照抄的参数,生产上要按数据量与硬件重新算。正确的学习姿势:<strong>沙盘练语法,集群学分布</strong>——第 3 期讲 vnode 与数据分片时,你会看到今天这条单机路线如何横向铺开成一个集群。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 10 要点 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这四条:</strong></p>
+    <ul>
+      <li>两条命令起步:<code>docker pull tdengine/tsdb:latest</code> + <code>docker run</code>——镜像名 3.3.7.0 起改成了 tdengine/tsdb(社区版),老教程里的 tdengine/tdengine 已停更;6030 原生连接、6041 REST/WebSocket,默认账号 root/taosdata;</li>
+      <li>就绪判定看 STATUS:<code>Up ... (healthy)</code> 才算数,然后 <code>docker exec -it tdengine taos</code> 看到 <code>taos&gt;</code> 提示符,show databases 出来两个系统库;</li>
+      <li>超级表三件套:CREATE STABLE 定模板、TAGS 挂静态属性、INSERT .. USING 自动建表——一个数据采集点一张子表,聚合交给超级表;</li>
+      <li>成色实测:taosBenchmark -y 一条命令写 1 亿条,普通 PC 十几秒,COUNT(*) 0.075 秒返回(官方文档样例)——"为写入而生"不是口号。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告:</strong>第 3 期《核心概念与整体架构》——超级表背后的建模体系、vnode 与数据分片怎么协作,以及一张整体架构图:今天你写的每一条数据,下期给出它在集群里的完整旅程。Primary source:<a href="https://docs.taosdata.com/quick-start/download-and-install/docker/" target="_blank" rel="noopener">TDengine 官方文档 · 用 Docker 快速体验</a>——本期 Docker 命令、命令行示例与压测输出出处;安装包方式见 <a href="https://docs.taosdata.com/quick-start/download-and-install/package/" target="_blank" rel="noopener">用安装包快速体验</a>,超级表与子表语法见 <a href="https://docs.taosdata.com/quick-start/data-modeling/" target="_blank" rel="noopener">数据建模</a>,容器部署细节(数据卷、集群 docker-compose)见 <a href="https://docs.taosdata.com/operations-and-tooling/operations/deployment/docker/" target="_blank" rel="noopener">运维指南 · Docker 部署</a>,版本与发布记录见 <a href="https://github.com/taosdata/TDengine/releases" target="_blank" rel="noopener">GitHub Releases</a>。</p>
+  <div class="note">
+    <p><strong>延伸阅读(每日微课程线,建模与调优不重讲):</strong></p>
+    <ul>
+      <li><a href="../../daily-tech-course/lessons/0015-tdengine-supertable.html">第 0015 期 · TDengine 超级表与子表数据建模</a>——今天超级表、子表、标签只点到为止,完整建模方法论(怎么选标签、怎么设计列)在那边讲透;</li>
+      <li><a href="../../daily-tech-course/lessons/0022-tdengine-write-read-performance.html">第 0022 期 · TDengine 时序数据写入与查询性能优化</a>——今天 taosBenchmark 跑出的 1 亿条只是开始,写入与查询的性能调优见该课。</li>
+    </ul>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0027-tdengine-what-and-why.html">← 上一期:认识 TDengine</a>
+  <a class="next" href="0029-tdengine-core-concepts-architecture.html">下一期:核心概念与整体架构 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对,再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

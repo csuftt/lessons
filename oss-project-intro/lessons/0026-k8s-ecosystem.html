@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Kubernetes 系列第 6 期：生态与进阶 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0026</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0025-k8s-source-reading.html">上一期：0025</a> · Kubernetes 系列第 6 期 / 共 6 期 · <a href="https://kubernetes.io" target="_blank" rel="noopener">kubernetes.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · KUBERNETES 系列第 6 期：生态与进阶</p>
+  <h1>Kubernetes 生态与进阶：CNCF 生态地图与继续学习路线</h1>
+  <p class="subtitle">上一期我们进了源码。系列最后一期把镜头拉远——单学一个项目是为了看清一类版图，而 K8s 的版图叫 CNCF。这一期解决四个问题：周边工具地图怎么读（按"离集群的距离"分层，每类给"是什么+什么时候需要"）、CRD 与 Operator 凭什么是生态的接入插座、十年版本演进有哪些里程碑、官方文档怎么查与接下来动手玩什么。数字与版本逐条注明来源与统计时间。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 容器编排平台 · Go · Apache-2.0</span>
+    <span class="tag">📦 基于 v1.37.x（1.37.0，2026-08-26 发布）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 6 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 路线 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>本期路线：把 K8s 放回生态里看</h2>
+  <p>前五期把 K8s 本体从心智模型讲到源码。但生产上的 Kubernetes 几乎从来不裸奔——装个监控、发个应用、管个证书，都意味着从生态里挑一个项目。<strong>这一期不深入任何工具，只做三件事：画一张地图、讲一个接入插座、给一条学习路线</strong>。先看全文的路标：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>节</th><th>回答的问题</th><th>带走的东西</th></tr></thead>
+    <tbody>
+      <tr><td>02 生态地图</td><td>K8s 周边都有谁，怎么分层记忆</td><td>一张自绘分层图 + CNCF 项目数</td></tr>
+      <tr><td>03 六类周边</td><td>每类工具是什么、什么时候需要</td><td>一张选型速查表</td></tr>
+      <tr><td>04 CRD 与 Operator</td><td>生态工具凭什么能接上集群</td><td>"万物皆资源"与官方口径</td></tr>
+      <tr><td>05 十年演进</td><td>K8s 走过哪些里程碑</td><td>2015→2026 六个节点，注明出处</td></tr>
+      <tr><td>06 继续学习</td><td>文档怎么查、动手玩什么</td><td>/concepts、/tasks、/reference 分工</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note"><span class="h">版本口径</span>系列基准 v1.37.x（1.37.0，2026-08-26 发布，GitHub Latest；kubernetes.io/releases 显示当前维护 1.37/1.36/1.35 三分支、各约一年补丁支持，2026-09-19 复核）。文中数字与工具版本均注明来源与统计时间，工具不逐个钉死小版本。</p>
+</section>
+
+<!-- ================= 02 生态地图 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>CNCF 生态地图：以集群为圆心，按"离 API Server 的距离"分层</h2>
+  <p>先认识圈子本身。CNCF（云原生计算基金会）2015 年随 Kubernetes 1.0 的发布一同成立，K8s 是它的<strong>种子项目</strong>——Google 把 1.0 捐给了这个新基金会（2015-07-21，Google Cloud 官方博客）。十年过去，CNCF 项目主页上列着 <strong>39 个毕业项目、38 个孵化项目</strong>（2026-09 在 cncf.io/projects 逐项清点）：Kubernetes、Prometheus、Envoy、etcd、Harbor、Argo、Helm、Flux 全在其中。别的生态是"围绕某项目的相关工具"，CNCF 是一整个以 K8s 为圆心的技术圈。</p>
+  <div class="diagram">
+  <svg viewBox="0 0 760 400" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar26" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar26a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+    <rect x="130" y="18" width="500" height="44" rx="9" fill="var(--card)" stroke="var(--line)"/>
+    <text x="380" y="37" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">你与团队：声明 YAML · CI 流水线 · Git 仓库</text>
+    <text x="380" y="53" text-anchor="middle" fill="var(--muted)" font-size="9">所有生态工具的输入端都长这样</text>
+
+    <line x1="380" y1="62" x2="380" y2="84" stroke="var(--muted)" marker-end="url(#ar26)"/>
+
+    <rect x="24" y="86" width="226" height="58" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="137" y="107" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">打包与发布 · Helm</text>
+    <text x="137" y="123" text-anchor="middle" fill="var(--muted)" font-size="9">应用模板 + 版本化安装</text>
+    <text x="137" y="137" text-anchor="middle" fill="var(--muted)" font-size="9">相当于 K8s 界的包管理器</text>
+    <rect x="266" y="86" width="226" height="58" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="379" y="107" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">GitOps · Argo CD / Flux</text>
+    <text x="379" y="123" text-anchor="middle" fill="var(--muted)" font-size="9">Git 里的声明就是期望状态</text>
+    <text x="379" y="137" text-anchor="middle" fill="var(--muted)" font-size="9">仓库漂移了自动拉回来</text>
+    <rect x="508" y="86" width="226" height="58" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="621" y="107" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">镜像仓库 · Harbor</text>
+    <text x="621" y="123" text-anchor="middle" fill="var(--muted)" font-size="9">镜像的存、扫、签、复制</text>
+    <text x="621" y="137" text-anchor="middle" fill="var(--muted)" font-size="9">交付链的上游</text>
+
+    <line x1="380" y1="144" x2="380" y2="166" stroke="var(--muted)" marker-end="url(#ar26)"/>
+
+    <rect x="24" y="168" width="226" height="58" rx="9" fill="var(--card)" stroke="var(--line)"/>
+    <text x="137" y="189" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">网关与流量 · Gateway API / Istio</text>
+    <text x="137" y="205" text-anchor="middle" fill="var(--muted)" font-size="9">入口路由、灰度、熔断</text>
+    <text x="137" y="219" text-anchor="middle" fill="var(--muted)" font-size="9">Service 之上的流量层</text>
+    <rect x="266" y="168" width="226" height="58" rx="9" fill="var(--card)" stroke="var(--line)"/>
+    <text x="379" y="189" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">可观测性 · Prometheus + Grafana</text>
+    <text x="379" y="205" text-anchor="middle" fill="var(--muted)" font-size="9">指标采集存储 + 大盘展示</text>
+    <text x="379" y="219" text-anchor="middle" fill="var(--muted)" font-size="9">告警也在这一层</text>
+    <rect x="508" y="168" width="226" height="58" rx="9" fill="var(--card)" stroke="var(--line)"/>
+    <text x="621" y="189" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">扩展插座 · CRD / Operator</text>
+    <text x="621" y="205" text-anchor="middle" fill="var(--muted)" font-size="9">cert-manager、PG Operator 等</text>
+    <text x="621" y="219" text-anchor="middle" fill="var(--muted)" font-size="9">把新领域装成"一种资源"</text>
+
+    <line x1="137" y1="226" x2="300" y2="272" stroke="var(--muted)" stroke-dasharray="5 3" marker-end="url(#ar26)"/>
+    <line x1="379" y1="226" x2="379" y2="272" stroke="var(--muted)" stroke-dasharray="5 3" marker-end="url(#ar26)"/>
+    <line x1="621" y1="226" x2="458" y2="272" stroke="var(--muted)" stroke-dasharray="5 3" marker-end="url(#ar26)"/>
+
+    <rect x="130" y="274" width="500" height="66" rx="9" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="380" y="298" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">Kubernetes 集群（本系列第 3、5 期）</text>
+    <text x="380" y="316" text-anchor="middle" fill="var(--muted)" font-size="9.5">API Server（唯一入口）· etcd · 控制器 · 调度器 · kubelet</text>
+    <text x="380" y="332" text-anchor="middle" fill="var(--muted)" font-size="9.5">声明式 API + level-based 对账，是所有层共同的底座</text>
+
+    <line x1="380" y1="340" x2="380" y2="360" stroke="var(--accent)" marker-end="url(#ar26a)"/>
+    <text x="380" y="376" text-anchor="middle" fill="var(--accent)" font-size="10" font-weight="700">共同姿势：每类工具都是 API Server 的客户端——走同一套认证、同一套 API、同一套对账循环</text>
+  </svg>
+  </div>
+  <p>这张图记忆的重点不是六个名字，而是<strong>分层逻辑：离集群越近的越"基础设施"，离你越近的越"工作流"</strong>。Helm、Argo CD 离你最远——它们改变"你怎么提交期望"；Prometheus、Gateway API 贴着集群——它们扩展"集群怎么提供服务"；CRD/Operator 是插座，把任何新领域装成"一种资源"。最底下那行共同姿势是本期最重要的一句话，第 4 节展开。</p>
+</section>
+
+<!-- ================= 03 六类周边 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>六类周边：是什么，什么时候需要它</h2>
+  <p>地图有名字还不够，关键是<strong>"什么时候轮到它上场"</strong>。下表按引入频率从高到低排，每类给一句定位与引入信号，全部指向官方描述、不展开用法：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>类别 · 代表项目</th><th>是什么</th><th>什么时候需要它</th></tr></thead>
+    <tbody>
+      <tr><td>打包与发布 · Helm</td><td>K8s 的包管理器（helm.sh 原话："The package manager for Kubernetes"；2026-09 查得最新版 4.3.0，CNCF 毕业项目）：一组 YAML 打成 Chart，参数化、版本化安装升级</td><td>应用 YAML 超过两三个文件、想一键升级回滚时；装现成第三方应用几乎必经它</td></tr>
+      <tr><td>GitOps · Argo CD / Flux</td><td>Git 里的声明就是期望状态，工具盯着仓库与集群的漂移自动对账（Argo CD 仓库自述 "Declarative Continuous Delivery for Kubernetes"，24.2k stars，2026-09 实测 GitHub）</td><td>多环境频繁发布、发布要可审计、想让"回滚 = git revert"时</td></tr>
+      <tr><td>可观测性 · Prometheus + Grafana</td><td>Prometheus 拉取并存储指标、Grafana 出大盘，告警也在这层；CNCF 毕业项目</td><td>生产集群第一天就需要。项目池后续专讲 Prometheus 系列，这里只认门</td></tr>
+      <tr><td>镜像仓库 · Harbor</td><td>自托管的企业级镜像仓库：存储、漏洞扫描、镜像签名、跨机房复制（CNCF 毕业项目）</td><td>镜像不放公网、要审计谁推了什么镜像时；第 4 期清单里 image: 的来源就是它</td></tr>
+      <tr><td>网关与流量 · Gateway API / Istio</td><td>Gateway API 是 Ingress 的下一代官方 API（2023-10 发布 v1.0 GA）；Istio 做服务网格，把重试熔断灰度下沉到 Sidecar</td><td>Ingress 注解力不从心、或要跨语言统一治理流量时</td></tr>
+      <tr><td>存储与安全 · CSI 驱动 / cert-manager 等</td><td>CSI 标准接存储后端；cert-manager 自动签发续期 TLS 证书（官方自述："creates TLS certificates ... and renews the certificates before they expire"）</td><td>挂持久卷要挑存储后端、证书申请人工跑到忘记续期时</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note"><span class="h">两个衔接</span>网关一层：Ingress 的运维视角与流量入口选型，见每日微课程线 <a href="../../daily-tech-course/lessons/0024-k8s-ingress-service-traffic.html">第 0024 期 · 流量入口：Service 与 Ingress</a>；可观测一层：本线项目池里 Prometheus 排在后面，届时从 Pull 模型讲到 TSDB。</p>
+</section>
+
+<!-- ================= 04 CRD 与 Operator ================= -->
+<section>
+  <h2><span class="sec-num">04</span>CRD 与 Operator：生态凭什么接上集群</h2>
+  <p>上一节的工具从 Helm 到 cert-manager，来自不同公司、写着不同语言，凭什么都能"插"进 K8s？官方文档《Custom Resources》的定义是出发点：<em>"A custom resource is an extension of the Kubernetes API that is not necessarily available in a default Kubernetes installation."</em>（自定义资源是对 K8s API 的扩展，默认安装里未必有。）而 <strong>CRD 就是声明这种资源的说明书</strong>——写一个 CRD 进集群，API Server 立刻为它开出一条新的 REST 路径：</p>
+  <pre><code># resourcedefinition.yaml 节选 · kubernetes.io《CustomResourceDefinitions》
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: crontabs.stable.example.com   # 名字必须是 &lt;plural&gt;.&lt;group&gt;
+spec:
+  group: stable.example.com           # REST 路径：/apis/&lt;group&gt;/&lt;version&gt;
+  scope: Namespaced
+  names:
+    plural: crontabs                  # kubectl get crontabs，短名 ct
+    kind: CronTab                     # 你的清单里 kind 就写它
+  versions:
+  - name: v1
+    storage: true                     # 存储版本只有一个
+    schema:                           # openAPIV3Schema：字段校验
+      openAPIV3Schema: { type: object, properties: { spec: { ... } } }</code></pre>
+  <p>apply 之后，<code>kubectl get crontabs</code>、RBAC 授权、审计日志、<code>kubectl get -o yaml</code> 全套基础设施<strong>原样生效</strong>——第 5 期讲过的 client-go Informer/list-watch 对自定义资源同样适用：生态工具的开发者等于免费领了一套 K8s 的对账与存储机制。官方文档随后点题：<em>"The Operator pattern combines custom resources and custom controllers. You can use custom controllers to encode domain knowledge for specific applications into an extension of the Kubernetes API."</em>（Operator 模式 = 自定义资源 + 自定义控制器，把某个应用的领域知识编码进 API 扩展。）第 5 期读过的 level-based 对账循环，就是 Operator 的全部内核。</p>
+  <p>举一个直观的例子。<strong>cert-manager 是一个 Operator，它把"证书签发"这个领域知识装成了两种资源</strong>：你声明一个 Certificate 对象（要什么域名、存进哪个 Secret），它的控制器就按期向 CA 申请、签发，并在证书快过期时自动续期——运维从"人肉跑 openssl、记续期日历"变成"声明期望、等对账"。和 ReplicaSet 对账 Pod 是同一个循环，只是领域知识换成了 PKI。</p>
+  <p>为什么说<strong>"万物皆资源"是 K8s 开放性的关键</strong>？反事实推一遍：如果扩展只能改源码、走插件二进制，每个生态项目都要自带鉴权、存储、CLI、高可用方案，K8s 的升级会扯上所有工具的重编译。CRD 把"加一种资源"变成"写一份 YAML"，把"写一个平台"变成"写一个控制器"——生态因此只需要对齐一个接口：<strong>API Server</strong>。这也回答了上一节那张图的"共同姿势"。</p>
+</section>
+
+<!-- ================= 05 十年演进 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>十年演进：从 1.0 到 v1.37 的六个节点</h2>
+  <p>版本节奏先立个坐标系：K8s 每年发三个小版本（1.37/1.36/1.35 三分支同时在维护，各约一年补丁支持，kubernetes.io/releases，2026-09-19 复核）。回头看六个改写了生态格局的节点：</p>
+  <div class="steps">
+    <div class="step"><span class="step-n">1</span><div><strong>2014-06 · 开源：</strong>Google 把内部 Borg 十余年集群经验开源成 Kubernetes（官方"10 Years of Kubernetes"回顾口径，2024-06）。</div></div>
+    <div class="step"><span class="step-n">2</span><div><strong>2015-07-21 · v1.0 与 CNCF 成立：</strong>1.0 在 OSCON 发布同日，Google 将它捐给新成立的 CNCF——API 承诺"v1 稳定兼容"是捐赠的前提。</div></div>
+    <div class="step"><span class="step-n">3</span><div><strong>2018-03-06 · 首个毕业项目：</strong>K8s 成为 CNCF 第一个毕业项目（cncf.io 公告）——生产采用、治理、社区健康度全过线。</div></div>
+    <div class="step"><span class="step-n">4</span><div><strong>2022-05 · v1.24 摘除 dockershim：</strong>内置 Docker 支持移除，运行时全面转向 CRI（containerd/CRI-O）——"K8s 不兼容 Docker"是当年最大的误读，实际只是不再内置那层垫片。</div></div>
+    <div class="step"><span class="step-n">5</span><div><strong>2023-10 · Gateway API v1.0 GA：</strong>Ingress 的继任者正式发布（2023-10-31，SIG-Network），流量入口有了角色分层的官方 API。</div></div>
+    <div class="step"><span class="step-n">6</span><div><strong>2026-08-26 · v1.37 "Garhwal"：</strong>67 项增强（16 项转正、23 项进 beta、27 项进 alpha，官方发布博客）；kubectl 支持更安全的 KYAML 输出格式；HPA 支持缩到零副本进入 beta。</div></div>
+  </div>
+  <p>读这份时间线有一个视角：<strong>K8s 的演进不是"加功能"，而是"把曾经的生态约定收编为官方 API"</strong>——Gateway API 收编了流量入口的碎片化，DRA 在收编 GPU 调度的碎片化。这也是判断"某个周边工具会不会被平台吃掉"的常用框架。</p>
+  <p class="note"><span class="h">延伸一步</span>HPA 的原理视角见每日微课程线 <a href="../../daily-tech-course/lessons/0016-k8s-hpa.html">第 0016 期 · Kubernetes HPA 自动伸缩</a>；v1.37 里 HPA 的 <code>spec.minReplicas: 0</code> 已进 beta，缩容不再受"至少一个副本"的旧约束。</p>
+</section>
+
+<!-- ================= 06 继续学习 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>继续学习路线：官方文档地图 + 动手清单</h2>
+  <p>kubernetes.io 的文档结构三棵树，查之前先分清去哪棵：</p>
+  <div class="steps">
+    <div class="step"><span class="step-n">1</span><div><strong>/docs/concepts —— 查"是什么"：</strong>概念字典，Pod、Service、调度架构都在这；想看底层为什么，回本系列第 3、5 期。</div></div>
+    <div class="step"><span class="step-n">2</span><div><strong>/docs/tasks —— 查"怎么做"：</strong>一段任务一篇：配探针、建 Secret、加 CRD，日常操作九成的疑问在这解决。</div></div>
+    <div class="step"><span class="step-n">3</span><div><strong>/docs/reference —— 查"字段与命令"：</strong>API 字段字典与 kubectl 命令参考，能配哪些字段、默认值是什么，以这棵树为准。</div></div>
+    <div class="step"><span class="step-n">4</span><div><strong>版本对齐的习惯：</strong>文档左下角切版本（当前默认 1.37），读文档先对版本，别拿最新文档对老集群。</div></div>
+  </div>
+  <p>动手建议一条：把<strong>第 2 期那个 minikube 集群重新拉起来，按第 4 期的清单纯手工交付一次，再用 Helm 4 装一个真实应用</strong>（官方 Quickstart 的 podinfo 就行，一条 <code>helm install</code>），最后用 <code>kubectl get crd</code> 看看 cert-manager 或 Helm 装完给你留下了哪些新资源类型——亲手摸过一次"生态工具往集群里注册了什么"，第 4 节的"万物皆资源"就从概念变成了体感。</p>
+</section>
+
+<!-- ================= 07 quiz ================= -->
+<section>
+  <h2><span class="sec-num">07</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. Helm 官方给自己的定位是什么？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["Argo CD 的定位才是把 Git 当期望状态源，Helm 管的是包。","对：helm.sh 原话 The package manager for Kubernetes——Chart 打包、参数化安装升级。","集群创建是 minikube/kubeadm 这类工具的事，Helm 装的是装进集群里的应用。"]'>
+        <li class="quiz-option">K8s 的 GitOps 持续交付工具</li>
+        <li class="quiz-option">K8s 的包管理器：Chart 打包、版本化安装升级</li>
+        <li class="quiz-option">本地集群一键创建工具</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. Operator 模式由哪两部分组成（官方文档口径）？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["CRD 只负责声明新资源类型，没有控制器它只是个能存的对象。","StatefulSet 是内置工作负载对象，与 Operator 模式定义无关。","对：Custom Resources 概念页原话——Operator pattern combines custom resources and custom controllers。"]'>
+        <li class="quiz-option">CRD 与 RBAC 授权规则</li>
+        <li class="quiz-option">StatefulSet 与 Headless Service</li>
+        <li class="quiz-option">自定义资源与自定义控制器</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 2018 年 3 月，Kubernetes 迎来了哪个里程碑？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对：2018-03-06 cncf.io 官方宣布，K8s 成为 CNCF 第一个毕业项目。","v1.0 与 CNCF 成立都发生在 2015-07-21。","dockershim 移除是 2022 年 v1.24 的事。"]'>
+        <li class="quiz-option">成为 CNCF 首个毕业项目</li>
+        <li class="quiz-option">发布 v1.0 并加入 CNCF</li>
+        <li class="quiz-option">移除 dockershim，全面转向 CRI</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. Helm、Argo CD、cert-manager 分属不同组织，它们接入 K8s 集群的共同方式是什么？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["API Server 是唯一入口，不存在直连 etcd 的合法姿势——etcd 只归 API Server 管。","对：都是 API Server 的客户端，共用同一套 API、认证与 list-watch 对账机制。","容器运行时在节点侧归 kubelet 管，与生态工具无关。"]'>
+        <li class="quiz-option">各自直连 etcd 读写数据</li>
+        <li class="quiz-option">都作为 API Server 的客户端走同一套 API</li>
+        <li class="quiz-option">都通过替换容器运行时来接管集群</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 08 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：如果 K8s 不提供 CRD，扩展只能靠改源码或二进制插件，生态会变成什么样？CRD 到底"免费送"了生态工具哪些东西？<span class="chev">展开解析 ▾</span></summary>
+    <div class="details-body">
+      <p>先数 CRD 送了什么。<strong>存储</strong>：CR 对象直接存进 etcd，一致性、备份、压缩全是集群现成的；<strong>鉴权与审计</strong>：RBAC、准入控制、审计日志对自定义资源原样生效；<strong>客户端全家桶</strong>：kubectl 原生可读写，client-go 的 Informer/list-watch 直接可用——第 5 期讲的"把集群读进内存"三大件零成本继承；<strong>对账框架</strong>：控制器模式、workqueue 限流重试、leader 选举，照抄内置控制器。</p>
+      <p>反事实世界则相反：每个生态项目自带数据库与鉴权体系，装一个监控要单独部署它的元数据存储；各工具 CLI 与配置格式互不相通；K8s 每次升级，所有工具跟着重编译适配。这正是很多"插件式架构"平台生态长不大的原因——<strong>扩展点定义了生态的形状：定义成"一种资源"，生态就长成声明式的样子；定义成"一个钩子"，生态就长成脚本的样子</strong>。K8s 把最重的公共部分（存储、一致性、鉴权、对账）做成底座，生态项目只需贡献自己那一点"领域知识"——cert-manager 只懂 PKI，Prometheus 只懂指标，Argo CD 只懂 Git 同步。分工程度之深，是 CRD 这份"说明书"换来的。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：团队现在只有 kubectl 和手写清单，什么时候才真的需要 Helm、什么时候需要 GitOps？引入的判断标准是什么？<span class="chev">展开解析 ▾</span></summary>
+    <div class="details-body">
+      <p>判断标准不是"工具火不火"，而是<strong>重复劳动和漂移风险何时超过工具本身的学习与运维成本</strong>。Helm 的引入信号：同一套 YAML 要在多环境以不同参数部署，你开始复制粘贴改端口改副本数——Chart 的 values 分层正是为这个；或者你要装第三方应用，对方只发 Chart。只有一个环境、几个应用时，手写清单加 <code>kubectl apply</code> 反而更直白。</p>
+      <p>GitOps 的引入信号比 Helm 更靠后：<strong>集群的实际状态开始偏离 Git 里的声明，而且没人知道是谁改的</strong>——凌晨的 kubectl edit、口头发布的配置、回滚全靠回忆。Argo CD/Flux 的价值是把"集群只认 Git"变成机器强制的对账，让每次变更有提交、可审计、回滚等于 revert；代价是多一套要维护的高可用组件，以及"改配置必须走 Git"的纪律。一个务实的顺序：手写清单 → 多环境了上 Helm → 多人协作与合规要求来了上 GitOps——<strong>每一步都由具体的痛触发，而不是由趋势触发</strong>，这也是第 2 期"先跑起来"在生态层的延续。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 09 要点与收尾 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>本期要点与系列收尾</h2>
+  <div class="card card-tip">
+    <p><strong>带走这几条：</strong></p>
+    <ul>
+      <li>K8s 是 CNCF 的种子项目，生态以它为圆心分层：打包（Helm 4.3.0）、GitOps（Argo CD/Flux）、观测（Prometheus+Grafana）、交付链（Harbor）、流量（Gateway API/Istio）、扩展插座（CRD/Operator）——先记分层逻辑，再记名字；</li>
+      <li>共同姿势一句话：所有生态工具都是 API Server 的客户端，走同一套 API、认证与对账——学透第 3、5 期，等于拿了生态的万能钥匙；</li>
+      <li>CRD+Operator 是"万物皆资源"的落点：写一份 CRD 说明书，API Server 就为新领域开出 REST 路径，存储、RBAC、Informer 全套白送（官方 Custom Resources 页口径）；</li>
+      <li>十年六个节点：2014 开源 → 2015 v1.0+CNCF 成立 → 2018 首个毕业 → 2022 摘 dockershim → 2023 Gateway API GA → 2026 v1.37（67 项增强）——演进主线是"把生态约定收编为官方 API"；</li>
+      <li>学习路线：/concepts 查是什么、/tasks 查怎么做、/reference 查字段，读文档先对版本；动手从"重新拉起 minikube、Helm 装个 podinfo"开始。</li>
+    </ul>
+  </div>
+  <p><strong>系列收尾：</strong>Kubernetes 这个项目的入门就聊到这里——六期走完"认识、跑起来、概念与架构、实战交付、源码导读、生态地图"一条龙，从一句心智模型到 CNCF 版图，这个云原生地基你可以下手了。下期开启新项目 <strong>TDengine</strong>：项目池里公司主栈的时序数据库，用系列常规的节奏从超级表建模讲起（想先睹为快，每日微课程线的 <a href="../../daily-tech-course/lessons/0015-tdengine-supertable.html">第 0015 期 · TDengine 超级表</a> 可以提前翻翻）。</p>
+  <p><strong>延伸阅读：</strong>Primary source 官方文档：<a href="https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/" target="_blank" rel="noopener">Custom Resources（CRD 与 Operator 模式官方定义）</a>、<a href="https://kubernetes.io/blog/2026/08/26/kubernetes-v1-37-release/" target="_blank" rel="noopener">Kubernetes v1.37 发布博客（67 项增强口径）</a>、<a href="https://kubernetes.io/releases/" target="_blank" rel="noopener">Release History（版本节奏与支持窗口）</a>、<a href="https://www.cncf.io/projects/" target="_blank" rel="noopener">CNCF Projects（毕业/孵化项目名录，39+38 为 2026-09 清点）</a>、<a href="https://helm.sh/docs/intro/quickstart/" target="_blank" rel="noopener">Helm Quickstart（4.3.0）</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0025-k8s-source-reading.html">← 上一期：架构与源码导读</a>
+  <span class="next">Kubernetes 系列完 · 回<a href="../index.html">课程目录</a></span>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

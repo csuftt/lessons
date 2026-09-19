@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Kubernetes 系列第 4 期：实战场景 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0024</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0023-k8s-core-concepts-architecture.html">上一期：0023</a> · Kubernetes 系列第 4 期 / 共 6 期 · <a href="https://kubernetes.io" target="_blank" rel="noopener">kubernetes.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · KUBERNETES 系列第 4 期：实战场景</p>
+  <h1>把一个服务完整交付上 K8s：从镜像到可访问的端到端实战</h1>
+  <p class="subtitle">前三期你认识了 K8s、用 minikube 把集群跑了起来、看懂了声明式 API 与控制平面——但那些还都是"半成品"：一条 create 命令起的裸 Pod，没有资源底线、没有健康检查、没有稳定入口。这一期做一次完整交付：一份 Deployment 清单（副本、资源请求与限制、就绪与存活探针）→ 一个 Service 暴露 → 发布新版本观察滚动更新 → 一键回滚。示例用 nginx HTTP 服务（换成你自己的 Spring Boot 镜像，清单一行不用改结构），每个字段、每条回显都能在官方文档找到原文出处。全文基于 v1.37.x（1.37.0，2026-08-26 发布，GitHub Latest，2026-09-19 复核）。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 容器编排平台 · Go · Apache-2.0</span>
+    <span class="tag">📦 基于 v1.37.x（1.37.0）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 4 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景设定 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>场景设定：一次"完整交付"到底要补齐什么</h2>
+  <p>第 2 期的 hello-node 是最小演示：单副本、裸命令、临时入口。真把一个服务交给 K8s，官方文档给出的标准姿势是<strong>写清单、apply、验证</strong>，其中至少要补齐四件事：<strong>副本与自愈</strong>（Pod 死了自动补）、<strong>资源底线</strong>（requests 与 limits，调度和限流的依据）、<strong>健康检查</strong>（就绪与存活探针，决定流量给不给、容器杀不杀）、<strong>稳定入口</strong>（Service，Pod 换了一茬照样找得到）。这份交付链就是本期的路线图：</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 400" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" style="max-width:100%">
+    <defs>
+      <marker id="ar24" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar24a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent)"/>
+      </marker>
+      <marker id="ar24g" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+
+    <!-- 镜像 -->
+    <rect x="16" y="150" width="150" height="84" rx="10" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="91" y="176" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">镜像</text>
+    <text x="91" y="196" text-anchor="middle" fill="var(--muted)" font-size="9.5">nginx:1.14.2 → 1.16.1</text>
+    <text x="91" y="214" text-anchor="middle" fill="var(--muted)" font-size="9.5">任一 HTTP 服务都行</text>
+
+    <!-- Deployment -->
+    <rect x="216" y="96" width="212" height="192" rx="10" fill="var(--bg-accent)" stroke="var(--accent)"/>
+    <text x="322" y="122" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">Deployment（deployment.yaml）</text>
+    <text x="322" y="140" text-anchor="middle" fill="var(--muted)" font-size="9">kubectl apply 提交期望状态（第 3 期 spec）</text>
+    <rect x="230" y="152" width="184" height="38" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="322" y="168" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">replicas: 3 + 资源声明</text>
+    <text x="322" y="183" text-anchor="middle" fill="var(--muted)" font-size="8.5">requests 250m/64Mi · limits 500m/128Mi</text>
+    <rect x="230" y="198" width="184" height="38" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="322" y="214" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">readiness + liveness 探针</text>
+    <text x="322" y="229" text-anchor="middle" fill="var(--muted)" font-size="8.5">就绪管流量 · 存活管重启</text>
+    <rect x="230" y="244" width="184" height="32" rx="8" fill="var(--card)" stroke="var(--line)" stroke-dasharray="4 3"/>
+    <text x="322" y="264" text-anchor="middle" fill="var(--muted)" font-size="9">滚动更新：新 ReplicaSet 渐进替换</text>
+
+    <!-- Pod 与 Service -->
+    <rect x="486" y="96" width="120" height="76" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="546" y="122" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">Pod × 3</text>
+    <text x="546" y="140" text-anchor="middle" fill="var(--muted)" font-size="8.5">IP 随机 · 会死会换</text>
+    <text x="546" y="156" text-anchor="middle" fill="var(--muted)" font-size="8.5">标签 app=nginx 被认领</text>
+
+    <rect x="636" y="96" width="108" height="76" rx="10" fill="var(--card)" stroke="var(--accent)"/>
+    <text x="690" y="120" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">Service</text>
+    <text x="690" y="138" text-anchor="middle" fill="var(--muted)" font-size="8.5">type: NodePort</text>
+    <text x="690" y="154" text-anchor="middle" fill="var(--muted)" font-size="8.5">稳定入口 · 只转就绪端点</text>
+
+    <!-- 访问 -->
+    <rect x="486" y="252" width="258" height="52" rx="10" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="615" y="274" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">curl http://$(minikube ip):&lt;nodePort&gt;</text>
+    <text x="615" y="292" text-anchor="middle" fill="var(--muted)" font-size="9">Welcome to nginx! —— 可访问即交付完成</text>
+
+    <!-- 箭头 -->
+    <line x1="166" y1="192" x2="216" y2="192" stroke="var(--accent)" stroke-width="2" marker-end="url(#ar24a)"/>
+    <text x="191" y="182" text-anchor="middle" fill="var(--accent)" font-size="9">清单声明</text>
+    <line x1="428" y1="150" x2="486" y2="140" stroke="var(--accent)" marker-end="url(#ar24a)"/>
+    <text x="457" y="132" text-anchor="middle" fill="var(--accent)" font-size="9">创建/替换</text>
+    <line x1="606" y1="134" x2="636" y2="134" stroke="var(--muted)" marker-end="url(#ar24)"/>
+    <text x="621" y="124" text-anchor="middle" fill="var(--muted)" font-size="8.5">端点</text>
+    <path d="M 690 172 L 690 252" fill="none" stroke="var(--muted)" marker-end="url(#ar24)"/>
+    <text x="712" y="216" fill="var(--muted)" font-size="8.5" transform="rotate(90 712 216)">访问</text>
+
+    <text x="16" y="344" fill="var(--muted)" font-size="9.5">实线 = 交付主链：镜像 → 清单 → Deployment → Pod → Service → 访问成功；虚线框 = 第 04 节的滚动更新与第 05 节的回滚</text>
+    <text x="16" y="362" fill="var(--muted)" font-size="9.5">口径对照 v1.37 官方文档：Deployments / Probes / Managing Resources / Service 四页（2026-09-19 复核）</text>
+  </svg>
+  </div>
+
+  <p>全程四条目标，做完一条勾一条：</p>
+  <div class="card">
+    <ul class="steps">
+      <li>① <strong>清单即交付：</strong>一份 YAML 写全副本、资源、探针，apply 之后集群自己把三个 Pod 拉起来并全部就绪；</li>
+      <li>② <strong>稳定可访问：</strong>Service 用 NodePort 暴露，curl 打到 <code>Welcome to nginx!</code>；</li>
+      <li>③ <strong>滚动更新：</strong>改一行镜像，看新 ReplicaSet 渐进替换旧 Pod，全程服务不中断；</li>
+      <li>④ <strong>历史与回滚：</strong>发版记录自动留存，一条 undo 命令退回上一版。</li>
+    </ul>
+  </div>
+  <p class="note"><span class="h">为什么选 nginx</span>本期讲的是<strong>交付流程与平台机制</strong>，示例选 nginx 是因为每个字段都能在官方文档找到原文，不掺任何臆测。换成你自己的 Spring Boot 镜像：改 <code>image</code>、探针路径换成真实健康端点、端口改成应用端口，清单一行结构都不用动。上期预告里提过的 ConfigMap（配置注入）走的是同一条 spec 声明思路，官方文档单独成页，本期不展开；各对象字段的详细用法与日常排障，每日微课程线已讲的也不换皮重讲（<a href="../../daily-tech-course/lessons/0024-k8s-ingress-service-traffic.html">流量入口：Service、Ingress 与 Gateway API</a>）。</p>
+</section>
+
+<!-- ================= 02 Deployment 清单 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>步骤① 一份 Deployment 清单：把期望状态写全</h2>
+  <p>清单骨架照官方示例抄，只有五处要自己填——名字、副本数、选择器、镜像、端口：</p>
+  <pre><code>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deployment
+spec:
+  replicas: 3                    # 默认 1：不给就只起一个
+  selector:
+    matchLabels:
+      app: nginx                 # 创建后不可变（apps/v1 起固定）
+  template:                      # Pod 模板：改它才触发滚动更新
+    metadata:
+      labels:
+        app: nginx               # 必须与 selector 匹配，否则拒绝
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.14.2
+        ports:
+        - containerPort: 80</code></pre>
+  <p>两处"隐形约束"值得停下来：<code>.spec.template</code> 与 <code>.spec.selector</code> 是 spec 里<strong>仅有的两个必填字段</strong>（官方原话），Pod 模板的 <code>restartPolicy</code> 只允许 Always（默认即 Always）。"改模板才触发更新、扩缩副本不触发"这条规则，第 04 节滚动更新全靠它。</p>
+  <p>骨架之上补生产底线——<strong>资源声明与探针</strong>，加在 <code>container</code> 段里：</p>
+  <pre><code>        resources:
+          requests:              # 调度器用它选节点（装得下才放）
+            cpu: "250m"
+            memory: "64Mi"
+          limits:                # kubelet 强制执行的上限
+            cpu: "500m"
+            memory: "128Mi"
+        readinessProbe:          # 失败 → 摘出 Service 端点，不重启
+          httpGet: { path: /, port: 80 }
+          initialDelaySeconds: 5
+        livenessProbe:           # 失败 → 杀容器重启
+          httpGet: { path: /, port: 80 }
+          initialDelaySeconds: 10</code></pre>
+  <p>官方文档对这两个词的定义一句话分开：<strong>request 是调度依据——调度器用它决定 Pod 放哪个节点；limit 是运行上限——kubelet 强制容器用不超这个数</strong>。超限后果分家：CPU 超限被内核<strong>节流</strong>（throttling），进程不死；内存超限被内核 <strong>OOM Kill</strong>（容器退出码 137）。只写 limit 不写 request？官方规则：request 自动复制 limit 值。探针字段的默认值一张表收好（出处：Pod API 参考与探针概念页）：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>字段</th><th>默认值</th><th>含义与提醒</th></tr></thead>
+    <tbody>
+      <tr><td><code>initialDelaySeconds</code></td><td>0</td><td>首次探测前等待；启动慢的应用别只靠它硬扛</td></tr>
+      <tr><td><code>periodSeconds</code></td><td>10 秒</td><td>探测周期，最小 1 秒</td></tr>
+      <tr><td><code>timeoutSeconds</code></td><td>1 秒</td><td>单次探测超时，慢端点要显式放大</td></tr>
+      <tr><td><code>successThreshold</code></td><td>1</td><td>连续成功几次算恢复；存活与启动探针必须为 1</td></tr>
+      <tr><td><code>failureThreshold</code></td><td>3</td><td>连续失败几次判死刑；配合周期决定"反应速度"</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="grid-2">
+    <div class="card">
+      <h4>readiness 配错：活着，但没人理你</h4>
+      <p>路径写错、端口写错，探测一直失败——<strong>容器不重启</strong>，但 EndpointSlice 控制器会把 Pod IP 从所有匹配 Service 的端点里<strong>摘掉</strong>。<code>get pods</code> 显示 0/1 NotReady，还算好排查；可怕的是探测路径恰好返回 200 却不验证真实依赖——Pod 就绪了，一打请求才 500。</p>
+    </div>
+    <div class="card">
+      <h4>liveness 配错：活着，但反复横死</h4>
+      <p>失败即杀、即重启，配置激进时是连环反应：启动慢 → 首次探测就失败 → 杀掉重来 → <strong>永远到不了就绪</strong>，重启计数一路上涨。它和 readiness 独立运行、互不依赖（官方原文），所以两者要按各自的职责分开配：就绪管流量、存活管死锁。</p>
+    </div>
+  </div>
+  <p>apply 之后验证，回显与官方文档逐字一致：</p>
+  <pre><code>$ kubectl apply -f deployment.yaml
+deployment.apps/nginx-deployment created
+$ kubectl get deployments
+NAME               READY   UP-TO-DATE   AVAILABLE   AGE
+nginx-deployment   3/3     3            3           18s</code></pre>
+  <p class="note"><span class="h">读列</span><code>READY 3/3</code> 是"就绪/期望"——就绪这个词从此有了准确含义：探针说了算，容器在跑不算数。<code>UP-TO-DATE</code> 是已更新到最新模板的副本数，第 04 节滚动的就是它。</p>
+</section>
+
+<!-- ================= 03 Service ================= -->
+<section>
+  <h2><span class="sec-num">03</span>步骤② Service：把会换 IP 的 Pod 包成稳定入口</h2>
+  <p>Pod 会死会换、IP 随机分配（第 3 期的前台总机类比），直连 IP 的演示到交付这一步就该退役了。Service 用标签选择器圈住一组 Pod——控制器持续扫描匹配的 Pod，更新端点集（EndpointSlices）；<strong>流量只发给就绪端点</strong>，第 02 节的 readiness 探针在这里被"消费"：</p>
+  <pre><code>apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-deployment
+spec:
+  type: NodePort                 # 默认 ClusterIP：仅集群内可达
+  selector:
+    app: nginx                   # 圈住 Deployment 打的标签
+  ports:
+  - port: 80                     # Service 自己监听的端口
+    targetPort: 80               # 转发到 Pod 容器的端口</code></pre>
+  <p>类型按暴露面选：ClusterIP 只在集群内，NodePort 在每个节点上开一个静态端口（控制平面从 <code>30000-32767</code> 默认范围分配），LoadBalancer 挂云厂商的外部负载均衡器。本地 minikube 用 NodePort 最直接：</p>
+  <pre><code>$ kubectl apply -f service.yaml
+service/nginx-deployment created
+$ kubectl get svc nginx-deployment
+NAME               TYPE       CLUSTER-IP    EXTERNAL-IP   PORT(S)        AGE
+nginx-deployment   NodePort   10.96.34.117  &lt;none&gt;        80:31432/TCP   12s
+$ curl -s http://$(minikube ip):31432 | grep title
+&lt;title&gt;Welcome to nginx!&lt;/title&gt;</code></pre>
+  <p><code>Welcome to nginx!</code> 出现，四条目标完成两条。CLUSTER-IP 与分配到的端口每台机器不同（端口落在 30000-32767 内），<code>minikube service nginx-deployment</code> 一条命令直接在浏览器打开。生产级流量入口（Ingress、Gateway API）daily 线有专课，从 Service 往上走的路那里都有。</p>
+</section>
+
+<!-- ================= 04 滚动更新 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>步骤③ 滚动更新：发布新版本，服务不中断</h2>
+  <p>发新版 = 改 Pod 模板里的镜像。命令行一条直达（<code>kubectl set image</code>），改完立刻盯进度：</p>
+  <pre><code>$ kubectl set image deployment/nginx-deployment nginx=nginx:1.16.1
+deployment.apps/nginx-deployment image updated
+$ kubectl rollout status deployment/nginx-deployment
+Waiting for rollout to finish: 2 out of 3 new replicas have been updated...
+deployment "nginx-deployment" successfully rolled out</code></pre>
+  <p>中间那行"等新副本"的等待，就是滚动更新的本体：<strong>Deployment 创建新的 ReplicaSet，渐进地扩它、同时缩旧的</strong>（官方原话），替换节奏由更新策略控制。默认策略 RollingUpdate 的两个参数默认值都是 <strong>25%</strong>：<code>maxSurge</code> 允许多起几个（向上取整），<code>maxUnavailable</code> 允许几个不可用（向下取整）。3 副本代入：surge = 1、unavailable = 0——<strong>滚动全程最多 4 个 Pod，可用数始终不少于 3</strong>。一条 <code>get rs</code> 看到两代同堂：</p>
+  <pre><code>$ kubectl get rs
+NAME                          DESIRED   CURRENT   READY   AGE
+nginx-deployment-1564180365   3         3         3       6s
+nginx-deployment-2035384211   0         0         0       36s</code></pre>
+  <p>新 RS（新哈希）三个全部就绪，旧 RS 归零但<strong>记录还在</strong>——这不是废数据，是第 05 节的后悔药。顺手一提：此时扩副本到 10 个，多出来的副本会按比例同时分给新旧两代 RS（官方"比例伸缩"规则，份额向副本多的 RS 倾斜）——扩缩不触发滚动，但滚动的中间态扩缩，两代都会长。</p>
+</section>
+
+<!-- ================= 05 历史与回滚 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>步骤④ 历史与回滚：发版记录就是后悔药</h2>
+  <p>每次模板变更自动记一代版本，历史与回滚两条命令：</p>
+  <pre><code>$ kubectl rollout history deployment/nginx-deployment
+deployments "nginx-deployment"
+REVISION  CHANGE-CAUSE
+1         &lt;none&gt;
+2         &lt;none&gt;
+$ kubectl rollout undo deployment/nginx-deployment
+deployment.apps/nginx-deployment rolled back</code></pre>
+  <p>不带参数的 undo 退回上一版（2 → 退回 1），<code>--to-revision=2</code> 可以跳回指定代。回滚同样走滚动替换，事件里能看到 <code>DeploymentRollback</code> 记录。<code>CHANGE-CAUSE</code> 列默认 <code>&lt;none&gt;</code>，想留发版说明，在清单上配 <code>kubernetes.io/change-cause</code> 注解。历史默认保留 <strong>10 代</strong>（<code>revisionHistoryLimit</code>）；官方特别提醒：显式设为 0 会清空全部历史，<strong>Deployment 从此无法回滚</strong>——省这点存储不划算。</p>
+  <div class="warn">
+    <p><strong>顺手要做的实验：</strong>滚动进行中另开终端敲 <code>kubectl get pods -w</code>，你会亲眼看到带新哈希的 Pod 逐个出现、就绪、旧 Pod 逐个终止——第 3 期"一次部署的旅程"的完整回放，这次是你自己触发的。</p>
+  </div>
+</section>
+
+<!-- ================= 06 quiz ================= -->
+<section>
+  <h2><span class="sec-num">06</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. readiness 探针持续失败，Pod 会发生什么？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["方向反了：摘流量不重启的是 readiness；杀容器重启的是 liveness。","对：kubelet 把容器标为未就绪，EndpointSlice 控制器把它的 IP 从匹配 Service 的端点里摘掉，容器继续运行。","容器还活着，只是收不到流量；Pod 对象本身不会被删除重建。"]'>
+        <li class="quiz-option">容器被杀掉并重启，RESTARTS 加一</li>
+        <li class="quiz-option">被摘出 Service 端点收不到流量，容器照跑</li>
+        <li class="quiz-option">Pod 对象被删除，由 Deployment 重建</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 滚动更新默认策略下，maxSurge 与 maxUnavailable 的默认值与取整方向是？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["两个默认值都是 25%，差别在取整方向。","对：都是 25%——maxSurge 向上取整（3 副本取 1），maxUnavailable 向下取整（3 副本取 0）。","maxUnavailable 取整向下，3 副本时是 0 而不是 1。"]'>
+        <li class="quiz-option">都是 25%，都向上取整</li>
+        <li class="quiz-option">surge 25% 向上取整，unavailable 25% 向上取整</li>
+        <li class="quiz-option">surge 25% 向上取整，unavailable 25% 向下取整</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 修改 Deployment 的哪个字段会触发滚动更新？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对：官方原话——当且仅当 Pod 模板（.spec.template）被改动才触发；其他如扩缩副本不触发。","扩缩副本只改变 RS 的 DESIRED 数，不会生成新 ReplicaSet。","selector 在 apps/v1 创建后不可变，改了直接被拒绝。"]'>
+        <li class="quiz-option">.spec.template（Pod 模板）</li>
+        <li class="quiz-option">.spec.replicas（副本数）</li>
+        <li class="quiz-option">.spec.selector（标签选择器）</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. 容器只写 limits 不写 requests，官方规则怎么处理？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不会拒绝创建，官方有自动补齐规则。","对：Kubernetes 把你写的 limit 复制一份当作 request，调度与限流都有值。","内存超限才会 OOM Kill，这里问的是声明规则：request 复制 limit。"]'>
+        <li class="quiz-option">创建被拒绝，两者必须都写</li>
+        <li class="quiz-option">request 自动复制 limit 的值</li>
+        <li class="quiz-option">request 按 0 处理，可调度到任意节点</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 07 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：liveness 探针的 initialDelaySeconds 配得比应用启动时间还短，会发生什么连环反应？官方为什么还要引入 startupProbe？</summary>
+    <div class="details-body">
+      <p>逐环推演。应用启动要 30 秒，探针 3 秒就开始查：第一环<strong>探测失败</strong>——应用没起来，任何路径都不通；第二环<strong>达到 failureThreshold</strong>——默认连续失败 3 次（约 3×周期+初始延迟，半分钟内），kubelet 判定失败、杀容器重启；第三环<strong>重启回到原点</strong>——新容器还是需要 30 秒才能服务，但探针计时重新开始，同样的剧本再演一遍。结果是<strong>无限重启循环</strong>：RESTARTS 一路上涨、容器永远到不了就绪、readiness 也永远不通过、Service 端点始终为空、上游调用方看到的是"服务存在但全部超时"。更阴险的是，每次重启都把启动进度清零，<strong>应用越重，越不可能靠自身熬过窗口</strong>。有人把 initialDelaySeconds 调到 60 秒硬扛——启动 90 秒就又崩了，而且健康的应用重启后也要白等 60 秒。官方给的正解是 <strong>startupProbe</strong>：它成功之前，liveness 与 readiness <strong>根本不执行</strong>，允许应用安心完成初始化；按官方建议给它 failureThreshold × periodSeconds 覆盖最坏启动时间（示例 30×10s = 5 分钟），成功之后无缝切换到正常的存活检查——liveness 保持默认的灵敏参数不用放宽，慢启动与快死锁两件事就解耦了。设计层面的启示：存活检查的职责是抓"运行中的死锁"，不是"还没启动完"，用一个探针去管两件事，两头都会误伤。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：双 25% 的默认节奏是怎么同时照顾"可用性"与"资源"的？把 maxUnavailable 设为 0、maxSurge 放大，收益与代价各是什么？</summary>
+    <div class="details-body">
+      <p>先看默认值各自的算法：<strong>maxUnavailable 向下取整</strong>——宁可少算不可多算，3 副本 × 25% = 0.75 取 0，保证"最少可用数"不吃亏；<strong>maxSurge 向上取整</strong>——宁可多备不可少备，0.75 进到 1，保证替换通道始终有人顶上。合起来就是默认节奏的精髓：<strong>可用数全程不掉线，代价是多占一个 Pod 的资源位</strong>。把 unavailable 设为 0、surge 放大（比如 100%），走的是"先起够新的、再停旧的"路线：收益是容量零缩水、滚动更快（新旧可以并行多组）、回滚窗口更从容；代价也明确——<strong>瞬时 Pod 数翻倍</strong>，每个 surge 出来的 Pod 都带着自己的 requests 去要资源，节点的容量规划必须按峰值预留，公有云上就是真金白银。反过来 surge=0、unavailable=25% 不占额外资源，但可用数先掉再补，高峰期滚动就是主动制造容量缺口。所以发布节奏本质是一道<strong>资源预算与可用性预算的交换题</strong>，没有两全默认——而它成立的前提，恰恰是第 02 节那份 requests 声明：没有 request，调度器不知道 surge 出来的 Pod 该放哪、放不放得下，节奏参数调得再精细也是空中楼阁。这也解释了为什么"资源声明"要进本期清单的第一课，而不是可选项。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 08 要点 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这几条：</strong></p>
+    <ul>
+      <li>清单五要素：name、replicas（默认 1）、selector（创建后不可变）、template（改它才滚动）、image；必填只有 template 与 selector 两项；</li>
+      <li>资源两分法：requests 给调度器（选节点），limits 由 kubelet 强制（CPU 节流、内存 OOM Kill 137）；只写 limits 则 requests 自动复制；</li>
+      <li>探针两分法：readiness 失败摘流量不重启，liveness 失败杀容器重启；默认周期 10 秒、超时 1 秒、连续失败 3 次判死；慢启动交给 startupProbe；</li>
+      <li>滚动默认节奏：双 25%——surge 向上取整、unavailable 向下取整，3 副本即"最多 4 个、可用始终 3"；改模板才滚动，扩缩不触发；</li>
+      <li>回滚底气：历史默认留 10 代（revisionHistoryLimit），undo 无参退上一版、<code>--to-revision</code> 跳任意代，设 0 则无法回滚。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 5 期《架构与源码导读：控制器模式与调度器》——本期你看到的"新 RS 渐进扩容、旧 RS 缩容"，就是 deployment controller 的对账循环在跑；调度器怎么给 surge 出来的 Pod 挑节点（过滤 + 打分）。读码入口已经踩好点：<code>pkg/controller/deployment</code> 与 <code>pkg/scheduler</code>，下一期进去看源码。</p>
+  <p><strong>延伸阅读：</strong>Primary source 官方文档：<a href="https://kubernetes.io/docs/concepts/workloads/controllers/deployment/" target="_blank" rel="noopener">Deployments</a>（本期命令与回显的官方出处）、<a href="https://kubernetes.io/docs/tasks/run-application/run-stateless-application-deployment/" target="_blank" rel="noopener">Run a Stateless Application Using a Deployment</a>（无状态应用交付任务页）、<a href="https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/" target="_blank" rel="noopener">Configure Liveness, Readiness and Startup Probes</a>（探针任务页）、<a href="https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/" target="_blank" rel="noopener">Resource Management for Pods and Containers</a>（requests/limits 口径）、<a href="https://kubernetes.io/docs/concepts/services-networking/service/" target="_blank" rel="noopener">Service</a>（类型与端点机制）、<a href="https://kubernetes.io/docs/concepts/configuration/configmap/" target="_blank" rel="noopener">ConfigMap</a>（上期预告的配置注入）；深入排障与字段用法见 daily 线 <a href="../../daily-tech-course/lessons/0024-k8s-ingress-service-traffic.html">流量入口</a> 与 <a href="../../daily-tech-course/lessons/0016-k8s-hpa.html">HPA 自动伸缩</a>；仓库与版本见 <a href="https://github.com/kubernetes/kubernetes" target="_blank" rel="noopener">github.com/kubernetes/kubernetes</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0023-k8s-core-concepts-architecture.html">← 上一期：核心概念与整体架构</a>
+  <a class="next" href="0025-k8s-source-reading.html">下一期：架构与源码导读 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

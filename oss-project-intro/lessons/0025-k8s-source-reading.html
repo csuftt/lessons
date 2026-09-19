@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Kubernetes 系列第 5 期：架构与源码导读 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0025</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0024-k8s-deploy-in-action.html">上一期：0024</a> · Kubernetes 系列第 5 期 / 共 6 期 · <a href="https://kubernetes.io" target="_blank" rel="noopener">kubernetes.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · KUBERNETES 系列第 5 期：架构与源码导读</p>
+  <h1>Kubernetes 架构与源码导读：控制器模式、Informer 与两阶段调度</h1>
+  <p class="subtitle">上一期我们把一个服务完整交付上了集群：一份清单、探针与资源底线、滚动更新与回滚。这一期进源码回答"凭什么"：对账循环凭什么敢只看当下不看过程（level-based 的底气）、控制器凭什么敢把集群读进内存（Informer 的 list-watch 与本地缓存）、调度器凭什么先过滤再打分（两阶段的取舍），再轻讲怎么从源码把控制面跑起来。一条"过滤到打分到绑定"的调度旅程串起调用链，收尾一张六步读码路线图。代码逐行核对自 tag v1.37.0 的 raw 文件。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 容器编排平台 · Go · Apache-2.0</span>
+    <span class="tag">📦 源码基准 v1.37.0（2026-09-19 逐行核对）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 5 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 路线 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>本期路线：三个决策，两条链</h2>
+  <p>两百多万行的超大仓库别顺着读。前三期攒下的概念——声明式 spec/status、控制平面组件、一次部署的旅程——正好是读码藏宝图：<strong>先锁定三个最值得学的设计决策，再顺着决策找文件</strong>。三个决策与两条配套链路：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>看点</th><th>一句话结论</th><th>源码坐标（v1.37.0）</th></tr></thead>
+    <tbody>
+      <tr><td>决策一 · level-based 对账</td><td>只认最新期望，不追中间事件：自愈的底气</td><td><code>pkg/controller/replicaset/replica_set.go</code></td></tr>
+      <tr><td>决策二 · Informer list-watch</td><td>List 一次记版本，Watch 一直增量，本地缓存扛读</td><td><code>staging/src/k8s.io/client-go/tools/cache/</code></td></tr>
+      <tr><td>决策三 · 两阶段调度</td><td>过滤保可行，打分选最优，贵的只花在可行集</td><td><code>pkg/scheduler/schedule_one.go</code></td></tr>
+      <tr><td>配套 · 从源码跑起来</td><td>一条脚本拉起整套控制面，断点随便打</td><td><code>hack/local-up-cluster.sh</code> + <code>cmd/</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note"><span class="h">版本口径</span>K8s 主仓 tag <code>v1.37.0</code>（2026-08-26 发布，GitHub Latest，系列基准 v1.37.x）。所有类名与路径按该 tag 的 raw 文件逐行核对；etcd 的 watch 本体见本系列第 16~20 期，本期看它如何被 API Server 转译给控制器。</p>
+</section>
+
+<!-- ================= 02 决策一 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>决策一：level-based 对账——为什么系统只看当下、不问过程</h2>
+  <p>官方 API 约定（community 仓库 api-conventions.md）有个精彩的例子：spec 先从 2 改成 5、再改回 3，系统<strong>不要求"路过" 5</strong>，直接朝 3 收敛。原话是：<em>"the system's behavior is level-based rather than edge-based. This enables robust behavior in the presence of missed intermediate state changes."</em>（系统行为按"水平触发"而非"边沿触发"，即使漏掉中间状态变化也能稳健收敛。）</p>
+  <p>为什么这么设计？<strong>中间事件一定会丢</strong>：watch 断线、控制器重启、发布窗口，任何一次抖动都会让"事件序列"出现缺口。如果系统靠"收到过什么指令"驱动（edge-triggered），丢一条指令就是永久性漂移，只能人工对账；改成 level-triggered，<strong>事件被降级成"该对账了"的提示</strong>——丢了无所谓，下一轮对账照着最新账本补齐。这就是第 3 期"组件挂了会自愈"的源码出处。落点在 <code>replica_set.go</code>：</p>
+  <pre><code>// pkg/controller/replicaset/replica_set.go · syncReplicaSet（节选，v1.37.0）
+rs, err := rsc.rsLister.ReplicaSets(namespace).Get(name)  // ① 从本地缓存读期望
+allRSPods, err := controller.FilterPodsByOwner(rsc.podIndexer, ...)  // ② 缓存里认领实际
+activePods := ...                                          // 统计存活的 Pod
+if rsNeedsSync &amp;&amp; rs.DeletionTimestamp == nil {
+    manageReplicasErr = rsc.manageReplicas(ctx, activePods, rs)  // ③ 差额补齐
+}
+newStatus := calculateStatus(rs, activePods, ...)
+// 源码原注释：Always updates status as pods come up or die.
+updatedRS, err := updateReplicaSetStatus(logger, rsc.kubeClient.AppsV1()
+    .ReplicaSets(rs.Namespace), rs, newStatus, ...)       // ④ status 写回</code></pre>
+  <p>第 ③ 步是差额计算的全部：<code>diff := len(activePods) - int(*(rs.Spec.Replicas))</code>——少了补建（<code>slowStartBatch</code> 慢启动批量创建，1、2、4、8 翻倍，避免错误请求刷爆 API Server），多了并发删除。<strong>它从不问"刚才发生了什么"，只问"现在差多少"</strong>；处理失败 <code>processNextWorkItem</code> 把 key 限流重排（<code>AddRateLimited</code>），下一轮再来。换种做法会怎样？把控制器做成"命令处理器"，每次变更发指令——重启一次就丢账，靠人肉补偿的系统我们都维护过。</p>
+</section>
+
+<!-- ================= 03 决策二 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>决策二：Informer 的 list-watch——凭什么敢把集群读进内存</h2>
+  <p>对账的前提是"随时知道实际状态"。如果每轮对账都去 API Server 全量 List，几千个控制器轮询起来，API Server 和它背后的 etcd（本系列第 16~20 期的老朋友——etcd 只管存，watch 链路由 API Server 对外转译）会被读请求打爆。K8s 的答案是 client-go 的 <strong>Informer</strong>：<code>shared_informer.go</code> 头注释写得像设计文档，三大件——</p>
+  <ul>
+    <li><strong>indexer 本地缓存</strong>：带索引的全量对象副本，控制器的读九成落在内存；</li>
+    <li><strong>Reflector</strong>：<code>ListAndWatch</code>——原注释 <em>"first lists all items and get the resource version at the moment of call, and then use the resource version to watch"</em>，先 List 拿全量和版本号，再凭版本号 Watch 增量，断线从上次版本续传；</li>
+    <li><strong>DeltaFIFO + sharedProcessor</strong>：变更先排队再分发，多控制器共享一份缓存与连接。</li>
+  </ul>
+  <div class="diagram">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar25" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar25a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+    <rect x="16" y="30" width="130" height="56" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="81" y="53" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">API Server</text>
+    <text x="81" y="71" text-anchor="middle" fill="var(--muted)" font-size="9">watch 广播（etcd 在其后）</text>
+    <line x1="146" y1="58" x2="236" y2="58" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#ar25a)"/>
+    <text x="191" y="48" text-anchor="middle" fill="var(--accent)" font-size="9.5">① List 全量+版本号 → Watch 增量</text>
+    <rect x="238" y="30" width="118" height="56" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="297" y="53" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">Reflector</text>
+    <text x="297" y="71" text-anchor="middle" fill="var(--muted)" font-size="9">断线按版本续传</text>
+    <line x1="356" y1="58" x2="446" y2="58" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#ar25a)"/>
+    <text x="401" y="48" text-anchor="middle" fill="var(--accent)" font-size="9.5">② 变更入队</text>
+    <rect x="448" y="30" width="120" height="56" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="508" y="53" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">DeltaFIFO</text>
+    <text x="508" y="71" text-anchor="middle" fill="var(--muted)" font-size="9">Resync 也走这（Sync 增量）</text>
+    <line x1="568" y1="58" x2="646" y2="58" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#ar25a)"/>
+    <text x="607" y="48" text-anchor="middle" fill="var(--accent)" font-size="9.5">③ HandleDeltas</text>
+    <rect x="648" y="30" width="98" height="56" rx="8" fill="var(--card)" stroke="var(--accent)"/>
+    <text x="697" y="53" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">indexer</text>
+    <text x="697" y="71" text-anchor="middle" fill="var(--muted)" font-size="9">本地缓存+索引</text>
+    <path d="M697,86 C697,140 380,120 260,150" fill="none" stroke="var(--muted)" stroke-dasharray="5 3" marker-end="url(#ar25)"/>
+    <rect x="120" y="150" width="150" height="52" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="195" y="171" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">workqueue</text>
+    <text x="195" y="189" text-anchor="middle" fill="var(--muted)" font-size="9">只放 key，失败限流重排</text>
+    <line x1="270" y1="176" x2="360" y2="176" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#ar25a)"/>
+    <rect x="362" y="150" width="150" height="52" rx="8" fill="var(--card)" stroke="var(--accent)"/>
+    <text x="437" y="171" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">syncReplicaSet</text>
+    <text x="437" y="189" text-anchor="middle" fill="var(--muted)" font-size="9">读缓存 → 差额 → 行动</text>
+    <path d="M512,176 C600,176 640,150 660,110" fill="none" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#ar25a)"/>
+    <text x="600" y="140" fill="var(--accent)" font-size="9.5">④ status 写回 API Server</text>
+    <text x="16" y="238" fill="var(--muted)" font-size="9.5">闭环读起来是"事件驱动"，实际是"事件提醒 + level 对账"：断线、重启、漏事件，都被下一轮全量对账抹平；</text>
+    <text x="16" y="256" fill="var(--muted)" font-size="9.5">长周期兜底：MinResyncPeriod 默认 12h、乘随机因子错峰（controllermanager.go），Resync 以 Sync 增量重放全部对象。</text>
+  </svg>
+  </div>
+  <p>换种做法会怎样？纯轮询——延迟与压力双输；每个控制器各开一条 watch——连接数随控制器数爆炸，断线重连逻辑人人重写。SharedInformer 一份缓存多客户复用，把"读集群"变成"读内存"，这是整个控制器生态的公共底座。</p>
+</section>
+
+<!-- ================= 04 决策三 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>决策三：两阶段调度——先过滤保可行，再打分选最优</h2>
+  <p>调度入口 <code>schedule_one.go</code> 的 <code>schedulePod</code>，一个函数讲完哲学：</p>
+  <pre><code>// pkg/scheduler/schedule_one.go · schedulePod（节选，v1.37.0）
+feasibleNodes, diagnosis, ... := sched.findNodesThatFitPod(ctx, fwk, state, podInfo)
+if len(feasibleNodes) == 0 {              // ① 过滤后一个不剩：FitError，Pod 排队
+    return result, &amp;framework.FitError{Pod: pod, NumAllNodes: ..., Diagnosis: diagnosis}
+}
+if len(feasibleNodes) == 1 {              // 只剩一个：免打分直接用
+    return ScheduleResult{SuggestedHost: feasibleNodes[0].Node().Name, ...}
+}
+priorityList, err := prioritizeNodes(ctx, sched.Extenders, fwk, state, pod, feasibleNodes)
+node := framework.NewSortedScoredNodes(priorityList).Pop().Name  // ② 打分取最高 → ③ 绑定</code></pre>
+  <p><strong>过滤（Filtering）答"能不能放"，打分（Scoring）答"放哪最好"</strong>——官方 kube-scheduler 文档原话就是这两步。可行集为空不是错误而是排队：Pod 挂 Pending，事件里留下 <code>0/42 nodes available: insufficient cpu</code> 这样的原因（官方文档样例），绝不硬塞。过滤阶段还有个隐藏的量级控制：<code>numFeasibleNodesToFind</code>——大集群不扫全量节点，起始比例 50%、每 125 个节点再降 1 个百分点、下限 5%，凑够候选数就提前收工。绑定不是"调度器直接开容器"：结果经 <code>RunBindPlugins</code> 写回 API Server，kubelet watch 到 <code>spec.nodeName</code> 才认领执行——控制面各组件只跟账本对话。</p>
+  <p>换种做法会怎样？一阶段全量打分：每个插件对每个节点算分，万节点集群一轮调度就是几十万次评分，其中绝大多数节点连"可行"都算不上。两阶段把<strong>贵的计算只花在可行集上</strong>，还让"硬约束"（资源、污点、亲和）与"软偏好"（均衡、亲和权重）分属两组插件，扩展语义清爽。</p>
+</section>
+
+<!-- ================= 05 跑起来 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>从源码把控制面跑起来（轻讲）</h2>
+  <p>读码最好的伴侣是断点。仓库自带一条最小组件启动路径：<code>hack/local-up-cluster.sh</code> 把 apiserver、etcd、controller-manager、scheduler 在本机进程级拉起——加 <code>-O</code> 可复用预编译二进制免重复构建；日志末尾给一句 <code>export KUBECONFIG=/var/run/kubernetes/admin.kubeconfig</code>，照抄就能用 kubectl 连上这个"裸"集群。想单看某个组件，从 <code>cmd/</code> 的 main 进：<code>cmd/kube-scheduler/app/server.go</code> 的 <code>NewSchedulerCommand</code> → <code>scheduler.New</code>，一条线读完启动流程。与第 2 期 minikube 的差别：minikube 起的是"生产形态"的沙盘，这条是"开发形态"——<strong>直接跑你工作区里的源码，改一行也能立刻验证</strong>。</p>
+  <p class="note"><span class="h">延伸一步</span>控制器模式不只内置：HPA 自动伸缩也是"改别人期望"的控制器——它调 Deployment 的 replicas，真正建 Pod 的还是 ReplicaSet 控制器。用法见每日微课程线 <a href="../../daily-tech-course/lessons/0016-k8s-hpa.html">第 0016 期 · Kubernetes HPA 自动伸缩</a>；服务交付后流量入口（Service/Ingress）的运维视角同见该线 <a href="../../daily-tech-course/lessons/0024-k8s-ingress-service-traffic.html">第 0024 期 · 流量入口</a>。</p>
+</section>
+
+<!-- ================= 06 旅程与路线图 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>一次调度决策的源码旅程 + 读码路线图</h2>
+  <p>把决策三串成一条链——第 4 期交付清单里的每个 Pod，都走过这条路：</p>
+  <pre><code>$ kubectl apply -f deploy.yaml            # 声明进门（第 3 期旅程的接力棒）
+informer 链: Reflector.ListAndWatch → DeltaFIFO → HandleDeltas
+ └─ scheduler 的 Pod 队列：未被绑定的 Pod 出队（scheduleOnePod）
+     └─ schedulePod（schedule_one.go）
+         ├─ findNodesThatFitPod           # 过滤：资源/污点/亲和硬约束
+         │   └─ numFeasibleNodesToFind    # 候选上限：50% 起步、下限 5%
+         ├─ prioritizeNodes               # 打分：可行集内逐插件评分
+         └─ RunBindPlugins → 写回 API Server   # 绑定：spec.nodeName 落账
+             └─ kubelet watch 到本节点新 Pod → 调用运行时起容器（第 3 期第⑤步）</code></pre>
+  <p>读码路线图六步，每步只回答一个问题，从体感进、沿调用链走：</p>
+  <div class="steps">
+    <div class="step"><span class="step-n">1</span><div><strong>体感复现：</strong>第 2 期 minikube + 第 4 期交付清单各跑一遍——先知道现象，再去源码找它。</div></div>
+    <div class="step"><span class="step-n">2</span><div><strong>公共底座：</strong>client-go <code>tools/cache/</code> 的 shared_informer.go——三大件与 list-watch 怎么配合。</div></div>
+    <div class="step"><span class="step-n">3</span><div><strong>对账样本：</strong><code>pkg/controller/replicaset/replica_set.go</code> 的 syncReplicaSet→manageReplicas——最短的一条 reconcile 链。</div></div>
+    <div class="step"><span class="step-n">4</span><div><strong>调度链：</strong><code>pkg/scheduler/schedule_one.go</code> 的 schedulePod——过滤、打分、绑定三段。</div></div>
+    <div class="step"><span class="step-n">5</span><div><strong>跑起来验证：</strong>hack/local-up-cluster.sh 起裸集群，对着日志与断点重走第 3、4 步。</div></div>
+    <div class="step"><span class="step-n">6</span><div><strong>横向拓展：</strong>deployment_controller.go 看高层控制器怎么"改别人的期望"，串起第 3 期的对象接力。</div></div>
+  </div>
+  <p class="note"><span class="h">读码入口表</span>入口四件套：<code>staging/src/k8s.io/client-go/tools/cache/</code>（informer/Reflector/DeltaFIFO）、<code>pkg/controller/</code>（各内置控制器）、<code>pkg/scheduler/</code>（调度核心与 framework 插件）、<code>cmd/</code>（组件 main）。tag 切到 v1.37.0 再读，避免与文档对不上。</p>
+</section>
+
+<!-- ================= 07 架构师借鉴 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>架构师视角：能搬回自己系统的三件事</h2>
+  <ul>
+    <li><strong>用"期望 vs 实际的差额"建模，把事件当提醒而不是指令。</strong>自研平台里的定时对账、补偿任务常常写得心虚——"事件都到了才敢动"。level-based 给了相反的底气：处理逻辑幂等、只认最新状态，丢了就下一轮补；故障恢复从"回放历史"简化成"重读账本"；</li>
+    <li><strong>读多写少的系统：本地缓存 + 版本续传 + 周期对账三件套。</strong>Informer 的这套组合对配置中心、注册中心客户端是照抄级答案（本系列 etcd 期读过的 watch 语义，在客户端侧长成了这样）——先全量、后增量、断了从版本续、再定期全量兜底，四道防线各管一段；</li>
+    <li><strong>把贵的计算隔离在"可行集"内。</strong>先便宜的硬约束过滤、再昂贵的打分排序，过滤为空宁可排队也不硬塞——调度、推荐、风控引擎同样适用；顺带把"硬约束"与"软偏好"拆成两组扩展点，语义谁也不污染谁。</li>
+  </ul>
+</section>
+
+<!-- ================= 08 quiz ================= -->
+<section>
+  <h2><span class="sec-num">08</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. spec 先从 2 改成 5 再改回 3，官方 API 约定说系统会怎么表现？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["level-based 恰恰不要求逐级路过：2 到 5 再到 3，可直接朝 3 收敛。","中间没有丢：改回 3 是最新的期望，系统直接奔它去。","对：原话 level-based rather than edge-based——漏掉中间状态变化也能稳健收敛。"]'>
+        <li class="quiz-option">必须先收敛到 5，再到 3</li>
+        <li class="quiz-option">5 被跳过，视为非法中间态回滚</li>
+        <li class="quiz-option">直接朝 3 收敛，不要求路过 5</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. Informer 的 Reflector 为什么要先 List 一次再 Watch？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["List 不是为了校验，而是拿全量数据和 resourceVersion 起点值。","对：源码注释——先 List 拿全量与当时的 resource version，再用它 Watch 增量；断线也从该版本续传。"," Watch 与 List 同价，一次全量并没有省掉，只是为了校准。"]'>
+        <li class="quiz-option">为了校验本地缓存的数据完整性</li>
+        <li class="quiz-option">拿全量数据与 resourceVersion 起点，之后凭版本号收增量</li>
+        <li class="quiz-option">Watch 太贵，能用 List 就不用 Watch</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 调度过滤后可行节点为 0，调度器会怎么做？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["调度器从不硬塞：没有可行节点就没有绑定的对象。","放到较差节点违反硬约束语义，K8s 选择排队而不是降级。","对：返回 FitError，Pod 挂 Pending 排队，事件留下 0/42 nodes available 这类原因。"]'>
+        <li class="quiz-option">挑一个得分最高的节点硬塞进去</li>
+        <li class="quiz-option">自动降低资源请求后重试</li>
+        <li class="quiz-option">返回 FitError，Pod 挂 Pending 排队等待</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. 调度器选出节点之后，容器是谁、在什么时候拉起的？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["控制面组件都不直接碰容器：绑定只是把 nodeName 写进账本。","对：绑定结果经 Bind 插件写回 API Server，kubelet watch 到本节点新 Pod 才调用运行时。","绑定完成不等于容器已起：中间还隔着 kubelet 的 watch 与拉镜像。"]'>
+        <li class="quiz-option">调度器通过 Bind 插件直接在节点上启动容器</li>
+        <li class="quiz-option">绑定写回 API Server，kubelet watch 到后才调用运行时拉起</li>
+        <li class="quiz-option">controller-manager 远程执行启动命令</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 09 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：watch 断网十分钟、期间积压的所有事件全部丢失，控制器靠哪几层兜底把状态收敛回来？这暴露了 edge-triggered 方案的什么死穴？<span class="chev">展开解析 ▾</span></summary>
+    <div class="details-body">
+      <p>逐层看。<strong>第一层：重连续传</strong>——Reflector 重连时带着断开前的 resourceVersion，API Server 从该版本回放此后所有变更，只要服务端历史窗口没滑走，一秒补齐。<strong>第二层：全量重新 List</strong>——版本号太旧已被压缩（对应 etcd 期的 compacted 报错），Reflector 干脆重 List 一遍全量替换本地缓存，等价于" Forget everything, read the ledger again"。<strong>第三层：周期 Resync</strong>——就算什么都没断，MinResyncPeriod（默认 12 小时、乘随机因子错峰）也会把全部对象以 Sync 增量重放一遍，专治"事件到了但处理逻辑当时有 bug"这类静默漏账。<strong>第四层：workqueue 限流重试</strong>——对账本身失败也不丢：key 退避重排，下一轮再来。</p>
+      <p>反观 edge-triggered：它的正确性依赖"事件序列完整且按序处理"，丢一条就是永久漂移，而恢复手段只有一种——回放全部历史，代价与历史长度成正比。level-based 把恢复问题从"历史回放"降维成"重读当前账本"，成本与历史无关。<strong>这就是"不信任事件、只信任状态"的完整含义：不是不要事件，而是任何时候都可以不需要事件。</strong></p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：调度器为什么不把"过滤"与"打分"合并成一个插件、一次算完？拆成两阶段，牺牲了什么、换来了什么？<span class="chev">展开解析 ▾</span></summary>
+    <div class="details-body">
+      <p>先看合并的隐含前提：每个节点都要算完整分数——包括那些最终会被硬约束一票否决的节点。资源不足、污点不匹配、亲和冲突的节点，它们的"得分"毫无意义却照常消耗插件计算；万节点集群一轮调度几十万次评分，热点插件还会互相拖慢。<strong>两阶段把 O(节点×插件) 的昂贵评分，压缩到只对可行集执行</strong>，再加 <code>numFeasibleNodesToFind</code> 的比例控制（50% 起步、下限 5%），可行集本身也有上限——性能是拆分换来的第一收益。</p>
+      <p>第二收益是语义：硬约束（Filter 插件）与软偏好（Score 插件）分属两组扩展点，"不允许"与"不 Prefer"不会被一个加权公式搅在一起，自定义插件注册时职责天然清晰。牺牲也明码标价：<strong>两阶段顺序执行，过滤结果的截断（候选上限）可能让真正最优的节点没进打分池</strong>——这是一种"足够好"对"全局最优"的让步；另外插件间想传递中间结果，要靠 CycleState 显式协作。与 etcd 期 ReadIndex 的取舍同构：不追全局最优档，停在"默认档"，把最常见场景的性价比做到最高。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 10 要点 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这几条：</strong></p>
+    <ul>
+      <li>level-based 是 K8s 的一切：只认最新期望、不追中间事件（api-conventions 原话），manageReplicas 的 diff 就是全部逻辑（replica_set.go）；</li>
+      <li>Informer 三大件：indexer 本地缓存扛读、Reflector list-watch 凭 resourceVersion 续传、DeltaFIFO+sharedProcessor 分发——读集群变成读内存；</li>
+      <li>两阶段调度：过滤答能不能、打分答放哪，可行集为空就排队（FitError/Pending），绑定只写回账本，起容器是 kubelet 的事（schedule_one.go）；</li>
+      <li>从源码跑起来：hack/local-up-cluster.sh -O 拉起裸控制面，export KUBECONFIG 即可对接，cmd/ 下每个组件都有独立 main；</li>
+      <li>读码路线：体感 → cache 包 → replica_set.go → schedule_one.go → 裸集群断点 → deployment_controller.go 横向拓展。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 6 期《生态与进阶》把镜头拉远：CNCF 生态地图上 K8s 周边都有谁、继续学习路线怎么排——本系列 Kubernetes 篇的收官视角，但不结束我们与云原生的缘分。</p>
+  <p><strong>延伸阅读：</strong>Primary source 官方源码与文档：<a href="https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md" target="_blank" rel="noopener">API Conventions（level-based 原文）</a>、<a href="https://github.com/kubernetes/kubernetes/blob/v1.37.0/pkg/controller/replicaset/replica_set.go" target="_blank" rel="noopener">replica_set.go（tag v1.37.0）</a>、<a href="https://github.com/kubernetes/kubernetes/blob/v1.37.0/staging/src/k8s.io/client-go/tools/cache/shared_informer.go" target="_blank" rel="noopener">shared_informer.go（tag v1.37.0）</a>、<a href="https://github.com/kubernetes/kubernetes/blob/v1.37.0/pkg/scheduler/schedule_one.go" target="_blank" rel="noopener">schedule_one.go（tag v1.37.0）</a>、<a href="https://kubernetes.io/docs/concepts/scheduling-eviction/kube-scheduler/" target="_blank" rel="noopener">官方文档 · kube-scheduler（Filtering/Scoring）</a>、<a href="https://kubernetes.io/docs/concepts/architecture/controller/" target="_blank" rel="noopener">官方文档 · Controllers（控制循环）</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0024-k8s-deploy-in-action.html">← 上一期：实战场景</a>
+  <a class="next" href="0026-k8s-ecosystem.html">下一期：生态与进阶 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

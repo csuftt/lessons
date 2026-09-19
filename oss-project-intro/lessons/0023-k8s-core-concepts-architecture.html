@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Kubernetes 系列第 3 期：核心概念与整体架构 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0023</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0022-k8s-quickstart.html">上一期：0022</a> · Kubernetes 系列第 3 期 / 共 6 期 · <a href="https://kubernetes.io" target="_blank" rel="noopener">kubernetes.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · KUBERNETES 系列第 3 期：核心概念与整体架构</p>
+  <h1>Kubernetes 核心概念与整体架构：声明式 API、控制平面与一次部署的旅程</h1>
+  <p class="subtitle">上一期我们用 minikube 起了本地集群，部署了第一个工作负载：一条 create 命令，Pod 自己出现了。但"自己出现"这件事，命令行一个字都没解释——谁看到了你的声明、谁决定 Pod 落在哪、账记在哪。这一期把 K8s 的户口本翻开：术语体系按抽象层级串成一条线（Pod、ReplicaSet、Deployment、Service，用进程、线程池、发版、总机来类比）；期望状态 vs 实际状态与声明式 API 的真正含义；控制平面五个组件与节点侧三个组件各自干什么；一张自绘架构图看懂一次部署从 kubectl apply 到容器运行的全部走向，再打开源码仓库把顶层模块一一对号入座。全文基于 v1.37.x（1.37.0，2026-08-26 发布，GitHub Latest，2026-09-19 复核），概念表述逐条对照 kubernetes.io 官方文档。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 容器编排平台 · Go · Apache-2.0</span>
+    <span class="tag">📦 基于 v1.37.x（1.37.0）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 3 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 承上启下 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>上一期那条命令，背后站着一整个控制平面</h2>
+  <p>第 2 期我们跑通三条判定：<code>minikube status</code> 三行 Running、<code>kubectl get pods</code> 看到 1/1 Running、浏览器里看到应用响应。回头看那条部署命令：<code>kubectl create deployment hello-node</code>——只说了一句"要一个叫 hello-node 的 Deployment"，<strong>没人登录任何机器手动起容器，Pod 就自己出现了</strong>。谁读到了这句话？谁把它记下来？谁照着它干活？</p>
+  <p>答案是：这不是命令，是<strong>一份期望状态的声明</strong>，集群里站着一整个控制平面在消费它。读懂它只要两组词汇：一组描述"你声明什么"——对象体系与声明式 API；一组描述"谁来干活"——控制平面与节点组件。先发名片架，再上架构图对号入座。</p>
+</section>
+
+<!-- ================= 02 术语体系 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>术语体系：按抽象层级串起来，不背名词</h2>
+  <p>K8s 的对象名词少说几十个，但入门只需要抓一条主线：<strong>Deployment 管 ReplicaSet，ReplicaSet 管 Pod，Service 把一组 Pod 包装成稳定入口</strong>——一层套一层，每层只干一件事。四个核心对象配类比：</p>
+  <div class="grid-2">
+    <div class="card">
+      <h4>① Pod——最小调度单元，像"进程组"</h4>
+      <p><strong>一句话定义：</strong>一个或多个容器的组合，共享网络与存储，同生共死，是集群调度的最小单位。</p>
+      <ul>
+        <li>类比操作系统：<strong>容器是线程，Pod 是进程组</strong>——主容器加边车容器共用一个网络命名空间；</li>
+        <li>Pod 是"牲口不是宠物"：被删了不复活，由上一层对象重新生一个新的；第 2 期看到的 <code>hello-node-5f76cf6ccf-br9b5</code> 就是一个 Pod 的全名。</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>② ReplicaSet——副本保活员，像"线程池"</h4>
+      <p><strong>一句话定义：</strong>维持指定数量的 Pod 副本时刻在线：少了补、多了删。</p>
+      <ul>
+        <li>类比线程池保活：核心线程数设为 3，挂一个补一个——只认"数量"，不关心版本怎么换；</li>
+        <li>靠标签选择器认领 Pod，靠属主引用（ownerReferences）挂在 Deployment 名下——第 05 节演示链亲眼看这条链；日常几乎不直接操作它。</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>③ Deployment——发版管理员，管版本与滚动</h4>
+      <p><strong>一句话定义：</strong>声明 Pod 模板与副本数的期望状态，负责滚动更新、回滚与扩缩。</p>
+      <ul>
+        <li>类比发版系统：你只提交新版本声明，它控制新旧 ReplicaSet 此消彼长，滚动着换流量；</li>
+        <li>改镜像不是改 Pod，而是生成<strong>新的 ReplicaSet</strong>——<code>get rs</code> 里每代哈希就是一次发版存档；</li>
+        <li>副本数随负载自动伸缩是另一套机制，用法见每日微课程线 <a href="../../daily-tech-course/lessons/0016-k8s-hpa.html">第 0016 期 · Kubernetes HPA 自动伸缩</a>。</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>④ Service——稳定前台总机，像"域名 + 负载均衡"</h4>
+      <p><strong>一句话定义：</strong>给一组 Pod 提供固定访问入口（虚拟 IP 与 DNS 名），Pod 换了一茬照样找得到。</p>
+      <ul>
+        <li>Pod 会死会换、IP 随机分配——Service 用标签选择器圈住一组 Pod，入口地址却不变，类比公司前台总机：员工工位天天换，总机号码不变；</li>
+        <li>第 2 期那个 <code>EXTERNAL-IP &lt;pending&gt;</code> 只是入口体系的最小演示，生产级流量入口（Ingress、Gateway API）见 <a href="../../daily-tech-course/lessons/0024-k8s-ingress-service-traffic.html">第 0024 期 · Kubernetes 流量入口</a>。</li>
+      </ul>
+    </div>
+  </div>
+  <p class="note"><span class="h">边界说明</span>各对象的 YAML 用法与日常排障，每日微课程线已讲过的不换皮重讲，需要时看上面两处延伸阅读；本期只回答"这些对象是什么、谁在背后驱动它们"。</p>
+</section>
+
+<!-- ================= 03 期望状态与声明式 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>期望状态 vs 实际状态：声明式 API 的真正含义</h2>
+  <p>上一期的心智模型是"你声明期望状态，控制器把现实拉过去"。落到对象上，就是每个 K8s 对象几乎都有的两个嵌套字段。官方 working-with-objects 文档原话：<strong>spec 由你提供，是"期望状态的描述"；status 由系统及其组件提供并更新，描述"对象的当前状态"</strong>，而控制平面"持续且主动地管理每个对象的实际状态，使其匹配你提供的期望状态"。</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>字段</th><th>谁写</th><th>装什么</th><th>一句话理解</th></tr></thead>
+    <tbody>
+      <tr><td><code>spec</code></td><td>用户（你）</td><td>要几个副本、用什么镜像、暴露哪个端口</td><td>期望状态——你说了算的唯一一份</td></tr>
+      <tr><td><code>status</code></td><td>系统（控制器）</td><td>现在几个就绪、更新到第几代</td><td>实际状态——只能读，别手改</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>官方给 K8s 对象的定义是 <strong>"record of intent"（意图记录）</strong>——对象一旦创建，系统会持续工作确保它存在。声明式的完整含义在 <code>kubectl apply</code> 里：官方 object-management 文档把对象管理分成三种——<strong>命令式命令</strong>（直接操作活动对象，适合入门）、<strong>命令式对象配置</strong>（<code>kubectl create -f</code> 单文件全量定义）、<strong>声明式对象配置</strong>（<code>kubectl apply -f 目录</code>，增删改由 kubectl 逐对象自动判定，还能保留其他人的直接改动）。生产推荐第三种，官方同时警告：<strong>同一对象只用一种方式管理，混用会导致未定义行为</strong>。API 侧，对象按 API 组与版本暴露在 <code>/api/v1</code>、<code>/apis/apps/v1</code> 这样的路径上，<code>apiVersion</code> 与 <code>kind</code> 正是 YAML 头两行的来历；序列化的对象状态写入 etcd 持久化——etcd 就是这本总账（etcd 本身详见本系列第 16~20 期，点到为止）。</p>
+</section>
+
+<!-- ================= 04 组件与架构 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>控制平面与节点组件：一张架构图看懂一次部署</h2>
+  <p>概念有了承重墙，现在看房子。官方 components 文档把组件分两拨：<strong>控制平面组件管理集群的整体状态，节点组件运行在每个节点上、维持运行中的 Pod 并提供运行时环境</strong>。每个组件一句话：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>组件</th><th>位置</th><th>一句话职责（对照官方文档）</th></tr></thead>
+    <tbody>
+      <tr><td><strong>kube-apiserver</strong></td><td>控制平面</td><td>暴露 Kubernetes HTTP API 的核心组件服务器——所有读写的唯一入口</td></tr>
+      <tr><td><strong>etcd</strong></td><td>控制平面</td><td>为所有 API 服务器数据提供一致且高可用的键值存储——集群总账本</td></tr>
+      <tr><td><strong>kube-scheduler</strong></td><td>控制平面</td><td>寻找尚未绑定节点的 Pod，为每个 Pod 分配合适的节点（过滤 + 打分，第 5 期展开）</td></tr>
+      <tr><td><strong>kube-controller-manager</strong></td><td>控制平面</td><td>运行控制器以实现 Kubernetes API 行为——Deployment、ReplicaSet 等对账循环的合集</td></tr>
+      <tr><td><strong>cloud-controller-manager</strong>（可选）</td><td>控制平面</td><td>与底层云提供商集成：负载均衡器、挂载盘、节点地址这些"云上的事"</td></tr>
+      <tr><td><strong>kubelet</strong></td><td>每个节点</td><td>确保 Pod 及其容器处于运行状态——节点上照看容器的人</td></tr>
+      <tr><td><strong>kube-proxy</strong>（可选）</td><td>每个节点</td><td>在节点上维护网络规则以实现 Service——流量怎么转发的执行者</td></tr>
+      <tr><td><strong>容器运行时</strong></td><td>每个节点</td><td>负责运行容器的软件（containerd 等，官方标注为第三方项目）</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 560" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" style="max-width:100%">
+    <defs>
+      <marker id="ar23" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar23a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent)"/>
+      </marker>
+      <marker id="ar23g" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+
+    <!-- kubectl -->
+    <rect x="290" y="12" width="180" height="52" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="380" y="33" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">kubectl apply -f</text>
+    <text x="380" y="51" text-anchor="middle" fill="var(--muted)" font-size="9.5">提交期望状态（spec）</text>
+    <line x1="380" y1="64" x2="380" y2="96" stroke="var(--accent)" marker-end="url(#ar23a)"/>
+    <text x="392" y="84" fill="var(--accent)" font-size="9">① 声明进门：HTTP API</text>
+
+    <!-- 控制平面框 -->
+    <rect x="20" y="100" width="720" height="212" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-opacity="0.6"/>
+    <text x="36" y="122" fill="var(--ink)" font-size="11" font-weight="700">控制平面 Control Plane</text>
+    <text x="220" y="122" fill="var(--muted)" font-size="9.5">管理集群的整体状态 · 云上常为托管形态</text>
+
+    <rect x="250" y="132" width="260" height="56" rx="8" fill="var(--card)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="380" y="154" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">kube-apiserver · 唯一入口</text>
+    <text x="380" y="173" text-anchor="middle" fill="var(--muted)" font-size="9">认证 → 鉴权 → 准入 → 写账 / watch 广播</text>
+
+    <rect x="36" y="222" width="150" height="72" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="111" y="244" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">etcd</text>
+    <text x="111" y="261" text-anchor="middle" fill="var(--muted)" font-size="8.5">一致且高可用的键值存储</text>
+    <text x="111" y="277" text-anchor="middle" fill="var(--muted)" font-size="8.5">集群总账本（第 16~20 期）</text>
+
+    <rect x="226" y="222" width="150" height="72" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="301" y="244" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">kube-scheduler</text>
+    <text x="301" y="261" text-anchor="middle" fill="var(--muted)" font-size="8.5">给未绑定的 Pod 分节点</text>
+    <text x="301" y="277" text-anchor="middle" fill="var(--muted)" font-size="8.5">过滤 + 打分（第 5 期）</text>
+
+    <rect x="416" y="222" width="160" height="72" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="496" y="244" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">kube-controller-manager</text>
+    <text x="496" y="261" text-anchor="middle" fill="var(--muted)" font-size="8.5">控制器合集：对账循环</text>
+    <text x="496" y="277" text-anchor="middle" fill="var(--muted)" font-size="8.5">Deployment / ReplicaSet …</text>
+
+    <rect x="606" y="222" width="118" height="72" rx="8" fill="var(--card)" stroke="var(--line)" stroke-dasharray="5 3"/>
+    <text x="665" y="244" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">cloud-controller-manager</text>
+    <text x="665" y="261" text-anchor="middle" fill="var(--muted)" font-size="8.5">对接云厂商（可选）</text>
+    <text x="665" y="277" text-anchor="middle" fill="var(--muted)" font-size="8.5">负载均衡 / 挂载盘</text>
+
+    <!-- 控制平面内部连线 -->
+    <line x1="300" y1="188" x2="130" y2="218" stroke="var(--accent)" marker-end="url(#ar23a)"/>
+    <text x="128" y="196" fill="var(--accent)" font-size="9">② 序列化状态写入 etcd</text>
+    <path d="M470,188 C480,206 490,212 496,218" fill="none" stroke="var(--accent-3)" stroke-dasharray="4 3" marker-end="url(#ar23g)"/>
+    <text x="510" y="206" fill="var(--accent-3)" font-size="9">watch 到变更 → 对账</text>
+    <path d="M470,170 C560,150 590,150 640,150" fill="none" stroke="var(--muted)" stroke-dasharray="4 3" marker-end="url(#ar23)"/>
+
+    <!-- 节点框 -->
+    <rect x="20" y="342" width="720" height="128" rx="10" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="36" y="364" fill="var(--ink)" font-size="11" font-weight="700">工作节点 Node × N</text>
+    <text x="200" y="364" fill="var(--muted)" font-size="9.5">维持运行中的 Pod · 提供运行时环境</text>
+
+    <rect x="36" y="378" width="150" height="72" rx="8" fill="var(--card)" stroke="var(--accent)"/>
+    <text x="111" y="400" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">kubelet</text>
+    <text x="111" y="417" text-anchor="middle" fill="var(--muted)" font-size="8.5">确保 Pod 与容器在跑</text>
+    <text x="111" y="433" text-anchor="middle" fill="var(--muted)" font-size="8.5">节点状态回报</text>
+
+    <rect x="206" y="378" width="160" height="72" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="286" y="400" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">容器运行时</text>
+    <text x="286" y="417" text-anchor="middle" fill="var(--muted)" font-size="8.5">containerd 等（第三方）</text>
+    <text x="286" y="433" text-anchor="middle" fill="var(--muted)" font-size="8.5">真正拉起容器</text>
+
+    <rect x="386" y="378" width="150" height="72" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="461" y="400" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">Pod × N</text>
+    <text x="461" y="417" text-anchor="middle" fill="var(--muted)" font-size="8.5">真正跑应用的容器组</text>
+    <text x="461" y="433" text-anchor="middle" fill="var(--muted)" font-size="8.5">标签被 ReplicaSet 认领</text>
+
+    <rect x="556" y="378" width="168" height="72" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="640" y="400" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">kube-proxy（可选）</text>
+    <text x="640" y="417" text-anchor="middle" fill="var(--muted)" font-size="8.5">节点网络规则</text>
+    <text x="640" y="433" text-anchor="middle" fill="var(--muted)" font-size="8.5">Service 流量转发</text>
+
+    <!-- apiserver 与节点 -->
+    <path d="M300,188 C230,240 160,320 118,374" fill="none" stroke="var(--accent-3)" stroke-dasharray="4 3" marker-end="url(#ar23g)"/>
+    <text x="128" y="330" fill="var(--accent-3)" font-size="9">③⑤ watch 下发 Pod 清单 · 状态回报</text>
+    <line x1="111" y1="378" x2="111" y2="346" stroke="var(--muted)" marker-end="url(#ar23)"/>
+    <line x1="121" y1="346" x2="121" y2="374" stroke="var(--muted)" stroke-dasharray="4 3" marker-end="url(#ar23)"/>
+    <line x1="151" y1="414" x2="202" y2="414" stroke="var(--muted)" marker-end="url(#ar23)"/>
+    <text x="176" y="406" text-anchor="middle" fill="var(--muted)" font-size="8.5">调用 CRI</text>
+    <line x1="336" y1="414" x2="382" y2="414" stroke="var(--muted)" marker-end="url(#ar23)"/>
+    <text x="359" y="406" text-anchor="middle" fill="var(--muted)" font-size="8.5">拉镜像起容器</text>
+    <line x1="386" y1="430" x2="552" y2="424" stroke="var(--muted)" stroke-dasharray="4 3" marker-end="url(#ar23)"/>
+    <text x="470" y="446" fill="var(--muted)" font-size="8.5">Service 规则覆盖 Pod 网络</text>
+
+    <text x="20" y="494" fill="var(--muted)" font-size="9.5">实线 = 一次部署的写路径（①声明 ②落账 ③下发 ④起容器）；虚线 = watch 与状态回流（⑤）</text>
+    <text x="20" y="512" fill="var(--muted)" font-size="9.5">组件分工口径对照官方 v1.37 文档 Components 页（kubernetes.io/docs/concepts/overview/components/，2026-09-19 复核）</text>
+    <text x="20" y="546" fill="var(--muted)" font-size="9.5">调度器经 apiserver 写回绑定结果，不直连节点；图为了紧凑省略 kubelet→apiserver 的回线箭头</text>
+  </svg>
+  </div>
+
+  <p><strong>一次部署的完整旅程</strong>，顺着实线走：<strong>① kubectl apply 把声明交给 apiserver → 认证、鉴权、准入后写进 etcd 落账 → ② Deployment 控制器 watch 到新对象创建 ReplicaSet，ReplicaSet 控制器创建 Pod（此刻还没节点，处于 Pending）→ ③ kube-scheduler 为每个 Pod 过滤打分、绑定结果写回 apiserver → kubelet watch 到"本节点有新 Pod"，④ 调用容器运行时拉镜像、起容器 → ⑤ kubelet 持续回报状态，status 更新为 Running</strong>。第 2 期那个"自己出现"的 Pod，就是这条流水线的终点。</p>
+
+  <div class="grid-2">
+    <div class="card">
+      <h4>钩子一：为什么一切读写都要过 apiserver 这道门？</h4>
+      <p>反着想：如果控制器与客户端都直连 etcd 会怎样？<strong>认证、鉴权、准入三道安检没了集中执行的地方</strong>；并发写入没有乐观并发控制（resourceVersion 比对）兜底，互相覆盖；watch 广播要每个客户端自己造轮子；存储演进也没了转换层。把门收拢到一处，换来：<strong>策略一处生效、冲突一处裁决、事件一处广播、审计一处留痕</strong>。apiserver 无状态、可水平扩，真正的状态瓶颈在 etcd——这道"门"不是设计失误，而是把复杂性换成可控性的关键取舍。</p>
+    </div>
+    <div class="card">
+      <h4>钩子二：组件挂了会发生什么？</h4>
+      <p>看三个典型故障：<strong>kube-scheduler 挂</strong>——新 Pod 没人分派节点、卡 Pending，已在跑的容器照常服务；<strong>某个 kubelet 挂</strong>——该节点 Pod 失去照看、状态不再回报，控制面把节点标 NotReady 并驱逐重建其上 Pod；<strong>apiserver 挂</strong>——大门关闭，kubectl 全部失联，但节点上的 kubelet 与运行时还在照看既有容器，业务照跑。这正是声明式架构的底气：<strong>数据面与控制面分离，控制面短暂失能不打断业务，恢复后一切向期望状态对齐</strong>。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 05 源码模块地图 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>打开仓库：顶层模块地图</h2>
+  <p>Kubernetes 是单体大仓库（k8s.io/kubernetes，GitHub 上 128k stars）。以主分支为据（2026-09-19 核对；阅读源码建议锁定 tag <strong>v1.37.0</strong>），顶层目录一句话：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>顶层目录</th><th>一句话职责</th></tr></thead>
+    <tbody>
+      <tr><td><code>cmd/</code></td><td>每个二进制的 main 入口：kube-apiserver、kubelet、kube-proxy 等都从这编译出来</td></tr>
+      <tr><td><code>pkg/</code></td><td>主体实现：控制平面与节点的核心逻辑（调度器、控制器、kubelet 等）都在这</td></tr>
+      <tr><td><code>staging/</code></td><td>待拆分出去的子仓库：client-go、k8s.io/api 等从这里发布给外部使用</td></tr>
+      <tr><td><code>api/</code></td><td>API 对象的 Go 类型与序列化定义，与 staging 中的对外仓库同步</td></tr>
+      <tr><td><code>test/</code></td><td>e2e 与集成测试套件——读码时最好的"用法示例库"</td></tr>
+      <tr><td><code>hack/</code></td><td>构建、代码生成与校验的开发脚本（改代码前先看这里怎么跑）</td></tr>
+      <tr><td><code>third_party/</code>、<code>vendor/</code></td><td>外部依赖的 fork 与 vendored 副本</td></tr>
+      <tr><td><code>cluster/</code>、<code>build/</code></td><td>集群部署脚本与构建发布流水线</td></tr>
+      <tr><td><code>plugin/</code>、<code>docs/</code>、<code>logo/</code></td><td>插件（鉴权等）、仓库内文档与品牌资源</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note"><span class="h">读码提示</span>两个目录记优先级：<code>cmd/</code> 是"哪里进"（每个组件的 main 函数），<code>pkg/</code> 是"里面是什么"（控制器模式、调度器都在这）——第 5 期源码导读从这两处进门；想在 K8s API 上做开发，看 <code>staging/</code> 里的 client-go。</p>
+</section>
+
+<!-- ================= 06 quiz ================= -->
+<section>
+  <h2><span class="sec-num">06</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. 对象的 spec 与 status，分别由谁写？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["方向反了：官方原话——spec 由用户提供，是期望状态的描述。","status 由系统及其组件提供并更新，手改会被拉回来。","对：spec 你写（期望状态），status 系统写（当前状态），控制平面持续对账。"]'>
+        <li class="quiz-option">spec 系统写，status 用户写</li>
+        <li class="quiz-option">两个都是用户写，字段不同</li>
+        <li class="quiz-option">spec 用户写期望，status 系统写实际</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 一切读写都要过 kube-apiserver，最主要的原因是什么？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["etcd 性能不弱，让道 apiserver 的核心理由是安全与一致性策略的集中执行。","对：认证、鉴权、准入、乐观并发、审计、watch 广播全在一道门上，etcd 藏在门后不直接暴露。","apiserver 不是负载均衡器，Service 的流量不经过它。"]'>
+        <li class="quiz-option">因为 etcd 性能太弱，需要代理缓存</li>
+        <li class="quiz-option">安检与一致性策略集中一处：认证、鉴权、准入、并发控制、审计、watch 都在门口</li>
+        <li class="quiz-option">因为它是集群里唯一的负载均衡器</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. kubectl apply -f configs/ 属于官方定义的哪种管理方式？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对：声明式对象配置——增删改由 kubectl 逐对象自动判定，生产推荐。","命令式命令直接操作活动对象，不经过文件，如 kubectl create deployment。","官方警告：同一对象混用多种管理方式会导致未定义行为。"]'>
+        <li class="quiz-option">声明式对象配置</li>
+        <li class="quiz-option">命令式命令</li>
+        <li class="quiz-option">三者混用，视心情而定</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. kube-scheduler 挂掉之后，已经在运行的 Pod 会怎样？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["调度器只管没绑定节点的 Pod 分派，不管已运行容器的生死。","对：数据面与控制面分离——已在跑的容器照常服务；新 Pod 没人分派节点，会一直 Pending。","节点被清空是 kubelet 侧故障或节点级别的处置，调度器挂掉不会触发。"]'>
+        <li class="quiz-option">立刻全部被杀掉并重新调度</li>
+        <li class="quiz-option">照常运行；新 Pod 没人分派节点，卡在 Pending</li>
+        <li class="quiz-option">所在节点立刻被清空，Pod 全部驱逐</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 07 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：如果允许控制器与客户端绕过 apiserver 直连 etcd 读写，集群会在哪些具体地方坏掉？这反过来解释了 apiserver 的哪些设计？</summary>
+    <div class="details-body">
+      <p>逐层推演。<strong>第一层安全崩塌</strong>：认证、鉴权、准入目前在 apiserver 一处集中执行，直连 etcd 意味着每个客户端都自带"内部人员"权限——RBAC 名存实亡，准入校验要么没人做、要么几十个客户端各做一遍。<strong>第二层并发崩塌</strong>：多个控制器同时改一个对象，靠的是 apiserver 的乐观并发控制——请求带着 resourceVersion，版本不对就拒绝重试；直连后这层裁决消失，丢更新、互相覆盖变成日常。<strong>第三层事件崩塌</strong>：控制器的"观察"能力来自 apiserver 的 watch 广播（带资源版本排序、断线连续传），直连则每个客户端都要自己处理 etcd 的 watch 语义与历史窗口。<strong>第四层演进崩塌</strong>：API 版本转换发生在 apiserver，存储格式想换也不惊动客户端——直连则存储 schema 被锁死。这些"坏掉的地方"逐条对应 apiserver 的设计职责：它是集群<strong>唯一的写入裁决者与事件广播者</strong>。第 5 期读控制器源码会反复看到同一个模式：控制器从不"直接改变现实"，只通过 apiserver 提交期望——那里才有并发安全。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：第 2 期的 minikube 单节点"既是控制平面又是工作节点"，本期的"组件挂了会发生什么"分析还成立吗？哪些结论在沙盘里要打折扣？</summary>
+    <div class="details-body">
+      <p>逐条对账。<strong>成立的结论</strong>：组件分工与对账机制完全一致——沙盘里的 apiserver、scheduler、controller-manager、kubelet 与生产是同一批程序，演示链敲的每条命令语义不变。<strong>要打折扣的结论</strong>：其一，"apiserver 挂了数据面照跑"在沙盘里只对一半——minikube 把控制面组件跑在节点上的静态 Pod 里，apiserver 进程挂掉，kubelet 与运行时确实还在、既有容器照跑，kubectl 也确实失联；但控制面与数据面挤在同一台机器，<strong>整机故障时两者一起完蛋</strong>，而生产集群控制面独立部署（云上常为托管形态），worker 故障只影响该节点。其二，沙盘没有"调度"可言：唯一节点上 scheduler 的过滤打分基本空转。其三，容错为零：单 etcd、单 apiserver，任何控制面进程崩溃都意味着对应能力完全不可用——生产用多副本加 quorum 换容错。所以正确的读法是：<strong>沙盘练语法，故障语义按"多节点 + 控制面独立"的生产形态想象</strong>——这也是第 4 期实战交付前要建立的默认画像。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 08 要点 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这几条：</strong></p>
+    <ul>
+      <li>术语一条线：Pod 是最小调度单元（进程组），ReplicaSet 保副本数（线程池），Deployment 管版本与滚动（发版管理员），Service 给稳定入口（前台总机）；</li>
+      <li>声明式的含义：spec 你写期望、status 系统写实际，对象是"意图记录"，控制平面持续对账；apply 是生产姿势，同一对象别混用管理方式；</li>
+      <li>控制平面五件套：apiserver 守门、etcd 落账、scheduler 派位、controller-manager 对账、cloud-controller-manager 对接云；节点侧三件套：kubelet 照看、运行时拉起、kube-proxy 通流量；</li>
+      <li>一次部署的旅程：apply → 落账 etcd → 控制器接力（Deployment→ReplicaSet→Pod）→ 调度绑定 → kubelet 起容器 → 状态回报，全程没有一步靠人；</li>
+      <li>仓库地图：<code>cmd/</code> 是入口，<code>pkg/</code> 是主体，<code>staging/</code> 里是 client-go 等对外仓库，读码先锁 v1.37.0 tag。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 4 期《实战场景：把一个服务完整交付上 K8s》——把今天的对象体系用到真实交付：一份完整清单（Deployment + Service + ConfigMap）、探针与资源声明、端到端跑通。本期每个名词都会变成交付清单里实打实的一行。</p>
+  <p><strong>延伸阅读：</strong>Primary source 官方文档：<a href="https://kubernetes.io/docs/concepts/overview/components/" target="_blank" rel="noopener">Kubernetes Components</a>（控制平面与节点组件的一手出处）；<a href="https://kubernetes.io/docs/concepts/overview/working-with-objects/" target="_blank" rel="noopener">Working with Kubernetes Objects</a>（spec/status 与"意图记录"）、<a href="https://kubernetes.io/docs/concepts/overview/working-with-objects/object-management/" target="_blank" rel="noopener">Object Management</a>（三种管理方式与混用警告）、<a href="https://kubernetes.io/docs/concepts/overview/kubernetes-api/" target="_blank" rel="noopener">The Kubernetes API</a>（API 组、版本化与 etcd 持久化）、<a href="https://kubernetes.io/docs/concepts/workloads/controllers/deployment/" target="_blank" rel="noopener">Deployments</a>（本期演示链命令与回显样例）、<a href="https://kubernetes.io/docs/reference/kubectl/" target="_blank" rel="noopener">kubectl 命令参考</a>（get --watch 与 explain）；仓库与版本见 <a href="https://github.com/kubernetes/kubernetes" target="_blank" rel="noopener">github.com/kubernetes/kubernetes</a> 与 <a href="https://github.com/kubernetes/kubernetes/releases" target="_blank" rel="noopener">GitHub Releases</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0022-k8s-quickstart.html">← 上一期：5 分钟跑起来</a>
+  <a class="next" href="0024-k8s-deploy-in-action.html">下一期：实战场景 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>
