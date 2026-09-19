@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Harbor 系列第 1 期：企业级云原生镜像仓库 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0052</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0051-skywalking-source-reading.html">上一期:0051</a> · Harbor 系列第 1 期 / 共 4 期 · <a href="0053-harbor-quickstart.html">下一期:0053</a> · <a href="https://goharbor.io" target="_blank" rel="noopener">goharbor.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · HARBOR 系列第 1 期：认识项目</p>
+  <h1>Harbor 是什么：企业级云原生镜像仓库</h1>
+  <p class="subtitle">开源项目入门系列的每个新项目，都从三个问题开始：它解决什么痛点、凭什么活下来、什么场景该选它。上一个项目我们聊完了 SkyWalking，今天开启新项目 Harbor。官方定义一句话：<strong>an open source registry that secures artifacts with policies and role-based access control, ensures images are scanned and free from vulnerabilities, and signs images as trusted</strong>——一个用策略与基于角色的访问控制保护制品、确保镜像经过漏洞扫描并可签名验证的开源仓库。一句话心智模型：<strong>不只是存镜像的仓库，而是企业级的镜像"管理中心"——存储、扫描、签名、复制、权限五件事一个平台管</strong>。本期不装任何软件，素材全部来自官方文档与官方仓库，每张图都标出处；你带走四样东西：镜像放公共仓库的四个麻烦、"管理中心"这个心智模型、一套五方选型对比，外加"什么场景该选它"的判断清单。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">📦 镜像仓库与交付 · Go · Apache-2.0（CNCF 毕业项目）</span>
+    <span class="tag">📦 基于 v2.15.2（GitHub Latest）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 1 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 痛点 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>痛点：镜像全放 Docker Hub 的四个麻烦</h2>
+  <p>容器化之后，每个团队都绕不开一个问题：<strong>镜像放哪？</strong>默认答案是 Docker Hub——官方仓库、镜像最全、免费就能用。个人项目这么用没毛病，但企业一上规模，很快撞上四堵墙：</p>
+  <ul>
+    <li><strong>拉取慢还限流：</strong>海外源隔着公网，大镜像拉半个小时是常态；Docker 官方文档明文规定，匿名用户每个 IPv4 地址六小时限 100 次拉取、认证的免费账号 200 次（docs.docker.com《Usage and rate limits》，2026-09 核对）。一个中型团队每天的 CI 构建就能把这额度用光，构建队列动不动挂在 <code>toomanyrequests</code> 上；</li>
+    <li><strong>安全扫描缺失：</strong>基础镜像里带没带已知漏洞（CVE）、你们业务镜像依赖的库有没有挖矿程序，推上去没人告诉你——等安全部门拿着扫描器找上门，镜像可能已经跑在生产上几个月了；</li>
+    <li><strong>审计合规难：</strong>谁在什么时候推了什么、哪个镜像版本上了生产、出了问题该追溯谁——公共仓库不替你记账，等保和行业审计要证据时拿不出来；</li>
+    <li><strong>跨机房分发贵：</strong>多机房、多云部署时，每个机房都从公网重复拉几个 G 的镜像层，带宽和发布时间的双重浪费，遇上线窗口全在等镜像。</li>
+  </ul>
+  <p>把这四个麻烦翻译成需求清单，企业要的私有镜像仓库长这样：<strong>协议兼容（现有 docker 命令照用）、自带漏洞扫描、能签名验源、有角色权限和审计、支持跨实例分发</strong>。Harbor 就是照着这张清单长出来的。</p>
+</section>
+
+<!-- ================= 02 是什么 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>是什么：官方定义与一句话心智模型</h2>
+  <p>官网的定义值得逐词读（goharbor.io，2026-09 核对）：<strong>"Harbor is an open source registry that secures artifacts with policies and role-based access control, ensures images are scanned and free from vulnerabilities, and signs images as trusted."</strong>——注意主语是 registry（仓库），但定语全是管理动作：策略、权限、扫描、签名。官网的使命宣言补了下半句：<strong>to be the trusted cloud native repository for Kubernetes</strong>，做 K8s 值得信赖的云原生仓库。</p>
+  <p>一句话心智模型：<strong>不只是存镜像的仓库，而是企业级的镜像"管理中心"——存储是起点，扫描、签名、复制、权限才是它区别于网盘的部分。</strong>用法上它刻意"隐形"：因为完全兼容 Docker 的仓库协议，你的命令一个字都不用改，只换地址（命令出自官方文档《Pulling and Pushing Images》，2026-09 核对）：</p>
+  <pre class="codeblock"><code># 和 Docker Hub 完全一致的用法，地址换成自家域名
+docker login harbor.demo.com
+docker tag ubuntu:24.04 harbor.demo.com/demo/ubuntu:24.04
+docker push harbor.demo.com/demo/ubuntu:24.04</code></pre>
+  <p>推完回显 digest（摘要值），镜像就进了 demo 这个项目。Helm Chart 也不用另找仓库——Harbor 2.0 起支持 OCI 制品规范，一条 <code>helm push</code> 把 Chart 和镜像存进同一个仓库。对应用代码来说，迁移要改的东西是<strong>零行</strong>。</p>
+  <p class="note"><img src="../output/0052-harbor-what-and-why/images/harbor-goharbor-home.png" alt="goharbor.io 官网 What is Harbor 定义区块" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">goharbor.io 官网"What is Harbor?"区块：官方定义原文 + GitHub 按钮 + CNCF Status: Graduated 徽章（2026-09-19 截图，当日 Star 计数 29,415）。</p>
+</section>
+
+<!-- ================= 03 心智模型图 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>心智模型：一张图看懂"管理中心"</h2>
+  <div class="diagram">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar52" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="16" y="112" width="150" height="76" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="91" y="142" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">开发机 / CI</text>
+    <text x="91" y="164" text-anchor="middle" fill="var(--muted)" font-size="9.5">docker push</text>
+    <rect x="300" y="100" width="170" height="100" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="385" y="132" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">Harbor</text>
+    <text x="385" y="154" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">镜像管理中心</text>
+    <text x="385" y="178" text-anchor="middle" fill="var(--muted)" font-size="9.5">项目 · 制品 · 策略</text>
+    <line x1="166" y1="150" x2="294" y2="150" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar52)"/>
+    <rect x="560" y="24" width="188" height="52" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="654" y="46" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">漏洞扫描：推入即体检</text>
+    <text x="654" y="64" text-anchor="middle" fill="var(--muted)" font-size="9">Trivy · 高危可拦截</text>
+    <rect x="560" y="92" width="188" height="52" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="654" y="114" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">内容签名：验来源防篡改</text>
+    <text x="654" y="132" text-anchor="middle" fill="var(--muted)" font-size="9">只放行可信镜像</text>
+    <rect x="560" y="160" width="188" height="52" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="654" y="182" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">跨实例复制：机房同步</text>
+    <text x="654" y="200" text-anchor="middle" fill="var(--muted)" font-size="9">多云多机房按规则分发</text>
+    <rect x="560" y="228" width="188" height="52" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="654" y="250" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">项目权限：RBAC 隔离</text>
+    <text x="654" y="268" text-anchor="middle" fill="var(--muted)" font-size="9">人员角色 + 机器人账号</text>
+    <line x1="470" y1="120" x2="554" y2="54" stroke="var(--accent-3)" stroke-width="1.5" marker-end="url(#ar52)"/>
+    <line x1="470" y1="140" x2="554" y2="120" stroke="var(--accent-3)" stroke-width="1.5" marker-end="url(#ar52)"/>
+    <line x1="470" y1="165" x2="554" y2="184" stroke="var(--accent-3)" stroke-width="1.5" marker-end="url(#ar52)"/>
+    <line x1="470" y1="185" x2="554" y2="250" stroke="var(--accent-3)" stroke-width="1.5" marker-end="url(#ar52)"/>
+    <rect x="60" y="240" width="150" height="60" rx="10" fill="var(--warn-bg)" stroke="var(--line)"/>
+    <text x="135" y="264" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">K8s 集群</text>
+    <text x="135" y="284" text-anchor="middle" fill="var(--muted)" font-size="9.5">按策略拉取可信镜像</text>
+    <line x1="310" y1="200" x2="180" y2="252" stroke="var(--accent-3)" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#ar52)"/>
+    <text x="16" y="292" fill="var(--muted)" font-size="9.5">图例：存储是起点不是终点——扫描、签名、复制、权限围着同一份制品转（概念图，第 3 期拆组件）</text>
+  </svg>
+  </div>
+  <p>左边开发机和流水线把镜像推进来，右边 K8s 集群按策略拉取，中间这个仓库干了五件事：存制品、扫漏洞、做签名、跨机房复制、管项目权限。<strong>存下来只是起点，管起来才是目的</strong>——这句话贯穿整个系列，Harbor 的所有功能都长在这条根上。第 3 期我们按组件拆它的架构，今天先记分工。</p>
+</section>
+
+<!-- ================= 04 核心能力 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>核心能力盘点：四件看家本事加五件硬功夫</h2>
+  <p>看家本事四件（口径为官方文档，2026-09 核对）：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>能力</th><th>它做什么</th><th>对你的意义</th></tr></thead>
+    <tbody>
+      <tr><td><strong>镜像与 OCI 制品管理</strong></td><td>容器镜像、Helm Chart 统一入库，完全兼容 Docker/OCI 规范</td><td>现有命令与流水线零改动，交付物一个仓库管完</td></tr>
+      <tr><td><strong>漏洞扫描（Trivy）</strong></td><td>推入即做静态漏洞分析，按严重级别出报告，可配高危拦截；也支持外接其他扫描器</td><td>镜像上生产前有体检报告，安全卡点有据可依</td></tr>
+      <tr><td><strong>内容信任与签名</strong></td><td>对制品签名、拉取端验签，可配"只拉已签名镜像"策略</td><td>防镜像投毒、防中间篡改，来源可信可验证</td></tr>
+      <tr><td><strong>跨实例复制</strong></td><td>实例之间按规则双向/单向自动同步，可配基于 P2P 的分发加速</td><td>多云多机房分发不靠人搬，灾备有副本</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>管理面上还有五件硬功夫，单拎出来都不起眼，拼起来正是企业选它的理由：<strong>RBAC 项目隔离</strong>（项目为界分开发者/维护者/管理员，CI 用机器人账号）；<strong>保留策略与 GC</strong>（自动清旧镜像救存储）；<strong>项目配额</strong>（每个项目设存储上限）；<strong>代理缓存</strong>（当公共仓库的本地代理，外层镜像拉一次存一份，内网拉取不卡）；<strong>审计日志</strong>（谁在何时推拉过什么，接口可查可导出）。</p>
+  <p class="note"><img src="../output/0052-harbor-what-and-why/images/harbor-docs-trivy.png" alt="Harbor 官方文档 Vulnerability Scanning 页" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档《Vulnerability Scanning》：Harbor provides static analysis of vulnerabilities in images through the open source project Trivy——安装时带 <code>--with-trivy</code> 启用；Clair 自 v2.2 起移出默认扫描器（2026-09-19 截图）。</p>
+</section>
+
+<!-- ================= 05 关键数据 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>关键数据与版本基准</h2>
+  <p class="note"><img src="../output/0052-harbor-what-and-why/images/harbor-github-repo.png" alt="GitHub goharbor 组织仓库列表中的 harbor 卡片" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">GitHub goharbor 组织仓库列表中的 harbor 卡片：自述 An open source trusted cloud native registry project that stores, signs, and scans content · Go · Apache License 2.0 · Star 29k（精确值 29,415）· Fork 5.4k · cncf/helm/kubernetes 话题标签在列（2026-09-19 截图，github.com/orgs/goharbor/repositories）。</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>指标</th><th>数值</th><th>来源与口径</th></tr></thead>
+    <tbody>
+      <tr><td>GitHub Stars</td><td><strong>29.4k</strong>（29,415）</td><td>goharbor/harbor 仓库页，2026-09-19 核对</td></tr>
+      <tr><td>开源许可</td><td><strong>Apache-2.0</strong></td><td>仓库 license 栏，商用友好</td></tr>
+      <tr><td>CNCF 毕业日期</td><td><strong>2020-06-15</strong></td><td>CNCF 项目页：2018-07-31 收纳进沙箱、同年 11-14 进孵化、2020-06-15 毕业——首个源自中国团队的 CNCF 毕业项目</td></tr>
+      <tr><td>生产采用公示</td><td>30+ 家</td><td>仓库 ADOPTERS.md：京东、中国移动、CERN、Rancher、Trend Micro 等（2026-09 核对）</td></tr>
+      <tr><td>最新稳定版</td><td><strong>v2.15.2</strong></td><td>GitHub Releases Latest，2026-07-02 发布（UTC）</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note"><img src="../output/0052-harbor-what-and-why/images/harbor-github-releases.png" alt="GitHub goharbor/harbor Releases 页 Latest 卡片" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">GitHub Releases：v2.15.2 标记 Latest（released Jul 2，即 2026-07-02 UTC）；左侧列表可见 2.15.3-rc1 预发布与 2.15.2-rc 系列滚动（2026-09-19 截图）。本系列全部口径锚定 v2.15.2。</p>
+</section>
+
+<!-- ================= 06 演进史 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>钩子：从 VMware 内部工具到 CNCF 毕业的六年</h2>
+  <div class="card">
+    <ul>
+      <li><strong>2014 · VMware 内部项目：</strong>VMware 中国研发中心为自家容器平台的交付链造镜像仓库——用的团队多了，发现"企业管镜像"是个行业通用难题；</li>
+      <li><strong>2016 · 开源：</strong>代码放上 GitHub（仓库创建于 2016-01）对外发布，从自用工具长成公共项目，跟着容器与 K8s 的普及一起长大；</li>
+      <li><strong>2018-07-31 · 捐入 CNCF：</strong>进沙箱，同年 11 月 14 日升孵化——Pivotal、Rancher 这些公司在贡献者名单里；</li>
+      <li><strong>2020-06-15 · 毕业：</strong>成为 <strong>CNCF 首个源自中国团队的毕业项目</strong>，与 Kubernetes、Prometheus 同列毕业名单。</li>
+    </ul>
+  </div>
+  <p>从公司自用到社区中立治理，六年走完这条路，每一步都有日期可查。它说明两件事：治理上，基金会背书让企业敢把交付链压在它身上；功能上，"中国团队发起、全球社区共建"的出身，让它的中文文档与国内云厂商适配都意外地好——这也是国内企业私有仓库选型时它出场率极高的原因。</p>
+</section>
+
+<!-- ================= 07 对比 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>与同类对比：一个主角，四个对手</h2>
+  <p>镜像仓库这条赛道玩家不少，各就各位（定位为各项目官方公开口径，2026-09 核对）：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>方案</th><th>定位</th><th>安全能力</th><th>部署形态与差异</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Harbor v2.15</strong></td><td>自建企业级镜像管理中心：存储+扫描+签名+复制+RBAC</td><td>Trivy 内建、签名验签、审计日志全带</td><td>自建为主，CNCF 毕业、Apache-2.0；完全兼容 Docker 协议</td></tr>
+      <tr><td>Docker Hub</td><td>官方公共仓库，基础镜像集散地</td><td>有限；私有协作能力弱</td><td>托管；匿名限流（100 次/6 小时/IP），私有仓库按席位收费</td></tr>
+      <tr><td>Quay（Red Hat）</td><td>托管镜像仓库，与 OpenShift 亲和</td><td>安全扫描内建</td><td>托管为主；免费公共仓库，私有化社区版弱</td></tr>
+      <tr><td>Nexus / Artifactory</td><td>泛制品库：jar、npm、镜像一个库全装</td><td>镜像安全能力偏集成、要拼装</td><td>自建/托管均有；商业许可为主，体量重</td></tr>
+      <tr><td>云厂商 ACR / TCR 等</td><td>云内托管镜像仓库</td><td>扫描签名齐，与云安全产品联动</td><td>开箱即用免运维；数据在厂商云上，跨云分发受限</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>怎么选？<strong>个人与公共镜像，Docker Hub 够用；已深度绑定某朵云、不想养运维，用云厂商托管仓库；全家桶制品（jar+npm+镜像）一个库管，看 Nexus/Artifactory；要自建、要数据自主、要跨机房多云分发、要安全合规证据链，Harbor 是默认答案。</strong>没有全能冠军，只有场景匹配。</p>
+</section>
+
+<!-- ================= 08 场景 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>什么场景该选它（以及什么场景是错配）</h2>
+  <div class="card">
+    <p><strong>✅ 适合：</strong></p>
+    <ul>
+      <li><strong>多云多机房镜像分发：</strong>复制策略加分发加速，跨环境交付不卡公网，发布窗口不用干等镜像；</li>
+      <li><strong>安全合规要求高的团队：</strong>扫描、签名、审计三件套，"这个镜像为什么能上生产"第一次有完整证据链；</li>
+      <li><strong>K8s 交付链要私有仓库：</strong>CNCF 生态默认选项，镜像与 Helm Chart 同仓库管，协议兼容所以接入成本近乎为零。</li>
+    </ul>
+    <p><strong>❌ 错配：</strong></p>
+    <ul>
+      <li><strong>个人小项目：</strong>公共仓库免费额度完全够用，为自己养一套集群纯属负担；</li>
+      <li><strong>只想缓存上游镜像：</strong>轻量需求一条代理缓存配置、甚至更轻的开源 registry 就够，不必上全家桶；</li>
+      <li><strong>不想运维且预算充足：</strong>云厂商托管仓库更省心——除非哪天要跨云分发，再回来找它。</li>
+    </ul>
+  </div>
+  <p>一条判断捷径：<strong>当"镜像"从个人产物变成企业交付物的那一天，就是需要 Harbor 的一天。</strong></p>
+</section>
+
+<!-- ================= 09 quiz ================= -->
+<section>
+  <h2><span class="sec-num">09</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. 官方给 Harbor 的定位，哪句最准确？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，存文件只是起点，官网定义的重点全在管理动作上。","不对，Harbor 本身不含 K8s，它是给 K8s 交付链供镜像的仓库。","对的：官网原话 an open source registry that secures artifacts with policies and role-based access control, ensures images are scanned…and signs images as trusted。"]'>
+        <li class="quiz-option">一个加速镜像下载的文件网盘</li>
+        <li class="quiz-option">一个轻量化的 Kubernetes 发行版</li>
+        <li class="quiz-option">用策略与角色权限保护制品、确保镜像已扫描可签名的开源仓库</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. "完全兼容 Docker 仓库协议"对迁移意味着什么？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，兼容协议的意思恰恰是命令照旧。","对的：登录地址一换，现有 docker 命令与 CI 脚本零改动直接可用。","不对，镜像摘要与内容不受仓库切换影响，不需要重推。"]'>
+        <li class="quiz-option">所有 docker 命令要换成 harbor 专属命令</li>
+        <li class="quiz-option">现有 docker 命令与流水线换地址即可，应用代码零改动</li>
+        <li class="quiz-option">已有镜像必须重新构建后才能推入</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 装了 Trivy 的 Harbor，镜像推入后会发生什么？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：推入即触发静态漏洞分析，出报告并可按严重级别设拦截。","不对，扫描是自动的，不需要等人工排期。","不对，Harbor 不修改镜像内容，它只做检测与策略控制。"]'>
+        <li class="quiz-option">自动做漏洞扫描并出报告，可配高危拦截</li>
+        <li class="quiz-option">要等安全团队手动排期扫描</li>
+        <li class="quiz-option">镜像会被自动重建为无漏洞版本</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. 哪种场景最不该上 Harbor？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，跨机房分发恰是它的强项，复制策略就是干这个的。","不对，合规审计正是它审计日志与扫描签名的主场。","对的：个人小项目公共仓库免费额度够用，养一套集群纯属负担。"]'>
+        <li class="quiz-option">多机房团队要做镜像分发</li>
+        <li class="quiz-option">金融团队要镜像审计证据</li>
+        <li class="quiz-option">个人小项目只想放几张镜像</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 10 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：企业自建镜像仓库是不是"多此一举"？请从四个麻烦里挑两个，替 CTO 算一笔账。</summary>
+    <div class="details-body">
+      <p>先算<strong>限流账</strong>。Docker Hub 匿名限额是每 IP 六小时 100 次、免费账号 200 次。一个 20 人的团队，每人每天几十次构建、每次构建拉 3~5 个基础镜像层，一天就是几千次拉取——额度根本不够，于是要么买付费席位（按人头逐年花钱），要么自建。自建一次投入一台服务器加运维工时，代理缓存模式还能把上游镜像在本地只存一份、全员复用，公网流量断崖式下降。这笔账在团队规模超过十来人时就会翻盘。<strong>再算安全账。</strong>没有私有仓库时，镜像从构建到上生产之间没有任何检查点：一个带高危漏洞的基础镜像可以在生产跑几个月，直到安全扫描找上门。修复成本随上线时间指数上涨——上线前拦截是改一行 CI，上线后发现是全集群滚动更新加事故复盘。Harbor 的"推入即扫描 + 高危拦截"把检查点前置了，同时签名机制让"生产跑的镜像确实是 CI 构建的那个"可被验证，供应链投毒这类攻击直接失去入口。<strong>什么时候不值得？</strong>团队规模小、无合规压力、发布频率低时，公共仓库加免费额度是更理性的选择——自建的运维成本（证书、升级、备份、高可用）是持续性的。工具没有立场，规模和合规才是分界线。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：Harbor 完全兼容 Docker Registry API，但扫描、签名、复制都长在协议之外。这种"协议兼容 + 增值服务"的分层，对自研基础产品有什么借鉴？</summary>
+    <div class="details-body">
+      <p>这层分层的精妙之处在于<strong>把"迁移成本"和"差异化"解耦到了两端</strong>。协议兼容这一层：Docker Registry API 是公开标准，Harbor 一分不改地实现它，换来的是用户迁移成本趋近于零——换地址就完事，老的脚本、CI、K8s 配置全部照用。差异化这一层：扫描、签名、复制、RBAC、审计全部通过<strong>协议之外的扩展</strong>提供（REST API v2.0、Webhook 通知、K8s 准入控制器的对接），它们不破坏标准，但给出了标准之外的充分理由。对自研基础产品的借鉴至少有三条：<strong>其一</strong>，先找一条事实标准的协议完整实现它，让自己的产品成为现有体系的"即插即换件"，用户敢于试用——Harbor 能进企业，第一步不是功能赢，是"换了不疼"；<strong>其二</strong>，增值能力做成可独立关闭的扩展而非隐式行为，兼容层永远可预测，这是长期口碑；<strong>其三</strong>，差异化要贴着"协议管不了但企业必须管"的缝隙去做——协议只管存取，企业要的是审计、安全与分发，缝隙越靠近组织诉求，护城河越深。反例也常见：有些产品一上来就"魔改"标准协议加私有语义，短期炫技，长期把用户锁死也把自己锁死——用户不敢走，新用户也不敢来。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 11 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">11</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>Harbor = CNCF 毕业的云原生镜像仓库，官方定位：用策略与角色权限保护制品、确保镜像已扫描可签名（goharbor.io，v2.15 口径）；</li>
+      <li>心智模型：不只是存镜像——存储、扫描、签名、复制、权限，企业级镜像"管理中心"；存下来只是起点，管起来才是目的；</li>
+      <li>四个痛点：公共仓库拉取限流、安全扫描缺失、审计合规难、跨机房分发贵——镜像变成企业交付物的那天就需要它；</li>
+      <li>数据面：29.4k Stars；2014 年 VMware 内部项目起家，2016 开源，2020-06-15 成为首个源自中国团队的 CNCF 毕业项目；生产公示 30+ 家（2026-09-19 核对）；</li>
+      <li>版本基准 v2.15.2（GitHub Latest，2026-07-02）；选型捷径：个人项目公共仓库够用，自建+合规+跨环境分发找 Harbor。</li>
+    </ul>
+  </div>
+  <p class="note"><img src="../output/0052-harbor-what-and-why/images/harbor-docs-install.png" alt="官方文档 Run the Installer Script" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档《Run the Installer Script》：默认安装不含 Trivy，<code>./install.sh --with-trivy</code> 带扫描一起装；默认管理员账号 admin / Harbor12345（上生产前务必改掉）（2026-09-19 截图）。</p>
+  <p><strong>下期预告：</strong>第 2 期《5 分钟跑起来》——照官方安装文档改配置、跑安装脚本、登录控制台，把第一张镜像推进自己的仓库，命令与预期输出逐条对照，不用自己踩坑。</p>
+  <p><strong>Primary source：</strong><a href="https://goharbor.io/docs/2.15.0/" target="_blank" rel="noopener">Harbor 官方文档 · v2.15.0</a>——本期定义、能力清单与安装说明均出自该文档（与 v2.15 匹配）；漏洞扫描见 <a href="https://goharbor.io/docs/2.15.0/administration/vulnerability-scanning/" target="_blank" rel="noopener">Vulnerability Scanning</a>，镜像拉推见 <a href="https://goharbor.io/docs/2.15.0/working-with-projects/working-with-images/pulling-pushing-images/" target="_blank" rel="noopener">Pulling and Pushing Images</a>，版本与发布记录见 <a href="https://github.com/goharbor/harbor/releases" target="_blank" rel="noopener">GitHub Releases</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0051-skywalking-source-reading.html">← 上一期：SkyWalking 架构与源码导读</a></span>
+  <a class="next" href="0053-harbor-quickstart.html">下一期：5 分钟跑起来 Harbor →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · SkyWalking 系列第 3 期：核心概念与整体架构 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0049</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0048-skywalking-quickstart.html">上一期:0048</a> · SkyWalking 系列第 3 期 / 共 5 期 · <a href="0050-skywalking-in-action.html">下一期:0050</a> · <a href="https://skywalking.apache.org" target="_blank" rel="noopener">skywalking.apache.org ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · SKYWALKING 系列第 3 期：核心概念与整体架构</p>
+  <h1>看懂 SkyWalking：概念地图与整体架构</h1>
+  <p class="subtitle">上一期我们一条命令起了全家、挂上 agent，亲眼看见了第一条跨服务调用链。但 Trace 列表、Span 瀑布、拓扑图上的边，后台都发生了什么？本期你带走一张<strong>概念地图：一条请求的调用链是怎么被切分（Trace→Segment→Span）、跨进程传递（sw8 协议）、聚合成拓扑与指标（OAP 流式聚合）</strong>的，外加一张自绘整体架构图和两座源码仓库的顶层模块地图。全部概念逐条核对官方文档（2026-09 核对），引用什么核什么。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">📡 链路追踪与 APM · Java · Apache-2.0（Apache 顶级项目）</span>
+    <span class="tag">📦 基于 OAP v11.0.0 + Java agent v9.7.0</span>
+    <span class="tag-date">📅 2026-09-19 · 第 3 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 本期地图 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>本期地图：把上期看到的三样东西拆开</h2>
+  <p>上一期跑通之后，你在界面上见到三样东西：<strong>Trace 列表里的一条记录、点开后的 Span 瀑布图、Topology 页上的服务拓扑</strong>。当时我们说"第 3 期拆原理"，现在兑现。本期回答三个问题，也是这张概念地图的三个坐标：</p>
+  <ul>
+    <li><strong>怎么切：</strong>一条调用链在数据模型上长什么样——Trace、Segment、Span 三层各管什么，为什么跨进程要切段；</li>
+    <li><strong>怎么传：</strong>段与段之间靠什么续上——sw8 传播协议如何在 HTTP 头里把上下文带过去；</li>
+    <li><strong>怎么算：</strong>拓扑和指标从哪来——OAP 收到明细后的流式聚合（先剧透：<strong>拓扑图是算出来的，不是画出来的</strong>）。</li>
+  </ul>
+  <p>三问答完，再往两头各补一块：告警与存储（OAP 的规则评估和插拔式存储），以及源码仓库的顶层模块地图（主仓库 apache/skywalking 与独立成仓的 apache/skywalking-java）。第 4 期实战和第 5 期源码导读，都踩在这张地图上走。</p>
+</section>
+
+<!-- ================= 02 Trace 数据模型 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>Trace 数据模型：Trace → Segment → Span 三层</h2>
+  <p>先看本期最核心的三层模型。权威出处是官方《Trace Data Protocol v3.1》——agent 和后端之间传的就是这个格式：</p>
+  <pre class="codeblock"><code># 官方《Trace Data Protocol》v3.1 · SegmentObject（节选）
+message SegmentObject {
+    string traceId = 1;         // A string id represents the whole trace.
+    string traceSegmentId = 2;  // A unique id represents this segment.
+    repeated SpanObject spans = 3;
+    string service = 4;         // Shows as a separate node in the topology.
+    string serviceInstance = 5; // Like `pods` in Kubernetes.
+}</code></pre>
+  <ul>
+    <li><strong>Trace</strong>：一次请求的完整调用链，由一个全局唯一的 <code>traceId</code> 串起来——就是上期瀑布图顶上那个编号；</li>
+    <li><strong>Segment</strong>：官方原话"a unique concept in SkyWalking"——<strong>单个 OS 进程内、一次请求产生的全部 Span，装进一个 Segment</strong>。上期 demo-app 和 demo-api 两个服务，各报一个 Segment，靠同一个 traceId 归成一条链；</li>
+    <li><strong>Span</strong>：一次具体的调用记录，分三类（下一节展开）。</li>
+  </ul>
+  <p class="note"><img src="../output/0049-skywalking-core-concepts-architecture/images/skywalking-docs-trace-protocol.png" alt="官方 Trace Data Protocol 文档：Segment 与三类 Span 定义" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方《Trace Data Protocol v3.1》开篇：segment 是 SkyWalking 独有概念，应包含单个 OS 进程内一次请求的全部 span；Entry/Local/Exit 三类 Span 定义；跨线程/进程的父子信息叫 reference（2026-09-19 截图，正文主栏）。</p>
+  <p><strong>三类 Span 各管一段路</strong>（同样出自该文档原文）：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>类型</th><th>官方定义</th><th>典型场景</th></tr></thead>
+    <tbody>
+      <tr><td><strong>EntrySpan 入口</strong></td><td>服务提供者的端点（server end 的 endpoint）</td><td>HTTP 服务入口、消息消费者——"almost all the services and MQ-consumers"</td></tr>
+      <tr><td><strong>LocalSpan 内部</strong></td><td>与远程服务无关的普通方法调用</td><td>进程内部业务方法、工具函数</td></tr>
+      <tr><td><strong>ExitSpan 出口</strong></td><td>服务的客户端、消息生产者</td><td>JDBC 访问数据库、读写 Redis/Memcached、向外发出的 HTTP 调用</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>回看上期那条瀑布就对上了：demo-app 顶部是 <strong>EntrySpan</strong>（/hello 入口），它调 demo-api 的那一步是 <strong>ExitSpan</strong>（向外发出的 HTTP 客户端调用），demo-api 侧又是一个 <strong>EntrySpan</strong>（/api 入口）。<strong>一次跨进程调用，两端各记一种 Span</strong>——这个"各记"，就是下一节切段的原因。</p>
+</section>
+
+<!-- ================= 03 钩子一 切段与 sw8 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>钩子一：一个 Trace 为什么要切段？</h2>
+  <p>直接答案：<strong>因为进程有边界</strong>。请求从 demo-app 跨到 demo-api，是两个 JVM、两份内存，谁也没法在同一个数据结构里记下对方的事，所以每个进程各自记一段、各自上报。进程内的<strong>异步任务、跨线程调用</strong>同理——线程边界上也断开成新段（协议里 reference 分 <code>CrossProcess</code> 与 <code>CrossThread</code> 两种类型）。</p>
+  <p>切完的段怎么拼回一条链？靠<strong>上下文传播</strong>。官方协议叫《Cross Process Propagation Headers Protocol v3》，简称 <strong>sw8 协议</strong>：</p>
+  <pre class="codeblock"><code># 官方文档原文格式：Header 名 sw8，值 = 8 个字段以 - 分隔，BASE64 编码
+sw8: 1-TRACEID-SEGMENTID-3-PARENT_SERVICE-PARENT_INSTANCE-PARENT_ENDPOINT-IPPORT
+
+# 8 字段依次：采样标记 / traceId / 父 SegmentId / 父 SpanId
+#            / 父服务 / 父实例 / 父端点 / 客户端访问的目标地址</code></pre>
+  <p>流程是：demo-app 的 agent 在发出 HTTP 调用的那一刻（ExitSpan 处），把八个字段塞进请求头；demo-api 的 agent 收到请求先解析这个头，于是它产生的 Segment 天然挂到正确的父 Span 下面。<strong>注入和解析都是 agent 自动做的，应用代码一行不改</strong>——上期瀑布能连成一棵树、拓扑能出现一条有向边，底层靠的就是这枚头的"一注一解"。这枚头还带一个采样标记字段：上游说这段不用采样，下游可以跟着省掉上报，这是它比常见追踪头"复杂"的原因——官方原话，复杂是为了 OAP 的分析性能。</p>
+</section>
+
+<!-- ================= 04 钩子二 流式聚合 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>钩子二：指标不是采的，是算的</h2>
+  <p>第二个反直觉的点：<strong>你在服务面板看到的响应时间、成功率、每分钟调用数，没有任何一个是被"采集"上来的</strong>。agent 上报的只有 Span 明细；OAP 收到 Segment 的当下，就在流式管道里把它们折算成<strong>服务、服务实例、端点</strong>三级实体的指标。官方给这套规则起了个名字：<strong>OAL（Observability Analysis Language，可观测分析语言）</strong>，原话是"analyzes incoming data in streaming mode"。看三行 v11.0.0 的官方原版脚本（<code>oap-server/server-starter/src/main/resources/oal/core.oal</code> 第 20-22 行）：</p>
+  <pre class="codeblock"><code>service_resp_time = from(Service.latency).longAvg();      // 响应时间：延迟求平均
+service_sla = from(Service.*).percent(status == true);    // 成功率：成功状态占比
+service_cpm = from(Service.*).cpm();                      // 每分钟调用数：计数</code></pre>
+  <p>上期服务面板上的每张 KPI 卡片，都对应这里的一行。更关键的是文档里另一句：<strong>拓扑/依赖关系不需要写任何脚本，由 OAP 内核自动从调用明细构建</strong>——Span 里天然带着"谁调了谁"，聚合引擎把 RPC 调用折算成服务间的输入/输出流量，边就算出来了。这就是"拓扑图是算出来的"的完整含义。</p>
+  <div class="callout">
+    <p><strong>和 Prometheus 的分工一句话说清</strong>：Prometheus 是 Pull 模型，上门<strong>抓原始样本</strong>，先存后算，查询时现场聚合（详见 <a href="0044-prom-core-concepts-architecture.html">Prometheus 系列第 3 期</a>）；SkyWalking 是 Push 模型，agent <strong>推调用明细</strong>，后端收到即流式聚合。一个存样本后算账，一个收明细即算账——所以 SkyWalking 同一份明细既能看逐笔瀑布，又有聚合面板，还能互相跳转；而纯指标系统里，调用关系根本不在样本里。</p>
+  </div>
+</section>
+
+<!-- ================= 05 告警与存储 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>告警与存储：OAP 的规则评估和插拔式后端</h2>
+  <p><strong>告警是指标之上的一层薄规则。</strong>官方《Alerting》文档对告警内核的定义只有一句："in-memory, time-window based queue"——内存里基于时间窗的队列。规则写在 <code>alarm-settings.yml</code> 里，v11 的表达式用 MQE（指标查询表达式）语法：</p>
+  <pre class="codeblock"><code># 官方《Alerting》v11.0.0 示例（节选）
+rules:
+  service_resp_time_rule:
+    expression: sum(service_resp_time &gt; baseline(service_resp_time, upper)) &gt; 3
+    period: 10                                   # 最近 10 分钟窗口
+
+webhook:                                         # 触发后 HTTP POST JSON 通知
+  default:
+    is-default: true
+    urls:
+      - http://ip:port/xxx</code></pre>
+  <p>这条官方示例的含义：响应时间超过 AI 基线、10 分钟窗口内超过 3 次就告警。规则读的正是 OAL 算出来的指标（<code>service_resp_time</code>）；触发后进入静默期（同一条告警一个周期内最多一条），条件转好还要经过恢复观察期才发恢复通知。通知走 hooks：除了 webhook，还内置 Slack、PagerDuty 等类型——<strong>OAP 自带告警闭环，不依赖外部告警组件</strong>，对接企业内部机器人就是填一行 URL 的事。</p>
+  <p><strong>存储是插拔式的。</strong>官方《Backend storage》文档原话"storage is pluggable"，配置里一行 selector 切换，v11 默认自研的 <strong>BanyanDB</strong>（native APM database，官方对标口径：2 联络 + 2 数据节点、各 4C8G，可稳住约 200 服务、每秒 200+ 调用）；中等规模可选 MySQL/PostgreSQL，更大规模走 Elasticsearch/OpenSearch。换存储不动分析逻辑——聚合、拓扑、告警照常工作。第 2 期快速启动选的 BanyanDB 单容器，就是这条默认链路。</p>
+</section>
+
+<!-- ================= 06 整体架构 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>整体架构：官方四段论与自绘数据流</h2>
+  <p>架构的权威口径，官方《Overview · Architecture》一页说尽：<strong>"SkyWalking is logically split into four parts: Probes, Platform backend, Storage and UI."</strong>探针采集（Java agent 只是探针之一，Zipkin/OTel/Istio 数据也在收），后端聚合分析（可作 Receiver、Aggregator 或两者兼做），存储可插拔，UI 可视化。官方原图还画出后端的集群形态：数据经传输层进接收集群，聚合集群加工后分四路出去——查询、告警、导出、落存储。</p>
+  <p class="note"><img src="../output/0049-skywalking-core-concepts-architecture/images/skywalking-docs-architecture-parts.png" alt="官方 Overview 文档 Architecture 一节与四段论原文" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方《Concepts and Designs · Overview》Architecture 节：四段论原文 + 官方架构原图（数据源 → Transport layer → Receiver cluster → Aggregator cluster → GUI/CLI · Alarm · Exporter · Storage options）（2026-09-19 截图，正文主栏）。</p>
+  <p>把本期全部概念拼成一条请求的旅程（自绘图，与官方四段论逐框对应）：</p>
+  <div class="diagram">
+  <svg viewBox="0 0 760 320" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar49" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="14" y="34" width="180" height="104" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="104" y="62" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">被监控服务 ×N</text>
+    <text x="104" y="84" text-anchor="middle" fill="var(--muted)" font-size="9.5">Java agent 字节码增强（零改动）</text>
+    <text x="104" y="104" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">entry / local / exit Span</text>
+    <text x="104" y="122" text-anchor="middle" fill="var(--muted)" font-size="9.5">sw8 头跨进程续链</text>
+    <rect x="14" y="196" width="180" height="70" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="104" y="224" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">兼容入口</text>
+    <text x="104" y="246" text-anchor="middle" fill="var(--muted)" font-size="9.5">Zipkin / OTel / Istio mesh</text>
+    <rect x="290" y="34" width="190" height="104" rx="10" fill="var(--warn-bg)" stroke="var(--line)"/>
+    <text x="385" y="60" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">OAP v11.0.0</text>
+    <text x="385" y="81" text-anchor="middle" fill="var(--muted)" font-size="9.5">Receiver：trace / meter / log / otel / zipkin</text>
+    <text x="385" y="100" text-anchor="middle" fill="var(--muted)" font-size="9.5">Aggregator：OAL / MAL / LAL 流式聚合</text>
+    <text x="385" y="121" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">指标 · 拓扑 · 告警候选全在这算</text>
+    <rect x="576" y="34" width="170" height="70" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="661" y="61" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">存储（可插拔）</text>
+    <text x="661" y="82" text-anchor="middle" fill="var(--muted)" font-size="9.5">BanyanDB 默认 / ES / MySQL</text>
+    <rect x="290" y="196" width="190" height="70" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="385" y="223" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">告警</text>
+    <text x="385" y="245" text-anchor="middle" fill="var(--muted)" font-size="9.5">规则评估 → webhook / slack 通知</text>
+    <rect x="576" y="196" width="170" height="70" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="661" y="223" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">Horizon UI</text>
+    <text x="661" y="245" text-anchor="middle" fill="var(--muted)" font-size="9.5">拓扑 · 瀑布 · 面板（查询 :12800）</text>
+    <line x1="194" y1="78" x2="284" y2="78" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar49)"/>
+    <text x="239" y="68" text-anchor="middle" fill="var(--muted)" font-size="9.5">gRPC 上报 :11800</text>
+    <line x1="194" y1="224" x2="284" y2="140" stroke="var(--line)" stroke-width="1.5" stroke-dasharray="5 4"/>
+    <line x1="480" y1="78" x2="570" y2="78" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar49)"/>
+    <text x="525" y="68" text-anchor="middle" fill="var(--muted)" font-size="9.5">落库</text>
+    <line x1="385" y1="138" x2="385" y2="190" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar49)"/>
+    <text x="446" y="168" text-anchor="middle" fill="var(--muted)" font-size="9.5">规则触发</text>
+    <line x1="661" y1="104" x2="661" y2="190" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar49)"/>
+    <text x="706" y="150" text-anchor="middle" fill="var(--muted)" font-size="9.5">查询</text>
+    <text x="16" y="300" fill="var(--muted)" font-size="9.5">一条请求的旅程：agent 产出 Segment → gRPC 上报 → OAP 收数并流式聚合 → 落存储 → UI 查询；告警在 OAP 内评指标规则后外发（概念图）</text>
+  </svg>
+  </div>
+</section>
+
+<!-- ================= 07 仓库模块地图 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>仓库顶层模块地图：两座仓库，各管一摊</h2>
+  <p>架构要落到代码才踏实。SkyWalking 的源码分两座仓库：<strong>主仓库 apache/skywalking 放后端</strong>（下图为 tag v11.0.0 顶层实拍，标签选择器与最新提交 6f1fd78 可与 Releases 页互相印证）：</p>
+  <p class="note"><img src="../output/0049-skywalking-core-concepts-architecture/images/skywalking-github-tree-v1100.png" alt="apache/skywalking v11.0.0 顶层目录实拍" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">apache/skywalking @ v11.0.0 顶层：oap-server 是主角；右栏 25.0k stars · Releases 65 · 11.0.0（Latest）。注意顶层没有 UI 目录——UI 已独立出主仓库（2026-09-19 截图，UTC）。</p>
+  <pre class="codeblock"><code>oap-server/ @ v11.0.0 · OAP 后端全家
+├─ server-core/             聚合内核：流式分析与指标生成
+├─ server-receiver-plugin/  收数插件：trace/meter/log/otel/zipkin/mesh…
+├─ server-storage-plugin/   存储适配：BanyanDB / ES / JDBC 系列
+├─ server-alarm-plugin/     告警引擎（时间窗规则评估）
+├─ server-query-plugin/     查询协议：GraphQL / PromQL / TraceQL / LogQL
+├─ oal-rt/ + oal-grammar/   OAL 编译器：脚本动态生成 Java 代码
+├─ mqe-rt/ + mqe-grammar/   指标查询表达式引擎（告警表达式跑在这）
+├─ analyzer/                agent/mesh 明细分析器
+├─ exporter/                指标导出（官方架构图第四路输出）
+└─ 顶层另有 apm-protocol/ apm-dist/ docs/ docker/  协议·打包·文档·compose</code></pre>
+  <p>上一页自绘架构图的每个框，在这里都有对应目录：收数在 receiver、算账在 core 与 oal-rt、出门在 query 与 alarm。第 5 期读码，就从收数和聚合这两个目录进。</p>
+  <p><strong>挂在你应用里的那个 agent，源码不在主仓库。</strong>它独立成 <strong>apache/skywalking-java</strong> 仓库、自己发版本——所以"OAP v11.0.0 + agent v9.7.0"两个号对不上是常态，第 2 期强调过别配对：</p>
+  <p class="note"><img src="../output/0049-skywalking-core-concepts-architecture/images/skywalking-java-tree-v970.png" alt="apache/skywalking-java v9.7.0 顶层目录实拍" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">apache/skywalking-java @ v9.7.0 顶层：apm-sniffer 装着字节码内核与 130+ 框架插件；最新提交 7a6c1e4 正是 v9.7.0 的发布准备；右栏 Releases 17 · 9.7.0（Latest）（2026-09-19 截图，UTC）。</p>
+  <pre class="codeblock"><code>skywalking-java @ v9.7.0 · agent 独立仓库
+├─ apm-sniffer/              agent 本体（-javaagent 那个 jar 从这构建）
+│   ├─ apm-agent-core/         字节码增强内核（ByteBuddy 织入）
+│   ├─ apm-sdk-plugin/         框架插件：tomcat/spring/dubbo/mysql/redis…
+│   ├─ bootstrap-plugins/      引导插件：JDK 内置类增强
+│   └─ optional-plugins/       可选插件（想用拷进 plugins 目录）
+├─ apm-application-toolkit/  手动埋点工具包：@Trace / 跨线程 / 日志绑定
+├─ apm-commons/              apm-datacarrier：上报前的内存缓冲队列
+├─ apm-protocol/             agent 与 OAP 的通信协议
+└─ docs/ test/ tools/        文档源 / 插件兼容测试 / 工具</code></pre>
+  <p>两个补注：其一，apm-sdk-plugin 下每个子目录就是一个框架插件——第 2 期说"plugins 目录即生效清单"，出处就在这；其二，<strong>UI 也不在主仓库顶层</strong>：现役 Booster UI 在独立的 apache/skywalking-booster-ui 仓库，v11 起快速启动默认拉的是新一代 Horizon UI 镜像（apache/skywalking-ui:horizon-1.0.0）。第 2 期解压出的 agent 目录，就是这套 skywalking-java 源码的构建产物——读码路线预告：从内核进，往插件出，第 5 期按这条线走。</p>
+</section>
+
+<!-- ================= 08 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：让发起请求的第一个进程"记全整条链"、一口气上报，不是比切成多段再拼接简单得多吗？SkyWalking 为什么偏要按进程切段？</summary>
+    <div class="details-body">
+      <p>先把"记全链"这个方案的隐含代价翻出来：第一个进程要记下整条链，就必须知道后续每个服务内部<strong>发生了什么、耗时多少、成不成功</strong>——这些信息只存在于下游进程的内存里。要让上游记全，要么下游把明细回传给上游（链路反着再走一遍，流量翻倍、上游还要攒着等），要么请求携带巨型上下文沿途接力（头部膨胀，和 sw8 头"长度小于 2k"的克制设计背道而驰）。更致命的是<strong>异步场景根本走不通</strong>：MQ 削峰之后，生产者和消费者可能隔了几秒、甚至不在同一台机器上先后执行，"上游记全链"在时间上就不成立。</p>
+      <p>切段方案的聪明之处在于<strong>把"记录"这件事彻底本地化</strong>：每个进程只记自己内存里发生的事（Segment），记完立刻上报，不依赖任何下游回传；跨进程的父子关系压缩成 sw8 头里的几个编号随请求捎带，异步场景用 reference 补上——<strong>记录成本与链路长度无关，链多长都不加重任何单个进程的负担</strong>。代价是 OAP 要多做一层"拼接"：靠 traceId 归链、靠 reference 挂父子。这正符合"端侧越轻越好、重活留给后端"的 APM 设计哲学——agent 挂在业务进程里，多一分重就多一分影响业务的风险。顺带一提，切段还带来一个免费好处：某个进程上报失败，丢的只是它那一段，链的其他段照样可查。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二："拓扑图是算出来的"——如果让你从 Span 明细里设计这个算法，你怎么推出服务依赖边？为什么 Prometheus 的样本数据做不到这件事？</summary>
+    <div class="details-body">
+      <p>算法的原料就藏在 Span 三兄弟里：一个 <strong>ExitSpan</strong>（demo-app 调 demo-api）和一个下游的 <strong>EntrySpan</strong>（demo-api 收 /api），天然构成一次"谁、从哪个方法、调了谁、花了多久、成没成功"。OAL 文档原话是把 RPC 相关的 Span"converted to service input/output traffic"——OAP 把每个跨进程调用对折算成<strong>源服务 → 目标服务的一条调用记录</strong>，流式聚合后按时间窗累积，就得到边上的调用量、错误率、平均延迟；上游 sw8 头里的父服务名负责把两端对齐，纯本地方法（LocalSpan）不产生边，消息队列这类"时间上解耦"的调用靠 reference 里的目标地址与 sw8-x 扩展头里的发送时间戳补齐关系。注意官方特意说这一步"built by the SkyWalking OAP kernel automatically"——不写脚本，内核内置。</p>
+      <p>Prometheus 为什么做不到？回头看它的数据模型：<strong>样本 = 指标名 + 标签 + 值 + 时间戳</strong>。标签是采集端自己贴的平面维度，里面没有"这次调用是哪次调用、父调用是谁"的结构化语义——两个服务各自的 <code>http_requests_total</code> 曲线再漂亮，也无法证明"是 A 调了 B"。要做拓扑，得靠额外的调用关系指标（如客户端主动上报 <code>dependency</code> 类指标）或者干脆引入追踪。这也是"指标看症状、链路看路径"这句话的机制根源：<strong>路径信息不在样本里，只在明细里</strong>。两条技术路线没有高下——Prometheus 用最便宜的样本换来海量目标的规模，SkyWalking 用更重的明细换来开箱即得的拓扑与逐笔下钻，选型时按"要不要调用关系"来分。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 09 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这张概念地图：</strong></p>
+    <ul>
+      <li>三层模型：traceId 全局串链，Segment 单进程一段（官方独有概念），Span 分 entry / local / exit 三类各管一段路；</li>
+      <li>切段的原因是进程与线程边界；sw8 头八个字段随请求传播，agent 自动注入解析，段与段因此续成链；</li>
+      <li>指标不是采的是算的：OAP 收到明细流式聚合，OAL 脚本定义指标，拓扑由内核自动构建——对比 Prometheus 拉原始样本（原理深入见该系列第 3 期）；</li>
+      <li>告警在 OAP 内闭环：内存时间窗队列评规则，webhook/Slack 等 hooks 发通知；存储插拔，v11 默认 BanyanDB；</li>
+      <li>仓库两扇门：主仓库 v11.0.0 = oap-server 全家（UI 已独立），agent 独立在 skywalking-java v9.7.0（apm-sniffer 内核 + 130+ 插件）。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 4 期《实战场景》——概念地图有了，下一期我们动手做一个端到端的链路追踪实战：一个带数据库与跨服务调用的真实小系统，从接入配置到在 UI 里完成一次"指标发现异常 → 链路定位到跳"的完整排障。</p>
+  <p><strong>Primary source：</strong><a href="https://skywalking.apache.org/docs/main/v11.0.0/en/concepts-and-designs/overview/" target="_blank" rel="noopener">SkyWalking 官方文档 · Concepts and Designs · Overview（v11.0.0）</a>——本期四段论架构与数据类型均出自该页（与所用版本匹配）；Trace/Segment/Span 模型见 <a href="https://skywalking.apache.org/docs/main/v11.0.0/en/api/trace-data-protocol-v3/" target="_blank" rel="noopener">Trace Data Protocol v3.1</a>，sw8 传播见 <a href="https://skywalking.apache.org/docs/main/v11.0.0/en/api/x-process-propagation-headers-v3/" target="_blank" rel="noopener">Cross Process Propagation Headers Protocol v3</a>，OAL 见 <a href="https://skywalking.apache.org/docs/main/v11.0.0/en/concepts-and-designs/oal/" target="_blank" rel="noopener">Analysis Native Streaming Traces</a>，告警与存储见 <a href="https://skywalking.apache.org/docs/main/v11.0.0/en/setup/backend/backend-alarm/" target="_blank" rel="noopener">Alerting</a> 与 <a href="https://skywalking.apache.org/docs/main/v11.0.0/en/setup/backend/backend-storage/" target="_blank" rel="noopener">Backend storage</a>。</p>
+</section>
+
+<section>
+  <h2><span class="sec-num">10</span>随堂小测</h2>
+  <div class="quiz">
+    <div class="quiz-q">
+      <p class="quiz-question">1. 按官方定义，一个 Segment 的边界是？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["一个 Segment 里可以有多个 Span，反了。","对：官方原话——单个 OS 进程内一次请求的全部 Span 装进一个 Segment。","traceId 是全局的，跨进程串的是整个 Trace，不是 Segment。"]'>
+        <li class="quiz-option">一个 Span 的完整生命周期</li>
+        <li class="quiz-option">单个 OS 进程内、一次请求产生的全部 Span</li>
+        <li class="quiz-option">一条请求从头到尾的完整调用链</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. demo-app 里"向外调用 demo-api"的那一步，记录它的 Span 类型是？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["EntrySpan 是服务提供者的入口，那是 demo-api 侧的事。","LocalSpan 管进程内部普通方法，不涉及远程。","对：ExitSpan 代表服务的客户端——对外发出的 HTTP/JDBC/Redis 调用都是它。"]'>
+        <li class="quiz-option">EntrySpan</li>
+        <li class="quiz-option">LocalSpan</li>
+        <li class="quiz-option">ExitSpan</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. sw8 请求头解决的问题是什么？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对：跨进程传播上下文，把各自成段的 Segment 续成一条 Trace——注入解析都由 agent 自动完成。","应用配置是 agent.config / -D 系统属性的事，与 sw8 无关。","数据上报走 gRPC 11800，sw8 是随业务请求传播的头，不是上报通道。"]'>
+        <li class="quiz-option">跨进程传播追踪上下文，让切开的段拼回一条链</li>
+        <li class="quiz-option">给应用下发配置</li>
+        <li class="quiz-option">把 Segment 上报给 OAP</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. 拓扑图上 demo-app 指向 demo-api 的那条边，是怎么来的？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["手工连线维护不了动态调用关系，也不是 SkyWalking 的做法。","对：OAP 内核把跨进程调用折算成服务间流量自动聚合——官方原话 built by the OAP kernel automatically，无需任何脚本。","启动时静态上报的是部署结构，画不出带调用量的实时拓扑。"]'>
+        <li class="quiz-option">用户在 UI 里手工连线配置的</li>
+        <li class="quiz-option">OAP 从 Span 明细自动聚合出服务间调用关系</li>
+        <li class="quiz-option">agent 在启动时上报一张静态依赖清单</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0048-skywalking-quickstart.html">← 上一期：5 分钟跑起来</a></span>
+  <a class="next" href="0050-skywalking-in-action.html">下一期：实战场景 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · SkyWalking 系列第 5 期：架构与源码导读 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0051</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0050-skywalking-in-action.html">上一期:0050</a> · SkyWalking 系列第 5 期 / 共 5 期 · <a href="https://skywalking.apache.org" target="_blank" rel="noopener">skywalking.apache.org ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · SKYWALKING 系列第 5 期：架构与源码导读（收官）</p>
+  <h1>读进 SkyWalking 源码：三个决策与一条 span 的诞生</h1>
+  <p class="subtitle">上一期我们端到端追了一条跨进程调用链：两个微服务各挂一个 agent，瀑布两段相连，拓扑自己长出边。但应用一行没改，span 是怎么凭空出现的？本期收官，<strong>你带走一张读码路线图</strong>：沿字节码增强管线、类加载隔离、插件模型三个设计决策读进源码，把"凭空出现"拆成看得见的工序。源码仓库是 apache/skywalking-java，<strong>所有类名与路径逐条核对自 tag v9.7.0</strong>（2026-09 核对），跟读时先把仓库切到这个 tag。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">📡 链路追踪与 APM · Java · Apache-2.0（Apache 顶级项目）</span>
+    <span class="tag">📦 Java agent v9.7.0（源码 tag）+ OAP v11.0.0</span>
+    <span class="tag-date">📅 2026-09-19 · 第 5 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 本期地图 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>本期地图：把"凭空出现"拆成三道工序</h2>
+  <p>先对齐进度。第 1 期立住无侵入的心智模型，第 2 期一键起全家看见调用链，第 3 期拆透概念地图：Trace 按进程切段、sw8 头续链、OAP 流式聚合，第 4 期实战把地图跑通。本期是系列收官，回答一个悬了四期的问题：<strong>agent 到底对应用做了什么</strong>。答案拆成三道工序，每道讲清楚为什么这么设计、解决什么问题、换种做法会怎样：</p>
+  <ul>
+    <li><strong>工序一 · 字节码增强管线：</strong>premain 入口拿到 Instrumentation，ByteBuddy 在类加载时改写字节码——应用一行不改的机制本体；</li>
+    <li><strong>工序二 · 类加载隔离：</strong>agent 自带 AgentClassLoader，与宿主应用的依赖互不污染——所有 Java agent 的公共课题；</li>
+    <li><strong>工序三 · 插件模型：</strong>apm-sdk-plugin 一框架一目录，拦截点声明 + 拦截器织入 span——"支持一百多个中间件"的组织方式。</li>
+  </ul>
+  <p>三道工序串起来就是本期成果：一条 span 从诞生到上报的完整路线图。两个钩子预告：<strong>agent 为什么非要自带一个类加载器</strong>（隔离），<strong>增强为什么恰好发生在类加载那一刻</strong>（时机）。</p>
+</section>
+
+<!-- ================= 02 读码准备 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>读码准备：钉版本，认地图</h2>
+  <p>读码第一步钉版本。agent 源码不在主仓库，独立在 <strong>apache/skywalking-java</strong>，自己发版本（后端 v11.0.0 配 agent v9.7.0，第 3 期强调过别配对）。类会搬家、文件会改名，网上旧文章的路径大量对不上，但设计决策是稳定的——你跟读时先把仓库切到 tag v9.7.0。顶层模块地图（路径核对自 skywalking-java tag v9.7.0）：</p>
+  <pre class="codeblock"><code>skywalking-java @ tag v9.7.0 · agent 独立仓库
+├─ apm-sniffer/              agent 本体（skywalking-agent.jar 从这构建）
+│   ├─ apm-agent/              启动模块：premain 入口 SkyWalkingAgent
+│   ├─ apm-agent-core/         增强内核：plugin / context / remote 三大包
+│   ├─ apm-sdk-plugin/         框架插件：114 个目录，一框架一目录
+│   ├─ optional-plugins/       可选插件：gson / mybatis / sentinel…
+│   ├─ bootstrap-plugins/      引导插件：jdk-http / jdk-threading 等 JDK 类
+│   └─ apm-toolkit-activation/ @Trace 等工具包注解的激活器
+├─ apm-application-toolkit/  手动埋点工具包：@Trace / 跨线程 / 日志绑定
+├─ apm-commons/              apm-datacarrier：上报前的内存缓冲队列
+├─ apm-protocol/             agent 与 OAP 的 gRPC 协议定义
+└─ docs/ test/ tools/        文档源 / 插件兼容测试 / 工具</code></pre>
+  <p>本期读码的常驻模块就是 <code>apm-sniffer</code>，点开构建脚本里的模块清单对一眼：</p>
+  <p class="note"><img src="../output/0051-skywalking-source-reading/images/skywalking-sniffer-pom-modules.png" alt="apm-sniffer pom modules 实拍 @ v9.7.0" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">apm-sniffer/pom.xml @ tag v9.7.0 第 28-42 行实拍：modules 清单十个子模块一眼列全——apm-agent（启动）、apm-agent-core（内核）、apm-sdk-plugin（插件）、apm-toolkit-activation、bootstrap-plugins、optional-plugins、bytebuddy-patch 等，pom 模块名与目录名一一对应（2026-09-19 截图）。</p>
+  <p>记一句口诀：<strong>读码从内核进（apm-agent / apm-agent-core），往插件出（apm-sdk-plugin）</strong>。</p>
+</section>
+
+<!-- ================= 03 决策一 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>决策一 · 字节码增强管线：入口只有一个 premain</h2>
+  <p>JVM 对 Java agent 只留了一扇门：<code>-javaagent</code> 参数指向 jar 时，JVM 会先调（写成"调用"，防念错）jar 里 MANIFEST 指定的 <code>premain</code> 方法——它在你的 <code>main</code> 之前执行，参数里带一个 <code>Instrumentation</code> 实例，这是 JVM 官方给的"改写字节码"的授权。SkyWalking 的入口类是 <code>org.apache.skywalking.apm.agent.SkyWalkingAgent</code>（摘自 apm-sniffer/apm-agent/src/main/java/org/apache/skywalking/apm/agent/SkyWalkingAgent.java，tag v9.7.0，省略异常处理）：</p>
+  <pre class="codeblock"><code>public static void premain(String agentArgs, Instrumentation instrumentation) {
+    pluginFinder = new PluginFinder(new PluginBootstrap().loadPlugins());
+    installClassTransformer(instrumentation, pluginFinder);   // 注册字节码改写器
+    ServiceManager.INSTANCE.boot();                           // 启动上报等服务
+    Runtime.getRuntime().addShutdownHook(
+        new Thread(ServiceManager.INSTANCE::shutdown));
+}</code></pre>
+  <p>四步就是全部骨架：读配置初始化（省略段）→ 加载全部插件描述 → 注册 Transformer → 启动服务。对一眼源码实拍：</p>
+  <p class="note"><img src="../output/0051-skywalking-source-reading/images/skywalking-premain-blob.png" alt="SkyWalkingAgent.java premain 区间实拍 @ v9.7.0" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">SkyWalkingAgent.java @ tag v9.7.0 第 92-118 行实拍：插件加载、installClassTransformer、ServiceManager 启动与 shutdown 钩子，与上文摘录逐行对应（2026-09-19 截图）。</p>
+  <p>增强的机制链画出来是这样的：</p>
+  <div class="diagram">
+  <svg viewBox="0 0 760 210" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar51" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="14" y="40" width="150" height="64" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="89" y="66" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">① JVM 加载类</text>
+    <text x="89" y="84" text-anchor="middle" fill="var(--muted)" font-size="9.5">premain 已注册 Transformer</text>
+    <rect x="204" y="40" width="160" height="64" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="284" y="66" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">② ByteBuddy 匹配</text>
+    <text x="284" y="84" text-anchor="middle" fill="var(--muted)" font-size="9.5">插件声明的类名匹配器</text>
+    <rect x="404" y="40" width="160" height="64" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="484" y="66" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">③ 改写字节码</text>
+    <text x="484" y="84" text-anchor="middle" fill="var(--muted)" font-size="9.5">方法前后插回调</text>
+    <rect x="604" y="40" width="142" height="64" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="675" y="66" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">④ 替换后的类</text>
+    <text x="675" y="84" text-anchor="middle" fill="var(--muted)" font-size="9.5">业务代码无感</text>
+    <line x1="164" y1="72" x2="198" y2="72" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar51)"/>
+    <line x1="364" y1="72" x2="398" y2="72" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar51)"/>
+    <line x1="564" y1="72" x2="598" y2="72" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar51)"/>
+    <rect x="204" y="140" width="360" height="52" rx="10" fill="var(--warn-bg)" stroke="var(--line)"/>
+    <text x="384" y="162" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">运行时：方法被调用 → before 开 Span → 原方法 → after 收 Span</text>
+    <text x="384" y="180" text-anchor="middle" fill="var(--muted)" font-size="9.5">回调落在 InstMethodsInter：拦截器三件套，原方法经 zuper.call() 原样执行</text>
+    <line x1="484" y1="104" x2="440" y2="134" stroke="var(--line)" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#ar51)"/>
+    <text x="14" y="200" fill="var(--muted)" font-size="9.5">改的是字节码不是你的代码：Transformer 由 installClassTransformer 注册，只对插件匹配器命中的类动手</text>
+  </svg>
+  </div>
+  <p><strong>钩子二：增强为什么发生在类加载那一刻？</strong>因为 JVM 类只加载一次，字节码定稿后再改就迟了。在类加载的门口拦截，改写完的类直接进虚拟机运行——不需要应用重启配合、不需要代理类转发，更没有任何源码工程要动。<strong>换种做法会怎样？</strong>手动埋点要改代码、随发版走；运行时动态代理要改 Bean 装配、只罩得住 Spring 管理的 Bean；AOP 注解要全工程扫描、覆盖不了 Tomcat、JDBC 这些框架内部。类加载时改写是唯一能把覆盖面做到"框架层全包"的时机，代价是 agent 必须赶在一切之前就位——这也解释了第 2 期那条"首次启动稍慢"。</p>
+</section>
+
+<!-- ================= 04 决策二 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>钩子一 · 决策二：agent 为什么自带一个类加载器</h2>
+  <p>增强后的业务类要调用 agent 的拦截器，拦截器类从哪加载？答案是 agent 自带的 <code>AgentClassLoader</code>（摘自 apm-sniffer/apm-agent-core/src/main/java/org/apache/skywalking/apm/agent/core/plugin/loader/AgentClassLoader.java，tag v9.7.0，节选）：</p>
+  <pre class="codeblock"><code>public class AgentClassLoader extends ClassLoader {
+    static {
+        registerAsParallelCapable();          // 防类加载死锁
+    }
+    public AgentClassLoader(ClassLoader parent) {
+        super(parent);
+        Config.Plugin.MOUNT.forEach(mountFolder ->   // MOUNT 默认
+            classpath.add(new File(agentDictionary, mountFolder)));
+        // plugins、activations 两个挂载目录
+    }
+    protected Class<?> findClass(String name) { /* 只在 agent 自己的 jar 里找 */ }
+}</code></pre>
+  <p class="note"><img src="../output/0051-skywalking-source-reading/images/skywalking-agentclassloader-blob.png" alt="AgentClassLoader.java 实拍 @ v9.7.0" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">AgentClassLoader.java @ tag v9.7.0 第 47-89 行实拍：static 块注册并行能力（注释原话 Try to solve the classloader dead lock）、initDefaultLoader 双检锁单例、构造器只登记 MOUNT 挂载目录（2026-09-19 截图）。</p>
+  <p>为什么要多此一举？看一眼没隔离的世界就明白了。</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>场景</th><th>直接放 system classpath（反事实）</th><th>AgentClassLoader 隔离（现状）</th></tr></thead>
+    <tbody>
+      <tr><td><strong>agent 的 ByteBuddy 与宿主的同名类</strong></td><td>谁先上 classpath 谁赢，宿主应用按到的可能是 agent 带的旧版，一行栈溢出查三天</td><td>两套类各加载各的，同名不同源互不打扰</td></tr>
+      <tr><td><strong>agent 依赖的 Netty、gRPC 版本</strong></td><td>强行顶掉宿主自带的版本，序列化兼容性当场翻车</td><td>agent 用自己的，宿主用宿主的</td></tr>
+      <tr><td><strong>插件增删</strong></td><td>混在应用 classpath 里无法按目录启停</td><td>挪动 jar 即启停（第 2 期的"插件清单即生效清单"）</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>这就是所有 Java agent 的公共课题——Arthas、各类 APM 探针都绕不开：agent 是"寄生"在宿主进程里的，<strong>自己的依赖必须自己圈起来养</strong>，绝不能泄进宿主的 classpath。更进一步，每个插件 jar 里可能有同名拦截器类，SkyWalking 还有一层 <code>InterceptorInstanceLoader</code>：按宿主各自的 ClassLoader 缓存一份插件加载器（javadoc 原话点明要理解"Classloader appointment mechanism"，即双亲委派机制），保证拦截器实例与宿主上下文正确配对。换种做法——把 agent 的 jar 全塞进启动 classpath——单机 demo 能跑，一进有依赖冲突的真实应用就炸，这也是"装了 agent 应用起不来"这类事故的根。</p>
+</section>
+
+<!-- ================= 05 决策三 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>决策三 · 插件模型：一框架一目录，声明式拦截点</h2>
+  <p>打开 <code>apm-sdk-plugin</code> 的构建清单，一百一十四个插件目录一字排开（pom modules 清单核对 v9.7.0）：dubbo、grpc、kafka、mysql、redisson、lettuce、elasticsearch……每个目录就是一个框架的支持包：</p>
+  <p class="note"><img src="../output/0051-skywalking-source-reading/images/skywalking-sdk-plugin-pom-modules.png" alt="apm-sdk-plugin pom modules 实拍 @ v9.7.0" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">apm-sdk-plugin/pom.xml @ tag v9.7.0 第 29-50 行实拍（前 20 个模块）：dubbo-plugin、httpClient-4.x-plugin、redisson-3.x-plugin、tomcat-plugin、mongodb、okhttp、spring-plugins、jetty 等，框架名和版本号写进模块名；全部 114 个插件目录经 modules 清单核对（2026-09-19 截图）。</p>
+  <p>每个插件由两件东西组成。<strong>先是一份声明</strong>：增强哪个类、拦哪个方法、用哪个拦截器（摘自 apm-sdk-plugin/httpClient-4.x-plugin 的 AbstractHttpClientInstrumentation.java，tag v9.7.0，节选）：</p>
+  <pre class="codeblock"><code>public ClassMatch enhanceClass() {
+    return byName("org.apache.http.impl.client.AbstractHttpClient"); // 拦谁
+}
+public InstanceMethodsInterceptPoint[] getInstanceMethodsInterceptPoints() {
+    return new InstanceMethodsInterceptPoint[] {
+        getMethodsMatcher()    → named("doExecute"),          // 拦哪个方法
+        getMethodsInterceptor() → HttpClientExecuteInterceptor // 用哪个拦截器
+    };
+}</code></pre>
+  <p><strong>再是一组拦截器</strong>，接口三件套（摘自 apm-agent-core 的 InstanceMethodsAroundInterceptor.java，tag v9.7.0，签名原样）：</p>
+  <pre class="codeblock"><code>void beforeMethod(EnhancedInstance objInst, Method method,
+    Object[] allArguments, Class<?>[] argumentsTypes,
+    MethodInterceptResult result);        // 方法前：开 Span，参数全在手上
+Object afterMethod(EnhancedInstance objInst, Method method,
+    Object[] allArguments, Class<?>[] argumentsTypes,
+    Object ret);                          // 方法后：拿返回值，收 Span
+void handleMethodException(...Throwable t); // 异常时：把 Span 标错</code></pre>
+  <p>出口插桩的拦截器就在 <code>beforeMethod</code> 里调（写成"调用"）<code>ContextManager.createExitSpan</code> 开出口 Span，在 <code>afterMethod</code> 里 <code>stopSpan</code> 收口——耗时、状态、标签全从这三个钩子的参数里来。<strong>插件化的价值在组织方式</strong>：内核只管"怎么改字节码"，每个插件只管"改哪个框架"，声明式拦截点让两者彻底解耦——所以官方支持清单能到一百三十多条，而且是社区并行列出来的，这就是"支持一百多个中间件"成为一项社区协作工程的机制答案。</p>
+  <p>开关设计也一眼可读：<code>plugins/</code> 目录默认全启用（挪走即禁用）；<code>optional-plugins/</code> 收着 gson、mybatis、sentinel、trace-ignore 这些有副作用或小众的，拷进 plugins 才生效；<code>bootstrap-plugins/</code> 专攻 JDK 内置类（jdk-http、jdk-threading、虚拟线程执行器等），要走特殊的引导注入；<code>apm-toolkit-activation/</code> 则是 <code>@Trace</code> 手动埋点注解的激活器——工具包 jar 躺在宿主，激活器负责把空实现替换成真埋点。第 4 期"挪动即启停"的谜底就在这。</p>
+</section>
+
+<!-- ================= 06 归途 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>一条 span 的归途：攒段、入队、上报</h2>
+  <p>拦截器产出的 span 去了哪？类坐标给全（均在 apm-agent-core，tag v9.7.0 核对）：</p>
+  <pre class="codeblock"><code>core/context/ContextManager.java     拦截器总入口：createEntry/Local/ExitSpan
+core/context/TracingContext.java     进程内上下文：把 span 攒进当前段
+core/context/trace/TraceSegment.java  一个进程一段（第 3 期概念的字面落点）
+core/remote/TraceSegmentServiceClient.java  gRPC 异步上报：
+  ↳ TracingContext.ListenerManager.add(this)   段写完自动回调 afterFinished
+  ↳ new DataCarrier<>(CHANNEL_SIZE, BUFFER_SIZE) 内存队列削峰
+  ↳ TraceSegmentReportServiceGrpc → collect()   流式发给 OAP :11800</code></pre>
+  <p>串起来读：拦截器开收 Span → TracingContext 把当前进程的 Span 攒成一个 TraceSegment → 段写完，监听器回调把它放进 DataCarrier 内存队列（单消费者线程，队满则丢弃并计数，绝不阻塞业务线程）→ TraceSegmentServiceClient 批量经 gRPC 流式上报 OAP。第 3 期"Segment 单进程一段"的定义，在源码里就是这几个类各司其职；sw8 头的注入与解析，也落在 ContextManager 的 <code>inject</code> / <code>extract</code> 两个方法上。全期合成一张读码路线图：</p>
+  <div class="diagram">
+  <svg viewBox="0 0 760 150" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar52" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="10" y="34" width="112" height="58" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="66" y="56" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">JVM 加载类</text>
+    <text x="66" y="73" text-anchor="middle" fill="var(--muted)" font-size="9">premain 已就位</text>
+    <rect x="136" y="34" width="118" height="58" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="195" y="56" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">ByteBuddy 拦截</text>
+    <text x="195" y="73" text-anchor="middle" fill="var(--muted)" font-size="9">匹配器命中</text>
+    <rect x="268" y="34" width="124" height="58" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="330" y="56" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">before/after</text>
+    <text x="330" y="73" text-anchor="middle" fill="var(--muted)" font-size="9">开收 Span</text>
+    <rect x="406" y="34" width="118" height="58" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="465" y="56" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">span 进上下文</text>
+    <text x="465" y="73" text-anchor="middle" fill="var(--muted)" font-size="9">TracingContext</text>
+    <rect x="538" y="34" width="104" height="58" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="590" y="56" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">段入队</text>
+    <text x="590" y="73" text-anchor="middle" fill="var(--muted)" font-size="9">DataCarrier</text>
+    <rect x="656" y="34" width="94" height="58" rx="10" fill="var(--warn-bg)" stroke="var(--line)"/>
+    <text x="703" y="56" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">gRPC 上报</text>
+    <text x="703" y="73" text-anchor="middle" fill="var(--muted)" font-size="9">OAP :11800</text>
+    <line x1="122" y1="63" x2="130" y2="63" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar52)"/>
+    <line x1="254" y1="63" x2="262" y2="63" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar52)"/>
+    <line x1="392" y1="63" x2="400" y2="63" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar52)"/>
+    <line x1="524" y1="63" x2="532" y2="63" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar52)"/>
+    <line x1="642" y1="63" x2="650" y2="63" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar52)"/>
+    <text x="380" y="130" text-anchor="middle" fill="var(--muted)" font-size="9.5">一条 span 的诞生到离场，全程无一行业务代码知情；按此路线打断点，调用栈自己展开</text>
+  </svg>
+  </div>
+</section>
+
+<!-- ================= 07 OAP 与借鉴 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>另一扇门与可借鉴的三件事</h2>
+  <p>OAP 侧（流式聚合）只指个路不展开：聚合引擎在主仓库 apache/skywalking 的 <code>oap-server/</code> 下——<code>oal-rt</code> 与 <code>oal-grammar</code>（@ v11.0.0）是 OAL 分析语言的运行时与语法，agent 上报的 Segment 从 <code>server-receiver-plugin</code> 进去，被 OAL 脚本折算成第 3 期讲的指标与拓扑。agent 收、OAP 算，两个仓库各读各的。</p>
+  <p class="note"><img src="../output/0051-skywalking-source-reading/images/skywalking-docs-plugin-dev.png" alt="官方 Plugin Development Guide" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方《Plugin Development Guide》：给想给自家框架写插件的读者——声明 Instrumentation、写拦截器、打包进 plugins，正是本期读码路线的"动手版"（2026-09-19 截图，正文主栏）。</p>
+  <p>收口之前，把可借鉴的三件事说透：</p>
+  <ul>
+    <li><strong>字节码增强的工程边界：</strong>增强只发生在框架边界（Tomcat 的入口、JDBC 的出口），业务方法一个不碰；还配了 ignore 名单防递归增强自己——侵入性技术要靠"收窄作用面"换来生产可信；</li>
+    <li><strong>插件生态的组织方式：</strong>声明式拦截点 + 一框架一目录，内核与插件解耦，贡献者不读内核也能给一百多个中间件添砖——把大生态拆成小目录，是开源协作的范本；</li>
+    <li><strong>隔离思想：</strong>寄生于宿主进程的组件，依赖自己圈养、日志自己管、上报不阻塞业务——做任何"被引入的组件"（agent、SDK、starter）都适用。</li>
+  </ul>
+</section>
+
+<!-- ================= 08 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：同样是"无代码改动"，Spring 的 Java agent / Instrumentation 改字节码，和 Spring AOP 的动态代理，边界到底在哪？什么场景必须用前者？</summary>
+    <div class="details-body">
+      <p>边界有三条。<strong>其一，作用对象</strong>：动态代理只能包住"通过容器拿到"的对象——Spring Bean、接口实现；而 Tomcat 的连接器、JDBC 的 Driver、Redis 客户端这些框架内部的类，不归任何容器管，代理根本够不着，只有类加载时改写字节码能拦。<strong>其二，生效时机</strong>：代理在应用装配时生效，改配置要重启上下文；字节码增强在类加载那一刻定稿，虚拟机里跑的就是改过的类。<strong>其三，代码感知</strong>：AOP 至少要求对象由框架创建，agent 连这一点都不要求——main 方法之前的 premain 就位，之后加载的一切类都在射程内。</p>
+      <p>所以判断标准是：<strong>要增强的类是否在"你的框架"手里</strong>。自家 Spring Bean 的切面用 AOP 足够、更可控；要观测"所有进出 JVM 的框架调用"，只能走 agent。反过来也要记住代价：字节码增强的排障门槛高（出错在字节码层，栈又深又陌生）、有版本兼容风险，所以 SkyWalking 才把增强面收窄到框架边界，而不是见类就改。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：假设把 skywalking-agent.jar 的所有依赖 jar 平铺进应用的 classpath（不用 AgentClassLoader），第一个出问题的会是什么？为什么插件目录式隔离反而让"挪 jar 即启停"成立？</summary>
+    <div class="details-body">
+      <p>第一个出问题的多半是<strong>同名类版本仲裁</strong>：classpath 是扁平的，先到先得。agent 自带的 ByteBuddy、Netty、gRPC 与宿主应用的版本几乎必然不一致——如果 agent 的 jar 先加载，宿主按到的就是 agent 的版本，轻则 NoSuchMethodError，重则行为悄然变化；如果宿主先加载，agent 又可能因为拿到旧版 ByteBuddy 而增强失败。这类问题最恶毒的地方在于<strong>不总是立刻炸</strong>，往往在某个特定调用路径上才暴露，线上排障极难。</p>
+      <p>插件目录式隔离的妙处在于把"类可见性"变成了<strong>文件系统问题</strong>：AgentClassLoader 只扫描挂载目录里的 jar（Config.Plugin.MOUNT，默认 plugins 与 activations），findClass 只在这批 jar 里找——目录里有什么，类空间里就有什么。于是"启停一个插件"从改配置、重新打包，降级成挪一个文件，不需要懂类加载理论的人也能安全操作。顺带一提，bootstrap-plugins 处理 JDK 内置类时要走更特殊的引导注入路径，那是隔离体系里最硬的骨头，官方为此专门留了独立目录和 bytebuddy-patch 模块。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 09 要点收口 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>本期要点</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句：</strong></p>
+    <ul>
+      <li>premain 是唯一入口：加载插件 → 注册 Transformer → 启动服务，JVM 在 main 之前把 Instrumentation 交到 agent 手上；</li>
+      <li>增强发生在类加载那一刻：类只加载一次，改完的类直接进虚拟机运行，这是覆盖面做到"框架层全包"的唯一时机；</li>
+      <li>AgentClassLoader 圈养依赖：寄生于宿主进程的组件必须隔离自己的依赖，同名类版本仲裁是最隐蔽的生产事故源；</li>
+      <li>插件 = 声明（拦谁/拦哪个方法/用哪个拦截器）+ 三件套（before 开 Span / after 收 Span / 异常标错），114 个插件目录是一百三十多条支持的机制答案；</li>
+      <li>一条 span 的归途：ContextManager 攒段 → TraceSegment 入 DataCarrier 队列 → gRPC 流式上报 OAP，全程不阻塞业务线程。</li>
+    </ul>
+  </div>
+  <p><strong>Primary source：</strong><a href="https://skywalking.apache.org/docs/skywalking-java/latest/en/setup/service-agent/java-agent/java-plugin-development-guide/" target="_blank" rel="noopener">SkyWalking Java agent 官方文档 · Java Plugin Development Guide（latest = v9.7.0 文档线）</a>——本期插件模型的官方出处；源码路径均核对自 <a href="https://github.com/apache/skywalking-java/tree/v9.7.0" target="_blank" rel="noopener">github.com/apache/skywalking-java @ tag v9.7.0</a>；OAP 侧 OAL 引擎见主仓库 <a href="https://github.com/apache/skywalking/tree/v11.0.0/oap-server" target="_blank" rel="noopener">apache/skywalking @ v11.0.0 · oap-server/oal-rt</a>。</p>
+</section>
+
+<section>
+  <h2><span class="sec-num">10</span>随堂小测</h2>
+  <div class="quiz">
+    <div class="quiz-q">
+      <p class="quiz-question">1. premain 方法在什么时机执行？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["main 之后执行就晚了，类早已加载完，字节码没法改。","对：JVM 在应用 main 方法之前调用 premain，把 Instrumentation 授权交给 agent。","premain 不是每次请求都跑的回调，它只在进程启动时执行一次。"]'>
+        <li class="quiz-option">每次请求进入时</li>
+        <li class="quiz-option">应用 main 方法之前</li>
+        <li class="quiz-option">JVM 退出时</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. agent 为什么非要自带 AgentClassLoader？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["加快启动不是主要目的，隔离才是。","插件分发走的是解压目录，任何加载器都能读文件。","对：把 agent 的 ByteBuddy、Netty 等依赖与宿主应用隔离，避免同名类版本互相污染。"]'>
+        <li class="quiz-option">为了加快启动速度</li>
+        <li class="quiz-option">为了方便下载插件</li>
+        <li class="quiz-option">为了隔离依赖避免同名类冲突</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 插件里 InstanceMethodsAroundInterceptor 的 afterMethod 拿不到哪样东西？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对：方法名以字符串常量进的是匹配器，拦截器签名里没有它；参数、返回值、异常都在签名里。","ret 是方法返回值，afterMethod 的最后一个参数。","allArguments 是方法入参数组，afterMethod 的第三个参数。"]'>
+        <li class="quiz-option">被拦方法的名称字符串</li>
+        <li class="quiz-option">方法返回值 ret</li>
+        <li class="quiz-option">方法入参 allArguments</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. 想启用 optional-plugins 里的某个插件，正确动作是？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["optional 目录不挂载，jar 放那里不会生效。","对：把插件 jar 拷进 plugins 目录即可，挪动即启停。","改配置文件不是官方机制，官方口径就是挪 jar。"]'>
+        <li class="quiz-option">在 agent.config 里把开关设为 true</li>
+        <li class="quiz-option">把插件 jar 拷进 plugins 目录</li>
+        <li class="quiz-option">重启后自动全部生效</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0050-skywalking-in-action.html">← 上一期：实战：两个微服务，一条调用链</a></span>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

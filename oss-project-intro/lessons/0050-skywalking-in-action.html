@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · SkyWalking 系列第 4 期：实战场景 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0050</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0049-skywalking-core-concepts-architecture.html">上一期:0049</a> · SkyWalking 系列第 4 期 / 共 5 期 · <a href="0051-skywalking-source-reading.html">下一期:0051</a> · <a href="https://skywalking.apache.org" target="_blank" rel="noopener">skywalking.apache.org ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · SKYWALKING 系列第 4 期：实战场景</p>
+  <h1>SkyWalking 实战：两个微服务，一条调用链</h1>
+  <p class="subtitle">上一期我们拿到了概念地图：Trace 怎么按进程切段、sw8 头怎么跨进程续链、拓扑和指标怎么被 OAP 算出来。本期把地图用起来，<strong>端到端做一个跨进程调用链追踪</strong>：两个极简 Spring Boot 服务互相调用，各自挂上 agent，压几笔请求后，链路在 UI 里串成一条——瀑布逐行对号入座第 3 期概念，拓扑自己长出一条边，"慢在哪一跳"一眼定位。接入口径逐条对照官方文档（2026-09 核对），引用什么核什么。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">📡 链路追踪与 APM · Java · Apache-2.0（Apache 顶级项目）</span>
+    <span class="tag">📦 基于 OAP v11.0.0 + Java agent v9.7.0 + Spring Boot 4.1.1</span>
+    <span class="tag-date">📅 2026-09-19 · 第 4 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 本期地图 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>本期地图：一条演示链贯穿全程</h2>
+  <p>先对齐进度。第 1 期立住了"无侵入"的心智模型，第 2 期一条命令起了全家、挂 agent 看见第一条调用链，第 3 期拆透了概念地图：<strong>Trace → Segment → Span 三层模型、sw8 上下文传播、OAP 流式聚合</strong>。本期是系列第 4 期实战，所有概念都要在两个真实进程之间走一遍：</p>
+  <ul>
+    <li><strong>起服务挂 agent：</strong>两个极简服务 demo-app（入口，8080）与 demo-api（被调，8081），三参数接入，命令逐行给；</li>
+    <li><strong>触发请求：</strong>压五笔请求，让两个 agent 都有货可报；</li>
+    <li><strong>UI 验收：</strong>Trace 瀑布里两个 Segment 首尾相连，拓扑自动长出一条有向边；</li>
+    <li><strong>解读定位：</strong>瀑布逐行对号入座第 3 期的 entry / exit / sw8 概念，把"慢在哪一跳"钉死在某一段上。</li>
+  </ul>
+  <p>本期有两个钩子：其一，<strong>零代码自动埋点 vs 手动埋点</strong>到底怎么分工；其二，开头那个排障需求——<strong>慢在哪一跳</strong>——四步定位法当场收掉。演示链共五幕，占全期一半以上篇幅，跟着敲就能复现。</p>
+</section>
+
+<!-- ================= 02 需求 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>需求：下单接口慢了，慢在哪一跳？</h2>
+  <p>需求摆上桌：用户反馈下单接口慢，你要回答三连问。传统手段和挂上 agent 之后各有答案：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>要回答的问题</th><th>翻日志的排障法</th><th>挂上 agent 之后</th></tr></thead>
+    <tbody>
+      <tr><td><strong>哪个接口慢？</strong></td><td>登多台机器，按时间戳对日志</td><td>Trace 列表按耗时倒序，最慢的链置顶</td></tr>
+      <tr><td><strong>慢在哪一跳？</strong></td><td>把各服务日志拼成时间线猜</td><td>瀑布逐段看时长条，长段一目了然</td></tr>
+      <tr><td><strong>为什么慢？</strong></td><td>凭经验猜：慢查询、锁还是 GC</td><td>段内下钻：Span 明细绑定日志继续查</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>微服务一多，"翻日志对时间戳"就抓瞎：一次请求横跨多个进程，谁也没有全局视角。这正是第 1 期讲的痛点——<strong>追踪系统把"一次请求"重新变成一个可以整体观察的对象</strong>。本期就用一个最小复现：两个服务、一条 HTTP 调用，把三连问的答案亲手做出来。</p>
+</section>
+
+<!-- ================= 03 钩子一 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>钩子一：零代码接入，还是手动埋点？</h2>
+  <p>动代码之前先回答一个选型问题：埋点是谁做的？官方给两条路，定位完全不同：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>agent 自动埋点（本期主线）</th><th>手动埋点 apm-toolkit（进阶补充）</th></tr></thead>
+    <tbody>
+      <tr><td>0 行代码改动，<code>-javaagent</code> 挂上就生效</td><td><code>@Trace</code> 注解标业务方法，瀑布多一个 LocalSpan</td></tr>
+      <tr><td>框架插件全织入：Spring MVC、RestTemplate、JDBC、Redis……</td><td>补上 agent 看不见的业务语义：缓存命中、分片键</td></tr>
+      <tr><td>升级插件即跟上新框架，应用不用重发版</td><td>业务关键路径主动打标，排查更快</td></tr>
+      <tr><td>代价：埋点粒度由插件决定，业务语义它不会猜</td><td>代价：要加依赖、要动代码</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>结论先给：<strong>两者是配合关系，不是二选一</strong>。框架调用交给插件自动织入（第 5 期讲它怎么做到的），业务语义用工具包手动补标（本期末尾演示）。绝大多数接入从零代码开始，等瀑布里"看不见业务"了，再补注解。</p>
+</section>
+
+<!-- ================= 04 版本与两个极简服务 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>两个极简服务：先钉版本，再写代码</h2>
+  <p>动手前先钉版本。两个示例服务用 <strong>Spring Boot 4.1.1</strong>（Maven Central 当前最新 GA，2026-08-20 发布；4.2.0-M1 是里程碑预发布，生产不追）。注意一个 Boot 4 的新变化：<strong>Web 起步器改名 <code>spring-boot-starter-webmvc</code></strong>，经典的 <code>spring-boot-starter-web</code> 已标记弃用，新项目直接用新坐标：</p>
+  <p class="note"><img src="../output/0050-skywalking-in-action/images/spring-boot-maven-central.png" alt="Maven Central：spring-boot-starter-webmvc 4.1.1 依赖片段" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">Maven Central 实拍：spring-boot-starter-webmvc 4.1.1 依赖片段可直接抄；同页 Versions 列表显示 4.1.1（2026-08-20）为最新 GA、4.2.0-M1 为里程碑预发布（2026-09-19 截图）。</p>
+  <p>被调方 demo-api（8081），一个睡 800 毫秒的慢接口——它是本期唯一的"病灶"：</p>
+  <pre class="codeblock"><code>// demo-api：被调方（8081），模拟慢查询
+@RestController
+public class ApiController {
+    @GetMapping("/api")
+    public String api() throws InterruptedException {
+        Thread.sleep(800);   // 模拟一次 800ms 的慢查询
+        return "ok";
+    }
+}</code></pre>
+  <p>入口 demo-app（8080），用经典的 RestTemplate 转调下游——特意换了第 2 期没用过的客户端：官方插件清单里 <code>spring-resttemplate</code> 从 3.x 到 6.x 一条线在列，换了客户端照样织入：</p>
+  <pre class="codeblock"><code>// demo-app：入口（8080），RestTemplate 转调 demo-api
+@RestController
+public class OrderController {
+    RestTemplate rest = new RestTemplate();
+
+    @GetMapping("/order")
+    public String order() {
+        return rest.getForObject("http://127.0.0.1:8081/api", String.class);
+    }
+}</code></pre>
+  <p>两个服务各自独立打包成 jar。注意看：除了业务逻辑，<strong>没有任何一行 SkyWalking 的依赖或注解</strong>——这正是第 3 页"零代码接入"的实物。为什么非要两个服务？拓扑图的"边"至少要两个节点才画得出来；一次请求跨两个 JVM，瀑布和拓扑才有戏唱。版本兼容性官方口径也省心：agent 支持列表明确列有 Spring Boot Web 4.x 条目（agent v9.7.0）。</p>
+</section>
+
+<!-- ================= 05 接入与启动 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>接入与启动：三参数挂上 agent</h2>
+  <p>接入方式回到官方文档的五步，还是第 2 期那套：确认 JDK（8-25）、找到 agent 目录、设服务名、设后端地址、<code>-javaagent</code> 放在 <code>-jar</code> 之前：</p>
+  <p class="note"><img src="../output/0050-skywalking-in-action/images/skywalking-docs-agent-quickstart.png" alt="官方 Setup java agent 快速开始：五步与 agent 目录结构" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方《Setup java agent》快速开始原文：JDK 8-25、agent.service_name（任意英文字符串）、collector.backend_service（默认 127.0.0.1:11800）、-javaagent 放在 -jar 之前；下方是新包目录结构（2026-09-19 截图，正文主栏）。</p>
+  <p>先起被调方 demo-api，挂上第一个 agent（<code>-Dskywalking.*</code> 系统属性覆盖 <code>agent.config</code> 是官方覆盖机制，路径换成你的解压路径）：</p>
+  <pre class="codeblock"><code>java -javaagent:/path/to/agent/skywalking-agent.jar \
+  -Dskywalking.agent.service_name=demo-api \
+  -Dskywalking.collector.backend_service=localhost:11800 \
+  -jar demo-api.jar --server.port=8081</code></pre>
+  <p>再起入口 demo-app，命令同款，只有服务名和端口不同。然后连发五笔请求触发：</p>
+  <pre class="codeblock"><code>java -javaagent:/path/to/agent/skywalking-agent.jar \
+  -Dskywalking.agent.service_name=demo-app \
+  -Dskywalking.collector.backend_service=localhost:11800 \
+  -jar demo-app.jar --server.port=8080
+
+for i in 1 2 3 4 5; do curl -s http://localhost:8080/order; done</code></pre>
+  <p>终端回显五个 <code>ok</code>，但每笔都等了约 0.8 秒才返回——慢，用户已经感觉到了。<strong>本期唯一要留心的接入细节：两个服务共用同一份 agent，服务名必须不同</strong>（demo-app / demo-api），拓扑上的两个节点靠它区分。另外 agent 是纯客户端，只出不进，不占业务端口；OAP 就是第 2 期起的那个，收数口 11800 别填成查询口 12800。</p>
+</section>
+
+<!-- ================= 06 瀑布与拓扑 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>UI 验收：瀑布两段相连，拓扑长出一条边</h2>
+  <p>打开 Horizon UI 的 Trace 页，按耗时排序，最慢的链置顶。点开任意一条，瀑布长这样（官方 Horizon UI 实拍，展示环境数据）：</p>
+  <p class="note"><img src="../output/0050-skywalking-in-action/images/horizon-ui-trace-waterfall.png" alt="Horizon UI Trace 瀑布实拍" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方 Horizon UI 的 Trace 详情实拍（官方博客素材）：顶部 traceId、总耗时、Span 数、服务数；瀑布逐行一个 Span，服务各自着色，条长即耗时。demo-app → demo-api 的链结构与画面同构（2026-09-19 取自官方站点原图）。</p>
+  <p>我们的链会比画面更简洁：两个 Segment、三行 Span。把瀑布解剖开，就是第 3 期那张概念图在两个真实进程里各走了一遍（自绘）：</p>
+  <div class="diagram">
+  <svg viewBox="0 0 760 250" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar50" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="14" y="40" width="120" height="46" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="74" y="60" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">curl ×5</text>
+    <text x="74" y="78" text-anchor="middle" fill="var(--muted)" font-size="9.5">GET /order</text>
+    <rect x="176" y="26" width="200" height="74" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="276" y="48" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">Segment ① · demo-app</text>
+    <text x="276" y="68" text-anchor="middle" fill="var(--muted)" font-size="9.5">entry /order · exit 调 /api</text>
+    <text x="276" y="86" text-anchor="middle" fill="var(--muted)" font-size="9.5">整链起点，约 815 毫秒</text>
+    <rect x="418" y="26" width="200" height="74" rx="10" fill="var(--warn-bg)" stroke="var(--line)"/>
+    <text x="518" y="48" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">Segment ② · demo-api</text>
+    <text x="518" y="68" text-anchor="middle" fill="var(--muted)" font-size="9.5">entry /api · 约 805 毫秒</text>
+    <text x="518" y="86" text-anchor="middle" fill="var(--muted)" font-size="9.5">耗时大头：慢查询折进端点</text>
+    <rect x="576" y="160" width="170" height="62" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="661" y="184" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">UI 瀑布</text>
+    <text x="661" y="204" text-anchor="middle" fill="var(--muted)" font-size="9.5">两段拼成一条链</text>
+    <rect x="300" y="160" width="180" height="62" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="390" y="184" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">OAP v11.0.0</text>
+    <text x="390" y="204" text-anchor="middle" fill="var(--muted)" font-size="9.5">同 traceId 归链 · 流式聚合</text>
+    <line x1="134" y1="63" x2="170" y2="63" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar50)"/>
+    <line x1="376" y1="55" x2="412" y2="55" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar50)"/>
+    <text x="394" y="30" text-anchor="middle" fill="var(--muted)" font-size="9">HTTP + sw8 头</text>
+    <line x1="276" y1="100" x2="360" y2="154" stroke="var(--line)" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#ar50)"/>
+    <line x1="518" y1="100" x2="430" y2="154" stroke="var(--line)" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#ar50)"/>
+    <text x="230" y="130" text-anchor="middle" fill="var(--muted)" font-size="9">gRPC 上报 :11800</text>
+    <line x1="480" y1="191" x2="570" y2="191" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar50)"/>
+    <text x="14" y="240" fill="var(--muted)" font-size="9.5">跨进程边界切段续链：每段 = 单个进程内的全部 Span；sw8 头在出口 Span 注入、对面 agent 解析，OAP 按同一 traceId 归成一条链（概念图）</text>
+  </svg>
+  </div>
+  <p>瀑布逐行对号入座第 3 期概念，每一格都有实物：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>瀑布里的一行</th><th>第 3 期概念</th><th>本期实例中的值</th></tr></thead>
+    <tbody>
+      <tr><td>demo-app <code>/order</code> 顶行</td><td>EntrySpan 入口</td><td>整链起点，含下游等待，约 815 毫秒</td></tr>
+      <tr><td>demo-app 指向 <code>/api</code> 一行</td><td>ExitSpan 出口</td><td>sw8 头在这一步注入请求</td></tr>
+      <tr><td>demo-api <code>/api</code> 一行</td><td>跨进程新段的 EntrySpan</td><td>约 805 毫秒，耗时大头在这段</td></tr>
+      <tr><td>顶栏同一个 traceId</td><td>Trace 全局串链</td><td>两个 Segment 靠它拼成一条链</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>再看拓扑页：压完请求几分钟内，画布上自动长出一条有向边，从入口服务指向被调服务，边上标着调用量。第 3 期说"拓扑是算出来的，不是画出来的"——出口 Span 加对面入口 Span 构成一次调用对，聚合内核把它折算成边，你从头到尾没有画过一行配置：</p>
+  <p class="note"><img src="../output/0050-skywalking-in-action/images/horizon-ui-topology.png" alt="Horizon UI 服务拓扑实拍" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方 Horizon UI 拓扑实拍（官方博客素材）：六边形节点带健康色环，边上标每分钟调用量。demo-app 会指向 demo-api 长出同款一条边，全程零配置（2026-09-19 取自官方站点原图）。</p>
+</section>
+
+<!-- ================= 07 定位与进阶 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>收掉需求：慢在哪一跳，四步定位法</h2>
+  <p>开头的需求现在收口。"慢在哪一跳"不需要灵感，是一套固定动作：</p>
+  <ol>
+    <li><strong>排序：</strong>Trace 列表按耗时倒序，最慢的链置顶；</li>
+    <li><strong>下钻：</strong>点开最慢链，瀑布逐段看时长条；</li>
+    <li><strong>锁段：</strong>最长条在 demo-api 段——约 805 毫秒，病灶锁定；</li>
+    <li><strong>归因：</strong>进端点详情，把段和日志、慢查询对上，收口。</li>
+  </ol>
+  <p>本期 800 毫秒是 <code>Thread.sleep</code> 模拟的，方法是真的：这套动作不挑框架、不挑语言，任何接入了 SkyWalking 的微服务系统里都一样。真实系统里锁段之后还有一步——段内往往不只一行 Span，JDBC、Redis 调用各占一行，哪行最长，嫌疑最大。</p>
+  <p>想再进一步，把业务方法也搬进瀑布？这就是第 3 页说的手动埋点。加一个工具包依赖，方法上打个注解：</p>
+  <pre class="codeblock"><code>// pom 加依赖：org.apache.skywalking:apm-toolkit-trace
+import org.apache.skywalking.apm.toolkit.trace.Trace;
+
+@Trace(operationName = "/order/queryCache")   // 织入一个 LocalSpan
+public String queryCache() {
+    return localCache.get(key);                // 业务逻辑不动
+}</code></pre>
+  <p>重启后，瀑布里 demo-app 段多出一行 LocalSpan <code>/order/queryCache</code>。注意它的定位：<strong>框架调用已经有人埋了，你补的只是业务语义</strong>——缓存查了哪次、分片走了哪片，用 <code>@Tag</code> 自己打标，agent 不会猜。全期要动代码的只有这一小步，而且它和自动埋点是叠加关系，不是替换。</p>
+</section>
+
+<!-- ================= 08 翻车清单 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>高频翻车速查（按出现概率）</h2>
+  <ul>
+    <li><strong>瀑布里只有一段，链没串起来：</strong>上游请求没带 sw8 头——被自定 Header 拦截器过滤了，或 HTTP 客户端不在插件清单里。先看 agent 的 <code>logs/skywalking-api.log</code>；</li>
+    <li><strong>拓扑上两个节点合并成一个：</strong>两个服务挂了同一个 <code>service_name</code>，OAP 把它们当成一个服务，边自然消失；</li>
+    <li><strong>拓扑有节点，Trace 列表空的：</strong>UI 时间窗没盖住请求时间，拉到最近 15 分钟；两端时钟不同步也会错位（第 2 期同款坑）；</li>
+    <li><strong>服务起来了，界面永远无数据：</strong><code>backend_service</code> 填错口——收数 11800、查询 12800，agent 只认 11800，口诀"收 11 出 12"；</li>
+    <li><strong>-javaagent 写了但没生效：</strong>参数要放在 <code>-jar</code> 之前（官方特意强调的顺序），放后面 JVM 不认；</li>
+    <li><strong>新版框架织入不上：</strong>部分插件收在 <code>optional-plugins</code> 目录，把 jar 拷进 <code>plugins</code> 才启用——第 2 期讲过"挪动即启停"。</li>
+  </ul>
+</section>
+
+<!-- ================= 09 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：同一个 agent，为什么给 RestTemplate 的调用记 ExitSpan、给 Tomcat 收到的请求记 EntrySpan？如果让你写插件，你怎么决定一个拦截点该生成哪种 Span？</summary>
+    <div class="details-body">
+      <p>决定因素是<strong>调用方向，不是框架</strong>。官方对三类 Span 的定义都围绕"谁提供服务、谁发起调用"：服务提供者的端点记 EntrySpan（Tomcat 收到请求、MQ 消费者收到消息），向外打出的调用记 ExitSpan（HTTP 客户端、JDBC、Redis 客户端），进程内普通方法记 LocalSpan。所以同一个 agent 挂在 demo-app 上，Tomcat 拦截点在"收"的方向，生成 Entry；RestTemplate 拦截点在"发"的方向，生成 Exit；挂到 demo-api 上，同样的 Tomcat 拦截点生成的还是 Entry——<strong>类型跟着拦截点在调用方向上的角色走，插件作者只需要回答"这个类的方法是收还是发"</strong>。</p>
+      <p>再深一层是嵌套出口的抑制机制：一次业务调用里若层层包了多个 ExitSpan（先过自封装的 HTTP 工具类，再进 RestTemplate），官方的处理是<strong>只有最外层的 ExitSpan 真正上报，内层的被抑制</strong>——否则拓扑上一次逻辑调用会被算成多次，服务间流量就虚高了。这条规则顺带解释了为什么拓扑边稳定可信：边的原料（出口-入口调用对）在采集端就被去重约束过。动手验证的方法本期已经备好：在 demo-app 里再包一层 HTTP 工具类连调两次下游，数一数瀑布里 Exit 行数和拓扑边上的调用量对不对得上。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：把 demo-api 换成 MQ 异步处理（demo-app 发消息，demo-api 消费），瀑布和拓扑会变成什么样？sw8 头还能随请求传播吗？</summary>
+    <div class="details-body">
+      <p>形态会变，但模型不变。<strong>瀑布不再是"一条时间线上的两段"：生产者段和消费者段在时间上解耦</strong>——发送那一刻和消费那一刻可能隔几秒、甚至分属不同批次。第 3 期讲过，跨线程、跨进程边界都要切段，MQ 场景切得更彻底：生产者侧一个 Segment（业务 Span + 消息发送的 ExitSpan），消费者侧另一个 Segment（MQ 消费的 EntrySpan + 业务 Span），中间靠引用（reference）挂父子。<strong>sw8 头依然传播，只是不再走 HTTP 头，而是随消息体走</strong>——官方的做法是把上下文写进消息的属性/头字段（如 Kafka 的 message header），各消息插件负责注入解析，sw8-x 扩展头里还带发送时间戳，供 OAP 分析消息链路的耗时。</p>
+      <p>拓扑上的边依然存在（生产服务指向 Topic、Topic 指向消费服务），但读法要变：<strong>这条边不代表"同步等待"，两端各自独立记耗时</strong>——这也是排障时的关键差别，同步链路的"慢"看瀑布条长，异步链路的"慢"要先看消费延迟（消费时间戳减发送时间戳），再进各自的段。顺带回答一个衍生问题：为什么本期演示选 HTTP 而不是 MQ？因为同步链路的时间线最直观，适合第一次建立"两段连成一条链"的画面感；MQ 场景等你熟了模型，只是把"连"的方式从时间线换成引用。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 10 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句：</strong></p>
+    <ul>
+      <li>一条演示链跑通跨进程追踪：起服务挂 agent → 压请求 → 瀑布两段连成链 → 拓扑长出边，四步判定全绿；</li>
+      <li>接入就是三参数：<code>-javaagent</code> 放在 <code>-jar</code> 之前、<code>service_name</code> 用英文区分节点、<code>backend_service</code> 指向收数口 11800；</li>
+      <li>瀑布逐行对号入座：entry / exit / 跨进程 entry 各就各位，sw8 在出口 Span 注入，同 traceId 归链；</li>
+      <li>慢在哪一跳四步定位：排序 → 下钻 → 锁段 → 归因，本期病灶 demo-api 段约 805 毫秒；</li>
+      <li>自动埋点为主、手动埋点补语义：框架调用插件全包，<code>@Trace</code> 给业务方法补 LocalSpan。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 5 期《架构与源码导读》——这条链你已经能自己追了。下一期我们进源码，看字节码增强是怎么无声无息做到的：agent 在类加载那一刻改了什么、插件怎么匹配类与方法、ByteBuddy 织入的骨架长什么样。</p>
+  <p><strong>Primary source：</strong><a href="https://skywalking.apache.org/docs/skywalking-java/latest/en/setup/service-agent/java-agent/readme/" target="_blank" rel="noopener">SkyWalking Java agent 官方文档 · Setup java agent（latest，与 agent v9.7.0 匹配）</a>——本期接入口径（JDK 范围、三参数、-javaagent 顺序）均出自该页；插件覆盖见 <a href="https://skywalking.apache.org/docs/skywalking-java/latest/en/setup/service-agent/java-agent/plugin-list/" target="_blank" rel="noopener">Plugin list</a>，兼容范围见 <a href="https://skywalking.apache.org/docs/skywalking-java/latest/en/setup/service-agent/java-agent/supported-list/" target="_blank" rel="noopener">Supported list</a>，手动埋点见 <a href="https://skywalking.apache.org/docs/skywalking-java/latest/en/setup/service-agent/java-agent/application-toolkit-trace-annotation/" target="_blank" rel="noopener">Application Toolkit @Trace</a>；UI 实拍图取自官方博客 <a href="https://skywalking.apache.org/blog/2026-06-22-horizon-ui-trace-explorer/" target="_blank" rel="noopener">Meet Horizon UI · The Trace Explorer</a> 与 <a href="https://skywalking.apache.org/blog/2026-06-21-horizon-ui-topology-and-dependency/" target="_blank" rel="noopener">Topology &amp; Service Dependency</a>。</p>
+</section>
+
+<section>
+  <h2><span class="sec-num">11</span>随堂小测</h2>
+  <div class="quiz">
+    <div class="quiz-q">
+      <p class="quiz-question">1. 两个服务要成为拓扑上的两个独立节点，靠哪个参数区分？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["collector.backend_service 是后端地址，管上报去哪，不管身份。","对：agent.service_name 是服务在拓扑上的节点名，两个服务必须取不同的英文名。","-javaagent 是挂载参数，与身份无关。"]'>
+        <li class="quiz-option">collector.backend_service</li>
+        <li class="quiz-option">agent.service_name</li>
+        <li class="quiz-option">-javaagent 的 jar 路径</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 按官方强调的顺序，-javaagent 参数应该放在哪？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["放后面 JVM 不认，agent 不会加载。","端口参数跟在 -jar 后面给应用用，与 agent 加载顺序无关。","对：官方文档明确要求 -javaagent 放在 -jar 参数之前，顺序反了不生效。"]'>
+        <li class="quiz-option">-jar 参数之后</li>
+        <li class="quiz-option">--server.port 之后</li>
+        <li class="quiz-option">-jar 参数之前</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 瀑布里 demo-app 指向 /api 的那一行，Span 类型是？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对：ExitSpan 记录向外发出的调用，sw8 头就在这一步注入请求。","EntrySpan 是服务提供者的入口，那是两边 Tomcat 拦截点的事。","LocalSpan 管进程内部普通方法，不涉及远程调用。"]'>
+        <li class="quiz-option">ExitSpan</li>
+        <li class="quiz-option">EntrySpan</li>
+        <li class="quiz-option">LocalSpan</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. 四步定位法里，"锁段"一步看的是什么？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["服务面板是聚合指标，适合看趋势，定位跳数要看明细。","对：瀑布逐段看时长条，最长的条就是病灶所在的段。","拓扑只给调用关系，边上有调用量但没有逐笔耗时。"]'>
+        <li class="quiz-option">服务面板的 P99 曲线</li>
+        <li class="quiz-option">瀑布里每段的时长条</li>
+        <li class="quiz-option">拓扑边上的调用量</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0049-skywalking-core-concepts-architecture.html">← 上一期：核心概念与架构</a></span>
+  <a class="next" href="0051-skywalking-source-reading.html">下一期：架构与源码导读 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>
