@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Pulsar 系列第 4 期：实战场景 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0014</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0013-pulsar-core-concepts-architecture.html">上一期：核心概念与整体架构</a> · <a href="https://pulsar.apache.org" target="_blank" rel="noopener">pulsar.apache.org ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · Pulsar 系列第 4 期：实战场景</p>
+  <h1>把订单事件接进 Pulsar：从 starter 引入到死信队列的端到端实战</h1>
+  <p class="subtitle">前三期你已经知道 Pulsar 为什么把计算和存储拆开、也亲手把服务端跑起来、拿到了 Topic 与订阅的概念地图——但都还没写过一行业务代码。这一期换真枪实弹：用 Spring Boot 3 官方的 spring-boot-starter-pulsar，把一个"下单成功后发订单事件"的最小系统端到端跑通——生产者发事件、消费者监听处理、失败重投、 poison 消息进死信队列，四件事一次做完。走完你会发现，前三期的每个概念（Topic、订阅、独占与共享、游标）都长在了某个注解或配置键上。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 消息平台 · Java · Apache-2.0</span>
+    <span class="tag">📦 基于 Apache Pulsar 4.2.4 + Spring Boot 3.5.16 / Spring Pulsar 1.2.18</span>
+    <span class="tag-date">📅 2026-09-19 · 第 4 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景设定 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>场景设定：一条订单事件，多个下游要吃</h2>
+  <p>场景刻意选小，但把消息队列最有价值的用法都装进去了：<strong>order-service 在下单成功后发布一条订单事件</strong>到 Topic <code>order-events</code>；积分、风控、通知三个下游各自<strong>用自己的订阅</strong>独立消费同一份事件——互不干扰、互不丢消息。这条链路如下图，一条事件被三份订阅各自取走，正是第 3 期讲的"发布-订阅与队列的统一体"在实战里的样子：</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 380" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar14" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar14b" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+
+    <!-- order-service -->
+    <rect x="16" y="140" width="190" height="100" rx="10" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="111" y="166" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">order-service</text>
+    <text x="111" y="188" text-anchor="middle" fill="var(--muted)" font-size="9.5">PulsarTemplate&lt;OrderEvent&gt;</text>
+    <text x="111" y="206" text-anchor="middle" fill="var(--muted)" font-size="9.5">send()：持久化完成后才返回</text>
+    <text x="111" y="224" text-anchor="middle" fill="var(--muted)" font-size="9.5">只管发，不关心谁在消费</text>
+
+    <!-- Broker -->
+    <rect x="278" y="70" width="204" height="240" rx="10" fill="var(--bg-accent)" stroke="var(--accent)"/>
+    <text x="380" y="96" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">Pulsar 服务端（第 2 期 standalone）</text>
+    <rect x="292" y="110" width="176" height="42" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="380" y="128" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">Topic: persistent://public/default/order-events</text>
+    <text x="380" y="144" text-anchor="middle" fill="var(--muted)" font-size="9">JSON schema（由事件类型自动推断）</text>
+
+    <rect x="292" y="170" width="176" height="30" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="380" y="190" text-anchor="middle" fill="var(--muted)" font-size="9.5">订阅：points-sub ｜ risk-sub ｜ notify-sub</text>
+
+    <rect x="292" y="218" width="176" height="42" rx="8" fill="var(--card)" stroke="var(--line)" stroke-dasharray="4 3"/>
+    <text x="380" y="236" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">order-events-dlq（死信 Topic）</text>
+    <text x="380" y="252" text-anchor="middle" fill="var(--muted)" font-size="9">重投次数耗尽的"毒丸"进这里</text>
+
+    <text x="380" y="292" text-anchor="middle" fill="var(--muted)" font-size="9.5">二进制协议 6650 ｜ HTTP 8080（默认端口）</text>
+
+    <!-- 消费者 -->
+    <rect x="552" y="76" width="192" height="66" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="648" y="100" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">@PulsarListener × 3</text>
+    <text x="648" y="118" text-anchor="middle" fill="var(--muted)" font-size="9.5">积分 / 风控 / 通知 各一个监听方法</text>
+    <text x="648" y="134" text-anchor="middle" fill="var(--muted)" font-size="9.5">各自独立游标，谁慢谁追赶</text>
+
+    <rect x="552" y="230" width="192" height="60" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="648" y="252" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">死信监听器</text>
+    <text x="648" y="270" text-anchor="middle" fill="var(--muted)" font-size="9.5">人工介入的兜底入口</text>
+
+    <!-- 箭头 -->
+    <line x1="206" y1="180" x2="278" y2="150" stroke="var(--accent)" stroke-width="2" marker-end="url(#ar14b)"/>
+    <text x="242" y="152" text-anchor="middle" fill="var(--accent)" font-size="9">发布事件</text>
+    <line x1="482" y1="120" x2="552" y2="110" stroke="var(--muted)" marker-end="url(#ar14)"/>
+    <text x="516" y="104" text-anchor="middle" fill="var(--muted)" font-size="8.5">三份订阅各取一份</text>
+    <path d="M 482 250 C 520 250, 520 258, 552 258" fill="none" stroke="var(--muted)" stroke-dasharray="4 3" marker-end="url(#ar14)"/>
+    <text x="516" y="278" text-anchor="middle" fill="var(--muted)" font-size="8.5">重投耗尽后转存</text>
+
+    <text x="380" y="344" text-anchor="middle" fill="var(--muted)" font-size="10">读法：实线是事件主干，虚线是失败兜底——本期任务就是把实线跑通、把虚线引爆给你看</text>
+  </svg>
+  </div>
+
+  <p>全程四条目标，做完一条勾一条：</p>
+  <div class="card">
+    <ul class="steps">
+      <li>① <strong>引入即用：</strong>只加一个 starter，不写一行手动建连代码，注入模板就能发消息；</li>
+      <li>② <strong>事件发布：</strong>下单成功后发出 JSON 格式的订单事件，拿到持久化确认；</li>
+      <li>③ <strong>监听消费：</strong>@PulsarListener 收到事件并处理，默认独占订阅自动提交确认；</li>
+      <li>④ <strong>失败兜底：</strong>构造一条"毒丸"事件，看它重投若干次后被转存进死信 Topic。</li>
+    </ul>
+  </div>
+  <p class="note">订阅模式（独占/灾备/共享/按键共享）与游标的原理，daily 线已有专课：<a href="../../daily-tech-course/lessons/0013-pulsar-subscription-models.html">《Pulsar 订阅模型深入：四种订阅、游标机制与 Key_Shared 保序》</a>。本期只讲"在 Spring 里怎么用"，原理不换皮重讲；整体存算分离架构见 <a href="../../daily-tech-course/lessons/0012-pulsar-vs-kafka.html">《Apache Pulsar 存算分离架构与 Kafka 对比》</a>。</p>
+</section>
+
+<!-- ================= 02 依赖与版本 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>依赖与版本：一个 starter，三份版本账本</h2>
+  <p>Pulsar 接入 Spring Boot 的姿势在 Boot 3.2 之后简化到了一个依赖：<strong>Spring Boot 官方自带 <code>spring-boot-starter-pulsar</code></strong>，自动配置由 Boot 直接提供（早先 Spring Pulsar 项目里那个 <code>spring-pulsar-spring-boot-starter</code> 只存在于 0.x 预览阶段，GA 后不再使用，老文章里的坐标别再抄）：</p>
+  <pre><code>&lt;dependency&gt;
+  &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+  &lt;artifactId&gt;spring-boot-starter-pulsar&lt;/artifactId&gt;
+&lt;/dependency&gt;</code></pre>
+  <p>版本号照例<strong>不写在依赖里</strong>，交给 Boot 的依赖管理统一管。本期按 Boot 3.5 线最新 3.5.16 锚定，它替你管好两层版本：Spring Pulsar <strong>1.2.18</strong>（模板与监听注解的实现）+ Pulsar 客户端 <strong>4.0.11</strong>（底层网络与协议）。三个角色各管一摊：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>组件</th><th>版本</th><th>由谁引入</th><th>负责什么</th></tr></thead>
+    <tbody>
+      <tr><td>Apache Pulsar（broker / standalone）</td><td>4.2.4（当前 GA 稳定线）</td><td>第 2 期安装的独立服务</td><td>存消息、管订阅与游标</td></tr>
+      <tr><td>spring-pulsar</td><td>1.2.18</td><td>Boot 3.5.16 依赖管理</td><td>PulsarTemplate、@PulsarListener 等编程模型</td></tr>
+      <tr><td>pulsar-client</td><td>4.0.11</td><td>同上（传递依赖）</td><td>与 broker 之间的协议通信</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="warn">
+    <p><strong>版本线提醒：</strong>Spring Pulsar 已随 Spring Boot 4.0 进入 2.0.x 线（当前 GA 2.0.7），官方兼容矩阵的对应关系是——1.2.x 配 Boot 3.4/3.5，2.0.x 配 Boot 4.0。本系列钉在 Boot 3 线教学；升级 Boot 4 时 API 基本同形，但别把两条线的版本混搭。</p>
+  </div>
+  <p>其次是一份极薄的配置——<code>src/main/resources/application.yaml</code>：</p>
+  <pre><code>spring:
+  application:
+    name: order-service
+  pulsar:
+    client:
+      service-url: pulsar://localhost:6650   # 二进制协议端口，与第 2 期 standalone 一致
+    admin:
+      service-url: http://localhost:8080     # HTTP 管理端口；要自动建 Topic 才会用到</code></pre>
+  <p class="note">这两个默认值其实正好是 Pulsar 的默认端口——<code>pulsar://localhost:6650</code> 与 <code>http://localhost:8080</code>（出处：Spring Boot 参考手册 Apache Pulsar Support 一节），第 2 期跑的 standalone 没改端口的话，这两行都可以省。显式写出来的好处是：换环境时一眼就知道该改哪里。若想让应用启动时自动创建 Topic，加一个 <code>PulsarTopic</code> Bean 即可（走 admin 端口）；本期不依赖它。</p>
+</section>
+
+<!-- ================= 03 生产者 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>生产者：订单事件的定义与发布</h2>
+  <p>先定义事件本体。一个 Java record 就够了，框架看到非原始类型，<strong>自动按 JSON schema 处理</strong>（这是 Spring Pulsar 的默认约定，不用注册 schema）：</p>
+  <pre><code>public record OrderEvent(
+        String orderId,      // 订单号：下游幂等的锚点
+        String sku,
+        int quantity,
+        double amount,
+        Instant paidAt) {}</code></pre>
+  <p>然后是发布者。注入 <code>PulsarTemplate&lt;OrderEvent&gt;</code>，下单成功后一行发出去：</p>
+  <pre><code>@Service
+public class OrderEventPublisher {
+
+    private static final Logger log = LoggerFactory.getLogger(OrderEventPublisher.class);
+    private final PulsarTemplate&lt;OrderEvent&gt; pulsarTemplate;
+
+    public OrderEventPublisher(PulsarTemplate&lt;OrderEvent&gt; pulsarTemplate) {
+        this.pulsarTemplate = pulsarTemplate;
+    }
+
+    /** 下单成功后调用：发布订单事件（同步语义） */
+    public void publish(OrderEvent event) {
+        MessageId id = pulsarTemplate.send("order-events", event);
+        log.info("订单事件已发布: orderId={}, messageId={}", event.orderId(), id);
+    }
+}</code></pre>
+  <p>这段代码有三处值得停下来看：</p>
+  <ul>
+    <li><strong>Topic 名可以直接写短名：</strong><code>order-events</code> 会被解析成 <code>persistent://public/default/order-events</code>（默认租户/命名空间）。想让"事件类型绑定固定 Topic"，也可以在 record 上标 <code>@PulsarMessage(topic = "order-events")</code>，之后连 Topic 参数都省了；</li>
+    <li><strong><code>send()</code> 是同步语义：</strong>阻塞到 broker 确认<strong>消息已持久化</strong>才返回 <code>MessageId</code>——订单这种不能丢的事件，用同步；吞吐优先的日志埋点类事件，换 <code>sendAsync()</code> 拿 <code>CompletableFuture</code>，这是官方文档明确给出的两条路；</li>
+    <li><strong>没写任何建连代码：</strong>PulsarClient、生产者工厂、模板全部由 Boot 自动配置好，生产者实例默认还会被缓存复用（<code>spring.pulsar.producer.cache.*</code> 可调）。</li>
+  </ul>
+  <div class="card card-tip">
+    <p><strong>给事件带上业务键：</strong>需要按订单号保序或路由时，用流式 API 定制消息：<code>pulsarTemplate.newMessage(event).withMessageCustomizer(mb -&gt; mb.key(event.orderId())).send()</code>——key 进了消息元数据，分区 Topic 下同 key 落同一分区，配合按键共享订阅就是"同一订单串行处理"的地基（保序原理见 daily 线订阅模型一课）。</p>
+  </div>
+</section>
+
+<!-- ================= 04 消费者 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>消费者：一个注解接住事件</h2>
+  <p>消费侧更短。任何 Bean 的方法标上 <code>@PulsarListener</code>，监听容器就自动建好（方法参数类型决定反序列化目标，JSON 照旧自动推断）：</p>
+  <pre><code>@Component
+public class PointsListener {
+
+    private static final Logger log = LoggerFactory.getLogger(PointsListener.class);
+
+    @PulsarListener(subscriptionName = "points-sub", topics = "order-events")
+    public void onOrderEvent(OrderEvent event) {
+        log.info("积分服务已处理订单事件: orderId={}, amount={}", event.orderId(), event.amount());
+        // 加积分……
+    }
+}</code></pre>
+  <p>三个默认行为，对应第 3 期的概念清单：</p>
+  <ul>
+    <li><strong>订阅类型默认独占（Exclusive）：</strong>一个订阅同时只有一个消费者在干活，同订阅内天然有序——没特殊理由就保持默认；</li>
+    <li><strong>处理成功自动确认（ack）：</strong>方法正常返回，游标推进；这正是"broker 替你记账"的部分；</li>
+    <li><strong>一个订阅对应一个业务：</strong>积分、风控各自起 <code>subscriptionName</code>，同一份事件每人拿到一份完整副本——加一个下游不用动上游代码，这就是发布-订阅的红利。</li>
+  </ul>
+  <p>启动应用（<code>mvn spring-boot:run</code>），下单后看日志，两端各有一行：</p>
+  <pre><code>订单事件已发布: orderId=SO-20260919-0001, messageId=12:5:-1:0
+积分服务已处理订单事件: orderId=SO-20260919-0001, amount=399.0</code></pre>
+  <p class="note">messageId 是 <code>ledger:entry:partition:batch</code> 四段式——ledger 就是第 5 期要进 BookKeeper 源码时见到的账本。至此目标①②③达成：一个依赖、一个注解、一行发送，事件已经端到端流通。生产者/消费者更细的调优参数（批量、超时、接收队列）daily 线有专课：<a href="../../daily-tech-course/lessons/0014-pulsar-prod-cons-tuning.html">《Apache Pulsar 生产者/消费者调优》</a>。</p>
+</section>
+
+<!-- ================= 05 失败与死信 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>失败怎么办：重投与死信队列</h2>
+  <p>消费方法抛异常时，Spring 默认行为是<strong>否定确认（negative ack）</strong>：消息未确认，broker 会重新投递。重投节奏有官方默认值，也有两个可调的旋钮：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>机制</th><th>触发方式</th><th>默认节奏</th><th>调法</th></tr></thead>
+    <tbody>
+      <tr><td>否定确认重投</td><td>监听方法抛异常</td><td>1 分钟后重投</td><td>注解 properties：<code>negativeAckRedeliveryDelay=10s</code></td></tr>
+      <tr><td>确认超时重投</td><td>处理太慢、迟迟不 ack</td><td>默认关闭（0）</td><td>注解 properties：<code>ackTimeoutMillis=5000</code></td></tr>
+      <tr><td>递增退避</td><td>配合以上两者</td><td>无</td><td>注入 <code>RedeliveryBackoff</code> Bean（起始延迟/上限/倍率）</td></tr>
+      <tr><td>死信队列（DLQ）</td><td>重投次数耗尽</td><td>—</td><td><code>DeadLetterPolicy</code> Bean，仅共享订阅支持</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">一个反直觉的默认值值得划重点：异常抛出后消息<strong>默认等 1 分钟才重投</strong>。本地调试时不改这个参数，你会以为应用卡死了——其实消息在 broker 那边安静地排队等待重投。测试时把它调小（如 10s 或 1s），上线按业务容忍度定。</p>
+  <p>死信队列解决的是"重投多少次都没用"的消息——字段非法、上游数据坏掉的那类"毒丸"。它的用法官方文档给得很直白，照抄改两个值即可：</p>
+  <pre><code>@Configuration
+public class PulsarErrorHandlingConfig {
+
+    /** 重投 3 次仍失败 → 转存进死信 Topic */
+    @Bean
+    DeadLetterPolicy orderDeadLetterPolicy() {
+        return DeadLetterPolicy.builder()
+                .maxRedeliverCount(3)
+                .deadLetterTopic("order-events-dlq")   // 显式指定；不指定按 &lt;topic&gt;-&lt;sub&gt;-DLQ 默认命名
+                .build();
+    }
+}
+
+@Component
+public class RiskControlListener {
+
+    @PulsarListener(subscriptionName = "risk-sub", topics = "order-events",
+            subscriptionType = SubscriptionType.Shared,   // DLQ 只支持共享订阅！
+            deadLetterPolicy = "orderDeadLetterPolicy",
+            properties = { "ackTimeoutMillis=5000" })
+    public void onOrderEvent(OrderEvent event) {
+        // 金额非法即视为毒丸：抛出异常触发重投
+        if (event.amount() &lt;= 0) {
+            throw new IllegalArgumentException("非法金额: " + event.amount());
+        }
+        log.info("风控已放行订单: orderId={}", event.orderId());
+    }
+}</code></pre>
+  <p>四个关键点，个个都是官方文档的原文口径：</p>
+  <ul>
+    <li><strong>只有共享（Shared）订阅支持 DLQ</strong>，独占与灾备都不行——所以这里必须显式把订阅类型改成 Shared（四种订阅的语义差异见 daily 线订阅模型课）；</li>
+    <li><strong>死信 Topic 建议显式命名：</strong>不指定时默认名是 <code>&lt;topicname&gt;-&lt;subscriptionname&gt;-DLQ</code>；官方文档特别提醒，Topic 一旦分区，默认名里会混进 <code>partition-&lt;n&gt;</code>，干脆一开始就写死名字；</li>
+    <li><strong>重投来源二选一：</strong>要么异常否定确认，要么确认超时（上面的 <code>ackTimeoutMillis</code>），次数记满 <code>maxRedeliverCount</code> 后由消费者把消息转存进死信 Topic；</li>
+    <li><strong>死信也要有人接：</strong>再挂一个普通监听器盯着 <code>order-events-dlq</code>，告警、落库、人工排查都从这里走。</li>
+  </ul>
+  <pre><code>@PulsarListener(subscriptionName = "risk-dlq-sub", topics = "order-events-dlq")
+public void onDeadLetter(OrderEvent event) {
+    log.warn("进入死信, 需人工介入: orderId={}", event.orderId());
+}</code></pre>
+  <p>把毒丸事件（amount=-1）发出去，应用日志会依次打出三段：处理失败的异常栈 → 数次重投 → 最后死信监听器的告警行。目标④达成——<strong>消息一条没丢，只是从"正常通道"转进了"人工通道"</strong>，这正是死信队列的全部意义。可靠性全链路（ack、副本、持久化的整体视角）daily 线有更深的专课：<a href="../../daily-tech-course/lessons/0021-pulsar-message-reliability.html">《消息到底丢在哪：消息可靠性全链路》</a>。</p>
+  <div class="warn">
+    <p><strong>顺手要做的实验：</strong>把毒丸事件发一条，观察日志里的重投节奏；再把 <code>maxRedeliverCount</code> 改成 0 重发一条，看它"秒进"死信——两个数字一对比，重投与死信的接力关系就不用背了。</p>
+  </div>
+</section>
+
+<!-- ================= 06 quiz ================= -->
+<section>
+  <h2><span class="sec-num">06</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. Spring Boot 3 应用接 Pulsar，官方推荐的依赖是哪个？</p>
+      <ul class="quiz-options" data-answer="1">
+        <li class="quiz-option">org.springframework.pulsar:spring-pulsar-spring-boot-starter</li>
+        <li class="quiz-option">org.springframework.boot:spring-boot-starter-pulsar</li>
+        <li class="quiz-option">org.apache.pulsar:pulsar-client-all</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 想给某个订阅配死信队列（DeadLetterPolicy），订阅类型必须是什么？</p>
+      <ul class="quiz-options" data-answer="2">
+        <li class="quiz-option">独占 Exclusive——默认类型，越简单越能用</li>
+        <li class="quiz-option">灾备 Failover——主备切换专用</li>
+        <li class="quiz-option">共享 Shared——只有它支持死信队列</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 监听方法抛出异常后，消息默认多久后被重新投递？</p>
+      <ul class="quiz-options" data-answer="0">
+        <li class="quiz-option">1 分钟——negative ack 重投的官方默认值，调试时常被误认为卡死</li>
+        <li class="quiz-option">1 秒——框架会自动用最快的节奏重投</li>
+        <li class="quiz-option">永不——异常即丢弃，需要自己写补偿逻辑</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 07 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：为什么死信队列只支持共享订阅，独占订阅就不行？这暴露了"失败责任在谁"的什么差异？</summary>
+    <div class="details-body">
+      <p>先把现象钉死：官方文档明确写着 DLQ 需要消费者使用共享订阅类型，独占与灾备不可用。原因要从<strong>游标的记账方式</strong>找：Pulsar 的重投与死信转存，依赖消费者对"单条消息"的精细反馈——哪条否定确认了、哪条确认超时了、这条已经重投几次了，都要<strong>按消息粒度</strong>记在订阅的游标账本上。共享订阅天然就是"逐条 ack/nack"的模型：多个消费者抢着消费，谁处理哪条各记各的账，单条失败不影响整批，重投计数自然挂在单条消息上。而独占订阅的优化取向是<strong>批量、顺序</strong>：一个消费者独占整个订阅，确认可以按累计进度推进（cumulative ack），重投的最小单位退化成"从某个位置起的一段"，没有清晰的"这一条失败了几次"账本，死信转存的判定依据就不存在了——不是框架偷懒，是模型对不上。引申到设计层面：独占订阅里消息失败的责任主体是<strong>整个消费者会话</strong>（挂了重启、从头或从最近确认点继续），共享订阅里责任主体是<strong>单条消息</strong>（逐条记账、逐条处置）。做消息系统选型时先问自己一句：我们的失败处理要精确到"这一条"，还是"这一段"？要精确到条，就接受共享订阅的代价（无顺序保证、每个消费者独立 ack）；要顺序，就别指望死信队列替你兜底，得在应用内自建重试表或补偿任务。两边都有代价，没有免费午餐。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：send() 明明"阻塞到持久化才返回"，为什么下游还是可能收到重复事件？生产者侧和消费者侧各该做什么？</summary>
+    <div class="details-body">
+      <p>很多人把"同步 send"误解为"绝不重复"，其实持久化确认只解决了一半问题。拆开看时序：生产者发出消息 → broker 落盘 → 确认返回。若确认在网络上<strong>丢了</strong>或超时，生产者侧看不到成功，可能重发；broker 那边第一条其实已经落盘成功——于是同一事件出现两份。这正是消息系统默认承诺 <strong>at-least-once（至少一次）</strong>而不是"恰好一次"的原因：宁可重复，不可丢失，重复由业务侧消化。生产者侧能做的是<strong>收窄重复窗口</strong>：开启去重相关配置让 broker 按生产者序列号去重（producer name / sequence id 的幂等机制），或业务上给事件带全局唯一 ID 由 broker 的 <code>deduplication</code> 兜住；但这些都有适用边界，跨 Topic、跨重试路径的场景仍可能漏。所以<strong>消费者侧的幂等才是最后一道防线</strong>，也是本期代码里 orderId 真正的用途：加积分前先查"这笔订单的积分加过没有"——数据库唯一约束（orderId+业务动作做唯一键）、或状态机条件更新（只有"待加积分"能流转到"已加"）都是标准做法。一句口诀收束：投递语义交给消息系统兜底，业务正确性靠幂等设计兜底——把两件事混在一层，哪件都做不干净。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 08 要点与下期预告 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这四句：</strong></p>
+    <ul>
+      <li>依赖只有一个：Boot 官方 <code>spring-boot-starter-pulsar</code>，版本交给 Boot 管（3.5.16 → Spring Pulsar 1.2.18 + 客户端 4.0.11）；</li>
+      <li>生产用 <code>PulsarTemplate</code>：同步 <code>send()</code> 拿持久化确认，异步 <code>sendAsync()</code> 换吞吐；record 事件自动走 JSON schema；</li>
+      <li>消费用 <code>@PulsarListener</code>：默认独占订阅 + 成功自动确认，订阅名按业务划分，加下游不动上游；</li>
+      <li>失败有节奏：异常默认 1 分钟后重投（<code>negativeAckRedeliveryDelay</code> 可调），重投耗尽进死信——DLQ 只支持共享订阅，Topic 名要显式指定。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 5 期《架构与源码导读》——应用侧一个 <code>send()</code> 的背后，消息怎么落进 BookKeeper 的"分片日志"；计算存储分层、ledger 条带化写入、冷数据分层存储这三个设计决策为什么这么定，并给一份"从哪个类开始读"的地图。Primary source：<a href="https://docs.spring.io/spring-pulsar/reference/reference/pulsar/quick-tour.html" target="_blank" rel="noopener">Spring for Apache Pulsar 官方文档 · Quick Tour（本期依赖坐标与代码样例的官方出处）</a>；错误处理与死信细节见 <a href="https://docs.spring.io/spring-pulsar/reference/reference/pulsar/message-consumption.html" target="_blank" rel="noopener">Message Consumption 一章</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0013-pulsar-core-concepts-architecture.html">← 上一期：核心概念与整体架构</a>
+  <a class="next" href="0015-pulsar-source-reading-guide.html">下一期：架构与源码导读 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，正确答案已标绿。");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

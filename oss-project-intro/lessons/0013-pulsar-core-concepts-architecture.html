@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Pulsar 系列第 3 期：核心概念与整体架构 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0013</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0012-pulsar-quickstart.html">上一期：0012</a> · Pulsar 系列第 3 期 / 共 5 期 · <a href="https://pulsar.apache.org" target="_blank" rel="noopener">pulsar.apache.org ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · Pulsar 系列第 3 期：核心概念与整体架构</p>
+  <h1>Pulsar 核心概念与整体架构：一套术语、三层架构与一张模块地图</h1>
+  <p class="subtitle">上一期我们用 standalone 模式跑起了集群，发出并消费了第一条消息。但回头看，那条命令里其实全是问号：persistent://public/default/my-topic 里的 public 和 default 是什么？消息发出去到底存到了哪？为什么官方架构图里 Broker 敢自称"无状态"？这一期把 Pulsar 的户口本翻开：六个核心名词配类比和一句话定义——租户、命名空间、主题、订阅、游标、账本；四大订阅模式从使用视角扫一遍（原理深入有专线课程，文末延伸阅读）；一张自绘三层架构图看懂计算与存储怎么分工，顺带回答两个值得琢磨的问题——Broker 凭什么可以无状态横向扩、Ledger 分卷写入凭什么扛得住单块磁盘故障。最后打开源码仓库，把顶层模块一一对号入座。读完这一期，第 4 期把它接进 Spring Boot 时，每个配置项你都知道自己在配什么。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 消息平台 · Java · Apache-2.0</span>
+    <span class="tag">📦 基于 4.2 线（4.2.4 · 2026-09-19 核对）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 3 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 承上启下 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>上一期的第一条消息，埋着今天的全部问题</h2>
+  <p>第 2 期我们跑通了两条命令：服务端 <code>bin/pulsar standalone</code> 起一个单机集群，客户端发出并收回了第一条消息。命令里那个 <code>my-topic</code> 前面没写任何前缀，消息照样落地——但如果把完整名字写全，它是这样的：</p>
+  <div class="codeblock"><pre><code>persistent://public/default/my-topic
+└─────┬────┘ └──┬──┘ └───┬──┘ └──┬──┘
+    持久化类型   租户    命名空间   主题
+（省略时默认 persistent） public  default  你起的名字</code></pre></div>
+  <p>三个新名词当场出现：租户、命名空间、主题。而消息收走之后，它去哪了？官方架构图把系统画成三层，最上面那层 Broker 明晃晃写着 <strong>stateless（无状态）</strong>——消息队列的节点居然不存消息？这一期的任务就是把这些问题全部问掉。用户视角的 Pulsar 核心，说穿了就是六个名词：<strong>Tenant、Namespace、Topic、Subscription、Cursor、Ledger</strong>。后面不管你接 Spring Boot 还是做数据管道，本质都是在用这六块积木。</p>
+</section>
+
+<!-- ================= 02 术语体系 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>六块积木：类比 + 一句话定义 + 关键点</h2>
+
+  <div class="grid-2">
+    <div class="card">
+      <h4>① Tenant 租户——入驻的公司</h4>
+      <p><strong>一句话定义：</strong>多租户的最外层隔离单位，官方把 tenant 称为多租户能力的基石。</p>
+      <ul>
+        <li>类比同一座写字楼里的<strong>入驻公司</strong>：房租（配额）、门禁（权限）按公司算；</li>
+        <li>建租户要指定<strong>管理员角色</strong>（--admin-roles）和<strong>允许部署的集群</strong>（--allowed-clusters），隔离从出生就定死。</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>② Namespace 命名空间——部门的行政章</h4>
+      <p><strong>一句话定义：</strong>租户内的管理单元，一批相关 topic 归它管，官方称之为 administrative grouping unit。</p>
+      <ul>
+        <li>类比公司里的<strong>部门</strong>：考勤、报销制度是部门级的——保留策略（retention）、TTL、配额都配在 namespace 上，名下 topic 全体生效；</li>
+        <li>写法就是一条路径：<code>tenant/namespace</code>，如 <code>public/default</code>。</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>③ Topic 主题——贴了门牌的公告栏</h4>
+      <p><strong>一句话定义：</strong>一条从生产者向消费者传消息的命名通道（官方：a named channel for transmitting messages）。</p>
+      <ul>
+        <li>URL 式全名：<code>{persistent|non-persistent}://tenant/namespace/topic</code>——persistent 落盘可恢复，non-persistent 只在内存里飞，broker 挂了在途消息就丢，换来的延迟更低；</li>
+        <li>topic 不预创建也能用（自动落进默认租户/命名空间），但生产建议显式建；</li>
+        <li>还有<strong>分区 topic</strong>：一个逻辑名背后拆成 N 个内部 topic 分给多个 broker，为的是吞吐。</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>④ Subscription 订阅——自己的报刊户头</h4>
+      <p><strong>一句话定义：</strong>消费者在 topic 上立的"户头"，一条命名规则，决定消息怎么送到消费者手上。</p>
+      <ul>
+        <li>类比订报：同一份报纸（topic），<strong>各订各的户头，各收各的全套</strong>——三个订阅互不干扰，每个都能把全量消息走一遍；</li>
+        <li>消费者断线重连，报订阅名字就行，户头还在，消息照补；</li>
+        <li>四大模式（Exclusive / Failover / Shared / Key_Shared）下一节展开。</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>⑤ Cursor 游标——户头里的书签</h4>
+      <p><strong>一句话定义：</strong>每个订阅一个，记录"这个订阅读到哪条了"的进度标记。</p>
+      <ul>
+        <li>默认是<strong>持久游标</strong>（durable），书签本体存在 BookKeeper 里——broker 重启、消费者掉线，进度都不丢；</li>
+        <li>消费者确认（ack）一条消息，本质就是<strong>挪动书签</strong>；</li>
+        <li>一条消息要等<strong>所有订阅</strong>都挪过书签，才真正具备删除资格。</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>⑥ Ledger 账本——只进不改的分卷</h4>
+      <p><strong>一句话定义：</strong>BookKeeper 里的只追加（append-only）数据结构，同一时刻只有一个写入者，封卷后只读。</p>
+      <ul>
+        <li>类比一套<strong>按卷归档的账本</strong>：一卷写满（或到了时间）就封卷、换新卷继续写——这个动作叫 rollover；</li>
+        <li>一个 topic 的存储在 Pulsar 里叫 <strong>managed ledger</strong>：一个写入者往后追加，多个 cursor（订阅）各读各的进度；</li>
+        <li>封掉的卷还是<strong>分层存储</strong>的主角：不动就能搬去对象存储省钱——第 5 期细讲。</li>
+      </ul>
+    </div>
+  </div>
+  <p class="note"><span class="h">版本备注</span>以上术语与官方表述已对照 Pulsar 4.2.x 文档 Messaging / Architecture 概念页核对（2026-09-19）。版本基线：当前 GA 稳定线 <strong>4.2.4</strong>（2026-08-03 发布），4.0 LTS 线并行维护（4.0.13，安全支持到 2027-10）；5.0 尚处里程碑（5.0.0-M2，官方明确不用于生产）。</p>
+</section>
+
+<!-- ================= 03 四大订阅模式 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>四大订阅模式：建消费者时选的那一个参数</h2>
+  <p>对使用者来说，订阅模式就是建消费者时指定的 <code>subscriptionType</code>——一个参数决定"消息怎么分给手里的几个消费者"。从使用视角一句话扫过：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>模式</th><th>使用体感</th><th>典型场景</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Exclusive</strong>（默认）</td><td>一个订阅只许挂一个消费者，第二个直接报错</td><td>严格单实例消费，如某些配置同步任务</td></tr>
+      <tr><td><strong>Failover</strong></td><td>可挂多个，同一时刻只有主消费者收消息，主断了备顶上</td><td>主备容灾，要保序又要高可用</td></tr>
+      <tr><td><strong>Shared</strong></td><td>消息轮流发给各消费者，吞吐好扩，但不保证顺序、不支持累计确认</td><td>无序批量处理，堆实例提吞吐</td></tr>
+      <tr><td><strong>Key_Shared</strong></td><td>也是多消费者，但<strong>相同 key 的消息只发给同一个消费者</strong>——分 key 保序</td><td>按业务键（如订单号）保序又要并行</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="warn"><span class="h">跨线提示</span>四种模式内部的分发算法、游标与 Key_Shared 的哈希保序原理，属于"原理视角"，本系列不换皮重讲——想抠原理直接读 <a href="../../daily-tech-course/lessons/0013-pulsar-subscription-models.html">《Apache Pulsar 订阅模型：四种订阅、游标与 Key_Shared 保序》</a>（每日微课程线）。本期你只需记住使用层的选型口诀：<strong>默认独占要排他，主备 Failover，堆吞吐 Shared，按 key 保序 Key_Shared</strong>。</p>
+</section>
+
+<!-- ================= 04 整体架构 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>整体架构：计算与存储分家的三层楼</h2>
+  <p>六块积木拼上三层楼，就是 Pulsar 的全景。读图三句话：<strong>Broker 只管计算不存数据，BookKeeper 只管存储不算业务，中间的元数据存储记账</strong>。实线是消息流，虚线是元数据流。</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 500" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" style="max-width:100%">
+    <defs>
+      <marker id="ar-n" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar-g" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+      <marker id="ar-a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+
+    <!-- 客户端 -->
+    <rect x="40" y="16" width="180" height="56" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="130" y="38" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">Producer / Consumer</text>
+    <text x="130" y="55" text-anchor="middle" fill="var(--muted)" font-size="9.5">客户端 · 连 Broker 不碰存储</text>
+    <line x1="130" y1="72" x2="130" y2="118" stroke="var(--muted)" marker-end="url(#ar-n)"/>
+    <text x="142" y="98" fill="var(--muted)" font-size="9.5">发消息 / 按订阅收消息</text>
+
+    <!-- Broker 层 -->
+    <rect x="20" y="122" width="560" height="158" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="36" y="144" fill="var(--ink)" font-size="11" font-weight="700">Broker 层 · 无状态计算层</text>
+    <text x="220" y="144" fill="var(--muted)" font-size="9.5">消息不落本机盘 · 加机器 = 起进程</text>
+
+    <rect x="40" y="156" width="160" height="72" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="120" y="178" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">Broker 1</text>
+    <text x="120" y="196" text-anchor="middle" fill="var(--accent)" font-size="9">Topic A 的 owner</text>
+    <text x="120" y="212" text-anchor="middle" fill="var(--muted)" font-size="9">管理 + 分发 + 缓存</text>
+
+    <rect x="220" y="156" width="160" height="72" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="300" y="178" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">Broker 2</text>
+    <text x="300" y="196" text-anchor="middle" fill="var(--accent)" font-size="9">Topic B 的 owner</text>
+    <text x="300" y="212" text-anchor="middle" fill="var(--muted)" font-size="9">同上</text>
+
+    <rect x="400" y="156" width="160" height="72" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="480" y="178" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">Broker 3</text>
+    <text x="480" y="196" text-anchor="middle" fill="var(--accent)" font-size="9">Topic C 的 owner</text>
+    <text x="480" y="212" text-anchor="middle" fill="var(--muted)" font-size="9">同上</text>
+
+    <text x="36" y="256" fill="var(--muted)" font-size="9">每个 topic 同一时刻只归一个 broker 服务（owner 记在元数据存储里），负载就这样天然摊开</text>
+
+    <!-- 元数据存储 -->
+    <rect x="590" y="122" width="150" height="158" rx="8" fill="var(--card)" stroke="var(--accent-3)"/>
+    <text x="665" y="146" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">元数据存储</text>
+    <text x="665" y="166" text-anchor="middle" fill="var(--muted)" font-size="9">ZooKeeper（默认）/</text>
+    <text x="665" y="181" text-anchor="middle" fill="var(--muted)" font-size="9">etcd / RocksDB / Oxia</text>
+    <text x="665" y="203" text-anchor="middle" fill="var(--ink-soft, var(--ink))" font-size="9">topic → owner 归属</text>
+    <text x="665" y="219" text-anchor="middle" fill="var(--ink-soft, var(--ink))" font-size="9">schema · 集群配置</text>
+    <text x="665" y="235" text-anchor="middle" fill="var(--ink-soft, var(--ink))" font-size="9">ledger 元数据</text>
+    <line x1="580" y1="200" x2="590" y2="200" stroke="var(--accent-3)" stroke-dasharray="4 3" marker-end="url(#ar-g)"/>
+    <line x1="590" y1="216" x2="580" y2="216" stroke="var(--accent-3)" stroke-dasharray="4 3" marker-end="url(#ar-g)"/>
+
+    <!-- Broker -> BookKeeper -->
+    <line x1="300" y1="280" x2="300" y2="326" stroke="var(--accent)" marker-end="url(#ar-a)"/>
+    <text x="312" y="306" fill="var(--accent)" font-size="9.5">写 ledger（消息）· 读历史（回溯积压）</text>
+
+    <!-- BookKeeper 层 -->
+    <rect x="20" y="330" width="720" height="152" rx="10" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="36" y="352" fill="var(--ink)" font-size="11" font-weight="700">BookKeeper 层 · 分片日志存储</text>
+    <text x="240" y="352" fill="var(--muted)" font-size="9.5">bookie = 一台存储节点 · 只追加</text>
+
+    <rect x="40" y="364" width="220" height="100" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="150" y="386" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">Bookie 1</text>
+    <rect x="58" y="396" width="86" height="22" rx="5" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="101" y="411" text-anchor="middle" fill="var(--ink)" font-size="8.5">Ledger-0 片</text>
+    <rect x="152" y="396" width="86" height="22" rx="5" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="195" y="411" text-anchor="middle" fill="var(--ink)" font-size="8.5">Ledger-1 片</text>
+    <text x="150" y="440" text-anchor="middle" fill="var(--muted)" font-size="8.5">journal + entry log + index 文件</text>
+
+    <rect x="276" y="364" width="220" height="100" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="386" y="386" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">Bookie 2</text>
+    <rect x="294" y="396" width="86" height="22" rx="5" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="337" y="411" text-anchor="middle" fill="var(--ink)" font-size="8.5">Ledger-0 片</text>
+    <rect x="388" y="396" width="86" height="22" rx="5" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="431" y="411" text-anchor="middle" fill="var(--ink)" font-size="8.5">Ledger-1 片</text>
+    <text x="386" y="440" text-anchor="middle" fill="var(--muted)" font-size="8.5">同一 ledger 的副本分布在不同 bookie</text>
+
+    <rect x="512" y="364" width="220" height="100" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="622" y="386" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">Bookie 3</text>
+    <rect x="530" y="396" width="86" height="22" rx="5" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="573" y="411" text-anchor="middle" fill="var(--ink)" font-size="8.5">Ledger-0 片</text>
+    <rect x="624" y="396" width="86" height="22" rx="5" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="667" y="411" text-anchor="middle" fill="var(--ink)" font-size="8.5">cursor 书签</text>
+    <text x="622" y="440" text-anchor="middle" fill="var(--muted)" font-size="8.5">订阅进度也持久化在这层</text>
+
+    <!-- meta <-> BK -->
+    <path d="M665,280 C665,306 700,316 700,364" fill="none" stroke="var(--accent-3)" stroke-dasharray="4 3" marker-end="url(#ar-g)"/>
+  </svg>
+  </div>
+
+  <p>三层楼各司其职：<strong>Broker 层</strong>是无状态计算层——每个 broker 跑一个 REST 管理服务和一个自定义二进制协议的异步 TCP 服务，消息进来先走托管账本缓存（managed ledger cache），攒够条件就写进 BookKeeper；<strong>BookKeeper 层</strong>是存储层——官方给它一个定位：分布式预写日志（WAL）系统，ledger 是其中只追加的基本单元；<strong>元数据存储</strong>是总账房——topic 归谁管、schema、集群配置、ledger 元数据都在它那里，Pulsar 4.2 里默认 ZooKeeper，也可换 etcd、RocksDB（standalone 用）或 Oxia。</p>
+
+  <div class="grid-2">
+    <div class="card">
+      <h4>钩子一：Broker 凭什么敢无状态？</h4>
+      <p>因为两样最重的东西都不在它身上：<strong>消息在 BookKeeper，进度（cursor）也在 BookKeeper</strong>，broker 名下只剩"归属关系"这种轻量元数据，记在元数据存储里。于是扩容变得极其简单——新加一台 broker 就是多起一个进程，元数据存储里一登记，topic 的 owner 分配就自然摊到新机器上；某台 broker 宕机，它名下 topic 的归属被转移到活着的 broker，新 owner 从 BookKeeper 把 ledger 和 cursor 接过来接着服务。<strong>计算层的"状态"被整层搬去了存储层</strong>，这就是"无状态"的底气。</p>
+    </div>
+    <div class="card">
+      <h4>钩子二：Ledger 分卷写入怎么抗单盘故障？</h4>
+      <p>一个 ledger 不是写死在一块盘上，而是<strong>摊在多台 bookie 组成的集合（ensemble）上</strong>：每条消息写 W 份（write quorum），收到 A 份成功确认才算写成功（ack quorum），满足 A ≤ W ≤ 集合大小 E——官方文档默认数据存 3 份。更妙的是故障处理方式：<strong>某台 bookie 坏了，不修复坏卷，直接封卷换新卷</strong>——新消息滚动（rollover）到健康 bookie 上开的新 ledger，坏卷里已写的部分只要凑得够读就行。旧账不翻新账接着记，写入路径永远不打断。</p>
+    </div>
+  </div>
+  <p class="note"><span class="h">分层存储一笔带过</span>封卷后的 ledger 不可变，所以还能整体搬到对象存储（S3 等）给热数据腾地方，读的时候对消费者透明——这套"冷热分离"的设计决策是第 5 期源码导读的主角之一。与 Kafka 存算一体的架构对比，同样属于原理视角，可见 <a href="../../daily-tech-course/lessons/0012-pulsar-vs-kafka.html">《Pulsar 存算分离架构与 Kafka 对比》</a>。</p>
+</section>
+
+<!-- ================= 05 源码仓库模块地图 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>打开仓库：顶层模块地图</h2>
+  <p>概念清楚了，再看源码仓库就不慌。以 GitHub 上 apache/pulsar 主分支（对应 4.2 线开发中，2026-09-19 核对）的实际目录为准，常用模块一句话：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>顶层模块</th><th>一句话职责</th></tr></thead>
+    <tbody>
+      <tr><td><code>pulsar-broker/</code></td><td>Broker 主体：topic 加载、消息分发、订阅管理——计算层的核心入口</td></tr>
+      <tr><td><code>managed-ledger/</code></td><td>存储抽象层：把 BookKeeper 的 ledger 包成"一写多读带游标"的托管账本，cursor 实现也在这</td></tr>
+      <tr><td><code>pulsar-metadata/</code></td><td>元数据抽象层：一套接口屏蔽 ZooKeeper / etcd / RocksDB / Oxia 差异</td></tr>
+      <tr><td><code>pulsar-common/</code></td><td>客户端与 broker 共用：二进制协议定义、公共数据结构与工具</td></tr>
+      <tr><td><code>pulsar-client-api/</code> + <code>pulsar-client/</code></td><td>Java 客户端的接口定义与实现（Producer / Consumer / Reader）</td></tr>
+      <tr><td><code>pulsar-client-admin/</code> + <code>pulsar-client-tools/</code></td><td>管理 REST 客户端与命令行工具——pulsar-admin 命令的真身</td></tr>
+      <tr><td><code>pulsar-proxy/</code></td><td>可选网关：客户端统一入口，转发给背后的 broker</td></tr>
+      <tr><td><code>pulsar-functions/</code> + <code>pulsar-io/</code></td><td>轻量计算框架（Functions）与外部系统连接器（IO Connectors）</td></tr>
+      <tr><td><code>pulsar-transaction/</code></td><td>事务支持：跨 topic / 消费确认的原子性</td></tr>
+      <tr><td><code>tiered-storage/</code></td><td>分层存储 offloader 实现：S3、GCS、文件系统等冷存后端</td></tr>
+      <tr><td><code>bin/</code> + <code>conf/</code></td><td>启动脚本与配置文件——第 2 期敲的命令都从这来</td></tr>
+      <tr><td><code>tests/</code></td><td>集成测试套件，读码时是最好的"用法示例库"</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note"><span class="h">读码提示</span>三个模块记优先级：<code>pulsar-broker</code> 是计算层入口，<code>managed-ledger</code> 是 Broker 与 BookKeeper 之间的"翻译官"，<code>pulsar-metadata</code> 是屏蔽各家元数据存储的适配层——第 5 期读源码就从这三个进门。</p>
+</section>
+
+<!-- ================= 06 quiz ================= -->
+<section>
+  <h2><span class="sec-num">06</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. persistent://public/default/my-topic 中，public 和 default 分别是？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["这两个词有层级关系，外层是租户、内层是命名空间。","对：路径结构是 persistent://租户/命名空间/主题，public 是默认租户，default 是其下的默认命名空间。","顺序反了：tenant 在前、namespace 在后，和文件路径从大到小一个道理。"]'>
+        <li class="quiz-option">命名空间在前，租户在后</li>
+        <li class="quiz-option">租户 public，其下命名空间 default</li>
+        <li class="quiz-option">public 是集群名，default 是分区数</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 消息什么时候才真正具备被删除的资格？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["一个订阅消费完就删，其他订阅就读不到了。","关键在于有多个订阅，一个动书签不算数。","对：官方文档明确——一条消息要等所有订阅都确认（挪过游标）才会被删除。"]'>
+        <li class="quiz-option">任意一个订阅确认后即删除</li>
+        <li class="quiz-option">生产者发完即删除</li>
+        <li class="quiz-option">所有订阅都确认之后</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. Broker 被称为无状态，是因为哪两样最重的东西都不在它身上？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对：消息数据与订阅进度都持久化在 BookKeeper，broker 只在元数据存储里记归属。","恰好相反：配置和客户端连接恰恰是轻的，消息和进度才是重的。","元数据（归属/schema）存在元数据存储里，不在 broker 本机。"]'>
+        <li class="quiz-option">消息在 BookKeeper，进度（cursor）也在 BookKeeper</li>
+        <li class="quiz-option">消息在内存缓存，配置在本地文件</li>
+        <li class="quiz-option">数据在元数据存储，连接在代理层</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. 某台 bookie 的磁盘坏了，Pulsar 的处理方式是？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["没有修复流程：ledger 封卷后本就只读，且 managed ledger 直接换新卷。","对：封卷（rollover）换新卷，新消息写到健康 bookie 上的新 ledger，旧卷已写部分只要凑得够读即可。","消息不会丢副本，也无需人工迁移：分片副本本来就在多台 bookie 上。"]'>
+        <li class="quiz-option">停写并修复坏盘上的 ledger</li>
+        <li class="quiz-option">封卷换新卷，新消息写入健康 bookie</li>
+        <li class="quiz-option">该 topic 数据全部迁到客户端重放</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 07 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：既然消息和 cursor 都在 BookKeeper，那 Broker 到底"计算"了什么？它是不是可有可无？</summary>
+    <div class="details-body">
+      <p>反过来看就明白了：BookKeeper 只是个"老实记账"的分布式日志系统，它<strong>不懂业务</strong>——不知道什么是 topic、subscription、优先级、重试策略。这些"懂业务"的活全在 Broker：<strong>服务发现与归属仲裁</strong>（客户端连上来，先查元数据存储把 topic 定位到 owner broker，同一条消息不会有两个 broker 同时服务）；<strong>分发调度</strong>（四种订阅模式的分发逻辑、消息优先级、背压与流控都在 broker 的 dispatcher 里）；<strong>缓存加速</strong>（刚写入的消息先待在 managed ledger cache 里，消费者多半能直接从缓存拿走，命中不了才去摸 bookie——官方文档原话：消息一般从缓存服务，除非积压超过缓存）；<strong>生命周期管理</strong>（什么时候开新卷、封旧卷、把冷卷卸载到对象存储，决策都由 broker 做出）。所以 Broker 不是可有可无，而是把"智能"与"存储"解耦了：<strong>BookKeeper 提供的是不带业务语义的可靠追加日志，Broker 在上面长出整套消息语义</strong>。这套分工的代价是多一层网络跳转与组件复杂度（运维要同时养 broker、bookie、元数据存储三种角色），收益是两侧各自独立扩缩——理解了这层取舍，"无状态"三个字才算真懂。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：Ledger"封卷换新"而不是"原地修复"，到底换来了什么？换种做法会怎样？</summary>
+    <div class="details-body">
+      <p>先看"原地修复"这个反事实方案：ledger 要支持就地改写，存储就得处理"半新半旧"的页、修复期间的并发读写锁、以及"修到一半又坏"的递归难题——整个写入路径从纯顺序追加退化为随机读写，日志型存储最值钱的顺序写优势就没了。再看"封卷换新"这套不可变（immutable）设计的收益清单：<strong>写入永远顺序追加</strong>（journal 和 entry log 都是顺序写盘，这是吞吐的根基）；<strong>封卷即定稿</strong>，副本之间不存在"谁是对的"的长期分歧，故障恢复只需读够法定数量（ack quorum）的副本即可定案；<strong>删除变得干净</strong>——所有订阅的 cursor 越过整卷后，直接删文件即可，不用逐条清理；<strong>分层存储成了顺手的副产品</strong>——正因为卷不可变，才能整体搬去对象存储而不怕中途变更。代价也得认：<strong>卷的粒度在"故障切换"时略粗</strong>（坏一台 bookie，其上未封的卷要作废滚动，浪费一点写入），以及<strong>读路径多了一层"这卷在哪本 bookie"的元数据查找</strong>。Pulsar 把 ledger 做成不可变分卷，本质和 Netty 里 ByteBuf 不可变切片、Kafka 里 segment 不可变是同一家思想：<strong>用"不许改"换"简单与快"，把变更转化为追加新数据</strong>。在你自己的系统里，凡是"日志、流水、事件"类数据，都值得先想想能不能套这个模式。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 08 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这几句：</strong></p>
+    <ul>
+      <li>路径即身份：<code>persistent://tenant/namespace/topic</code>——租户是公司，命名空间是部门，topic 是贴了门牌的公告栏；</li>
+      <li>订阅是户头，游标是书签：一份消息各订阅各收全套，一条消息等所有订阅都确认才有删除资格；</li>
+      <li>三层分工：Broker 管计算（归属、分发、缓存），BookKeeper 管存储（ledger 只追加、默认 3 副本），元数据存储记总账；</li>
+      <li>无状态的底气：最重的消息与 cursor 都在存储层，broker 只剩归属元数据——扩容即起进程，故障即转移；</li>
+      <li>抗故障靠换卷：ledger 摊在 bookie 集合上（A ≤ W ≤ E），坏盘不修卷、封卷开新卷。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 4 期《实战场景：把 Pulsar 接进 Spring Boot 应用》——在今天的术语地图上动真格：引入客户端 starter、配置 service URL 与租户/命名空间、生产者发消息、消费者按订阅模式接消息，跑通一个端到端小例子。本期每个名词都会变成配置文件里实实在在的一行。</p>
+  <p><strong>延伸阅读：</strong>Primary source 官方资料两份：<a href="https://pulsar.apache.org/docs/4.2.x/concepts-messaging/" target="_blank" rel="noopener">Pulsar 4.2.x · Messaging 概念页</a>（topic 命名、订阅四模式、游标与确认的一手出处）与 <a href="https://pulsar.apache.org/docs/4.2.x/concepts-architecture-overview/" target="_blank" rel="noopener">Pulsar 4.2.x · Architecture Overview</a>（broker 无状态、BookKeeper ledger、元数据存储的权威定义）；订阅模型原理深入见每日微课程线 <a href="../../daily-tech-course/lessons/0013-pulsar-subscription-models.html">《Apache Pulsar 订阅模型》</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0012-pulsar-quickstart.html">← 上一期：5 分钟跑起来</a>
+  <a class="next" href="0014-pulsar-spring-in-action.html">下一期：实战场景 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

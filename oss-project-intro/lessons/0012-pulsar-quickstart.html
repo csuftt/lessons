@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Pulsar 系列第 2 期：5 分钟跑起来 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0012</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0011-pulsar-what-and-why.html">上一期：0011</a> · Pulsar 系列第 2 期 / 共 5 期 · <a href="https://pulsar.apache.org" target="_blank" rel="noopener">pulsar.apache.org ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · Pulsar 系列第 2 期：5 分钟跑起来</p>
+  <h1>5 分钟跑起来 Pulsar：一条命令起集群，亲手发出第一条消息</h1>
+  <p class="subtitle">上一期我们认识了 Pulsar 的计算存储分离：Broker 是不存货的分拣中心，BookKeeper 是仓库网络。这一期把比喻变成实物——下载官方二进制包，一条 <code>bin/pulsar standalone</code> 在本机起一个完整集群（三层架构全在一个进程里），再用 <code>pulsar-client</code> 发出第一条消息、亲眼看它带着 <code>----- got message -----</code> 回来。全文基于 4.2.x（稳定线 4.2.4，2026-08-03 发布，2026-09-19 于 GitHub Releases 与官方文档核对），命令与预期输出逐条对照官方 quickstart，Docker 方式与高频报错一并给全，跑不通先对号入座再怀疑人生。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 消息平台 · Java · Apache-2.0</span>
+    <span class="tag">📦 基于 Pulsar 4.2.x（4.2.4）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 2 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 路线 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>本期路线与跑通判定</h2>
+  <p>四步路线：<strong>查 JDK → 下载解压 → 一条命令起服务 → 收发第一条消息</strong>。全部走完后，满足三条判定才算跑通：</p>
+  <div class="card">
+    <ul class="steps">
+      <li>① <strong>服务起来了：</strong>启动终端滚动出 <code>messaging service is ready</code> 的就绪日志，进程不退、光标停在日志末尾——是设计如此，不是卡死；</li>
+      <li>② <strong>发得出去：</strong><code>pulsar-client produce</code> 执行完，CLI 打出成功提示（<code>1 messages successfully produced</code>）；</li>
+      <li>③ <strong>收得回来：</strong><code>pulsar-client consume</code> 打出 <code>----- got message -----</code> 和 <code>content:Hello Pulsar!</code>——这行输出也原样写在官方文档里。</li>
+    </ul>
+  </div>
+  <p>standalone 模式是官方为本地实验准备的"全家桶"：上一期讲的 Broker（计算）、BookKeeper（存储）、元数据存储三层，全部塞进一个 JVM 进程。学习阶段它让"起一个集群"退化成一条命令；代价是三层挤在一起没有故障隔离——所以官方文档明确它<strong>只用于开发</strong>，这个定位贯穿全文。</p>
+</section>
+
+<!-- ================= 02 环境 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>环境要求：Java 21 是硬门槛</h2>
+  <p>Pulsar 4.x 对 JDK 的要求是<strong>硬性的</strong>，官方 standalone 入门页原文："Java 21 is required for Pulsar 4.0+"。这是从 2.x 时代一路涨上来的：2.7 要 Java 8，2.11 要 Java 17，4.0 起要 Java 21。不少老机器上默认的 JDK 8 会直接启动失败，先查再说：</p>
+  <pre><code>java -version
+
+# 达标示例输出（21 及以上即可）
+# openjdk version "21.0.8" 2025-07-15
+# OpenJDK Runtime Environment Temurin-21.0.8+9 (build 21.0.8+9)</code></pre>
+  <p>没装或版本不够，官方页给了两条路：<a href="https://sdkman.io" target="_blank" rel="noopener">SDKMAN</a> 一条命令切换版本，或去 <a href="https://adoptium.net" target="_blank" rel="noopener">Adoptium</a> 下载 Temurin OpenJDK 21。另一个容易忽略的前提：<strong>本机安装方式只支持 64 位 macOS 和 Linux</strong>——Windows 用户别硬来，直接跳到第 08 节走 Docker，这也是官方文档给 Windows 的唯一指引。</p>
+</section>
+
+<!-- ================= 03 下载解压 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>第一步：下载解压，认识目录地图</h2>
+  <p>官方 quickstart 用 curl 从 Apache 镜像分发页下载二进制包，解压、进目录、看一眼里面有什么：</p>
+  <pre><code>curl -LO "https://www.apache.org/dyn/closer.lua/pulsar/pulsar-4.2.4/apache-pulsar-4.2.4-bin.tar.gz?action=download"
+tar xvfz apache-pulsar-4.2.4-bin.tar.gz
+cd apache-pulsar-4.2.4
+ls -1F</code></pre>
+  <p><code>ls -1F</code> 会列出五个条目：<code>bin/</code>、<code>conf/</code>、<code>lib/</code>、<code>examples/</code>、<code>instances/</code>。官方文档给它们的一句话分工：<strong>bin 是入口脚本，conf 放配置（broker.conf 在这里），lib 是全部依赖 JAR</strong>。本期要打交道的命令都在 <code>bin/</code> 里，四个脚本各管一摊：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>命令</th><th>职责</th><th>本期用途</th></tr></thead>
+    <tbody>
+      <tr><td><code>bin/pulsar</code></td><td>起 Broker 服务本体</td><td>standalone 启动集群</td></tr>
+      <tr><td><code>bin/pulsar-client</code></td><td>命令行收发消息</td><td>发出并收回第一条消息</td></tr>
+      <tr><td><code>bin/pulsar-admin</code></td><td>管理面操作</td><td>建租户、命名空间、Topic</td></tr>
+      <tr><td><code>bin/pulsar-daemon</code></td><td>后台守护方式启停</td><td>想让服务常驻时用</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">curl 参数里 <code>?action=download</code> 别丢：Apache 的 closer.lua 分发页靠它才直接跳转镜像开始下载，漏掉会得到一个列镜像的 HTML 页面而不是 tar 包。</p>
+</section>
+
+<!-- ================= 04 启动 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>第二步：一条命令起一个集群</h2>
+  <pre><code>bin/pulsar standalone</code></pre>
+  <p>就这一条。终端开始滚动启动日志——这个进程要依次拉起 BookKeeper（bookie）、元数据服务和 Broker。等日志停止滚动、光标停在末尾，翻到附近找这行就绪标志（关键短语核对自 4.2 分支源码 PulsarService 的启动逻辑）：</p>
+  <pre><code># ... INFO  org.apache.pulsar.broker.PulsarService - messaging service is ready, ...
+# 启动后工作目录下会多出 data/ 和 logs/ 两个目录（官方文档说明）
+# 进程不退 = 服务活着；停止：回到这个终端按 Ctrl-C</code></pre>
+  <p>三件事确认就绪：<strong>看到了 ready 日志、进程不退、目录里多了 <code>data/</code>（BookKeeper 与元数据的落盘位置）和 <code>logs/</code></strong>。想让服务常驻后台，用 <code>bin/pulsar-daemon start standalone</code>；实验阶段更推荐前台跑——Ctrl-C 即停，日志直出终端，新手排障最直观。</p>
+  <div class="card card-tip">
+    <p><strong>启动时官方悄悄替你做了两件事：</strong></p>
+    <ul>
+      <li>自动创建了 <code>public/default</code> 命名空间（官方原文："The public/default namespace is created when you start a Pulsar cluster"）——所以下一节不发一条 admin 命令也能直接收发；</li>
+      <li>默认允许自动创建 Topic——produce 一个不存在的 Topic 名，它会先被创建再收消息。方便归方便，生产实践里官方仍建议显式建 Topic（第 11 节思考题会展开为什么）。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= 05 收发 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>第三步：发出去，收回来</h2>
+  <p>三条命令完成闭环：建 Topic、发一条、收回来。命令与输出都出自官方 4.2.x standalone 文档，可逐字对照：</p>
+  <pre><code>bin/pulsar-admin topics create persistent://public/default/my-topic
+bin/pulsar-client produce my-topic --messages 'Hello Pulsar!'
+bin/pulsar-client consume my-topic -s 'my-subscription' -p Earliest -n 0</code></pre>
+  <p>produce 执行完，CLI 打出成功提示（消息文本核对自 4.2 分支源码 CmdProduce）：<code>1 messages successfully produced</code>。切到收消息的终端，重头戏来了——官方文档原样的回显：</p>
+  <pre><code>----- got message -----
+key:[null], properties:[], content:Hello Pulsar!</code></pre>
+  <p>看到这两行，端到端就通了：消息经 Broker 写进 BookKeeper 落库，再被你的订阅取走。<code>consume</code> 的参数拆开看：<code>-s</code> 是订阅名（同一个名字记住上次读到的位置，就是上期说的"游标"）；<code>-p Earliest</code> 表示从该订阅最早的消息读起，避免"明明发了却收不到"；<code>-n 0</code> 表示不限条数、一直挂着等新消息。</p>
+  <p>顺手玩一把批量发送（官方示例，逗号分隔多条消息一次发出）：</p>
+  <pre><code>bin/pulsar-client produce my-topic --messages "$(seq -s, -f 'Message NO.%g' 1 10)"</code></pre>
+  <p class="note">订阅名与游标背后的四种订阅模式、消息怎么确认不丢，是概念与原理深水区——延伸阅读：<a href="../../daily-tech-course/lessons/0013-pulsar-subscription-models.html">每日微课程线《Pulsar 订阅模型：四种订阅、游标与 Key_Shared 保序》</a>、<a href="../../daily-tech-course/lessons/0021-pulsar-message-reliability.html">《Pulsar 消息可靠性全链路》</a>。</p>
+</section>
+
+<!-- ================= 06 三板斧 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>三板斧：自建租户、命名空间、Topic</h2>
+  <p>刚才那条 Topic 地址<strong>不是随口写的</strong>，它是 Pulsar 的标准寻址格式：<code>persistent://租户/命名空间/主题</code>。<code>public</code> 是启动时自动创建的默认租户，<code>default</code> 是它下面的默认命名空间——多租户隔离是 Pulsar 的架构内建能力（上期讲过），这节亲手把它用起来：</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 150" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <rect x="20" y="30" width="720" height="52" rx="8" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="380" y="62" text-anchor="middle" fill="var(--ink)" font-size="15" font-family="monospace">persistent://public / default / my-topic</text>
+    <line x1="322" y1="84" x2="322" y2="104" stroke="var(--muted)" stroke-dasharray="4 3"/>
+    <line x1="414" y1="84" x2="414" y2="104" stroke="var(--muted)" stroke-dasharray="4 3"/>
+    <text x="180" y="122" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">租户 tenant</text>
+    <text x="180" y="138" text-anchor="middle" fill="var(--muted)" font-size="9.5">public 是自带的默认租户</text>
+    <text x="368" y="122" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">命名空间 namespace</text>
+    <text x="368" y="138" text-anchor="middle" fill="var(--muted)" font-size="9.5">default 是自带默认命名空间</text>
+    <text x="590" y="122" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">主题 topic</text>
+    <text x="590" y="138" text-anchor="middle" fill="var(--muted)" font-size="9.5">消息的通道，才是业务起名的地方</text>
+  </svg>
+  </div>
+
+  <p>按官方 admin API 文档的命令原文，建一个自己的租户和命名空间：</p>
+  <pre><code>bin/pulsar-admin tenants create my-tenant -r role1 -c standalone
+bin/pulsar-admin namespaces create my-tenant/my-ns
+bin/pulsar-admin topics create persistent://my-tenant/my-ns/topic-1</code></pre>
+  <p><code>-r</code>（adminRoles）给这个租户指定管理员角色，<code>-c</code>（allowedClusters）圈定租户可用的集群——standalone 模式的集群名就叫 <code>standalone</code>。三类资源的 create/list 是对称的，做成速查表：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>资源</th><th>创建</th><th>查看</th></tr></thead>
+    <tbody>
+      <tr><td>租户</td><td><code>tenants create my-tenant</code></td><td><code>tenants list</code></td></tr>
+      <tr><td>命名空间</td><td><code>namespaces create my-tenant/my-ns</code></td><td><code>namespaces list my-tenant</code></td></tr>
+      <tr><td>Topic</td><td><code>topics create persistent://my-tenant/my-ns/topic-1</code></td><td><code>topics list my-tenant/my-ns</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>建完自己的租户，把收发命令换上完整地址再跑一遍：<code>bin/pulsar-client produce persistent://my-tenant/my-ns/topic-1 --messages 'Hello again!'</code>——地址变了，玩法没变。</p>
+</section>
+
+<!-- ================= 07 Docker ================= -->
+<section>
+  <h2><span class="sec-num">07</span>Docker 方式：Windows 的唯一正道，Linux/macOS 的另一选项</h2>
+  <p>官方《Run Pulsar In Docker》给的就是一条命令，镜像 tag 与本期版本一致（Windows 把行尾续行符 <code>\</code> 换成 <code>^</code>）：</p>
+  <pre><code>docker run -it \
+  -p 6650:6650 \
+  -p 8080:8080 \
+  --mount source=pulsardata,target=/pulsar/data \
+  --mount source=pulsarconf,target=/pulsar/conf \
+  apachepulsar/pulsar:4.2.4 \
+  bin/pulsar standalone --advertised-address localhost</code></pre>
+  <p>逐段拆：<code>-p 6650:6650</code> 映射二进制协议端口（pulsar-client 连的就是它），<code>-p 8080:8080</code> 映射 HTTP 端口（admin API 与监控）；两个 mount 把数据卷、配置卷挂出来，容器删了数据还在。末尾的 <code>--advertised-address localhost</code> 官方文档默认带着——容器里的服务要把自己" advertised（广播）"的地址写成宿主机可达的 localhost，否则宿主机客户端第一步寻址就碰壁。官方还提醒：容器默认以 UID 10000 运行，挂载卷要保证它可写。</p>
+  <p>起完之后验证与裸机完全同款：端口 6650 已映射到宿主机，宿主机上任何语言的客户端都能直连（官方 Docker 页用 Python 客户端 <code>pulsar://localhost:6650</code> 做演示）；也可以另开终端用 <code>docker exec</code> 进容器，容器里自带全套 <code>bin/pulsar-client</code>/<code>pulsar-admin</code>，收发输出与第 05 节一致。想看这颗 Topic 的运行统计，官方 Docker 页给了管理面查询：</p>
+  <pre><code>curl http://localhost:8080/admin/v2/persistent/public/default/my-topic/stats | python -m json.tool</code></pre>
+  <p>返回一屏 JSON 统计——生产速率、订阅情况都在里面，这是从"跑通了"走向"看得见"的第一步。</p>
+</section>
+
+<!-- ================= 08 报错 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>高频报错速查：现象 → 原因 → 解法</h2>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>现象</th><th>原因</th><th>解法</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>启动即抛 <code>UnsupportedClassVersionError</code>（提示 class file version 不匹配）</td>
+        <td>JDK 低于 21。4.0+ 硬性要求 Java 21，老机器默认 JDK 8 最常见</td>
+        <td>升到 JDK 21+：SDKMAN 一条命令切换，或 Adoptium 下载 Temurin；再 <code>java -version</code> 确认</td>
+      </tr>
+      <tr>
+        <td>Windows 上 <code>bin/pulsar</code> 各种脚本报错</td>
+        <td>本机安装方式官方只支持 64 位 macOS / Linux</td>
+        <td>改走 Docker 方式（第 07 节命令），这是官方给 Windows 的唯一路径</td>
+      </tr>
+      <tr>
+        <td><code>pulsar-client</code> 报连接被拒 / 连接超时</td>
+        <td>standalone 还没就绪就开始收发，或服务根本没起</td>
+        <td>回启动终端确认 <code>messaging service is ready</code> 日志与进程存活；端口 6650 是否被映射（Docker）</td>
+      </tr>
+      <tr>
+        <td>consume 挂着却一条消息都收不到</td>
+        <td>同名订阅之前消费过，游标已越过旧消息（订阅记住读到的位置）</td>
+        <td>加 <code>-p Earliest</code> 从最早读起，或换个全新订阅名（消息还没被确认删除时）</td>
+      </tr>
+      <tr>
+        <td>下载得到的是 HTML 页面，tar 解压报错</td>
+        <td>closer.lua 链接漏了 <code>?action=download</code> 参数，拿到的是镜像列表页</td>
+        <td>用第 03 节的完整链接重新 curl；解压前 <code>file apache-pulsar-4.2.4-bin.tar.gz</code> 确认是 gzip 文件</td>
+      </tr>
+      <tr>
+        <td>Docker 卷挂载报权限错误</td>
+        <td>容器默认以 UID 10000 / GID 0 运行，挂载卷对它不可写</td>
+        <td>按官方文档提示：确保挂载卷对 UID 10000 或 GID 0 可写（Linux 上 chown 或放开组权限）</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ================= 09 quiz ================= -->
+<section>
+  <h2><span class="sec-num">09</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. Pulsar 4.x 对 Java 版本的要求是？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，那是 2.7 及更早时代的要求，4.0 起门槛抬高了。","对的：官方文档原文 Java 21 is required for Pulsar 4.0+，这是硬性门槛，低于 21 启动直接报 UnsupportedClassVersionError。","不对，11 只是 2.8~2.10 时代的要求。"]'>
+        <li class="quiz-option">Java 8 及以上即可，向下兼容</li>
+        <li class="quiz-option">Java 21 硬性要求，低于就启动失败</li>
+        <li class="quiz-option">Java 11 及以上，17 更佳</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. consume 命令里 -p Earliest 的作用是？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，优先级是另一回事，这个参数管的是从哪里开始读。","不对，订阅名由 -s 指定，和这个参数无关。","对的：让这个订阅从最早的消息开始读，避免之前消费过、游标已越过旧消息导致一条也收不到。"]'>
+        <li class="quiz-option">让这条订阅优先于其他订阅拿到消息</li>
+        <li class="quiz-option">自动创建一个名为 Earliest 的订阅</li>
+        <li class="quiz-option">从该订阅最早未确认的消息开始读</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. persistent://my-tenant/my-ns/topic-1 的三段路径依次是？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：租户/命名空间/主题，这是 Pulsar 的标准寻址格式，多租户隔离就架构在这三层路径上。","不对，顺序反了：命名空间挂在租户下面，Topic 挂在命名空间下面。","不对，集群名不出现在 Topic 地址里，租户通过 allowedClusters 圈定集群。"]'>
+        <li class="quiz-option">租户 → 命名空间 → 主题</li>
+        <li class="quiz-option">命名空间 → 租户 → 主题</li>
+        <li class="quiz-option">集群 → 租户 → 主题</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. Windows 上想跑起 Pulsar，官方给的方式是？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，官方明确本机安装只支持 64 位 macOS 和 Linux。","对的：官方 standalone 文档写明 Windows 用户参见 Run Pulsar In Docker，Docker 是唯一官方路径。","不对，源码编译门槛更高，官方 quickstart 没有这条路径。"]'>
+        <li class="quiz-option">下载 macOS/Linux 安装包改个路径硬跑</li>
+        <li class="quiz-option">用官方 Docker 镜像方式运行</li>
+        <li class="quiz-option">从源码编译出 Windows 版本</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 10 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：standalone 把三层塞进一个进程，它和生产集群的差异只是"少了几台机器"吗？</summary>
+    <div class="details-body">
+      <p>差异远不止规模，本质是<strong>三份"架构承诺"在 standalone 里被临时打折</strong>。<strong>第一，故障域合并：</strong>生产里 Broker、BookKeeper、元数据存储各自独立伸缩、独立容错——Broker 全挂了消息还在 bookie 里，元数据挂了 Broker 还能照常服务；standalone 三层同居一个 JVM，进程一死全没，"计算存储分离"的容错红利在本地模式下是看不出来的，它给你看的只是<strong>逻辑分层</strong>（配置与代码路径分离），不是物理分离。<strong>第二，定位是开发件：</strong>官方文档明确 standalone 用于开发实验，<code>public/default</code> 这种自带命名空间也是"图省事"的开发默认——生产集群的第一课恰恰是别用 public/default，而是按业务规划租户。<strong>第三，配置口径不同：</strong>standalone 为了本机流畅放开了不少默认值（自动建 Topic 等），生产的 broker.conf 则要逐项过。所以正确的用法是：<strong>用 standalone 建立肌肉记忆，把"哪些是架构承诺、哪些是开发默认"分清楚，上生产时逐条把默认值换掉</strong>——这也是第 3 期读架构、第 4 期接 Spring Boot 时反复回对照的一面镜子。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：既然支持自动创建 Topic，为什么官方还建议显式建？</summary>
+    <div class="details-body">
+      <p>官方 standalone 文档的原文大意是：即使 Pulsar 支持自动创建，实践中也建议显式提前创建。原因拆三层。<strong>第一层是治理：</strong>自动创建意味着"谁先发出消息，谁就定义了 Topic 的属性"——生产者代码里手滑把 <code>order-created</code> 打成 <code>order-cretaed</code>，系统不会报错，而是安静地开一条新通道，消息从此分流，下游订阅旧名的那一半永远等不到货；显式创建 + 关闭自动创建，把这类拼写事故从"静默分流"变成"当场报错"。<strong>第二层是属性预置：</strong>自动创建的 Topic 用默认参数；而分区数、保留策略这些关键属性，显式建的时候才能一次性配对——事后改分区数是迁移级别的动作。<strong>第三层是权限与生命周期：</strong>企业里 Topic 的创建应该走审批面（admin API / 管理台），有主有据，而不是随第一个生产者"野生长出来"。一句话：自动创建是让第一次五分钟顺滑的开发善意，显式创建才是生产的纪律。官方文档同样提示，真实业务应使用 Producer/Consumer API 或 Pulsar IO，命令行工具只适合实验。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 11 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">11</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这四条：</strong></p>
+    <ul>
+      <li>Java 21 硬门槛（4.0+），Windows 走 Docker，本机方式仅支持 64 位 macOS/Linux；</li>
+      <li>四步路线：下载解压 → <code>bin/pulsar standalone</code> → 发 → 收，判定三条：ready 日志、produce 成功提示、<code>----- got message -----</code>；</li>
+      <li>Topic 地址 = <code>persistent://租户/命名空间/主题</code>，<code>public/default</code> 是启动自带的开发默认，admin 三板斧（tenants/namespaces/topics）建自己的；</li>
+      <li>consume 收不到先查订阅游标：<code>-p Earliest</code> 或换新订阅名；standalone 是开发件，生产另算。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 3 期《核心概念与整体架构》——把今天命令里的每个名词拆开：租户、命名空间、Topic、订阅、游标、账本六个核心概念配类比讲解，四种订阅模式从使用视角扫一遍，再画一张三层架构图，看 Broker 凭什么敢自称无状态。Primary source：<a href="https://pulsar.apache.org/docs/4.2.x/getting-started-standalone/" target="_blank" rel="noopener">Pulsar 官方文档 · Getting Started: Standalone（4.2.x）</a>——本期全部命令与输出出处；Docker 方式见 <a href="https://pulsar.apache.org/docs/4.2.x/getting-started-docker/" target="_blank" rel="noopener">Run Pulsar In Docker（4.2.x）</a>，租户与命名空间命令见 <a href="https://pulsar.apache.org/docs/4.2.x/admin-api-tenants/" target="_blank" rel="noopener">Admin API - Tenants</a> 与 <a href="https://pulsar.apache.org/docs/4.2.x/admin-api-namespaces/" target="_blank" rel="noopener">Admin API - Namespaces</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0011-pulsar-what-and-why.html">← 上一期：认识 Pulsar</a>
+  <a class="next" href="0013-pulsar-core-concepts-architecture.html">下一期：核心概念与整体架构 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

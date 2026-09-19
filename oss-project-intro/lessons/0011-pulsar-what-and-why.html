@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Pulsar 系列第 1 期：把消息队列拆成“计算”和“存储” | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0011</span>
+  <span><a href="../index.html">课程目录</a> · Pulsar 系列第 1 期 / 共 5 期 · <a href="https://pulsar.apache.org" target="_blank" rel="noopener">pulsar.apache.org ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · PULSAR 系列第 1 期：认识项目</p>
+  <h1>Pulsar 是什么：把消息队列拆成“计算”和“存储”</h1>
+  <p class="subtitle">开源项目入门系列的每个新主题，都从三个问题开始：它解决什么痛点、凭什么活下来、什么场景该选它。Pulsar 官方的自我定位是“为云而生的开源分布式消息与流平台”，它最大的标签是<strong>计算与存储分离</strong>：Broker 只做无状态的计算，消息落在一套独立的分布式日志存储（Apache BookKeeper）里。这个架构决定带来三件事——扩容不搬数据、单集群支撑百万级 Topic、多租户是内建能力而不是补丁。上一期我们聊完了 Netty，今天开启新项目 Pulsar，本期带走一个能贯穿全系列的心智模型：<strong>分拣中心不存货，仓库只管记账</strong>。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 消息平台 · Java · Apache-2.0</span>
+    <span class="tag">📦 基于 Pulsar 4.2.x（主线 4.2.4）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 1 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 痛点 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>痛点：消息队列的“计算存储死绑”</h2>
+  <p>以 Kafka 为代表的存算一体消息队列，把“收发消息的计算”和“保存消息的存储”放在同一批节点上：每个分区及其副本绑定在某些节点的本地磁盘上，Broker 既是门口的分拣员，又是后面的仓库管理员。这个设计在中等规模下简单高效，但业务长到一定程度，三笔账开始变得难算：</p>
+  <ul>
+    <li><strong>扩容就是搬数据：</strong>容量不够了要加节点，可消息数据长在老节点的磁盘上，新节点不能凭空接单，得把分区副本成批迁移过去——过程要几小时甚至几天，还占着集群的带宽和性能。<strong>弹性伸缩在架构上就是贵的。</strong></li>
+    <li><strong>Topic 一多就开始抖：</strong>存算一体架构里每个分区都是“长在具体节点上的有状态实体”，Topic 数量涨到几十万级别，集群要维护的分区元数据、副本同步关系跟着线性膨胀，元数据服务与重均衡的压力都会成为瓶颈。而在云原生场景，“一个微服务一个 Topic、一个 IoT 设备一个 Topic”的百万级需求是真实存在的。</li>
+    <li><strong>多租户靠约定不靠架构：</strong>几十个业务团队共用一个集群，隔离只能靠 Topic 命名规范、配额和运维纪律来“约”，一个团队的流量打爆集群，邻队跟着遭殃。想要硬隔离，就得再建一套集群，运维成本翻倍。</li>
+  </ul>
+  <p>这三笔账指向同一个病根：<strong>计算和存储互相锁死，谁也动不了谁。</strong>Pulsar 的答案就一句话——把这两层拆开。原理视角的深挖不在本期展开，每日微课程线有一期专门对比这两种架构（见第 05 节延伸阅读），我们从“上手与选型”的角度往下走。</p>
+</section>
+
+<!-- ================= 02 Pulsar 是什么 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>Pulsar 是什么：分拣中心 + 仓库网络</h2>
+  <p>官网首页对 Pulsar 的定义是<strong>“Cloud-Native, Distributed Messaging and Streaming”</strong>——为云而生的分布式消息与流平台，开源协议 Apache-2.0（2026-09 核对）。它出身名门：由 Yahoo 内部孵化，2015 年就在雅虎的生产环境首次部署，2016 年开源并捐入 Apache 孵化器，2018 年 9 月 25 日毕业成为 Apache 顶级项目。拆开看，一个 Pulsar 集群由三块拼成（官方《Architecture Overview》口径）：</p>
+  <ul>
+    <li><strong>Broker 集群（计算层）：</strong>官方文档明确写着“Broker 是一个无状态组件”——它对外承接生产者和消费者的连接、做 Topic 寻址与负载均衡、把消息分发出去，但<strong>自己不长期保存消息</strong>。正因为无状态，Broker 层扩缩容只需要启停进程，秒级生效，不搬任何数据；</li>
+    <li><strong>BookKeeper 集群（存储层）：</strong>消息真正落库的地方。一组叫 bookie 的存储节点把每个 Topic 的消息流切成一段段“账本”（Ledger）分片写进集群，多副本、条带化分布——这也是个独立的 Apache 顶级项目；</li>
+    <li><strong>元数据存储（协调层）：</strong>Topic 归属、schema、Broker 负载这些元数据存在独立的元数据存储里。4.2 的官方文档支持 ZooKeeper（默认）、etcd、RocksDB（单机模式）、Oxia 四种后端。</li>
+  </ul>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 320" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar1g" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+
+    <rect x="20" y="24" width="130" height="64" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="85" y="50" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">生产者们</text>
+    <text x="85" y="70" text-anchor="middle" fill="var(--muted)" font-size="9.5">业务 · 网关 · IoT</text>
+    <rect x="20" y="120" width="130" height="64" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="85" y="146" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">消费者们</text>
+    <text x="85" y="166" text-anchor="middle" fill="var(--muted)" font-size="9.5">订阅 · 各取各的</text>
+
+    <line x1="150" y1="50" x2="206" y2="80" stroke="var(--muted)" marker-end="url(#ar1)"/>
+    <line x1="150" y1="156" x2="206" y2="126" stroke="var(--muted)" marker-end="url(#ar1)"/>
+
+    <rect x="210" y="46" width="280" height="114" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="350" y="70" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">Broker 集群 · 计算层</text>
+    <text x="350" y="90" text-anchor="middle" fill="var(--muted)" font-size="9.5">官方口径：无状态组件</text>
+    <rect x="226" y="102" width="118" height="40" rx="6" fill="var(--bg-accent)" stroke="var(--line)"/>
+    <text x="285" y="120" text-anchor="middle" fill="var(--ink)" font-size="10">承接连接</text>
+    <text x="285" y="134" text-anchor="middle" fill="var(--muted)" font-size="8.5">寻址 · 鉴权</text>
+    <rect x="356" y="102" width="118" height="40" rx="6" fill="var(--bg-accent)" stroke="var(--line)"/>
+    <text x="415" y="120" text-anchor="middle" fill="var(--ink)" font-size="10">路由分发</text>
+    <text x="415" y="134" text-anchor="middle" fill="var(--muted)" font-size="8.5">负载均衡 · 缓存</text>
+    <text x="350" y="152" text-anchor="middle" fill="var(--accent-3)" font-size="9.5">扩缩容只动这层：启停进程，秒级</text>
+
+    <line x1="490" y1="103" x2="546" y2="103" stroke="var(--accent-3)" marker-end="url(#ar1g)"/>
+    <text x="518" y="93" text-anchor="middle" fill="var(--accent-3)" font-size="9">消息落库</text>
+
+    <rect x="550" y="46" width="190" height="114" rx="10" fill="var(--warn-bg)" stroke="var(--accent)"/>
+    <text x="645" y="70" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">BookKeeper 集群</text>
+    <text x="645" y="86" text-anchor="middle" fill="var(--muted)" font-size="9.5">存储层 · bookie 节点</text>
+    <rect x="566" y="96" width="158" height="50" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="645" y="115" text-anchor="middle" fill="var(--ink)" font-size="10">Ledger 分片日志</text>
+    <text x="645" y="132" text-anchor="middle" fill="var(--muted)" font-size="8.5">条带化 · 多副本 · 不绑节点</text>
+
+    <rect x="210" y="196" width="280" height="100" rx="10" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="350" y="222" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">元数据存储 · 协调层</text>
+    <text x="350" y="242" text-anchor="middle" fill="var(--muted)" font-size="9.5">Topic 归属 · schema · Broker 负载</text>
+    <text x="350" y="262" text-anchor="middle" fill="var(--ink)" font-size="9.5">4.2 支持：ZooKeeper（默认）/ etcd</text>
+    <text x="350" y="278" text-anchor="middle" fill="var(--muted)" font-size="9.5">RocksDB（单机）/ Oxia</text>
+    <line x1="350" y1="160" x2="350" y2="192" stroke="var(--muted)" stroke-dasharray="4 3" marker-end="url(#ar1)"/>
+    <text x="362" y="182" fill="var(--muted)" font-size="8.5">查归属</text>
+
+    <text x="20" y="316" fill="var(--muted)" font-size="9.5">计算与存储分离：两层各自扩容，互不拖累 —— 这是 Pulsar 所有特性的源头</text>
+  </svg>
+  </div>
+
+  <p>对应到现实：<strong>Broker 是快递分拣中心——包裹快速流过，自己不存货；BookKeeper 是仓库网络——货真正放在这里，按账本分片管理；元数据存储是调度室——记着哪个分拣员管哪个单。</strong>分拣中心爆单了？多开几家，货不用动。仓库不够了？多租几个库房，门口照常营业。这就是“计算存储分离”的全部要义。</p>
+</section>
+
+<!-- ================= 03 关键数据与版本演进 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>关键数据与版本演进：4.0 LTS → 4.2 主线</h2>
+  <p>社区面上（2026-09-19 GitHub 核对）：apache/pulsar 仓库 <strong>15.3k Stars、3.75k Forks</strong>，Java 编写，Apache-2.0 协议。星数在基础设施类项目里属第二梯队，但官方案例页挂着的名单很硬：Yahoo!（2015 年首次部署至今）、腾讯（游戏大数据平台，日均万亿级数据传输）、微信、Discord、Splunk、Cisco 等（来源：pulsar.apache.org/case-studies，2026-09 核对）。性能与规模数字取官网口径：<strong>发布延迟低于 10 毫秒（sub-10ms）</strong>、<strong>单集群可支撑百万级 Topic</strong>；官方案例里 BIGO 从 Kafka 迁到 Pulsar 后硬件成本降了 50%、Pandio 用它扛百万级 Topic 且发布延迟低于 5 毫秒。</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>版本线</th><th>起点</th><th>当前（2026-09）</th><th>定位</th></tr></thead>
+    <tbody>
+      <tr><td>3.0 LTS</td><td>2023-05</td><td>3.0.x 持续维护</td><td>2.x 之后的长期支持线</td></tr>
+      <tr><td>4.0 LTS</td><td>2024-10-21</td><td><strong>4.0.13</strong>（2026-08-03）</td><td>上一代长期支持线，仍在发补丁</td></tr>
+      <tr><td>4.2（当前主线）</td><td>2026-03-31</td><td><strong>4.2.4</strong>（2026-08-03，GitHub Latest）</td><td>本系列基准；Java 21 起步（4.0+ 硬要求）</td></tr>
+      <tr><td>5.0</td><td>—</td><td>仅 5.0.0-M1/M2 里程碑预览</td><td>官网明确“不用于生产”，选型时忽略</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">数据来源：官网 Download 页“Current stable version 4.2.4”与 GitHub Releases 页，2026-09-19 核对；Java 21 要求出自官方文档《Run Pulsar locally》。本系列以 <strong>4.2.x 为基准</strong>，命令与输出逐条对照官方文档。</p>
+</section>
+
+<!-- ================= 04 心智模型 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>一条消息的旅程：分层架构怎么转起来</h2>
+  <p>把心智模型落到一条消息上。生产者把消息发到某个 Topic，<strong>Broker 接住它，先写进 BookKeeper 落库，再分发给订阅者</strong>——注意这个顺序：存储是必经之路，计算层不攒数据。消费者按“订阅”各自取消息，互不影响；历史消息躺在 BookKeeper 里，游标（记住每个订阅读到哪了）在元数据存储里，随时可以回来重读旧账。</p>
+  <div class="card card-tip">
+    <p><strong>这套分层换来了四个“白送”的能力：</strong></p>
+    <ul>
+      <li><strong>弹性伸缩：</strong>Broker 无状态，流量高峰前加几台、过了撤掉，存储层按容量独立扩，不用搬数据；</li>
+      <li><strong>百万级 Topic：</strong>Topic 只是元数据里的一行 + 落库时的一个分片，不是“长在节点上的实体”，单个 Topic 成本极低；</li>
+      <li><strong>内建多租户：</strong>租户（tenant）和命名空间（namespace）是原生层级，隔离与配额在架构层解决，不靠命名规范；</li>
+      <li><strong>分层存储冷热分离：</strong>老消息可以从 BookKeeper 卸到 S3/MinIO 这类对象存储上，热数据留本地——公司主栈里正好有 MinIO，第 5 期源码导读会展开这一段。</li>
+    </ul>
+  </div>
+  <p>订阅模式（Exclusive、Shared、Failover、Key_Shared 四种）、分层存储的读写细节这些“原理深水区”，每日微课程线已经讲过，本系列不换皮重讲：本期把注意力放在<strong>“这套架构对你上手和选型意味着什么”</strong>。</p>
+</section>
+
+<!-- ================= 05 什么场景选它 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>什么场景该选它（以及不该）</h2>
+  <div class="card">
+    <p><strong>✅ 适合：</strong></p>
+    <ul>
+      <li><strong>海量 Topic / 海量连接场景：</strong>IoT 上报、每服务一 Topic 的微服务体系、一台设备一个通道——Pulsar 的设计主场；</li>
+      <li><strong>多团队共用一套消息平台：</strong>多租户隔离内建，平台团队收编各业务的消息中间件，运维一套而不是 N 套；</li>
+      <li><strong>流量波动大、要弹性：</strong>大促、日报表、爬虫突发——Broker 层分钟级扩缩容，存储层慢慢补；</li>
+      <li><strong>跨机房 / 异地复制是刚需：</strong>geo-replication 是官方内建能力，不用自己造同步工具。</li>
+    </ul>
+    <p><strong>❌ 不必：</strong></p>
+    <ul>
+      <li><strong>几百个 Topic、团队一两人的规模：</strong>Kafka 生态更成熟、组件更少，引入 Pulsar 的分层架构是给自己加运维对象；</li>
+      <li><strong>已有 Kafka 集群运转良好：</strong>没有痛点就别为了新架构迁移——存量团队换平台的隐性成本远大于特性收益；</li>
+      <li><strong>轻量场景：</strong>进程内队列、任务分发用 Redis Stream / 数据库表就够，消息平台是重量级基建。</li>
+    </ul>
+  </div>
+  <p>一条判断捷径：<strong>Topic 是海量的、租户是多个的、流量是弹性的、机房是跨地域的——四条占其二，就该认真评估 Pulsar；全不占，Kafka 或更轻的方案反而是对的。</strong>想看两种架构逐项对比与容量速算的原理分析，见下方延伸阅读第 1 条。</p>
+  <div class="note">
+    <p><strong>延伸阅读（原理视角，每日微课程线）：</strong></p>
+    <ul>
+      <li><a href="../../daily-tech-course/lessons/0012-pulsar-vs-kafka.html">第 0012 期 · Pulsar 存算分离架构与 Kafka 对比</a>——两种架构的原理深挖与选型对照；</li>
+      <li><a href="../../daily-tech-course/lessons/0013-pulsar-subscription-models.html">第 0013 期 · Pulsar 订阅模型：四种订阅、游标与 Key_Shared 保序</a>——订阅模式原理；</li>
+      <li><a href="../../daily-tech-course/lessons/0014-pulsar-prod-cons-tuning.html">第 0014 期 · Pulsar 生产者/消费者调优</a>——吞吐与延迟调优参数；</li>
+      <li><a href="../../daily-tech-course/lessons/0021-pulsar-message-reliability.html">第 0021 期 · Pulsar 消息可靠性全链路</a>——一条都不丢的正确姿势。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= 06 quiz ================= -->
+<section>
+  <h2><span class="sec-num">06</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. Pulsar 架构里，官方文档对 Broker 的定性是？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，长期保存消息的是 BookKeeper 集群，Broker 自己不存货。","对的：官方《Architecture Overview》写明 Broker 是无状态组件——只做计算，所以扩缩容不用搬数据。","不对，元数据另有专门的元数据存储（ZooKeeper/etcd/RocksDB/Oxia），Broker 只查询它。"]'>
+        <li class="quiz-option">有状态组件，每个 Broker 长期持有自己 Topic 的消息</li>
+        <li class="quiz-option">无状态组件，只做计算，消息保存在 BookKeeper 集群里</li>
+        <li class="quiz-option">元数据存储，负责保存 Topic 归属与 schema</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 存算一体集群“扩容就是搬数据”的根源是什么？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，那是消息模型的问题，与存储位置无关。","不对，恰恰相反，问题在于数据有多个副本分散存储却仍绑定在特定节点组合上。","对的：分区副本长在具体节点的本地磁盘上，新节点接不了单，必须成批迁移数据，弹性伸缩在架构上就是贵的。"]'>
+        <li class="quiz-option">消息协议不兼容新旧节点</li>
+        <li class="quiz-option">数据没有副本，搬过去就不安全了</li>
+        <li class="quiz-option">分区副本绑定在特定节点的本地磁盘上，扩缩容必须成批迁移</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. Pulsar 能支撑“百万级 Topic”而代价可控，架构上的原因？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：Topic 在 Pulsar 里只是元数据 + 分片，不是绑定节点的实体，单 Topic 成本极低，官网口径单集群可支撑百万级 Topic。","不对，每分区一进程的开销不可承受。","不对，静态规划正是 Pulsar 要摆脱的东西，它靠动态分配与元数据服务。"]'>
+        <li class="quiz-option">Topic 只是元数据里的一行加落库时的分片，不是长在节点上的有状态实体</li>
+        <li class="quiz-option">每个 Topic 独占一个轻量进程，资源开销趋近于零</li>
+        <li class="quiz-option">靠运维提前规划好所有 Topic 的分布，避免运行时创建</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. 你现在要为一个小团队（几十个 Topic、单机房）选消息队列，按本期判断捷径应该？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，几十个 Topic 的量级触发不了 Pulsar 的优势区。","对的：海量 Topic、多租户、弹性、跨地域四条占其二才评估 Pulsar；这个规模 Kafka 或更轻的方案反而更合适——不为新架构付运维税。","不对，任何场景都默认上架构最重的方案不是好习惯，存算分离的运维对象更多。"]'>
+        <li class="quiz-option">直接上 Pulsar，百万 Topic 能力早买早享受</li>
+        <li class="quiz-option">Kafka 或更轻的方案更合适——四条优势一条没占，别为不存在的痛点付架构成本</li>
+        <li class="quiz-option">任何规模都应该选架构最先进的，分层存储迟早用得上</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 07 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：把计算和存储拆开，好处都懂，那代价是什么？为什么不是所有消息系统都这么设计？</summary>
+    <div class="details-body">
+      <p>分层不是免费的，代价主要有三笔。<strong>第一笔是运维对象翻倍：</strong>原来一套集群，现在至少两套（Broker + 存储层）外加元数据存储，版本、监控、容量规划都要分头做——小团队用存算一体反而省心，这就是第 05 节“全不占就别上”的底层原因。<strong>第二笔是网络跳数：</strong>消息从 Broker 到 BookKeeper 至少多一跳 RPC，写路径变长了，架构上要用“先把数据落 BookKeeper、读时优先走 Broker 缓存（managed ledger cache）”来把延迟补回来——官网宣传的低延迟正是缓存层兜出来的。<strong>第三笔是系统复杂度：</strong>两层之间的一致性、故障切换、负载均衡都要精心设计，这也是 Pulsar 源码规模可观、第 5 期值得读码的原因。所以存算分离不是普适真理，它是“规模大到计算和存储的伸缩节奏明显错位”之后的解法——<strong>错位不存在，分层就是负资产。</strong></p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：公司已有 Kafka 集群运转良好，什么信号出现时才值得认真评估迁移到 Pulsar？</summary>
+    <div class="details-body">
+      <p>用本期的三笔账做体检。<strong>信号一：Topic 数量要上新台阶。</strong>如果业务演进方向是“每个微服务/每类设备/每个租户都开通道”，Topic 数量奔着十万、百万去，存算一体的分区元数据压力会先到瓶颈——这是官方案例里 IoT 平台（如 Cisco、EMQ）和“Topic 即服务”平台（Flipkart、OVHCloud）选 Pulsar 的共同理由。<strong>信号二：多团队共享集群开始互相踩。</strong>隔离需求从“约定”升级为“硬保障”时，Pulsar 的租户/命名空间是架构级答案，比再建一套 Kafka 集群省运维。<strong>信号三：流量弹性要求高或要跨机房。</strong>Broker 秒级扩缩容与内建 geo-replication 对应这两类痛点。三条信号一条都没有，就继续用 Kafka——迁移的真实成本（双写过渡、客户端改造、团队心智）远比 PPT 里的特性对比表昂贵。Pulsar 官方也提供了 KoP（Kafka on Pulsar）协议兼容层，让存量 Kafka 客户端不改代码接入，新浪微博的案例就是这么做的——<strong>评估迁移时先想“接入面”，再想“存储内核”。</strong></p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 08 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这四句话：</strong></p>
+    <ul>
+      <li>存算一体的三笔难算的账：扩容搬数据、海量 Topic 抖、多租户靠约定；</li>
+      <li>Pulsar = 无状态 Broker（分拣中心）+ BookKeeper 分片日志（仓库网络）+ 独立元数据存储（调度室），计算存储各自伸缩；</li>
+      <li>关键数据（2026-09 官网核对）：sub-10ms 发布延迟、单集群百万级 Topic、BIGO 迁移后硬件成本降 50%；版本基准 4.2.x（4.2.4），Java 21 起步；</li>
+      <li>选型捷径：海量 Topic、多租户、弹性、跨地域——占其二评估 Pulsar，全不占选 Kafka 或更轻的方案。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 2 期《5 分钟跑起来》——下载官方二进制包，一条 <code>bin/pulsar standalone</code> 命令在本机起一个完整集群（Broker、BookKeeper、元数据存储全在一个 JVM 进程里），再用 <code>pulsar-client</code> 发出第一条消息、亲手把它收回来。命令与预期输出逐条对照官方文档，跑通它，“分拣中心 + 仓库”就不再只是比喻。</p>
+  <p><strong>Primary source：</strong><a href="https://pulsar.apache.org/docs/4.2.x/concepts-architecture-overview/" target="_blank" rel="noopener">Pulsar 官方文档 · Concepts and Architecture（4.2.x）</a>——本期架构口径全部出自该页；版本与下载见 <a href="https://pulsar.apache.org/download/" target="_blank" rel="noopener">官网 Download 页</a>，采用案例见 <a href="https://pulsar.apache.org/case-studies/" target="_blank" rel="noopener">官方 Case Studies 页</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev">← 课程目录</span>
+  <a class="next" href="0012-pulsar-quickstart.html">下一期：5 分钟跑起来 Pulsar →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

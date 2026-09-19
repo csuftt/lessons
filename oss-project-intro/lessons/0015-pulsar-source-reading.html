@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Pulsar 系列第 5 期：架构与源码导读 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0015</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0014-pulsar-spring-in-action.html">上一期：实战场景</a> · Pulsar 系列第 5 期 / 共 5 期 · <a href="https://pulsar.apache.org" target="_blank" rel="noopener">pulsar.apache.org ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · Pulsar 系列第 5 期：架构与源码导读</p>
+  <h1>Pulsar 架构与源码导读：分片日志与分层存储的设计决策</h1>
+  <p class="subtitle">前四期我们做到的是"会用"：认知、跑通、概念地图、接进 Spring Boot。这最后一棒进源码，讲两件更值钱的事——BookKeeper 分片日志凭什么这么设计，以及冷数据凭什么能搬到对象存储。三个设计决策、一条消息从入口到落盘的四站旅程、一张六步读码路线图，外加三段能搬回自己系统的架构师视角。所有代码逐行核对自 release tag <code>v4.2.4</code>（commit 534a635），关键类都给仓库内路径。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 消息平台 · Java · Apache-2.0</span>
+    <span class="tag">📦 源码 tag v4.2.4（2026-09-19 核对）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 5 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 承上启下 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>上一期的 <code>send()</code>，埋着本期全部问题</h2>
+  <p>第 4 期我们交付了一条端到端链路：Spring Boot 里 <code>PulsarTemplate.send()</code> 一行调用，订单事件落进 Topic，三份订阅各收各的，毒丸重投耗尽进死信。应用侧短得不能再短，但消息过了 6650 端口之后发生了什么，全是问号：<strong>broker 收下消息交给谁？ledger 凭什么敢叫"分片日志"？一卷写满了怎么办？冷数据搬到对象存储，消费者为什么毫无感知？</strong>这一期把这些问题全部问掉。</p>
+  <p>导读策略先立住：<strong>不从第一行顺着读，先抓设计决策，再顺着决策找类</strong>。类会随版本搬家，决策却相对稳定。Pulsar 最值得学的三个设计决策是：</p>
+  <ul>
+    <li><strong>决策一 · 计算存储分层：</strong>broker 是无状态组件，消息与订阅进度全在存储层——官方架构页原话：BookKeeper 是一个分布式预写日志（WAL）系统；</li>
+    <li><strong>决策二 · 分片日志：</strong>一卷 ledger 写满就封卷，条带化摊在多台 bookie 上，故障时不修卷、换新卷；</li>
+    <li><strong>决策三 · 冷热分离：</strong>封卷即不可变，不可变才能整体搬去对象存储，读起来对消费者透明。</li>
+  </ul>
+  <p class="note"><span class="h">跨线提示</span>存算分离与 Kafka 的整体对比、订阅模型与游标原理，daily 线已有专课（文末延伸阅读），本期不换皮重讲；本期讲的是<strong>项目本身的设计决策与源码落点</strong>。</p>
+</section>
+
+<!-- ================= 02 决策一 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>决策一：计算存储分层的源码兑现</h2>
+  <p>"broker 无状态"不是口号，是三行事实：<strong>消息在 BookKeeper，进度（cursor）在 BookKeeper，broker 名下只剩归属元数据</strong>（记在元数据存储里，默认 ZooKeeper，可换 etcd / Oxia）。第 3 期讲过三层楼的分工，现在看它落在哪些类上。Broker 侧的入口是 <code>BrokerService</code>（<code>pulsar-broker/src/main/java/org/apache/pulsar/broker/service/BrokerService.java</code>），客户端要发消息，先由它把 topic 定位到本进程：</p>
+  <pre><code>// pulsar-broker/src/main/java/org/apache/pulsar/broker/service/BrokerService.java · v4.2.4
+public CompletableFuture&lt;Optional&lt;Topic&gt;&gt; getTopic(final TopicName topicName,
+        boolean createIfMissing, @Nullable Map&lt;String, String&gt; properties) {
+    CompletableFuture&lt;Optional&lt;Topic&gt;&gt; tp = topics.get(topicName.toString());
+    if (tp != null) {
+        return tp;                          // 命中缓存：归属已定，直接返回
+    }
+    final boolean isPersistentTopic =
+            topicName.getDomain().equals(TopicDomain.persistent);
+    // ...建超时 future、系统 topic 策略加载略
+    final var cachedFuture = topics.computeIfAbsent(topicName.toString(), ___ -> {
+        // 没缓存才真正加载/创建 topic，归属写入元数据存储
+    });</code></pre>
+  <p>每个 topic 同一时刻只归一个 broker 服务（官方架构页：each topic is handled by only one broker），归属就一条记录——"扩容"因此才是起进程这么轻的事。反过来想<strong>换种做法会怎样</strong>：把消息绑在 broker 本地盘（Kafka 的存算一体路线），扩缩容就得拷数据，故障转移变成数据搬运。两种定价各有所长，但"无状态 + 独立存储层"让你在扩容、故障、冷数据三件事上拿到同一张牌——分层。</p>
+  <p class="note"><span class="h">读码坐标</span>归属仲裁：<code>BrokerService.getTopic</code>（行 1194 起）；topic 门面：<code>org.apache.pulsar.broker.service.persistent.PersistentTopic</code>——名字里的 persistent 正对应 <code>persistent://</code> 协议头。整体架构对比见 daily 线 <a href="../../daily-tech-course/lessons/0012-pulsar-vs-kafka.html">《Pulsar 存算分离架构与 Kafka 对比》</a>。</p>
+</section>
+
+<!-- ================= 03 写入旅程 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>一条消息的写入旅程：四站走完主干</h2>
+  <p>第 4 期那条订单事件，进了 broker 之后走四站：<strong>入口定位 → 门面校验 → 托管账本 → 落盘 BookKeeper</strong>。前三站在计算层，第四站进存储层，调用链概述如下（只看主干）：</p>
+  <pre><code># 发布链：send() 的消息从入口到托管账本
+Producer.publishMessage()                    // pulsar-broker/.../service/Producer.java
+ └─ PersistentTopic.publishMessage()         // .../persistent/PersistentTopic.java
+     ├─ 尺寸 / fenced / 最大延迟校验，消息去重检查
+     └─ asyncAddEntry(headersAndPayload, ctx)     // 交给托管账本
+         └─ ManagedLedgerImpl.asyncAddEntry()     // managed-ledger/.../impl/ManagedLedgerImpl.java
+             ├─ executor.execute(...)             // 换到账本专属线程，规避多写者竞争
+             └─ internalAsyncAddEntry(op)         // 选账本 + 判封卷
+                 ├─ addOperation.setLedger(currentLedger)
+                 ├─ currentLedgerIsFull() → setCloseWhenDone(true)  // 满了：这条写完就封卷
+                 └─ addOperation.initiate()
+                     └─ ledger.asyncAddEntry(...) // OpAddEntry：真正写给 BookKeeper
+
+# 完成链：bookie 写成功之后发生什么（仍在 OpAddEntry.run()）
+ ├─ ml.pendingAddEntries.poll()               // 从挂起队列摘下本次写
+ ├─ ml.entryCache.insert(entry)               // 塞进缓存：消费者大概率直接从缓存拿走
+ ├─ ml.lastConfirmedEntry = (ledgerId, entryId)   // 推进"最新位置"
+ └─ closeWhenDone？
+     ├─ true  → ledger.asyncClose()           // 封卷，随后 createComplete 开新卷
+     └─ false → completeAdd() → cb.addComplete() + notifyCursors()  // 确认生产者、唤醒游标</code></pre>
+  <p>两个值得停下来的细节：<strong>其一</strong>，<code>asyncAddEntry</code> 收到消息第一件事是 <code>executor.execute(...)</code>——把写操作切到 ledger 专属线程排队，生产者再多，同一账本上的写入也是串行的；<strong>其二</strong>，写成功后先插缓存再推进位置——官方说消息一般直接从缓存服务，命中不了才去摸 bookie，读多一跳的成本靠这层缓存买回来。</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar15" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent)"/>
+      </marker>
+      <marker id="ar15m" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+
+    <rect x="14" y="70" width="150" height="88" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="89" y="94" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">Producer 客户端</text>
+    <text x="89" y="112" text-anchor="middle" fill="var(--muted)" font-size="9">send() 阻塞到</text>
+    <text x="89" y="128" text-anchor="middle" fill="var(--muted)" font-size="9">持久化确认返回</text>
+
+    <rect x="196" y="70" width="164" height="88" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="278" y="92" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">第 1-2 站 · 计算层</text>
+    <text x="278" y="110" text-anchor="middle" fill="var(--ink)" font-size="9.5">BrokerService.getTopic</text>
+    <text x="278" y="126" text-anchor="middle" fill="var(--ink)" font-size="9.5">PersistentTopic 校验+去重</text>
+    <text x="278" y="144" text-anchor="middle" fill="var(--muted)" font-size="9">broker 只路由不落盘</text>
+
+    <rect x="392" y="70" width="168" height="88" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="476" y="92" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">第 3 站 · 托管账本</text>
+    <text x="476" y="110" text-anchor="middle" fill="var(--ink)" font-size="9.5">ManagedLedgerImpl</text>
+    <text x="476" y="126" text-anchor="middle" fill="var(--ink)" font-size="9.5">选卷 · 判封卷 · 挂起队列</text>
+    <text x="476" y="144" text-anchor="middle" fill="var(--muted)" font-size="9">OpAddEntry 是每笔写的载体</text>
+
+    <rect x="592" y="70" width="154" height="88" rx="10" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="669" y="92" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">第 4 站 · 存储层</text>
+    <text x="669" y="110" text-anchor="middle" fill="var(--ink)" font-size="9.5">BookKeeper bookies</text>
+    <text x="669" y="126" text-anchor="middle" fill="var(--ink)" font-size="9.5">ledger 条带化落盘</text>
+    <text x="669" y="144" text-anchor="middle" fill="var(--muted)" font-size="9">A 份确认才算写成功</text>
+
+    <line x1="164" y1="114" x2="192" y2="114" stroke="var(--accent)" stroke-width="1.8" marker-end="url(#ar15)"/>
+    <line x1="360" y1="114" x2="388" y2="114" stroke="var(--accent)" stroke-width="1.8" marker-end="url(#ar15)"/>
+    <line x1="560" y1="114" x2="588" y2="114" stroke="var(--accent)" stroke-width="1.8" marker-end="url(#ar15)"/>
+
+    <rect x="14" y="196" width="732" height="66" rx="8" fill="var(--bg-accent)" stroke="var(--line)"/>
+    <text x="30" y="218" fill="var(--ink)" font-size="10.5" font-weight="700">回程：bookie 确认 → OpAddEntry.run()：插 entryCache、推进 lastConfirmedEntry → completeAdd() 确认生产者、notifyCursors() 唤醒消费</text>
+    <text x="30" y="240" fill="var(--muted)" font-size="9.5">第 4 期日志里的 messageId = ledger:entry:partition:batch —— 前两段就是这趟旅程在存储层的坐标</text>
+
+    <text x="380" y="36" text-anchor="middle" fill="var(--muted)" font-size="10">读法：实线是发布主干（四站），方框内是每站的关键类；回程走缓存与确认，全部代码核对自 tag v4.2.4</text>
+  </svg>
+  </div>
+  <p class="note"><span class="h">对应类速查</span>入口 <code>Producer.publishMessage</code>（行 200）→ 门面 <code>PersistentTopic.publishMessage</code>（行 638）→ 托管账本 <code>ManagedLedgerImpl.asyncAddEntry</code>（行 835）→ 落盘 <code>OpAddEntry.initiate / run</code>（行 133 / 243）。行号按 tag <code>v4.2.4</code> 文件，读码时以类名定位为准。</p>
+</section>
+
+<!-- ================= 04 决策二 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>决策二：分片日志——封卷、条带、换卷</h2>
+  <p>第 3 期讲过"账本按卷归档"，本期补上源码。一卷 ledger 不会一直写下去，<code>currentLedgerIsFull()</code>（<code>ManagedLedgerImpl</code> 行 4431）给封卷定了三个触发条件，任一满足即封：</p>
+  <pre><code>// managed-ledger/src/main/java/org/apache/bookkeeper/mledger/impl/ManagedLedgerImpl.java · v4.2.4
+private boolean currentLedgerIsFull() {
+    boolean spaceQuotaReached =
+            (currentLedgerEntries &gt;= config.getMaxEntriesPerLedger()
+             || currentLedgerSize &gt;= (config.getMaxSizePerLedgerMb() * MegaByte));
+    long timeSinceLedgerCreationMs = clock.millis() - lastLedgerCreatedTimestamp;
+    boolean maxLedgerTimeReached =
+            timeSinceLedgerCreationMs &gt;= config.getMaximumRolloverTimeMs();
+    if (spaceQuotaReached || maxLedgerTimeReached) {
+        // ...还有最小封卷时间下限判断（minimumRolloverTimeMs），略
+    }</code></pre>
+  <p>这三个条件的默认值都在 <code>conf/broker.conf</code> 里，v4.2.4 的实际取值如下——注意"最小 10 分钟"这个反向条件：条数/尺寸就算到了，卷太新也不许立刻封，防止抖动场景疯狂换卷：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>配置键（broker.conf）</th><th>v4.2.4 默认值</th><th>含义</th></tr></thead>
+    <tbody>
+      <tr><td><code>managedLedgerMaxEntriesPerLedger</code></td><td>50000</td><td>一卷最多 5 万条，条数到即封卷</td></tr>
+      <tr><td><code>managedLedgerMaxSizePerLedgerMbytes</code></td><td>2048</td><td>一卷最多 2GB，尺寸到即封卷</td></tr>
+      <tr><td><code>managedLedgerMinLedgerRolloverTimeMinutes</code></td><td>10</td><td>卷龄不足 10 分钟不许封（防抖动）</td></tr>
+      <tr><td><code>managedLedgerMaxLedgerRolloverTimeMinutes</code></td><td>240</td><td>满 4 小时必封，时间到即封卷</td></tr>
+      <tr><td><code>managedLedgerDefaultEnsembleSize / WriteQuorum / AckQuorum</code></td><td>2 / 2 / 2</td><td>条带集合 E、写份数 W、确认份数 A（生产常调大三副本）</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note"><span class="h">出处</span>以上默认值逐条核对自 <a href="https://github.com/apache/pulsar/blob/v4.2.4/conf/broker.conf" target="_blank" rel="noopener">tag v4.2.4 的 conf/broker.conf</a>（2026-09-19），standalone 模式另有更小的单机默认，别照抄。满足 A ≤ W ≤ E 的前提下，ledger 的条目被条带化摊到 E 台 bookie 组成的集合上——每条写 W 份、收到 A 份确认才算写成功。</p>
+  <p>封卷之后的故障故事，源码比文档更直白：bookie 坏了不修卷，<code>createComplete</code>（行 1734）里写下 <code>log.info("[{}] Created new ledger {}", ...)</code>，随即 <code>createNewOpAddEntryForNewLedger()</code>（行 1855）把挂起的写请求整体搬到新卷继续——<strong>旧账封存、新账另起，写入路径永不断流</strong>。这正是第 3 期"坏盘不修卷"的代码原貌：不可变分卷让副本之间没有"谁是对的"的长期分歧，恢复只需读够 A 份。</p>
+</section>
+
+<!-- ================= 05 决策三 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>决策三：冷热分离——不可变才有资格搬走</h2>
+  <p>官方分层存储文档有一句值得划线的话：<strong>Pulsar 的分段式架构允许积压几乎无上限地增长——但代价会越来越贵，所以旧消息要从 BookKeeper 搬进更便宜的存储</strong>。搬走的资格从哪来？还是决策二的馈赠：封卷的 ledger 不可变（文档原话：closed ledger becomes immutable），不可变的东西才能整体复制、搬完即删，不怕中途变更。源码入口在 <code>ManagedLedgerImpl.offloadLoop</code>（行 3739）：</p>
+  <pre><code>// managed-ledger/src/main/java/org/apache/bookkeeper/mledger/impl/ManagedLedgerImpl.java · offloadLoop · v4.2.4
+LedgerInfo info = ledgersToOffload.poll();      // 取一卷待搬的封卷 ledger
+long ledgerId = info.getLedgerId();
+UUID uuid = UUID.randomUUID();
+Map&lt;String, String&gt; extraMetadata = Map.of("ManagedLedgerName", name);
+String driverName = config.getLedgerOffloader().getOffloadDriverName();
+prepareLedgerInfoForOffloaded(ledgerId, uuid, driverName, driverMetadata)
+    .thenCompose((ignore) -&gt; getLedgerHandle(ledgerId))
+    .thenCompose(readHandle -&gt; config.getLedgerOffloader().offload(readHandle, uuid, extraMetadata))
+    .thenCompose((ignore) -&gt; Retries.run(..., () -&gt; completeLedgerInfoForOffloaded(ledgerId, uuid), ...));</code></pre>
+  <p>四步语义：登记 offload 中间态 → 拿到 ledger 的只读句柄 → 交给 offloader 上传 → 成功后回写元数据并清理本地副本。谁来实现"搬"这个动作？接口是 <code>org.apache.bookkeeper.mledger.LedgerOffloader</code>（<code>managed-ledger</code> 模块），仓库里 <code>tiered-storage/</code> 目录下两个实现：<code>jcloud</code>（S3 / GCS / Azure 等对象存储，类 <code>BlobStoreManagedLedgerOffloader</code>）和 <code>file-system</code>（类 <code>FileSystemManagedLedgerOffloader</code>）。搬走之后读怎么办？offloader 同时提供只读句柄（如 <code>BlobStoreBackedReadHandleImpl</code>），游标读到被搬走的卷时按同一套接口透明回源——消费者"如同什么都没发生"（文档原话：Consumers can access offloaded data transparently）。</p>
+  <p class="note"><span class="h">设计闭环</span>三个决策其实是一条因果链：<strong>分层</strong>让 broker 无状态，<strong>分片日志</strong>让存储层只写不可变分卷，<strong>不可变</strong>又让冷数据有资格整体搬去对象存储——第三步不是独立发明，是前两步的免费赠品。</p>
+</section>
+
+<!-- ================= 06 读码路线图 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>读码路线图：六步走完主干</h2>
+  <p>方法照旧：clone 后 checkout 到发布 tag（<code>git checkout v4.2.4</code>），带着第 2 期跑起来的 standalone 体感，沿调用链自顶向下，每步只回答一个问题：</p>
+  <div class="steps">
+    <div class="step"><span class="step-n">1</span><div><strong>从归属进：</strong><code>BrokerService.getTopic</code>——回答"topic 为什么归这个 broker、归属记在哪"。缓存未命中就 computeIfAbsent 加载，全程异步 future 串链。</div></div>
+    <div class="step"><span class="step-n">2</span><div><strong>从门面进：</strong><code>PersistentTopic.publishMessage</code>——回答"一条消息进门先过哪些检查"（fenced、尺寸、去重），以及它怎么把写交给托管账本。</div></div>
+    <div class="step"><span class="step-n">3</span><div><strong>托管账本：</strong><code>ManagedLedgerImpl.asyncAddEntry → internalAsyncAddEntry</code>——回答"写入为什么切专属线程、什么时候封卷"，顺带读 <code>currentLedgerIsFull</code> 三个条件。</div></div>
+    <div class="step"><span class="step-n">4</span><div><strong>落盘收口：</strong><code>OpAddEntry.initiate / run</code>——回答"写给 BookKeeper 的那一行在哪、写成功后先做缓存还是先确认"。</div></div>
+    <div class="step"><span class="step-n">5</span><div><strong>读路径：</strong><code>PersistentDispatcherMultipleConsumers.readMoreEntries</code>——回答"积压怎么按许可数读、重投的消息从哪回放"。</div></div>
+    <div class="step"><span class="step-n">6</span><div><strong>分层存储：</strong><code>ManagedLedgerImpl.offloadLoop</code> + <code>LedgerOffloader</code> 接口——回答"哪卷有资格搬、搬完元数据怎么回写"。</div></div>
+  </div>
+  <p>三条纪律：先切 tag 再读（<code>v4.2.4</code>，2026-08-03 发布、GitHub Releases 标 Latest；4.0 LTS 线 <code>v4.0.13</code> 并行维护，5.0 尚在里程碑）；从调用链进不从工具类进；用调试器别用眼睛——tests/ 目录的集成测试是最好的断点示例库。</p>
+</section>
+
+<!-- ================= 07 架构师视角 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>架构师视角：能搬回自己系统的三件事</h2>
+  <h3>把"状态"搬出计算层的定价账</h3>
+  <p>计算存储分层不是免费午餐：多一层网络跳转、三种角色（broker / bookie / 元数据存储）各自要养，买回来的是扩缩容自由和故障转移的轻。选型用同一把尺：数据规模增长快、节点经常上下线的，分层划算；规模稳定、本地盘够快的，存算一体更省。先算账再分层，别把分层当信仰。</p>
+  <h3>分片日志：一切"流水"类数据的通用骨架</h3>
+  <p>Pulsar 把"只追加 + 按卷封存 + 满卷换卷 + 不可变"做成骨架，代价是读写路径多一层卷管理，换来顺序写吞吐、干净的删除、天然的冷热分离。操作日志、审计流水、事件溯源、行为埋点——凡是"只能追加、按时间冷化"的数据，都值得先想想能不能套这个骨架。卷的粒度就是故障恢复、删除和分层迁移的公共单位，选它比事后补省一个量级。</p>
+  <h3>写路径纪律：单写者 + 专属线程串行</h3>
+  <p><code>internalAsyncAddEntry</code> 是 synchronized 单线程入口，写入又切到 ledger 专属执行线程——多生产者的并发写，在入口被收敛成账本上的串行追加，bookie 侧只见到顺序写。这和 Netty 的"channel 终身绑定一个线程"（上一系列）是同一个思想的两副面孔：<strong>把竞争消灭在入口，后面的每一段都因此不用加锁</strong>。写并发组件时，先问一句"我的 ledger 线程在哪"。</p>
+</section>
+
+<!-- ================= 08 quiz ================= -->
+<section>
+  <h2><span class="sec-num">08</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. broker 敢自称无状态，是因为哪两样最重的东西都不在它身上？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["对：消息数据与订阅进度（cursor）都持久化在 BookKeeper，broker 只在元数据存储里记归属关系。","恰好相反：schema 与连接恰恰是轻的，消息与进度才是重的。","归属元数据记在元数据存储里，消息不落 broker 本机。"]'>
+        <li class="quiz-option">schema 在 ZooKeeper，客户端连接在 proxy</li>
+        <li class="quiz-option">消息在 BookKeeper，订阅进度（cursor）也在 BookKeeper</li>
+        <li class="quiz-option">消息在元数据存储，连接状态在 proxy</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. v4.2.4 默认配置下，封卷的三个触发条件是？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["对：50000 条 / 2GB / 满 4 小时，任一满足即封；且卷龄不足 10 分钟不许封。","10 分钟是下限不是触发值；条数上限是 5 万不是 5 千。","2MB 与 24 小时都不对，尺寸上限是 2048MB、时间上限是 240 分钟。"]'>
+        <li class="quiz-option">5000 条 / 2MB / 满 24 小时</li>
+        <li class="quiz-option">满 10 分钟 / 满 2GB / 满 240 条</li>
+        <li class="quiz-option">50000 条 / 2048MB / 满 240 分钟（且受 10 分钟下限约束）</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 某台 bookie 磁盘坏了，写入路径上的正确剧情是？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对：createComplete 记下 Created new ledger，createNewOpAddEntryForNewLedger 把挂起请求整体搬到新卷——旧账封存、新账另起。","没有修复流程：ledger 封卷后本就只读，坏卷不修。","副本条带化摊在多台 bookie 上，写入不会停，更不用客户端重放。"]'>
+        <li class="quiz-option">封卷换新卷：新 ledger 开在健康 bookie 上，挂起写请求整体搬过去</li>
+        <li class="quiz-option">停写修复坏盘上的 ledger，修完继续写</li>
+        <li class="quiz-option">把该 topic 全量迁回客户端重放</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. offloadLoop 搬运一卷 ledger 的前提，和消费者读到它时的体验分别是？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["正在写入的卷随时在变，没法整体复制；“透明”的含义是接口不变、消费者无感，不是读得更快。","对：封卷不可变才有资格整体搬走；回源走 offloader 的只读句柄，消费者无感。","搬运的前提是封卷不可变，且这件事对消费者完全透明。"]'>
+        <li class="quiz-option">卷必须正在写入；消费者读到 offload 数据会明显变快</li>
+        <li class="quiz-option">卷已封卷不可变；消费者按同一套接口透明回源，如同什么都没发生</li>
+        <li class="quiz-option">卷已封卷不可变；但消费者必须先迁移订阅才能读到</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 09 思考题与收束 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：为什么把 ledger 设计成"写满就封卷"，而不是"一直追加一个大文件"？封卷粒度换来了什么、又付出了什么？<span class="chev">展开解析 ▾</span></summary>
+    <div class="details-body">
+      <p>先看大文件方案的病：一个 topic 一个无限追加的文件，删除只能逐条标记、压缩在后台无止境地跑；单盘坏了整条流水不可用；想搬去别的存储，面对的是一个天天在变的活文件。封卷方案把这三件事一次性解决：<strong>卷是公共单位</strong>——所有订阅的游标越过整卷，直接删文件，不用逐条清理；卷条带化摊在多台 bookie 上，单盘故障只伤到部分卷；卷不可变，才能整体复制去对象存储。看 offloadLoop 的四步和 createComplete 的换卷，全都是在这个粒度上操作的。代价也要认：卷粒度让故障切换略粗（坏一台 bookie，未封的卷要作废重开，浪费一点写入）；读路径多了"这卷在哪本 bookie"的元数据查找；小 topic 也会周期性产生新卷，bookie 上的卷数随 topic 数水涨船高，所以才有 5 万条 / 2GB / 4 小时这组默认值去平衡。一句话：封卷粒度 = 故障恢复、删除、分层迁移三件事的最小公倍数，选对了粒度，后面全是顺手的副产品。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：如果要把"计算存储分层"抄回自己公司的系统，哪三样东西必须先想清楚？<span class="chev">展开解析 ▾</span></summary>
+    <div class="details-body">
+      <p>第一样，<strong>状态清单</strong>：把计算层手里所有状态列出来，逐个决定搬去哪。Pulsar 的清单很干净：消息给 BookKeeper，进度（cursor）也给 BookKeeper，归属关系这种轻元数据给元数据存储——正因为重的全搬走了，broker 才敢无状态。抄的时候最容易漏的是"隐性状态"：本地缓存、连接会话、未 flush 的批量缓冲，出故障时它们都会变成正确性问题。第二样，<strong>元数据一致性</strong>：分层之后"谁拥有什么"全靠元数据存储仲裁，owner 归属、卷清单、offload 中间态都要能扛住重启与并发（源码里 prepareLedgerInfoForOffloaded 先登记中间态、成功后才回写正式元数据，就是为了崩溃后可判定）。第三样，<strong>运维三种角色</strong>：broker、存储节点、元数据存储要分别部署、监控、升级，排障还要跨进程看调用链。建议的路径是先做"不可变分卷 + 按卷清理"（收益立现、架构不变），验证卷管理稳定后，再引入独立存储层与对象存储冷化——Pulsar 三层架构是结果，不是起点，别一上来就抄终态。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 10 本期要点与延伸 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>本期要点与延伸阅读</h2>
+  <div class="card card-tip">
+    <p><strong>Pulsar 入门系列五期回顾：</strong></p>
+    <ul>
+      <li>会用层（第 1-4 期）：认知与心智模型、standalone 跑通、六块积木与三层楼、Spring Boot 端到端实战；</li>
+      <li>会读层（本期）：计算存储分层的源码兑现、一条消息的四站旅程、封卷三条件与换卷、offload 四步；</li>
+      <li>能抄走的设计三个词：状态出计算层、分片日志、写路径单写者串行；</li>
+      <li>读码路线一条：getTopic → publishMessage → internalAsyncAddEntry → OpAddEntry → readMoreEntries → offloadLoop，每步只回答一个问题；</li>
+      <li>版本感：源码基准 tag <code>v4.2.4</code>（Latest，2026-08-03），4.0 LTS 并行，5.0 尚在里程碑。</li>
+    </ul>
+    <p>Pulsar 入门系列就聊到这里。下一个项目我们开启 <strong>etcd</strong>——Kubernetes 的元数据心脏，工业级 Raft 实现，同样从"是什么、凭什么活下来"讲起。</p>
+  </div>
+  <p><strong>Primary source：</strong><a href="https://pulsar.apache.org/docs/4.2.x/concepts-architecture-overview/" target="_blank" rel="noopener">Pulsar 4.2.x · Architecture Overview</a>（broker 无状态、BookKeeper WAL 定位的一手出处）与 <a href="https://github.com/apache/pulsar/tree/v4.2.4" target="_blank" rel="noopener">github.com/apache/pulsar @ v4.2.4 源码</a>（本期所有类路径与行号的核对基准，2026-09-19）。分层存储细节见 <a href="https://pulsar.apache.org/docs/4.2.x/concepts-tiered-storage/" target="_blank" rel="noopener">Tiered storage 概念页</a>。</p>
+  <p class="note"><span class="h">延伸阅读（daily 线原理专题）</span>存算分离与 Kafka 对比：<a href="../../daily-tech-course/lessons/0012-pulsar-vs-kafka.html">《Apache Pulsar 存算分离架构与 Kafka 对比》</a>；订阅模型与游标原理：<a href="../../daily-tech-course/lessons/0013-pulsar-subscription-models.html">《Apache Pulsar 订阅模型深入》</a>；可靠性全链路：<a href="../../daily-tech-course/lessons/0021-pulsar-message-reliability.html">《消息到底丢在哪：消息可靠性全链路》</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0014-pulsar-spring-in-action.html">← 上一期：实战场景</a>
+  <span class="next">Pulsar 系列完 · 回课程目录</span>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>
