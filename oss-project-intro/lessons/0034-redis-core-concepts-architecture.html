@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Redis 系列第 3 期：命令背后的概念地图与整体架构 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0034</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0033-redis-quickstart.html">上一期:0033</a> · Redis 系列第 3 期 / 共 5 期 · <a href="0035-redis-in-action.html">下一期:0035</a> · <a href="https://redis.io" target="_blank" rel="noopener">redis.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · REDIS 系列第 3 期：核心概念与整体架构</p>
+  <h1>看清 Redis：命令背后的概念地图与整体架构</h1>
+  <p class="subtitle">上一期我们把 Redis 跑了起来，在 redis-cli 里敲下 SET 和 GET，完成了第一次读写。但命令敲下去到数据返回，中间经过了哪些组件？本期你带走一张<strong>概念地图</strong>：命令面与实现面两层术语、键的生命周期（过期与淘汰）、持久化两制式、复制三件套，再加一张自绘的整体架构图和一份按 tag 8.10.2 逐个核对的源码模块地图。每个概念只建立"叫什么、管什么"，实现细节留给第 5 期源码导读。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 缓存与数据结构 · C · RSALv2/SSPLv1/AGPLv3 三许可</span>
+    <span class="tag">📦 基于 8.10.2（GitHub Latest）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 3 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 系列地图 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>系列地图：承重墙期</h2>
+  <p>老规矩先看地图。第 1 期立住了心智模型——内存数据结构服务器；第 2 期把实例跑起来敲了第一条命令；<strong>本期是五期里的承重墙</strong>：术语体系与整体架构一次铺完，第 4 期实战里每个名词都会变成实打实的一步，第 5 期源码导读沿着本期画好的模块地图往下读。先铺图，再进正题。</p>
+</section>
+
+<!-- ================= 02 一条命令的旅程 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>一条 GET 的旅程：命令敲下去之后</h2>
+  <p>先把第 2 期敲过的 <code>GET name</code> 放大看。你在客户端回车后，命令经历四站：</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 240" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar34" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+
+    <rect x="14" y="60" width="130" height="110" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="79" y="92" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">客户端</text>
+    <text x="79" y="114" text-anchor="middle" fill="var(--muted)" font-size="9.5">redis-cli · 各语言 SDK</text>
+    <text x="79" y="134" text-anchor="middle" fill="var(--muted)" font-size="9.5">GET name ⏎</text>
+
+    <line x1="144" y1="115" x2="192" y2="115" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar34)"/>
+    <text x="168" y="100" text-anchor="middle" fill="var(--muted)" font-size="8.5">RESP 协议</text>
+
+    <rect x="196" y="24" width="180" height="182" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="286" y="52" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">redis-server 进程</text>
+    <rect x="210" y="64" width="152" height="40" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="286" y="80" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">IO 线程组</text>
+    <text x="286" y="96" text-anchor="middle" fill="var(--muted)" font-size="8.5">读写 socket + 解析协议（可多线程）</text>
+    <rect x="210" y="112" width="152" height="58" rx="6" fill="var(--card)" stroke="var(--accent)" stroke-width="1.2"/>
+    <text x="286" y="130" text-anchor="middle" fill="var(--accent-3)" font-size="10" font-weight="700">事件循环 · 命令执行</text>
+    <text x="286" y="147" text-anchor="middle" fill="var(--muted)" font-size="8.5">单线程 · 命令逐条串行</text>
+    <text x="286" y="162" text-anchor="middle" fill="var(--muted)" font-size="8.5">无锁 · 无并发冲突</text>
+
+    <line x1="376" y1="141" x2="424" y2="141" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar34)"/>
+    <text x="400" y="126" text-anchor="middle" fill="var(--muted)" font-size="8.5">查键</text>
+
+    <rect x="428" y="60" width="180" height="120" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="518" y="86" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">键空间（内存）</text>
+    <rect x="442" y="96" width="152" height="30" rx="6" fill="var(--bg)" stroke="var(--line)"/>
+    <text x="518" y="115" text-anchor="middle" fill="var(--muted)" font-size="9">keys 字典：键 → 值对象</text>
+    <rect x="442" y="134" width="152" height="30" rx="6" fill="var(--bg)" stroke="var(--line)"/>
+    <text x="518" y="153" text-anchor="middle" fill="var(--muted)" font-size="9">expires 过期字典：键 → 时间戳</text>
+
+    <line x1="608" y1="120" x2="652" y2="120" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar34)"/>
+    <rect x="656" y="82" width="94" height="70" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="703" y="112" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">回包</text>
+    <text x="703" y="132" text-anchor="middle" fill="var(--muted)" font-size="9">"hello"</text>
+
+    <text x="14" y="226" fill="var(--muted)" font-size="9.5">读请求四站走完：协议解析可多线程，命令执行永远是单线程串行——记住这条分界线，第 07 节给出官方口径</text>
+  </svg>
+  </div>
+
+  <p>写请求多走两站：命令执行后，除更新键空间，还会被追加进 AOF 缓冲、转发给副本——这两站对应第 05、06 节。下面把每一站的术语一次铺完。</p>
+</section>
+
+<!-- ================= 03 命令面与实现面 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>概念地图·数据面：命令面与实现面两层术语</h2>
+  <p>Redis 的术语要分两层记。<strong>命令面</strong>是你敲命令时面对的类型——第 1 期说过，官方开篇第一句是 "Redis is a data structure server"，六个核心类型各配一族原子命令：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>命令面类型</th><th>代表命令</th><th>一句话定位</th></tr></thead>
+    <tbody>
+      <tr><td>String</td><td>SET · GET · INCR</td><td>字节序列：缓存、计数器、分布式锁的基础</td></tr>
+      <tr><td>List</td><td>LPUSH · LRANGE</td><td>按插入顺序的双端队列：时间线、简单队列</td></tr>
+      <tr><td>Hash</td><td>HSET · HGET</td><td>字段-值映射：对象存档，改一个字段不用全量读写</td></tr>
+      <tr><td>Set</td><td>SADD · SINTER</td><td>无序去重集合：标签、共同关注、抽奖</td></tr>
+      <tr><td>Sorted set</td><td>ZADD · ZRANGE</td><td>成员挂分数自动排序：排行榜、延迟队列</td></tr>
+      <tr><td>Stream</td><td>XADD · XREAD</td><td>只追加日志：事件流，消费组读位点</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p><strong>实现面</strong>是每种类型背后真正的内存结构。用 <code>OBJECT ENCODING</code> 能当场看穿：同一个命令面类型，小对象用紧凑编码，长大后自动换成通用编码——官方文档原话：一旦操作让空间编码无法维持，就自动转成通用编码。本期<strong>只点名叫什么、不展开怎么实现</strong>：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>命令面类型</th><th>底层编码（按官方 OBJECT ENCODING 文档）</th></tr></thead>
+    <tbody>
+      <tr><td>String</td><td>int（整数值）· embstr（短字符串）· raw（长字符串）</td></tr>
+      <tr><td>List</td><td>listpack（小）· quicklist（quicklist 挂 listpack 节点）</td></tr>
+      <tr><td>Hash</td><td>listpack（小）· hashtable（字典）</td></tr>
+      <tr><td>Set</td><td>intset（纯整数小集合）· listpack（小）· hashtable</td></tr>
+      <tr><td>Sorted set</td><td>listpack（小）· skiplist（跳表）</td></tr>
+      <tr><td>Stream</td><td>stream：基数树（rax）组织的一串 listpack</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">这批名字就是第 5 期源码导读的主演名单：SDS（简单动态字符串，embstr/raw 的底层）、listpack、quicklist、intset、skiplist 都在 src/ 下有同名文件。数据结构怎么选型、编码何时切换的原理深入见：<a href="../../daily-tech-course/lessons/0005-redis-data-structures.html">daily 线第 0005 期《Redis 数据结构与选型》</a>，本线不换皮重讲。</p>
+</section>
+
+<!-- ================= 04 键的生命周期 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>概念地图·生命周期：过期删除与内存淘汰</h2>
+  <p>键空间里每个键有两条"死法"，机制完全不同，先分清楚：<strong>过期删除</strong>管"带了 TTL 的键到点该消失"，<strong>内存淘汰</strong>管"内存满了该牺牲谁"。TTL 到点了键还查得到？正常，因为过期删除分两个时机：</p>
+  <ul>
+    <li><strong>惰性删除（被动）：</strong>访问键时才发现已过期，当场删除并当作不存在——省 CPU，但没人再访问的键会滞留；</li>
+    <li><strong>主动删除（定期抽查）：</strong>Redis 周期性随机抽查一批带过期时间的键，过期的直接删，过期键占比高就继续抽查——兜住"永远不再被访问"的过期键。</li>
+  </ul>
+  <p>实现上，过期时间存在另一张 <code>expires</code> 字典里（绝对 Unix 毫秒时间戳，所以服务器时钟不对会"提前过期"），与键空间主字典分开管。内存淘汰则是另一套：<code>maxmemory</code> 划定内存上限，触顶后按 <code>maxmemory-policy</code> 驱逐。按 2026-09 官方文档，策略族已有<strong>十种</strong>——两大维度的组合：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>作用范围 →<br>淘汰依据 ↓</th><th>全部键 allkeys-*</th><th>仅带 TTL 的键 volatile-*</th></tr></thead>
+    <tbody>
+      <tr><td>最近未使用（近似 LRU）</td><td>allkeys-lru</td><td>volatile-lru</td></tr>
+      <tr><td>最近未修改（LRM，8.6 新增）</td><td>allkeys-lrm</td><td>volatile-lrm</td></tr>
+      <tr><td>访问频率（近似 LFU，4.0 起）</td><td>allkeys-lfu</td><td>volatile-lfu</td></tr>
+      <tr><td>随机</td><td>allkeys-random</td><td>volatile-random</td></tr>
+      <tr><td>剩余存活时间最短</td><td>—</td><td>volatile-ttl</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>两句话记要点：LRU/LFU 都是<strong>近似算法</strong>——不维护全局链表，驱逐时随机抽 <code>maxmemory-samples</code>（默认 5）个候选，省内存省到极致；volatile 族在没有任何键带 TTL 时<strong>退化为 noeviction</strong>（触顶直接报错，宁可拒绝写入也不丢数据）。策略怎么选、缓存命中率怎么算：原理深入见 <a href="../../daily-tech-course/lessons/0011-redis-memory-management.html">daily 线第 0011 期《Redis 内存管理》</a>。</p>
+</section>
+
+<!-- ================= 05 持久化两制式 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>概念地图·持久面：RDB 快照与 AOF 日志</h2>
+  <p>内存数据库怕断电，持久化就是"把内存状态落到磁盘"的两条路线，官方文档称它们为可组合的选项：<strong>RDB 是时间点快照，AOF 是写命令日志</strong>——一个是"结果存档"，一个是"过程回放"：</p>
+  <ul>
+    <li><strong>RDB（Redis Database）：</strong>按 save 点（如"60 秒内至少 1000 次修改"）生成某一刻的二进制全量快照，存为单个紧凑的 <code>dump.rdb</code>。生成时主进程 fork 出子进程，靠写时复制不动主进程内存——性能影响小、恢复快，代价是两次快照之间的数据在宕机时丢掉；</li>
+    <li><strong>AOF（Append Only File）：</strong>每条写命令执行后追加进日志，重启时回放重建数据。落盘节奏由 <code>appendfsync</code> 决定：always（每条）、everysec（每秒，默认，最多丢一秒）、no（交给操作系统）。日志越写越大，Redis 会在后台<strong>自动重写</strong>——用重建当前数据集所需的最小命令集生成新日志。7.0 起采用多文件形态：base 文件（重写产物）+ incr 增量文件 + manifest 清单；</li>
+    <li><strong>两者同开</strong>是官方推荐姿态：AOF 保证数据更完整（重启时优先用它重建），RDB 兜底做备份与快速恢复。8.10 又给了新工具：<code>BACKUP</code> 命令族，不停写产出可直接恢复的备份。</li>
+  </ul>
+  <p class="note">概念先到"两制式 + 取舍"为止：RDB 换性能与紧凑、AOF 换数据安全窗口。参数细节、故障排障与容量规划见：<a href="../../daily-tech-course/lessons/0006-redis-persistence.html">daily 线第 0006 期《Redis 持久化机制：RDB vs AOF 的架构权衡》</a>。</p>
+</section>
+
+<!-- ================= 06 复制三件套 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>概念地图·分布面：主从、哨兵、集群分片</h2>
+  <p>单机撑不住可用性与数据量时，Redis 给了三层递进的方案，官方统称里它们是叠加关系而非三选一：</p>
+  <ul>
+    <li><strong>主从复制（replication）：</strong>副本（replica）用一行 <code>replicaof 主节点 端口</code> 挂到主节点下，持续接收主节点的写命令流，默认<strong>异步复制</strong>——主节点不等副本确认就回客户端，低延迟但故障切换时可能丢最后一点写入。断线重连先尝试<strong>部分重同步</strong>（只补断连期间缺的命令流），补不上才全量同步（主节点生成 RDB 发过去再续命令流）；</li>
+    <li><strong>哨兵（Sentinel）：</strong>一组独立进程（至少三个，互为多数派）盯着主从，官方列的四件事：<strong>监控</strong>主从健康、<strong>通知</strong>运维或程序、主挂了挑一个副本<strong>自动故障转移</strong>升主、充当客户端的<strong>配置提供者</strong>（问它"当前主节点是谁"）。多个哨兵对故障达成一致才行动，避免单点误判；</li>
+    <li><strong>集群（Cluster）：</strong>数据量大到一台装不下时用。数据按<strong>哈希槽</strong>分片：每个键属于 16384 个槽之一（CRC16 对键取模），槽分给多个主节点，每个主节点再挂副本。客户端访问错节点会被重定向到对的节点。</li>
+  </ul>
+  <p class="note">三者选型与脑裂、数据丢失窗口的分析见：<a href="../../daily-tech-course/lessons/0007-redis-sentinel-vs-cluster.html">daily 线第 0007 期《Redis 集群方案：哨兵 vs Cluster》</a>；本期只立住"主从管复制、哨兵管高可用、集群管分片"这根总纲。</p>
+</section>
+
+<!-- ================= 07 单线程口径 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>钩子一："单线程"的准确口径</h2>
+  <p>每秒处理上百万次操作的引擎竟是"单线程"——这句流传最广的话，官方文档给过精确表述（《Redis benchmark》原文）：<strong>"Redis is, mostly, a single-threaded server from the POV of commands execution"</strong>——从<strong>命令执行</strong>的视角看，Redis 大多是单线程的。整条命令链里只有"执行"这一环是串行的：</p>
+  <ul>
+    <li><strong>执行串行的收益：</strong>所有命令逐条跑，没有锁、没有竞态，INCR 天然原子——快的前提是操作全在内存（微秒级），串行成本可以忽略；</li>
+    <li><strong>6.0 起 IO 可多线程：</strong>网络读写与协议解析从主线程拆了出去。官方 redis.conf 注释原话：开启 IO 线程后"不仅写回用线程，读取与协议解析也用线程"。8.0 把 IO 线程重新实现，吞吐进一步提升；</li>
+    <li><strong>要多核怎么办：</strong>官方口径是<strong>一台机器起多个实例</strong>横向扩展，而不是指望单实例吃满多核；</li>
+    <li><strong>代价：</strong>一条慢命令（如超大集合的全量遍历）会阻塞后面所有命令——延迟排查先查慢查询，见 <a href="../../daily-tech-course/lessons/0010-redis-performance-tuning.html">daily 线第 0010 期《Redis 性能调优》</a>。</li>
+  </ul>
+  <p>所以准确说法是：<strong>命令执行单线程，IO 读写与解析可多线程，后台任务（持久化、过期抽查、AOF 落盘）各有线程或子进程</strong>。"Redis 是单线程的"这句话省略的主语，正是理解它并发模型的关键。</p>
+</section>
+
+<!-- ================= 08 整体架构图 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>把地图拼起来：整体架构一张图</h2>
+  <p>五节术语全部就位，拼成一张总图。从左到右跟着一条命令走一遍，你会发现每个框都是前面某节的名字：</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 470" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar34b" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+      <marker id="ar34c" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+
+    <rect x="14" y="180" width="120" height="120" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="74" y="216" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">客户端</text>
+    <text x="74" y="238" text-anchor="middle" fill="var(--muted)" font-size="9">redis-cli · SDK</text>
+    <text x="74" y="256" text-anchor="middle" fill="var(--muted)" font-size="9">SET / GET / ZADD …</text>
+    <text x="74" y="278" text-anchor="middle" fill="var(--accent-3)" font-size="8.5">RESP 协议</text>
+
+    <line x1="134" y1="240" x2="176" y2="240" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar34b)"/>
+
+    <rect x="180" y="24" width="290" height="380" rx="12" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="325" y="50" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">redis-server（单进程，一图看全）</text>
+
+    <rect x="196" y="62" width="258" height="44" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="325" y="80" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">事件循环（ae.c）</text>
+    <text x="325" y="97" text-anchor="middle" fill="var(--muted)" font-size="8.5">IO 线程：读写 + 协议解析 · 命令执行：单线程</text>
+
+    <rect x="196" y="118" width="258" height="64" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="325" y="137" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">键空间（内存数据库）</text>
+    <text x="325" y="154" text-anchor="middle" fill="var(--muted)" font-size="8.5">keys 字典：键 → 值对象（db.c · object.c）</text>
+    <text x="325" y="171" text-anchor="middle" fill="var(--muted)" font-size="8.5">expires 过期字典：键 → 绝对毫秒时间戳</text>
+
+    <rect x="196" y="194" width="125" height="60" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="258" y="212" text-anchor="middle" fill="var(--ink)" font-size="9.5" font-weight="700">过期删除（expire.c）</text>
+    <text x="258" y="228" text-anchor="middle" fill="var(--muted)" font-size="8">惰性：访问时发现即删</text>
+    <text x="258" y="243" text-anchor="middle" fill="var(--muted)" font-size="8">主动：周期随机抽查</text>
+    <rect x="329" y="194" width="125" height="60" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="391" y="212" text-anchor="middle" fill="var(--ink)" font-size="9.5" font-weight="700">内存淘汰（evict.c）</text>
+    <text x="391" y="228" text-anchor="middle" fill="var(--muted)" font-size="8">maxmemory 触顶后按策略驱逐</text>
+    <text x="391" y="243" text-anchor="middle" fill="var(--muted)" font-size="8">十种策略 · 近似 LRU/LFU/LRM</text>
+
+    <rect x="196" y="266" width="258" height="56" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="325" y="284" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">持久化（rdb.c · aof.c · rio.c）</text>
+    <text x="325" y="301" text-anchor="middle" fill="var(--muted)" font-size="8">RDB：fork 子进程做全量快照（写时复制）</text>
+    <text x="325" y="316" text-anchor="middle" fill="var(--muted)" font-size="8">AOF：写命令追加 → 缓冲 → fsync → 后台重写</text>
+
+    <rect x="196" y="334" width="258" height="56" rx="8" fill="var(--card)" stroke="var(--accent)" stroke-width="1.2"/>
+    <text x="325" y="352" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">复制（replication.c）</text>
+    <text x="325" y="369" text-anchor="middle" fill="var(--muted)" font-size="8">写命令流异步转发给副本（默认异步复制）</text>
+    <text x="325" y="384" text-anchor="middle" fill="var(--muted)" font-size="8">断线先试部分重同步（PSYNC），不行再全量</text>
+
+    <line x1="325" y1="106" x2="325" y2="114" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar34c)"/>
+    <line x1="325" y1="182" x2="325" y2="190" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar34c)"/>
+    <line x1="325" y1="254" x2="325" y2="262" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar34c)"/>
+    <line x1="325" y1="322" x2="325" y2="330" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar34c)"/>
+
+    <line x1="470" y1="360" x2="540" y2="330" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar34b)"/>
+    <text x="512" y="326" text-anchor="middle" fill="var(--muted)" font-size="8.5">命令流</text>
+
+    <rect x="544" y="296" width="200" height="90" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="644" y="318" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">副本节点（replica）</text>
+    <text x="644" y="338" text-anchor="middle" fill="var(--muted)" font-size="8.5">replicaof 挂到主节点</text>
+    <text x="644" y="355" text-anchor="middle" fill="var(--muted)" font-size="8.5">数据集与主一致 · 读可分流</text>
+    <text x="644" y="372" text-anchor="middle" fill="var(--accent-3)" font-size="8">集群模式下再按 16384 槽分片</text>
+
+    <rect x="544" y="120" width="200" height="120" rx="10" fill="var(--warn-bg)" stroke="var(--line)"/>
+    <text x="644" y="142" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">哨兵 Sentinel × 3（26379）</text>
+    <text x="644" y="162" text-anchor="middle" fill="var(--muted)" font-size="8.5">监控 · 通知 · 自动故障转移</text>
+    <text x="644" y="179" text-anchor="middle" fill="var(--muted)" font-size="8.5">配置提供者：客户端问它"主在哪"</text>
+    <text x="644" y="200" text-anchor="middle" fill="var(--muted)" font-size="8">多数派一致才行动，不依赖主节点存活</text>
+    <line x1="644" y1="244" x2="644" y2="292" stroke="var(--muted)" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#ar34c)"/>
+    <text x="656" y="272" fill="var(--muted)" font-size="8">盯着主从拓扑</text>
+
+    <text x="14" y="440" fill="var(--muted)" font-size="9.5">实线 = 命令与数据流；虚线 = 观测与控制流。集群模式（cluster.c）下"主从 + 哨兵"整体平移到多节点：每个主节点管一段槽，哨兵的活由节点间总线分担</text>
+    <text x="14" y="458" fill="var(--muted)" font-size="9.5">括号内文件名即该组件在 src/ 下的实现入口——架构图与下一节的模块地图一一对应</text>
+  </svg>
+  </div>
+</section>
+
+<!-- ================= 09 模块地图 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>仓库模块地图：src/ 目录逐个对号（tag 8.10.2 核对）</h2>
+  <p>架构图上每个组件都有名字，名字在源码里就是文件。下面这份地图的每个文件名都在 <a href="https://github.com/redis/redis/tree/8.10.2/src" target="_blank" rel="noopener">github.com/redis/redis 的 8.10.2 tag</a> 下逐个核对过（2026-09-19）：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>src/ 文件</th><th>一句话职责</th></tr></thead>
+    <tbody>
+      <tr><td>server.c</td><td>主循环与命令表：serverCron 周期任务、所有命令的注册与分发入口</td></tr>
+      <tr><td>networking.c</td><td>客户端连接：命令接收、RESP 协议解析与回复写出</td></tr>
+      <tr><td>ae.c / iothread.c</td><td>事件循环封装（epoll/kqueue/select）/ IO 线程实现</td></tr>
+      <tr><td>db.c · object.c</td><td>键空间：键的增删查、TTL 处理 / 值对象与编码切换</td></tr>
+      <tr><td>expire.c · evict.c</td><td>过期删除（惰性 + 主动抽查）/ 内存淘汰（十种策略）</td></tr>
+      <tr><td>t_string.c 等六个</td><td>命令面类型的命令实现：t_string / t_list / t_hash / t_set / t_zset / t_stream</td></tr>
+      <tr><td>rdb.c · aof.c · rio.c</td><td>RDB 快照 / AOF 日志与重写 / 抽象 IO 层（两边共用的读写接口）</td></tr>
+      <tr><td>replication.c</td><td>主从复制：命令流转发、PSYNC 部分/全量重同步</td></tr>
+      <tr><td>sentinel.c · cluster.c</td><td>哨兵（独立进程模式）/ 集群（槽管理、节点总线、故障转移）</td></tr>
+      <tr><td>sds.c · dict.c</td><td>简单动态字符串（SDS）/ 通用哈希字典（键空间的地基）</td></tr>
+      <tr><td>listpack.c · intset.c · rax.c</td><td>紧凑列表编码 / 整数集合编码 / 基数树（Stream 的骨架）</td></tr>
+      <tr><td>zmalloc.c</td><td>内存分配封装：所有内存统计与碎片治理的起点</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">两个读码锚点先记住：命令执行的单线程分界线在 <code>server.c</code> 的事件循环里；键空间的两张字典在 <code>db.c</code>。第 5 期源码导读会从这两处出发，把 SDS、跳表、IO 线程的设计取舍读透。</p>
+</section>
+
+<!-- ================= 10 quiz ================= -->
+<section>
+  <h2><span class="sec-num">10</span>随堂小测</h2>
+  <div class="quiz">
+    <div class="quiz-q">
+      <p class="quiz-question">1. "Redis 是单线程的"——按官方口径，缺的主语是什么？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，整个进程并非单线程，后台任务与 IO 线程早就在并行。","对的：官方原话是从命令执行视角看大多是单线程——IO 读写与协议解析自 6.0 起可多线程。","不对，恰好相反，官方建议单实例不吃多核，要多核就起多个实例。"]'>
+        <li class="quiz-option">整个 redis-server 进程只有一个线程</li>
+        <li class="quiz-option">命令执行在单线程里串行</li>
+        <li class="quiz-option">Redis 无法利用任何多核 CPU</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 一个带 TTL 的键过期后仍能被 GET 到，最可能的原因是？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，副本上读不到已过期键是主节点 DEL 未到时的短窗口，与本场景无关。","不对，内存淘汰只在 maxmemory 触顶时发生，与 TTL 到期无关。","对的：过期删除是惰性加主动抽查，没人访问的过期键要等主动抽查扫到它。"]'>
+        <li class="quiz-option">它是从副本上读到的，副本永不删键</li>
+        <li class="quiz-option">内存淘汰策略把它保护了起来</li>
+        <li class="quiz-option">惰性删除要等访问，主动抽查还没扫到它</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 关于 RDB 与 AOF 的取舍，哪个说法符合官方文档？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：官方推荐两者同开，重启时 AOF 更完整所以优先用它重建数据集，RDB 负责备份与快速恢复。","不对，AOF 默认 appendfsync everysec，最多丢一秒左右，不是全丢。","不对，RDB 才是 fork 子进程加写时复制做快照，AOF 是追加写命令。"]'>
+        <li class="quiz-option">两者可以同开，重启重建数据时 AOF 优先</li>
+        <li class="quiz-option">AOF 开了 everysec 就一条都不会丢</li>
+        <li class="quiz-option">AOF 靠 fork 子进程加写时复制落盘</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. 主从、哨兵、集群三层各自管的活，哪个对应关系是对的？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，哨兵是独立的监控进程，不做数据分片。","不对，主从复制本身不带故障转移，主挂了它不会自己选新主。","对的：主从管复制与读分流，哨兵管监控与自动故障转移，集群按 16384 槽做分片并内置故障转移。"]'>
+        <li class="quiz-option">主从管分片，哨兵管分片调度，集群管监控</li>
+        <li class="quiz-option">主从自带自动故障转移，不需要哨兵</li>
+        <li class="quiz-option">主从管复制，哨兵管高可用，集群管分片</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 11 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">11</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：把过期删除设计成"定时器精确到点删除"不行吗？为什么 Redis 宁可选"惰性 + 随机抽查"这种看起来不精确的组合？</summary>
+    <div class="details-body">
+      <p>先算定时器方案的账。若每个带 TTL 的键挂一个精确定时器，百万级带过期键的实例就要维护百万个定时事件：事件表本身吃内存，事件循环每次要处理大量到点回调，CPU 在键稀疏过期时大量空转、在键密集过期时集中抖动——而<strong>绝大多数业务根本不需要毫秒级精确的过期</strong>，会话晚删几秒没有业务后果。再看 Redis 的组合怎么覆盖两类极端：惰性删除保证"只要有人访问，过期键立刻不可见"，把删除成本摊到访问路径上；主动抽查用固定频率的少量随机采样兜住"再也没人访问"的键，让过期键总量收敛——官方文档的描述是周期性地在带过期键中随机测试一批、删掉其中已过期的。两头都有残余误差：惰性路径下没人访问的键会短暂滞留（但主动抽查在收敛），抽查路径下单次扫描不完（但下个周期继续）。这是典型的<strong>"用可接受的近似，换掉不可接受的成本"</strong>——与近似 LRU 不维护全局链表是同一个设计哲学，第 5 期读 expire.c 源码时你会看到这套抽查的具体实现。反例也要会认：秒级精确过期的场景（如限流窗口）不该依赖"到点即删"，该按"逻辑过期 + 业务判断"或用有序集合按时间戳扫描来设计。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：主从复制是异步的，哨兵故障切换时"最后一条写命令"可能还没到副本就被提升为新主。单靠 Redis 自身能把这个丢失窗口收窄到什么程度？</summary>
+    <div class="details-body">
+      <p>先承认上限：官方文档明确说异步复制下<strong>无法保证已确认写入在故障切换后一定存活</strong>，WAIT 命令也只是降低概率而非提供强一致。但 Redis 给了三道收窄窗口的闸门，思路都是"把不可控的丢数窗口变成有界的"。第一道，<code>min-replicas-to-write</code> + <code>min-replicas-max-lag</code>：主节点发现可用副本数不足、或副本确认滞后超过阈值就拒绝写入——宁可短暂不可写，也不给"孤立主"继续收写的窗口，哨兵文档的网络分区案例用的正是它。第二道，哨兵选副本升主时按"优先级 → 复制偏移量"排序，<strong>偏移量大者胜</strong>——优先挑数据最全的副本，天然减少被丢弃的命令量。第三道，部分重同步（PSYNC）让切换后旧主降级重连时只补差异，缩短数据再收敛的时间。三道闸门叠完，窗口从"无限"变成"最多若干秒的确认滞后"，代价是可用性轻微下降——这正是哨兵文档说的 trade off。想彻底消除窗口只有两条路：同步复制（性能代价，Redis 不做）或外部共识层（代价更高）。架构师的判断点不是"能不能丢"，而是<strong>这个业务的写入能接受几秒的有界丢失</strong>，再决定闸门开多大。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 12 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">12</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>术语分两层：命令面六大类型各带一族原子命令；实现面编码（SDS/listpack/intset/skiplist 等）只点名，第 5 期展开；</li>
+      <li>键的生命周期：过期删除是惰性 + 主动抽查，淘汰是 maxmemory 触顶后按十种策略驱逐（8.6 起新增 LRM 族），LRU/LFU 都是近似算法；</li>
+      <li>持久化两制式：RDB 是 fork 子进程做的时间点快照，AOF 是可回放的写命令日志（默认每秒 fsync、自动重写），官方建议两者同开；</li>
+      <li>复制三件套：主从管异步复制与命令流，哨兵管监控/通知/故障转移/配置提供者，集群按 16384 个哈希槽分片；</li>
+      <li>单线程的准确口径：命令执行单线程串行，IO 读写与协议解析 6.0 起可多线程，8.0 重写加强，多核靠多实例。</li>
+    </ul>
+  </div>
+  <p><strong>延伸阅读（daily 线已讲过原理的主题，本期不重讲）：</strong><a href="../../daily-tech-course/lessons/0005-redis-data-structures.html">数据结构与选型</a> · <a href="../../daily-tech-course/lessons/0006-redis-persistence.html">持久化 RDB vs AOF 权衡</a> · <a href="../../daily-tech-course/lessons/0007-redis-sentinel-vs-cluster.html">哨兵 vs Cluster 选型</a> · <a href="../../daily-tech-course/lessons/0011-redis-memory-management.html">内存管理：淘汰与过期</a> · <a href="../../daily-tech-course/lessons/0010-redis-performance-tuning.html">性能调优与慢命令排查</a></p>
+  <p><strong>下期预告：</strong>概念地图在你脑子里了。下一期我们把它用起来——端到端做一个真实小场景：从需求出发把缓存、计数与排行榜接进一个 Spring Cloud 服务，看看今天这些名词怎么变成实打实的配置与代码。</p>
+  <p><strong>Primary source：</strong><a href="https://redis.io/docs/latest/develop/" target="_blank" rel="noopener">Redis 官方文档 · Develop 入口</a>——本期全部概念（数据类型、持久化、复制、哨兵、集群、淘汰）的官方定义都在这条文档树里，与 8.10 版本匹配的具体页面：<a href="https://redis.io/docs/latest/develop/data-types/" target="_blank" rel="noopener">data types</a> · <a href="https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/" target="_blank" rel="noopener">persistence</a> · <a href="https://redis.io/docs/latest/operate/oss_and_stack/management/replication/" target="_blank" rel="noopener">replication</a> · <a href="https://redis.io/docs/latest/operate/oss_and_stack/management/sentinel/" target="_blank" rel="noopener">sentinel</a> · <a href="https://redis.io/docs/latest/operate/oss_and_stack/management/scaling/" target="_blank" rel="noopener">cluster</a> · <a href="https://redis.io/docs/latest/develop/reference/eviction/" target="_blank" rel="noopener">key eviction</a>；源码模块名核对于 <a href="https://github.com/redis/redis/tree/8.10.2/src" target="_blank" rel="noopener">redis/redis tag 8.10.2 · src/</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0033-redis-quickstart.html">← 上一期：5 分钟跑起来 Redis</a></span>
+  <a class="next" href="0035-redis-in-action.html">下一期：Redis 实战：接进真实场景 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

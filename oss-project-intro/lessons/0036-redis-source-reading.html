@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Redis 系列第 5 期：走进 Redis 源码：三个设计决策与一张读码路线图 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0036</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0035-redis-in-action.html">上一期:0035</a> · Redis 系列第 5 期 / 共 5 期（收官） · <a href="https://github.com/redis/redis/tree/8.10.2" target="_blank" rel="noopener">redis/redis @ 8.10.2 ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · REDIS 系列第 5 期：架构与源码导读</p>
+  <h1>走进 Redis 源码：三个设计决策与一张读码路线图</h1>
+  <p class="subtitle">上一期我们用多数据结构组合给一场直播活动搭了后端：缓存挡读、计数器记互动、有序集合扛排行榜。今天 Redis 系列收官，走进源码。本期你带走一张<strong>读码路线图</strong>——顺着一条 ZADD 写命令从启动走到传播，外加三个经典设计决策的来龙去脉：SDS 怎么用内存布局补 C 的短板、zset 为什么养两个结构、单线程的分界线画在哪。本页出现的每个文件、函数与行号，均<strong>逐条核对自 tag 8.10.2</strong>（2026-09-19）。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 缓存与数据结构 · C · RSALv2/SSPLv1/AGPLv3 三许可</span>
+    <span class="tag">📦 基于 v8.10.2（GitHub Latest）· 源码 tag 8.10.2</span>
+    <span class="tag-date">📅 2026-09-19 · 第 5 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 系列地图 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>系列地图：收官期</h2>
+  <p>老规矩先看地图。第 1 期立住心智模型——内存数据结构服务器；第 2 期五分钟跑起来；第 3 期铺开概念地图与整体架构，并留了两个读码锚点：<strong>命令执行的单线程分界线在 server.c 的事件循环里，键空间的两张字典在 db.c</strong>；第 4 期把缓存、计数、排行榜接进真实场景。本期收官，把第 3 期点过名的实现面名词——SDS、listpack、跳表、IO 线程——全部落到文件和函数上。读码先带问题，别从第一行硬啃。</p>
+</section>
+
+<!-- ================= 02 读码路线图 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>先拿成果：一条 ZADD 的生命周期</h2>
+  <p>本期最重要的产出就是这张路线图。读大项目源码最好的方式，是<strong>顺着一条命令走完全程</strong>——我们选第 4 期用过的 ZADD：</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 250" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar36" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="8" y="52" width="132" height="96" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="74" y="80" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">① 启动</text>
+    <text x="74" y="102" text-anchor="middle" fill="var(--accent-3)" font-size="10" font-weight="700">main → aeMain</text>
+    <text x="74" y="122" text-anchor="middle" fill="var(--muted)" font-size="8.5">server.c · ae.c</text>
+
+    <line x1="140" y1="100" x2="152" y2="100" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar36)"/>
+    <rect x="154" y="52" width="132" height="96" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="220" y="80" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">② 收命令</text>
+    <text x="220" y="102" text-anchor="middle" fill="var(--accent-3)" font-size="10" font-weight="700">readQueryFromClient</text>
+    <text x="220" y="122" text-anchor="middle" fill="var(--muted)" font-size="8.5">networking.c · 解析 RESP</text>
+
+    <line x1="286" y1="100" x2="298" y2="100" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar36)"/>
+    <rect x="300" y="52" width="132" height="96" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="366" y="80" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">③ 分发</text>
+    <text x="366" y="102" text-anchor="middle" fill="var(--accent-3)" font-size="10" font-weight="700">processCommand → call</text>
+    <text x="366" y="122" text-anchor="middle" fill="var(--muted)" font-size="8.5">server.c · 查命令表</text>
+
+    <line x1="432" y1="100" x2="444" y2="100" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar36)"/>
+    <rect x="446" y="52" width="132" height="96" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="512" y="80" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">④ 执行</text>
+    <text x="512" y="102" text-anchor="middle" fill="var(--accent-3)" font-size="10" font-weight="700">zaddCommand → zsetAdd</text>
+    <text x="512" y="122" text-anchor="middle" fill="var(--muted)" font-size="8.5">t_zset.c · 双写两个结构</text>
+
+    <line x1="578" y1="100" x2="590" y2="100" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar36)"/>
+    <rect x="592" y="52" width="160" height="96" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="672" y="80" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">⑤ 写传播</text>
+    <text x="672" y="102" text-anchor="middle" fill="var(--accent-3)" font-size="10" font-weight="700">replicationFeedSlaves</text>
+    <text x="672" y="122" text-anchor="middle" fill="var(--muted)" font-size="8.5">replication.c · AOF 落缓冲</text>
+
+    <text x="8" y="190" fill="var(--ink)" font-size="10.5" font-weight="700">怎么用这张图：</text>
+    <text x="8" y="212" fill="var(--muted)" font-size="9.5">· 每站只回答一个问题：谁收的？谁分发的？谁执行的？改了哪个结构？传给了谁？</text>
+    <text x="8" y="232" fill="var(--muted)" font-size="9.5">· 第 2 期的容器还在的话，在各站打断点跑一条 ZADD，调用栈会自己沿这条线展开</text>
+  </svg>
+  </div>
+
+  <p>五站一条线，别的命令同理。下面把三个决策依次讲透——每个都给足三件事：<strong>为什么这么设计、解决什么问题、换种做法会怎样</strong>。</p>
+</section>
+
+<!-- ================= 03 模块地图 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>仓库模块地图：src/ 下本期出场的文件</h2>
+  <p>Redis 的服务端几乎是"一个目录打天下"：src/ 下两百多个文件，每期地图我们只标本期用得到的。以下文件名逐个核对自 tag 8.10.2：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>文件</th><th>一句话职责</th></tr></thead>
+    <tbody>
+      <tr><td>server.c</td><td>主循环与命令表：main 启动一切，processCommand 分发所有命令</td></tr>
+      <tr><td>networking.c</td><td>连接层：读命令、解析 RESP 协议、写回包（readQueryFromClient / writeToClient）</td></tr>
+      <tr><td>ae.c</td><td>事件循环封装：aeMain 大循环，底下适配 epoll/kqueue/select</td></tr>
+      <tr><td>iothread.c</td><td>输入输出线程组：8.0 重新实现的网络多线程，只管读写与解析</td></tr>
+      <tr><td>sds.c / sds.h</td><td>简单动态字符串：所有键、值、参数的字符串底座</td></tr>
+      <tr><td>dict.c</td><td>通用哈希表：键空间主字典与 zset 的成员字典都靠它</td></tr>
+      <tr><td>listpack.c</td><td>紧凑列表编码：小块数据省内存的通用底座</td></tr>
+      <tr><td>t_string.c 等六个</td><td>命令实现：t_string / t_hash / t_list / t_set / t_zset / t_stream</td></tr>
+      <tr><td>db.c / object.c</td><td>键空间查改（lookupKey）/ 值对象与编码切换</td></tr>
+      <tr><td>rdb.c / aof.c</td><td>两套持久化：时间点快照 / 可回放的写命令日志</td></tr>
+      <tr><td>replication.c</td><td>主从复制：命令流转发与部分重同步</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">行号与路径逐条核对自 tag 8.10.2。持久化与复制的机制原理第 3 期讲过，日常使用视角的调优见 daily 线<a href="../../daily-tech-course/lessons/0006-redis-persistence.html">《持久化 RDB vs AOF》</a>与<a href="../../daily-tech-course/lessons/0010-redis-performance-tuning.html">《性能调优》</a>，本期不重讲。</p>
+</section>
+
+<!-- ================= 04 决策一 SDS ================= -->
+<section>
+  <h2><span class="sec-num">04</span>决策一 · SDS：拒绝 C 字符串的理由</h2>
+  <p><strong>为什么这么设计？</strong>C 字符串有三堵墙。取长度要从头数到尾——C 字符串没有长度字段，strlen 逐字节扫描，开销与内容等长，对每秒上万次操作的内存库不可接受；二进制不安全——以空字符当结尾，内容里出现空字节就被截断，图片与序列化对象存不了；拼接不查边界——溢出是 C 程序的经典事故。Redis 的答案是自造 SDS（简单动态字符串）：一段连续内存，头紧贴数据，<strong>指针直接指向数据区</strong>。</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 235" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <rect x="30" y="42" width="86" height="46" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="73" y="62" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">len = 4</text>
+    <text x="73" y="79" text-anchor="middle" fill="var(--muted)" font-size="8.5">用了多长</text>
+    <rect x="116" y="42" width="86" height="46" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="159" y="62" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">alloc = 10</text>
+    <text x="159" y="79" text-anchor="middle" fill="var(--muted)" font-size="8.5">还剩多少</text>
+    <rect x="202" y="42" width="86" height="46" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="245" y="62" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">flags</text>
+    <text x="245" y="79" text-anchor="middle" fill="var(--muted)" font-size="8.5">低 3 位存类型</text>
+    <rect x="288" y="42" width="150" height="46" rx="6" fill="var(--bg)" stroke="var(--accent-3)" stroke-dasharray="4 3"/>
+    <text x="363" y="62" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">buf: n a m e \0</text>
+    <text x="363" y="79" text-anchor="middle" fill="var(--muted)" font-size="8.5">数据区，末尾留空字符</text>
+    <text x="472" y="70" fill="var(--accent-3)" font-size="10" font-weight="700">← sds 指针指向 buf</text>
+
+    <text x="30" y="122" fill="var(--ink)" font-size="10.5" font-weight="700">三个技巧，全部为了省内存：</text>
+    <text x="30" y="145" fill="var(--muted)" font-size="9.5">· 按长度选头 5 档：sdshdr5/8/16/32/64，最短的头只有 1 字节，最长的也只有 5 字节</text>
+    <text x="30" y="165" fill="var(--muted)" font-size="9.5">· 头和数据放同一段内存，s[-1] 一字节即可读到类型——不分开两次分配</text>
+    <text x="30" y="185" fill="var(--muted)" font-size="9.5">· packed 属性取消字节对齐空隙，头尾严丝合缝；末尾仍留 \0，部分 C 函数照常可用</text>
+    <text x="30" y="213" fill="var(--muted)" font-size="9.5">取长度 = 读一次内存（sdslen，src/sds.h）——strlen 的 O(N) 扫描被彻底消灭</text>
+  </svg>
+  </div>
+
+  <p><strong>解决什么问题？</strong>除了长度，还有分配次数。sds.c 的 sdsMakeRoomFor 定下预分配规矩：增长后不足 1 MB 就翻倍拿，超过 1 MB 就每次多拿 1 MB——连续追加不必一次次向系统要内存；缩短字符串时只改 len 不还内存（惰性释放），真要归还另有 sdsRemoveFreeSpace。配一个真实细节：sdshdr 的 flags 字段一物两用，低三位存类型，在 sdshdr5 里剩下五位还能存长度——源码注释原文 <code>3 lsb of type, and 5 msb of string length</code>。</p>
+  <p><strong>换种做法会怎样？</strong>硬用 C 字符串：长度现数、二进制截断、溢出自担、扩容抖动，四样全占。换 C++ 字符串或别的语言？Redis 选 C 是为了零依赖、每个字节可控，然后用内存布局技巧把 C 的短板一块块补上——这是它给所有 C 程序员的示范：你的项目未必用 C，但"头贴着数据、按需选头、取消对齐"这套账，换种语言照样算得通。</p>
+</section>
+
+<!-- ================= 05 决策二 zset ================= -->
+<section>
+  <h2><span class="sec-num">05</span>决策二 · zset 的双结构：左右互搏</h2>
+  <p><strong>为什么这么设计？</strong>排行榜这个负载有两类问题：给一个成员问它的分数（点查），和按分数段取一批成员（范围查询）。一个结构很难两头都做到最优，Redis 干脆养两个——官方文档的实现注记原话：有序集合由一个 <em>dual-ported（双端口）</em>结构实现，同时包含跳表和哈希表：</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 240" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <rect x="290" y="14" width="180" height="40" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="380" y="40" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">一个 zset 键</text>
+
+    <line x1="330" y1="54" x2="200" y2="92" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar36)"/>
+    <line x1="430" y1="54" x2="560" y2="92" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar36)"/>
+
+    <rect x="60" y="94" width="280" height="86" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="200" y="120" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">dict 哈希表</text>
+    <text x="200" y="142" text-anchor="middle" fill="var(--accent-3)" font-size="9.5" font-weight="700">成员 → 跳表节点指针</text>
+    <text x="200" y="162" text-anchor="middle" fill="var(--muted)" font-size="9">点查：判重、取分数，常数时间</text>
+
+    <rect x="420" y="94" width="280" height="86" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="560" y="120" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">zskiplist 跳表</text>
+    <text x="560" y="142" text-anchor="middle" fill="var(--accent-3)" font-size="9.5" font-weight="700">按分数有序的多层链</text>
+    <text x="560" y="162" text-anchor="middle" fill="var(--muted)" font-size="9">范围查询：ZRANGEBYSCORE，对数级</text>
+
+    <path d="M 340 175 C 370 205, 390 205, 420 175" fill="none" stroke="var(--muted)" stroke-dasharray="5 4"/>
+    <text x="380" y="208" text-anchor="middle" fill="var(--muted)" font-size="9">两个结构指向同一批节点，一次写入两处登记</text>
+    <text x="8" y="232" fill="var(--muted)" font-size="9.5">小集合（成员数 ≤128 且成员 ≤64 字节）整个键先住 listpack 紧凑列表，超阈值才转双结构——"能不分配就不分配"</text>
+  </svg>
+  </div>
+
+  <p><strong>解决什么问题？</strong>看源码里的咬合点（src/t_zset.c，tag 8.10.2）：新增成员先 <code>zslInsert</code> 进跳表，再 <code>dictSetKeyAtLink</code> 把节点指针登记进哈希表；注意哈希表的值存的是<strong>节点指针而非分数</strong>，于是判重与取分数走哈希表（常数时间），分数变化只动跳表、节点指针不变，哈希表无须重排。判重由调用方 zsetAdd 用 dictFindLink 在哈希表完成；zslInsert 的注释只约定"元素已存在由调用方保证"。小编码的转换由 zsetConvertToListpackIfNeeded 把关，阈值就是配置项 <code>zset-max-listpack-entries</code>（默认 128）与 <code>zset-max-listpack-value</code>（默认 64 字节）。</p>
+  <p><strong>换种做法会怎样？</strong>只留跳表：点查退化成对数级遍历，判重也要付一次对数代价；只留哈希表：范围查询与排序直接消失。写入时多付一次登记，换读取时两条路径各自最优——排行榜读取远多于写入，这笔交易稳赚。这正是"读写比例决定结构数量"的活教材。</p>
+</section>
+
+<!-- ================= 06 钩子一 B+ 树 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>钩子一 · 为什么不用平衡树，更不用 B+ 树</h2>
+  <p>跳表不是唯一能做有序范围查询的结构。红黑树取一段范围要中序遍历，插入删除要旋转保平衡，实现繁琐；B+ 树更不对路——它是<strong>为磁盘设计的</strong>：节点按页（通常 16 KB）组织，赌的是"磁盘读一块顺手多拿一块"，还要浪费页内空间换矮树减少寻道。而 Redis 全程在内存里，随机访问免费，页式预设全部落空。跳表用多层链表换来同样的对数级范围查询，核心一两百行，还天生带有序遍历，插入按随机层数挂链、没有旋转。<strong>内存里选结构，磁盘的规矩不作数</strong>——这句话反过来说也一样：做磁盘存储时，别把内存结构的习惯带下去。顺带一提，第 3 期讲过的近似 LRU 不维护全局链表，与本期的取舍是同一门哲学：用可接受的近似，换掉不可接受的成本。</p>
+
+  <p><strong>演进故事（钩子二）：</strong>小集合的紧凑编码也换过代。最早的 ziplist 让每个元素记着前一项的长度（为了从后往前走），代价是前一项变长、后面全跟着改，极端时一条写入放大成连锁反应，即级联更新。Redis 5.0（2018）引入的 listpack 去掉这个字段，每个元素只记自己，隐患从根上拔掉；7.0（2022）起 hash/zset 等小集合编码默认换新；到 8.10.2，配置项里 <code>zset-max-ziplist-entries</code> 这个老名字还在，只是被官方映射成 listpack 新名的别名。好结构也迭代，别把历史名字当永恒真理。</p>
+</section>
+
+<!-- ================= 07 决策三 单线程 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>决策三 · 单线程的分界线画在哪</h2>
+  <p><strong>为什么这么设计？</strong>"Redis 是单线程的"这句话省略了主语，第 3 期给过官方口径：从命令执行视角看，大多是单线程。分界线画在这——网络读写与协议解析可以多线程，<strong>命令执行永远串行</strong>。敢串行的底气：操作全在内存，微秒级完成，串行成本可忽略；换来的是无锁、无线程切换、每条命令天然原子。</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 210" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <rect x="20" y="30" width="150" height="60" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="95" y="55" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">客户端命令</text>
+    <text x="95" y="74" text-anchor="middle" fill="var(--muted)" font-size="9">RESP 协议</text>
+
+    <line x1="170" y1="60" x2="216" y2="60" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar36)"/>
+
+    <rect x="218" y="22" width="240" height="76" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="338" y="45" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">输入输出线程组（可多线程）</text>
+    <text x="338" y="66" text-anchor="middle" fill="var(--muted)" font-size="9">读包 · 解析协议 · 写回包</text>
+    <text x="338" y="84" text-anchor="middle" fill="var(--muted)" font-size="9">iothread.c · 8.0 重新实现</text>
+
+    <line x1="458" y1="60" x2="504" y2="60" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar36)"/>
+    <text x="481" y="46" text-anchor="middle" fill="var(--muted)" font-size="8.5">交回</text>
+
+    <rect x="506" y="22" width="234" height="76" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="623" y="45" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">主线程：命令执行</text>
+    <text x="623" y="66" text-anchor="middle" fill="var(--accent-3)" font-size="9.5" font-weight="700">单线程串行 · 无锁 · 原子</text>
+    <text x="623" y="84" text-anchor="middle" fill="var(--muted)" font-size="9">processCommand → call → 命令实现</text>
+
+    <line x1="623" y1="98" x2="623" y2="128" stroke="var(--muted)" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#ar36)"/>
+    <rect x="506" y="130" width="234" height="52" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="623" y="152" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">写传播</text>
+    <text x="623" y="171" text-anchor="middle" fill="var(--muted)" font-size="9">replication.c 复制缓冲 · AOF 缓冲</text>
+
+    <text x="20" y="140" fill="var(--ink)" font-size="10" font-weight="700">瓶颈在网络，不在 CPU：</text>
+    <text x="20" y="162" fill="var(--muted)" font-size="9.5">所以多线程加给网络收发，不给命令执行——</text>
+    <text x="20" y="180" fill="var(--muted)" font-size="9.5">6.0 首次引入 IO 线程，8.0 整体重写，吞吐进一步提升</text>
+  </svg>
+  </div>
+
+  <p><strong>解决什么问题？</strong>执行链的源码坐标（tag 8.10.2）：server.c 的 main 启动一切，末尾 <code>aeMain(server.el)</code> 把控制权交给事件循环（ae.c），大循环反复处理事件；命令到达后由 networking.c 的 <code>readQueryFromClient</code> 收下解析，进 server.c 的 <code>processCommand</code> 查命令表、过校验，再由 <code>call</code> 经函数指针 <code>c->cmd->proc(c)</code> 调到具体命令实现——整条链上没有一把锁。IO 线程组在 8.0 起独立为 iothread.c：客户端按分配进某个线程完成读写解析，命令仍交回主线程。配置口径：io-threads 默认 1（注释原文 Single threaded by default），且在 8.10.2 中为启动级配置，改线程数需重启。</p>
+  <p><strong>换种做法会怎样？</strong>命令也多线程化：锁竞争与线程切换立刻盖过微秒级的计算本身，INCR 这类命令还得靠脚本或锁补原子性，复杂度上去了，收益却仍看网络脸色。Redis 把最贵的并发问题整个收走，把真正的瓶颈交给线程组——官方基准每秒十八万次写入就是这么来的。<strong>设计不是堆并发，是把钱花在瓶颈上。</strong>也记住代价：正因串行，一条慢命令会堵住后面所有人（延伸阅读见 daily 线<a href="../../daily-tech-course/lessons/0010-redis-performance-tuning.html">《性能调优》</a>）。</p>
+</section>
+
+<!-- ================= 08 可借鉴点 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>这些设计，能搬回你自己的系统</h2>
+  <div class="card card-tip">
+    <ul>
+      <li><strong>内存布局技巧：</strong>头贴着数据、按长度分档选头、packed 取消对齐——序列化协议、网络包解析、自定义存储格式都用得上"按字节抠"的账本；</li>
+      <li><strong>双结构配合：</strong>点查与范围查询两类负载并存时，别硬让一个结构两头兼顾——用同一个对象指针把两个结构咬合起来，写入多付一次，读取各自最优；</li>
+      <li><strong>把并发收进单线程的勇气：</strong>先算清操作的真实成本（内存微秒级 vs 切换与锁），若串行成本可忽略，原子性白送、延迟可预期；真瓶颈在 IO，就把多线程给 IO；</li>
+      <li><strong>能不分配就不分配：</strong>预分配、惰性释放、小编码过渡——分配是昂贵操作，写路径的平稳比单次极限速度更重要。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= 09 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>随堂小测</h2>
+  <div class="quiz">
+    <div class="quiz-q">
+      <p class="quiz-question">1. SDS 取长度是常数时间，靠的是什么？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，SDS 恰恰不再依赖结尾标记，结尾空字符只是为了兼容部分 C 函数。","对的：sds 指针直接指向 buf，头垫在前面，sdslen 按类型选头直接读 len 字段。","不对，SDS 不做长度缓存，长度就写在头里，读一次内存即得。"]'>
+        <li class="quiz-option">结尾空字符帮忙计数</li>
+        <li class="quiz-option">头结构里带着 len 字段</li>
+        <li class="quiz-option">单独缓存了长度副本</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. tag 8.10.2 里，zset 的 dict 哈希表中"值"存的是什么？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，分数在跳表节点身上，dict 里存的是节点指针，取分数要经它中转。","不对，成员本身就是 dict 的键，不会再存一份成员。","对的：dict 值是 zskiplistNode 指针——所以改分数只动跳表，dict 无须重排。"]'>
+        <li class="quiz-option">分数（double 值）</li>
+        <li class="quiz-option">成员字符串的副本</li>
+        <li class="quiz-option">跳表节点的指针</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 关于 8.10.2 的 io-threads 配置，哪个说法对？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，默认是 1，注释原文就是默认单线程。","对的：默认 1，且 8.10.2 里标注 IMMUTABLE，改线程数要重启生效。","不对，它是启动级配置，运行期改不了。"]'>
+        <li class="quiz-option">默认 4，运行时可随时改</li>
+        <li class="quiz-option">默认 1，启动级配置需重启生效</li>
+        <li class="quiz-option">默认 8，只影响写回包</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. 小 zset 默认住 listpack、超阈值才转跳表，默认阈值是？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：zset-max-listpack-entries 128 加 zset-max-listpack-value 64，两个条件同时看。","不对，512 是 hash 类相关场景的常见数字，不是 zset 的默认。","不对，阈值按成员个数与单个成员长度计，不按字节总量。"]'>
+        <li class="quiz-option">成员数不超 128 且单个成员不超 64 字节</li>
+        <li class="quiz-option">成员数不超 512</li>
+        <li class="quiz-option">总大小不超 1024 字节</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 10 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：把 SDS 改成"头和数据分开两次分配"的经典 C 结构体做法，会失去什么？为什么 Redis 宁可用 s[-1] 这种取巧写法？</summary>
+    <div class="details-body">
+      <p>先列分开分配的账：一次 SDS 创建变成两次 malloc，释放也要两次；对象多一个指针字段；头和数据在堆上可能相距很远，缓存局部性变差——对每秒上百万次操作、以内存访问为主体的引擎，这些都是真金白银的开销。再看紧贴布局换来的三样东西：一次分配一次释放，创建销毁路径最短；头和数据几乎必然落在同一缓存行附近，sdslen 读头、业务读数据都便宜；<code>s[-1]</code> 一个字节就能拿到类型，分支选头的成本降到最低。sdshdr5 更是极端：头只有 1 字节，类型和长度共用一个字节——分开分配根本做不到这个密度。代价也要认：紧贴布局意味着增长时头和数据要一起 realloc，SDS 用预分配（不足 1 MB 翻倍）摊薄这个成本；同时 sds 指针不是对象首地址，不能 free(s) 了事，必须走 sdsfree——这是一切取巧的代价，源码里用"永远返回指向 buf 的指针 + 统一走 sds 系函数"的纪律来管住。可借鉴的判断点：<strong>当你有一种小对象要海量创建时，把元数据和数据放进同一次分配，通常是赢的</strong>；前提是像 Redis 一样，把"指针不是首地址"的纪律封装在访问函数里，而不是散落在业务代码中。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：假如让 zset 只留跳表、砍掉哈希表，功能上还完整吗？反过来只留哈希表呢？由此说说"结构数量该由什么决定"？</summary>
+    <div class="details-body">
+      <p>只留跳表：功能几乎完整——判重可以在插入时顺带查到（zslInsert 前先按分数区间定位），取分数 O(1)（节点自带），排名与范围照常。但两件事变贵：一是点查判重从哈希的常数时间变成对数级，二是像 ZSCORE 这种高频点查命令每次都要先走一遍跳表定位——排行榜刷分场景里，这正是最热的路径。只留哈希表：更糟，范围查询与排序能力整体消失，ZRANGE/ZRANGEBYSCORE/排行榜全没了，等于砍掉这个类型存在的理由。所以答案分两层：第一层是负载决定结构——<strong>读路径有几种，就值得养几个结构</strong>，点查养哈希、范围养跳表；第二层是一致性成本决定咬合方式——两个结构必须指向同一批节点（dict 存节点指针而非分数副本），才能把"一次写入两处登记"的成本压到最低，改分数时只动跳表一边。推而广之：数据库的二级索引、搜索引擎的正排加倒排，都是同一个模式。当你发现一个结构为了两类查询互相妥协时，别急着优化它——先算算，多养一个结构是不是更便宜。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 11 本期要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">11</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>SDS 是一段连续内存：len 头常数时间取长度、二进制安全、预分配加惰性释放——C 项目内存布局的教科书；</li>
+      <li>zset 双结构：哈希管点查、跳表管范围，一个节点指针咬合；小集合先住 listpack，超 128 成员才升级；</li>
+      <li>单线程分界线：网络读写可多线程（iothread.c），命令执行永远串行——无锁、无切换、原子性白送；</li>
+      <li>能不分配就不分配：按长选头、packed 省对齐、预分配、listpack——内存哲学贯穿全库；</li>
+      <li>读码路线：main → aeMain → readQueryFromClient → processCommand → 命令实现 → 写传播，基准 tag 8.10.2。</li>
+    </ul>
+  </div>
+  <p><strong>延伸阅读（daily 线已讲过使用与调优视角，本期不重讲）：</strong><a href="../../daily-tech-course/lessons/0005-redis-data-structures.html">数据结构与选型</a> · <a href="../../daily-tech-course/lessons/0010-redis-performance-tuning.html">性能调优与慢命令排查</a> · <a href="../../daily-tech-course/lessons/0011-redis-memory-management.html">内存管理与淘汰</a></p>
+  <p><strong>下期预告：</strong>Redis 的入门系列就聊到这里。下期开启新项目 <strong>Elasticsearch</strong>——搜索引擎与日志栈的核心，还是这套老路数：先问它为谁而生，再走进倒排索引、segment 不可变这些设计决策。</p>
+  <p><strong>Primary source：</strong><a href="https://redis.io/docs/latest/develop/data-types/sorted-sets/" target="_blank" rel="noopener">Redis 官方文档 · Sorted sets（含 dual-ported 实现注记）</a>；源码基准与逐条核对的仓库位置：<a href="https://github.com/redis/redis/tree/8.10.2/src" target="_blank" rel="noopener">redis/redis tag 8.10.2 · src/</a>（sds.h、sds.c、t_zset.c、server.c、ae.c、networking.c、iothread.c、config.c 均于 2026-09-19 核对）。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0035-redis-in-action.html">← 上一期：Redis 实战：接进真实场景</a></span>
+  <span class="next" style="opacity:.55">Redis 系列 5/5 · 收官</span>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

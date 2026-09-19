@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Redis 系列第 2 期:5 分钟跑起来 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0033</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0032-redis-what-and-why.html">上一期:0032</a> · Redis 系列第 2 期 / 共 5 期 · <a href="https://redis.io" target="_blank" rel="noopener">redis.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · REDIS 系列第 2 期:5 分钟跑起来</p>
+  <h1>5 分钟跑起来 Redis:从安装到第一次读写</h1>
+  <p class="subtitle">上一期我们认识了 Redis——内存数据结构服务器,也讲了它的许可证风波。这一期把认识变成动手:亲手把 Redis 跑起来,完成第一次写入和读取,并说清"什么输出才算跑通"。全文基于 v8.10.2(2026-09-17 发布的 Latest 稳定版,含安全修复;官方更名后的正式名字叫 Redis Open Source,2026-09-19 复核),安装命令与 quickstart 逐字对照 redis.io 官方文档,Windows 路线、高频报错一并给全,卡住了先对号入座,再怀疑人生。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 缓存与数据结构服务器 · C · 三许可(RSALv2/SSPLv1/AGPLv3)</span>
+    <span class="tag">📦 基于 v8.10.2(8.10 稳定线)</span>
+    <span class="tag-date">📅 2026-09-19 · 第 2 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 路线 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>本期路线与跑通判定</h2>
+  <p>五步路线:<strong>钉版本 → 装起来 → 起服务 → 连得上 → 读写通</strong>。Redis 是出了名的"好装"——纯内存、无外部依赖,一条 Docker 命令就能起。但"装好"不等于"跑通",本期给你三条硬判定:</p>
+  <div class="card">
+    <ul class="steps">
+      <li>① <strong>服务就绪:</strong>启动日志出现 <code>Ready to accept connections tcp</code>,或 <code>systemctl status redis-server</code> 显示 active (running);</li>
+      <li>② <strong>连接就位:</strong><code>redis-cli</code> 连上后提示符 <code>127.0.0.1:6379&gt;</code> 出现,敲 <code>PING</code> 回 <code>PONG</code>——官方文档原样口径;</li>
+      <li>③ <strong>读写闭环:</strong><code>SET</code> 返回 <code>OK</code>,<code>GET</code> 能查回刚写的值——数据进得去、出得来,才算真的通了。</li>
+    </ul>
+  </div>
+  <p>三条全绿,Redis 就在你机器上跑起来了。整个过程五分钟以内,我们开始。</p>
+</section>
+
+<!-- ================= 02 钉版本 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>动手前先钉版本:8.10.2,五条线同日补丁</h2>
+  <p>先看一眼 GitHub 发布页(GitHub redis/redis Releases,2026-09-19 实拍),把版本钉死:</p>
+  <div style="border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:.9rem 1rem;margin:.6rem 0;">
+    <div style="display:flex;flex-wrap:wrap;align-items:center;gap:.55rem;">
+      <span style="font-size:1.35rem;font-weight:700;">8.10.2</span>
+      <span style="border:1px solid #1a7f37;color:#1a7f37;border-radius:999px;padding:.05rem .6rem;font-size:.78rem;font-weight:600;">Latest</span>
+      <span style="color:rgba(0,0,0,.62);font-size:.85rem;">2026-09-17 发布 · 发布者 sundb · tag 8.10.2</span>
+    </div>
+    <div style="margin-top:.55rem;font-size:.92rem;">Update urgency: <code>SECURITY</code> : There are security fixes in the release.</div>
+    <div style="margin-top:.55rem;color:rgba(0,0,0,.72);font-size:.88rem;">Security fixes:#15673 事务队列越权访问 / #15722 集群总线端口无认证可被加入 / TimeSeries 与 RedisSearch 崩溃修复 / Vector Sets 深嵌套 JSON 崩溃修复</div>
+  </div>
+  <p>读出两个信息:<strong>其一</strong>,当前最新稳定版是 <strong>8.10.2</strong>,2026-09-17 发布,官方标注"含安全修复";<strong>其二</strong>,发布页同一天还挂出了 8.8.3、8.6.7、8.4.7、8.2.10——官方同时维护五条稳定线,安全补丁五线同日齐发。追"最新版"之前先知道自己站在哪条线上,这是上生产前的好习惯。</p>
+  <p class="warn">名字口径:Redis 8.0(2025-05-02 GA)起,官方把"Redis Community Edition"正式更名为 <strong>Redis Open Source</strong>,许可证三选一——RSALv2、SSPLv1、以及新加回的 AGPLv3。上一期讲的许可证风波,在 8.0 落了地。本系列统一以 8.10 稳定线为基准。</p>
+</section>
+
+<!-- ================= 03 环境要求 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>环境要求:轻到不像数据库,Windows 要绕行</h2>
+  <p>官方 README 给的支持平台清单是:<strong>Linux、macOS(OSX)、OpenBSD、NetBSD、FreeBSD</strong>——注意,<strong>Windows 不在清单里</strong>,官方不提供原生 Windows 版本。这不是疏忽,Redis 从设计之初就是奔着 Unix 系去的。</p>
+  <div class="card">
+    <ul>
+      <li><strong>Linux / macOS:</strong>按下面第 4 节直接装,一条命令的事;</li>
+      <li><strong>Windows 两条官方路:</strong>官方 Windows 文档给的第一条是用 <strong>Docker</strong> 跑(Windows 上装 Docker Desktop,后面命令一模一样);第二条是 <strong>Memurai</strong>——官方合作伙伴提供的 Windows 兼容版本(目前以 8.2 RC1 预览形式提供原生 Windows 支持);此外还有个社区惯用变通:在 <strong>WSL2</strong> 里装个 Ubuntu,然后完全按 Linux 的 apt 路线走——对本教程来说它就是 Linux;</li>
+      <li><strong>内存:</strong>练习环境几百 MB 绰绰有余——纯内存数据库不等于"吃内存",空跑实例只占几 MB,放多少数据占多少内存。生产环境官方运维手册给两条硬建议:开启 swap,并显式设置 <code>maxmemory</code> 上限(留出开销余量,别顶到物理内存);</li>
+      <li><strong>两个内核提醒(生产):</strong><code>vm.overcommit_memory=1</code>(否则后台保存可能 fork 失败)和关闭透明大页 THP——第 7 节报错清单里有原话。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= 04 安装 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>安装:三条路线,全按官方文档走</h2>
+  <p>官方安装文档给的开箱路线:Docker、Linux 发行版包(APT/RPM/Snap)、macOS Homebrew、源码编译。练习推荐 Docker(干净、命令与文档逐字对照),长期挂着用推荐系统包管理(开机自启、systemd 托管)。</p>
+
+  <h3>路线 A:Docker 一条命令起服务(全平台通用,Windows 就走这条)</h3>
+  <pre><code>docker run -d --name redis -p 6379:6379 redis:latest
+
+# 官方镜像页 tag 序列:8.10.1 / 8.10 / 8 / latest(另有 -alpine 精简底座)
+# 数据落盘(可选):docker run -v /local-data/:/data --name redis -p 6379:6379 redis:latest
+# 看启动日志:
+docker logs redis --tail 5</code></pre>
+  <p>日志最后几行(真实回显,节选):</p>
+  <pre><code>* Redis version=8.10.2, bits=64, commit=00000000, modified=0, pid=1, just started
+* Ready to accept connections tcp</code></pre>
+  <p class="note">判定①达成:<code>Ready to accept connections tcp</code>——服务端就绪。Docker Hub 上这是 <strong>Docker Official Image</strong>,由 Redis 官方维护,下载量 10 亿+ 量级。</p>
+
+  <h3>路线 B:Ubuntu / Debian 用官方 APT 源(生产 Linux 主线)</h3>
+  <p>Ubuntu/Debian 自带源里的 Redis 版本偏旧,官方文档给的是<strong>添加 packages.redis.io 官方源</strong>再装,六条命令原文:</p>
+  <pre><code>sudo apt-get install lsb-release curl gpg
+curl -fsSL https://packages.redis.io/gpg | sudo gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg
+sudo chmod 644 /usr/share/keyrings/redis-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/redis.list
+sudo apt-get update
+sudo apt-get install redis</code></pre>
+  <p class="note">官方文档原话:装完"Redis should start automatically after the initial installation and also at boot time"——首次安装即自动启动、开机自启。若没起来:<code>sudo systemctl enable redis-server &amp;&amp; sudo systemctl start redis-server</code>。确认版本:<code>redis-server --version</code>,源内为 8.10 线最新。上面六条命令与 redis.io「Install Redis Open Source on Ubuntu or Debian Linux using APT」一节逐字一致(2026-09-19 核对),装完想装指定旧版,文档还给了 <code>apt policy redis</code> 查可版本、按 <code>6:8.x.x-1rl1~noble1</code> 全名锁版本的路子。</p>
+
+  <h3>路线 C:macOS 用 Homebrew</h3>
+  <pre><code>brew install redis
+
+# 方式一:后台服务(开机自启)
+brew services start redis
+# 方式二:直接前台跑(练习推荐,日志看得见)
+redis-server $(brew --prefix)/etc/redis.conf
+
+# 官方提醒:8.10.1 起 formula 自带 Search/JSON/时序等模块</code></pre>
+  <p>三种路线殊途同归:机器上多了一个监听 <strong>6379</strong> 端口的 <code>redis-server</code> 进程。接下来连它。</p>
+</section>
+
+<!-- ================= 05 quickstart ================= -->
+<section>
+  <h2><span class="sec-num">05</span>官方 quickstart 逐段走:PING 到 SET,五分钟闭环</h2>
+
+  <h3>第一步:连上它,提示符出现</h3>
+  <pre><code># 路线 A(Docker)从容器里进命令行:
+docker exec -it redis redis-cli
+# 路线 B / C 直接连本机:
+redis-cli -h 127.0.0.1 -p 6379</code></pre>
+  <p>看到提示符 <code>127.0.0.1:6379&gt;</code>,你已经站在 Redis 门口。第一句先打个招呼:</p>
+  <pre><code>127.0.0.1:6379&gt; PING
+PONG</code></pre>
+  <p class="note"><code>PING</code> 回 <code>PONG</code>——官方文档原样口径,判定②达成。这不是玩具命令:生产上判活探测、客户端健康检查,用的就是它,一来一回不携带任何数据结构开销。</p>
+
+  <h3>第二步:第一次写入与读取,SET / GET</h3>
+  <pre><code>127.0.0.1:6379&gt; SET bike:1 "Process 134"
+OK
+127.0.0.1:6379&gt; GET bike:1
+"Process 134"</code></pre>
+  <p class="note">redis.io 官方 quickstart「Redis as an in-memory data structure store」的 CLI 示例原文就是这两句(2026-09-19 核对):给自行车库存起名——键名 <code>bike:1</code>,值 "Process 134"。你屏幕上的回显应与文档一致。</p>
+  <p>拆一下这十秒钟发生了什么:<code>SET 键 值</code> 把字节序列存进内存,返回 <code>OK</code>;<code>GET 键</code> 原样取回,带引号表示字符串。键名里的冒号是社区惯例的命名空间分隔符(<code>对象类型:编号</code>),不是语法强制。判定③达成——<strong>数据进得去、出得来,Redis 跑通了</strong>。</p>
+
+  <h3>第三步:顺手摸一下哈希与扫描(官方 quickstart 后半段)</h3>
+  <pre><code>127.0.0.1:6379&gt; HSET bike:2 model Deimos brand Ergonom type 'Enduro bikes' price 4972
+(integer) 4
+127.0.0.1:6379&gt; HGET bike:2 model
+"Deimos"
+127.0.0.1:6379&gt; SCAN 0 MATCH "bike:*" COUNT 100</code></pre>
+  <p class="note"><code>HSET</code> 一次写四个字段,回显 <code>(integer) 4</code> 是"新增字段数";<code>HGET</code> 取单字段;<code>SCAN</code> 游标扫描键空间——官方文档用它替代有隐患的 <code>KEYS</code> 全量遍历。字符串之外,Redis 还有列表、集合、有序集合、流等原生结构,daily 线第 0005 期专讲(见文末延伸阅读)。</p>
+
+  <h3>跑通判定,就这三条</h3>
+  <div class="card card-tip">
+    <ul>
+      <li><strong>① 服务就绪:</strong>日志 <code>Ready to accept connections tcp</code> 或 <code>active (running)</code>;</li>
+      <li><strong>② 连接就位:</strong>提示符出现,<code>PING</code> 回 <code>PONG</code>;</li>
+      <li><strong>③ 读写闭环:</strong><code>SET</code> 回 <code>OK</code>,<code>GET</code> 回刚写的值。</li>
+    </ul>
+    <p>想收工?Docker 一条 <code>docker rm -f redis</code> 连容器带数据清干净,重来零成本;apt/brew 装的用 <code>sudo systemctl stop redis-server</code> 或 <code>redis-cli SHUTDOWN</code>。</p>
+  </div>
+</section>
+
+<!-- ================= 06 报错 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>高频翻车与解法(按官方口径)</h2>
+  <p class="warn"><strong>① 端口被占:<code>Address already in use</code>。</strong>6379 上已经有别的进程(或上一次的 Redis 没退)。先查:<code>lsof -i :6379</code>(Linux/macOS)或 <code>netstat -ano | findstr 6379</code>(Windows),杀掉旧进程,或改配置文件里 <code>port 6380</code>,连接时 <code>redis-cli -p 6380</code>。</p>
+  <p class="warn"><strong>② 远程连不上:<code>DENIED Redis is running in protected mode</code>。</strong>这是<strong>保护模式</strong>在拦你——官方安全文档口径:自 3.2.0 起,以默认配置(绑定所有接口、无密码)运行时,Redis 只回环应答本机连接,远程连接会收到一段解释性报错。正确解法按顺序考虑:给实例设密码(<code>requirepass</code>,推荐再上 Redis 6 的 ACL 细粒度权限)→ 配置里 <code>bind</code> 到指定内网地址 → 都明确之后再考虑关 <code>protected-mode</code>。直接裸奔上公网是重大事故源,官方文档专门警告过。</p>
+  <p class="warn"><strong>③ 启动日志告警 overcommit。</strong>官方运维手册原话:把 <code>vm.overcommit_memory</code> 设为 1——写入 <code>/etc/sysctl.conf</code> 后重启,或直接 <code>sysctl vm.overcommit_memory=1</code>。不理它的话,后台保存(RDB)时 fork 可能失败。</p>
+  <p class="warn"><strong>④ 启动日志告警透明大页(THP)。</strong>官方口径:<code>echo never &gt; /sys/kernel/mm/transparent_hugepage/enabled</code> 关掉它,避免内存占用与延迟抖动。</p>
+  <p class="warn"><strong>⑤ Windows 装不了原生服务端。</strong>官方平台清单本就没有 Windows——走 Docker(官方 Windows 文档路线),或 Memurai(官方合作伙伴),或 WSL2 里按 Linux 路线装。别去找来路不明的 exe。</p>
+  <p class="warn"><strong>⑥ 本机好好的,别的机器连不上。</strong>按顺序排查:配置里 <code>bind 127.0.0.1</code> 只绑了回环(官方文档示例默认写法,远程需求要改)→ 保护模式拦截(见②)→ 云主机安全组没放行 6379。三处都看过再怀疑网络。</p>
+</section>
+
+<!-- ================= 07 彩蛋 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>两个小彩蛋:五线同日,与 6379 的来历</h2>
+  <p><strong>彩蛋一:你以为的"最新版"其实是五条线。</strong>2026-09-17 一天之内,官方连发 8.10.2、8.8.3、8.6.7、8.4.7、8.2.10 五个版本,清一色 SECURITY 级别。开源项目的版本策略是"多线并行、旧线也喂补丁"——升级前先弄清自己跟的是哪条线,别无脑追号。</p>
+  <p><strong>彩蛋二:6379 不是随手挑的号。</strong>在老式手机九宫格键盘上,6-3-7-9 三个键位能拼出 <strong>MERZ</strong>——一个和数据库毫无关系的意大利艺人名字缩写,作者 antirez 的程序员式恶趣味(这桩轶闻在《Redis in Action》与作者本人的解释中广为流传)。如今 6379 成了全球约定俗成的 Redis 端口,你在配置文件里随时能改,但没人真的改它。</p>
+</section>
+
+<!-- ================= 08 quiz ================= -->
+<section>
+  <h2><span class="sec-num">08</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. 官方支持平台清单里,没有下面哪个操作系统?</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对,Linux 是官方支持平台,也是生产部署主力。","不对,macOS(OSX)在官方清单里。","对的:官方 README 平台清单为 Linux/macOS/OpenBSD/NetBSD/FreeBSD,Windows 不在其中,官方给的路是 Docker 或 Memurai。"]'>
+        <li class="quiz-option">Linux</li>
+        <li class="quiz-option">macOS</li>
+        <li class="quiz-option">Windows(原生版本)</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 连上 redis-cli 之后,判定"连接就位"的官方口径是什么?</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对,那只是连接命令,连上之后还要验证服务可用。","对的:官方文档原样——PING 回 PONG,一问一答即服务可用。","不对,SHUTDOWN 是关闭服务的命令,敲了服务就停了。"]'>
+        <li class="quiz-option">敲 HELP 能列出所有命令</li>
+        <li class="quiz-option">敲 PING 回 PONG</li>
+        <li class="quiz-option">敲 SHUTDOWN 不报错</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 远程机器连 Redis 报 DENIED ... protected mode,官方建议的正确做法是什么?</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的:官方口径——先设密码(requirepass,推荐 ACL),再明确绑定地址,都清楚之后才考虑关保护模式。","不对,裸奔上公网是官方文档专门警告的重大事故源。","不对,换端口不解决保护模式的拦截逻辑,该拦还是拦。"]'>
+        <li class="quiz-option">设密码/配 ACL、明确 bind,再考虑关保护模式</li>
+        <li class="quiz-option">把实例直接暴露到公网方便调试</li>
+        <li class="quiz-option">换个端口就没事了</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. 2026-09-17 官方一天连发五个版本(8.10.2/8.8.3/8.6.7/8.4.7/8.2.10),说明了什么?</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对,五个都是各自稳定线的补丁号,不是每天发大版本。","不对,官方明确同日五线均为 SECURITY 安全修复。","对的:官方同时维护多条稳定线,安全补丁同步喂给每一条,升级前先弄清自己跟的哪条线。"]'>
+        <li class="quiz-option">Redis 每天都在发大版本</li>
+        <li class="quiz-option">老版本全部立即失效</li>
+        <li class="quiz-option">多线并行维护,旧线同样吃安全补丁</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 09 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>思考题(点击展开解析)</h2>
+  <details class="q-card">
+    <summary>思考一:PING/PONG 看似玩具,为什么几乎所有 Redis 客户端库和生产探测都用它?一个命令要满足"健康检查"的哪些条件才算合格?</summary>
+    <div class="details-body">
+      <p>把"健康检查"拆成四个硬条件,就看懂 PING 的地位了。<strong>其一快</strong>:PING 在服务端走的是极短路径——不碰任何键空间、不分配数据结构、不做复杂解析,官方命令表里它属于最贵也只有常数开销的那一类,适合高频调用;<strong>其二轻</strong>:应答 PONG 只有固定几个字节,不占带宽,一秒打几百次也无感;<strong>其三真</strong>:它走的是完整链路——客户端序列化、网络传输、服务端事件循环处理、再原路返回,任何一环断了它就回不来,所以它能代表"整条通路活着",而不是"进程活着";<strong>其四定</strong>:协议层保留字,从 Redis 诞生到 8.10 语义未变,不会有版本兼容坑。对照着看,有些系统拿"查一个真实业务键"当健康检查,键一大就把探测做成了压测;有些拿"进程存在"当检查,TCP 队列堵死了也发现不了。PING 恰好都避开——<strong>用最小代价,验证最完整链路</strong>,这是所有健康检查设计的通用范式,学会它,你给自己服务的接口写探活时就有标准了。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二:本期你装的 Redis 没设密码、只监听本机,和生产环境的 Redis 中间差了哪几层?哪些今天练的东西到了生产依然成立?</summary>
+    <div class="details-body">
+      <p>分两侧看。<strong>生产必补的至少四层</strong>:其一,网络边界——生产 Redis 通常只允许应用服务器所在内网访问,公网彻底隔离(官方安全文档反复警告暴露公网的后果,历史上成规模的勒索事件都从裸奔 Redis 开始);其二,认证与授权——至少 requirepass,规范做法是 Redis 6 引入的 ACL,给不同服务发不同用户、只授所需命令;其三,持久化策略——默认 RDB 快照对缓存够用,要当数据库用就补 AOF,这直接决定重启后数据还剩多少;其四,资源上限——maxmemory 加淘汰策略,避免内存无限膨胀拖垮宿主机。<strong>今天练的东西,大部分到生产依然成立</strong>:PING 探活、SET/GET 语义、键名命名惯例、SCAN 替代 KEYS、overcommit 与 THP 两个内核参数——最后这两个恰恰是官方运维手册的生产建议,你今天提前见过了。正确的学习姿势:<strong>本机练语法,生产补边界</strong>——第 3 期讲核心概念与架构时,你会看到主从复制、哨兵与集群如何把今天这个单机实例铺成高可用系统。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 10 要点 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这四条:</strong></p>
+    <ul>
+      <li>版本钉在 v8.10.2(2026-09-17 Latest,安全修复):官方同时维护五条稳定线,补丁同日齐发——先弄清自己跟的哪条线;</li>
+      <li>安装三条路:Docker 一条命令(<code>docker run -d --name redis -p 6379:6379 redis:latest</code>,Windows 也走这条)、Ubuntu/Debian 官方 APT 源六条命令、macOS Homebrew 一条 <code>brew install redis</code>;</li>
+      <li>跑通判定三条:日志 <code>Ready to accept connections tcp</code> / <code>PING</code> 回 <code>PONG</code> / <code>SET</code> 回 <code>OK</code> 且 <code>GET</code> 查回原值;</li>
+      <li>高频报错有谱:端口占用查进程或改 port,远程被拒先想保护模式与 bind,overcommit 与 THP 两条内核告警官方文档给了一字不差的解法。</li>
+    </ul>
+  </div>
+  <p><strong>下一期预告:</strong>Redis 已经在你机器上跑起来了。下一期我们拆开看它的核心概念与整体架构——键空间背后是什么、单线程到底单在哪、一条 SET 命令在实例内部的完整旅程。Primary source:<a href="https://redis.io/docs/latest/develop/get-started/data-store/" target="_blank" rel="noopener">Redis 官方文档 · Redis as an in-memory data structure store(quickstart)</a>——本期 SET/GET 与 SCAN 示例出处;安装细节见 <a href="https://redis.io/docs/latest/operate/oss_and_stack/install/install-stack/apt/" target="_blank" rel="noopener">APT 安装</a>、<a href="https://redis.io/docs/latest/operate/oss_and_stack/install/install-stack/docker/" target="_blank" rel="noopener">Docker 运行</a>、<a href="https://redis.io/docs/latest/operate/oss_and_stack/install/install-stack/windows/" target="_blank" rel="noopener">Windows 路线</a>,版本与发布记录见 <a href="https://github.com/redis/redis/releases" target="_blank" rel="noopener">GitHub Releases</a>。</p>
+  <div class="note">
+    <p><strong>延伸阅读(每日微课程线,使用与调优不重讲):</strong></p>
+    <ul>
+      <li><a href="../../daily-tech-course/lessons/0005-redis-data-structures.html">第 0005 期 · Redis 数据结构</a>——今天只用字符串和哈希开了个头,五大结构的命令面与适用场景在那边讲透;</li>
+      <li><a href="../../daily-tech-course/lessons/0010-redis-performance-tuning.html">第 0010 期 · Redis 性能调优</a>——跑通之后的慢查询、大键与连接池问题,见该课;</li>
+      <li><a href="../../daily-tech-course/lessons/0011-redis-memory-management.html">第 0011 期 · Redis 内存管理</a>——maxmemory 与淘汰策略的生产配置细节,见该课。</li>
+    </ul>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0032-redis-what-and-why.html">← 上一期:认识 Redis</a>
+  <a class="next" href="0034-redis-core-concepts-architecture.html">下一期:核心概念与整体架构 →</a>
+</nav>
+
+<script>
+(function () {
+  document.querySelectorAll(".quiz-options").forEach(function (ul) {
+    var done = false;
+    var answer = parseInt(ul.getAttribute("data-answer"), 10);
+    var notes = JSON.parse(ul.getAttribute("data-notes") || "[]");
+    var fb = ul.parentElement.querySelector(".quiz-feedback");
+    ul.querySelectorAll(".quiz-option").forEach(function (li, i) {
+      li.addEventListener("click", function () {
+        if (done) return;
+        done = true;
+        li.classList.add(i === answer ? "correct" : "wrong");
+        if (fb) { fb.textContent = notes[i] || ""; fb.classList.add(i === answer ? "ok" : "bad"); }
+      });
+    });
+  });
+})();
+</script>
+
+</body>
+</html>

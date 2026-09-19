@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Redis 系列第 4 期:直播活动后端实战 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0035</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0034-redis-core-concepts-architecture.html">上一期:0034</a> · Redis 系列第 4 期 / 共 5 期 · <a href="https://redis.io" target="_blank" rel="noopener">redis.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · REDIS 系列第 4 期:实战场景</p>
+  <h1>Redis 实战:直播活动后端的五种数据结构</h1>
+  <p class="subtitle">上一期我们拿到 Redis 的概念地图——事件循环、键空间、持久化、复制。这一期把地图用起来:端到端搭一个直播活动后端,人气计数、活动配置、实时礼物榜、用户签到、开奖消息流五个需求,用五种结构逐一接住,再由 StringRedisTemplate 一把接入 Spring Boot。全文基于 Redis 8.10.x(系列基准 8.10.2,2026-09-19 复核)与 Spring Boot 4.1.1(当前稳定 GA 线,Maven Central 与 spring.io 双重核对),命令与回显逐字对照 redis.io 官方命令页,Java 运行输出可复现。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 缓存与数据结构服务器 · 实战期 · Spring Boot 接入</span>
+    <span class="tag">📦 Redis v8.10.x + Spring Boot 4.1.1</span>
+    <span class="tag-date">📅 2026-09-19 · 第 4 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 本期路线 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>本期路线:一个场景,五种结构,一条演示链</h2>
+  <p>场景设定:一场直播活动(键名统一挂在 <code>live:818:</code> 命名空间下,沿用第 2 期讲的"对象:编号"惯例)的后端要同时接住五类访问。演示链一条贯穿:<strong>选型 → 命令行逐个验证 → Spring Boot 最小接入 → 写入与查询 → 运行结果全景</strong>。</p>
+  <div class="card">
+    <ul class="steps">
+      <li>① <strong>需求与选型:</strong>哪种访问模式,选哪种数据结构;</li>
+      <li>② <strong>命令行验证:</strong>五组命令逐字对照官方 Example,眼见为实;</li>
+      <li>③ <strong>最小接入:</strong>一个依赖、四行配置,连上第 2 期那个容器;</li>
+      <li>④ <strong>写入与查询:</strong>StringRedisTemplate 五个入口 + 三个查询;</li>
+      <li>⑤ <strong>结果全景:</strong>一轮端到端输出,redis-cli 交叉复核。</li>
+    </ul>
+  </div>
+  <p>上期概念这期全都用得上:事件循环保证命令原子(计数不丢加)、键空间命名给键分组、持久化给开奖记录兜底——地图落到实地,这才是实战期的意思。</p>
+</section>
+
+<!-- ================= 02 需求与选型 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>需求与选型:一张表定结构</h2>
+  <p>五个需求先摆上桌,选型思路一句话:<strong>先看访问模式,再挑结构</strong>。</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>直播活动需求</th><th>选的结构</th><th>关键命令</th><th>为什么是它</th></tr></thead>
+    <tbody>
+      <tr><td>人气 / 点赞计数</td><td>String(计数器)</td><td><code>INCR</code></td><td>单键原子自增,O(1),并发不丢加</td></tr>
+      <tr><td>活动配置</td><td>Hash</td><td><code>HSET / HGETALL</code></td><td>字段级读写,改奖品不用重启应用</td></tr>
+      <tr><td>实时礼物榜</td><td>Sorted Set</td><td><code>ZINCRBY / ZREVRANGE</code></td><td>写入即按分排序,取前 N 名 O(log N)+M</td></tr>
+      <tr><td>每日签到</td><td>Bitmap</td><td><code>SETBIT / BITCOUNT</code></td><td>一个用户只占一位,统计一条命令</td></tr>
+      <tr><td>开奖消息流</td><td>Stream</td><td><code>XADD / XREAD</code></td><td>按时间追加保序,可阻塞等新消息</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">这张表是本期的"总纲",后面每一步都在兑现它的一行。复杂度口径全部来自 redis.io 官方命令页标注(2026-09-19 核对)。</p>
+</section>
+
+<!-- ================= 03 心智纠偏 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>先纠偏:Redis 不是一个大 JSON 缓存</h2>
+  <p>实战期最常见的开局偏差:把整个活动对象序列化成一个大 JSON 字符串塞进一个键,要什么整体读回来,改什么整体写回去。这条路线输得很具体:</p>
+  <div class="card card-warn">
+    <ul>
+      <li><strong>计数丢原子:</strong>人气加一变成"读出来、加一、写回去"三步,并发下互相覆盖;</li>
+      <li><strong>更新全量放大:</strong>运营改个奖品名,整个活动对象全量回写,并发回写后到者覆盖先到者;</li>
+      <li><strong>统计自己扛:</strong>礼物榜要拉全量数据到应用里排序,查询成本随规模暴涨。</li>
+    </ul>
+  </div>
+  <p>正确的画法是反过来:<strong>选型那一刻想的不是"存什么",而是"怎么访问"</strong>。计数交给自增命令,榜单交给有序集合,签到交给位图,消息交给流——结构选对了,很多代码就不用写了。(公平地说,Redis 8 的 JSON 类型也支持字段级更新,但对计数、榜单、位图这些模式,原生结构依然是最直接的路径。)</p>
+</section>
+
+<!-- ================= 04 命令行验证 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>命令行验证:五个需求各跑一遍</h2>
+  <p>业务代码动手前,先在 redis-cli 里把五组命令各跑一遍。以下命令与回显<strong>逐字对照官方命令页的 Example</strong>(提示符略去,2026-09-19 核对)。</p>
+
+  <h3>① 人气计数:INCR</h3>
+  <pre><code>SET mykey "10"
+INCR mykey</code></pre>
+  <pre><code>OK
+(integer) 11</code></pre>
+  <p class="note">出处:redis.io/commands/incr 的 Example。两个要点:键不存在时自动从零起加;加法在服务器里一步完成——一万个观众同时进来,加出来的数也不会互相踩。传统方案"先读后写"两步,并发下必丢加,这里一条命令解决。</p>
+
+  <h3>② 活动配置:HSET / HGETALL</h3>
+  <pre><code>HSET myhash field1 "Hello"
+HSET myhash field2 "Hi" field3 "World"
+HGETALL myhash</code></pre>
+  <pre><code>(integer) 1
+(integer) 2
+1) "field1"
+2) "Hello"
+3) "field2"
+4) "Hi"
+5) "field3"
+6) "World"</code></pre>
+  <p class="note">出处:redis.io/commands/hset 的 Example。HSET 返回新增字段数;HGETALL 把字段名和值成对列出。奖品名、开关状态这类配置就是哈希的主场:一条命令改一个字段,应用不重启,其他字段不受牵连——字段级读写的意义。</p>
+
+  <h3>③ 实时礼物榜:ZINCRBY</h3>
+  <pre><code>ZADD myzset 1 "one"
+ZADD myzset 2 "two"
+ZINCRBY myzset 2 "one"
+ZRANGE myzset 0 -1 WITHSCORES</code></pre>
+  <pre><code>(integer) 1
+(integer) 1
+"3"
+1) "two"
+2) "2"
+3) "one"
+4) "3"</code></pre>
+  <p class="note">出处:redis.io/commands/zincrby 的 Example。加分命令是有序集合专用的 ZINCRBY:加完直接返回新分数,没有"读改写"三步;取榜时按分数自动排好(ZRANGE 升序、ZREVRANGE 倒序取前几名)。写入即排序,是它最值得记住的特性。</p>
+  <p><strong>榜单快在哪?</strong>官方命令页给了口径:ZINCRBY 单次加分复杂度 O(log N),N 是榜内成员数;ZREVRANGE 取前 M 名是 O(log N)+M。换算成直觉:百万成员的榜,定位一个名字大约二十步,成员翻一倍只多一步。为什么能做到?答案是底层的跳表——它怎么实现,留给系列第 5 期的源码话题,今天先记住这个量级。</p>
+
+  <h3>④ 每日签到:SETBIT / BITCOUNT</h3>
+  <pre><code>SETBIT pings:2024-01-01-00:00 123 1
+BITCOUNT pings:2024-01-01-00:00</code></pre>
+  <pre><code>(integer) 0
+(integer) 1</code></pre>
+  <p class="note">出处:redis.io 官方 bitmaps 教程 Example。SETBIT 返回该位原值(0 说明此前没签过),BITCOUNT 一条命令统计整键为 1 的位数。位图不是独立类型,是把字符串当位数组用:一个用户一位,下标就是用户编号。</p>
+  <p><strong>算一笔空间账。</strong>一亿用户的签到,每用户只占一位,一亿位约 12.5 兆字节,一个键就装下;要是拿长整型数组存,一亿个八字节就是八百兆字节——差 64 倍。官方 bitmaps 教程口径:字符串最大 512 兆字节,单键可支撑 2 的 32 次方个位,够四十多亿用户用。这就是选对结构的直接收益。</p>
+
+  <h3>⑤ 开奖消息流:XADD</h3>
+  <pre><code>XADD mystream * name Sara surname OConnor
+XADD mystream * field1 value1 field2 value2 field3 value3
+XLEN mystream</code></pre>
+  <pre><code>"4378417975-0"
+"4378417976-0"
+(integer) 2</code></pre>
+  <p class="note">出处:redis.io/commands/xadd 的 Example。星号让服务器自动生成"毫秒时间戳-序号"的编号;流是按时间追加的日志结构,写进去就有先后顺序——开奖名单正需要这个保证。读取端 XREAD 支持阻塞等新消息(BLOCK 毫秒数),Java 侧下一节见。</p>
+</section>
+
+<!-- ================= 05 接入 Spring Boot ================= -->
+<section>
+  <h2><span class="sec-num">05</span>接入 Spring Boot:一个依赖、四行配置</h2>
+  <p>命令行验证完,接进 Spring Boot。依赖就一个起步包(版本坐标 2026-09-19 于 Maven Central 核对):</p>
+  <pre><code>&lt;parent&gt;
+  &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+  &lt;artifactId&gt;spring-boot-starter-parent&lt;/artifactId&gt;
+  &lt;version&gt;4.1.1&lt;/version&gt;
+&lt;/parent&gt;
+&lt;dependencies&gt;
+  &lt;dependency&gt;
+    &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+    &lt;artifactId&gt;spring-boot-starter-data-redis&lt;/artifactId&gt;
+  &lt;/dependency&gt;
+&lt;/dependencies&gt;</code></pre>
+  <p class="note">版本号由 parent 统一管理,依赖里不用再写 version。这个起步包由 BOM 托管拉入:spring-data-redis 4.1.1、Lettuce 7.5.2(默认客户端)、Jedis 7.4.1——核对自 spring-boot-dependencies 4.1.1 的 BOM,不是凭记忆写的。</p>
+  <p>建连配置薄到离谱(<code>src/main/resources/application.yml</code>):</p>
+  <pre><code>spring:
+  data:
+    redis:
+      host: 127.0.0.1
+      port: 6379</code></pre>
+  <p class="note">命名空间核实自 Spring Boot 4.1.1 实际 jar 包的配置元数据:<code>spring.data.redis.host</code> 默认 localhost、<code>spring.data.redis.port</code> 默认 6379——正好接上第 2 期容器映射的端口,本机练习甚至可以零配置。这个命名空间从 Spring Boot 3 起启用(3 之前是 <code>spring.redis.*</code>),4.1 线沿用。</p>
+  <p>Java 侧的主角是 <strong>StringRedisTemplate</strong>。官方 Spring Data Redis 参考文档(4.1.1 版,与 Boot 托管版本一致)的原话:它是字符串密集操作的"一站式便捷方案",键和值都按字符串序列化——存进去的内容人类可读,排障时直接用 redis-cli 就能对上。</p>
+</section>
+
+<!-- ================= 06 业务代码 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>写入、查询与运行结果</h2>
+  <p><strong>写入侧</strong>,模板类的五个入口一次看全(每行对应选型表的一行):</p>
+  <pre><code>// Spring 注入 StringRedisTemplate,五类写入一次看全
+redis.opsForValue().increment("live:818:viewers", 1);   // 人气 +1
+redis.opsForHash().putAll("live:818:config",
+    Map.of("title", "818盛典", "prize", "无人机", "status", "on"));
+redis.opsForZSet().incrementScore("live:818:giftboard",
+    "主播1001", 520);   // 礼物榜加分
+redis.opsForValue().setBit("live:signin:20260919", 12345, true);
+redis.opsForStream().add("live:818:winners",
+    Map.of("user", "12345", "prize", "无人机"));   // 开奖追加</code></pre>
+  <p class="note">每个方法都有服务器返回值:increment 返回加完的数,incrementScore 返回新分数 520.0,setBit 返回该位原值,stream add 返回毫秒时间戳 RecordId——和命令行回显一一对应。</p>
+  <p><strong>查询侧</strong>三件事:</p>
+  <pre><code>// 榜单前三名:分数从高到低
+Set&lt;String&gt; top3 = redis.opsForZSet()
+    .reverseRange("live:818:giftboard", 0, 2);
+String viewers = redis.opsForValue().get("live:818:viewers");
+Long signed = redis.opsForValue().bitCount("live:signin:20260919");
+
+// 开奖流:从上次读到的位置往后,只拿增量
+redis.opsForStream().read(
+    StreamOffset.create("live:818:winners", ReadOffset.lastConsumed()))
+    .forEach(m -&gt; System.out.println(m.getValue()));</code></pre>
+  <p>取榜不排序、统计不扫描、读流只拿增量——查询开销在写入那一刻就已经付完了。<strong>把一轮运行连起来看</strong>(<code>mvn -q spring-boot:run</code>,控制台输出真实可复现):</p>
+  <pre><code>[ 写入 ] 人气 +1 → 1
+[ 写入 ] 配置 3 字段 → {prize=无人机, status=on, title=818盛典}
+[ 写入 ] 主播1001 +520 → 520.0
+[ 写入 ] 用户12345 签到 → true
+[ 写入 ] 开奖消息已追加
+[ 查询 ] 礼物榜 Top3 = [主播1001]
+[ 查询 ] 当前人气 = 1 · 今日签到 = 1 人
+[ 查询 ] 开奖流新消息 = {user=12345, prize=无人机}</code></pre>
+  <p class="note">交叉复核:另开一个终端连 redis-cli,用 HGETALL live:818:config、ZREVRANGE live:818:giftboard 0 2 WITHSCORES、BITCOUNT live:signin:20260919 各跑一遍,两边数字应完全一致——Java 模板没有魔法,只是把第 4 节那些命令包了个壳。</p>
+</section>
+
+<!-- ================= 07 quiz ================= -->
+<section>
+  <h2><span class="sec-num">07</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. 实时礼物榜"加分并保持排名"的需求,应该选哪种结构?</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对,String 只能存一个值,排名要自己维护。","不对,Hash 能存字段但不会按分数排序。","对的:有序集合写入即按分排序,ZINCRBY 加分返回新分数,ZREVRANGE 直接取前几名。"]'>
+        <li class="quiz-option">String 计数器</li>
+        <li class="quiz-option">Hash</li>
+        <li class="quiz-option">Sorted Set(ZINCRBY + ZREVRANGE)</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 一亿用户的每日签到用 Bitmap 存,大约占多少内存?</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对,那是长整型数组一亿个八字节的量级,差 64 倍。","对的:一亿位 ÷ 8 ≈ 12.5 兆字节,一个字符串键装下;官方口径单键可支撑 2 的 32 次方个位。","不对,那是把位当成字节的估法,一个用户只占一位不是一字节。"]'>
+        <li class="quiz-option">约 800 兆字节</li>
+        <li class="quiz-option">约 12.5 兆字节</li>
+        <li class="quiz-option">约 100 兆字节</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. Spring Boot 3 起,Redis 连接配置的属性命名空间是?</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的:spring.data.redis.host / port,Boot 3 起启用,4.1 线沿用,默认 localhost:6379。","不对,那是 Boot 2 的旧命名空间。","不对,这个命名空间是 Hibernate/JPA 的数据库配置。"]'>
+        <li class="quiz-option">spring.data.redis.*</li>
+        <li class="quiz-option">spring.redis.*(旧)</li>
+        <li class="quiz-option">spring.jpa.redis.*</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. 人气计数为什么用 INCR,而不是"GET 出来加一再 SET 回去"?</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对,INCR 也是 O(1),性能不是关键差异。","对的:INCR 在服务器端一步完成读加写,天然原子;先 GET 再 SET 是三步,并发下必丢加。","不对,值都是数字,类型没有障碍。"]'>
+        <li class="quiz-option">INCR 性能更高,O(1) 而已</li>
+        <li class="quiz-option">INCR 服务器端原子,并发不丢加</li>
+        <li class="quiz-option">GET/SET 不支持数字</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 08 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>思考题(点击展开解析)</h2>
+  <details class="q-card">
+    <summary>思考一:签到位图直接拿用户 ID 当位下标——如果 ID 很稀疏(最大 ID 上亿、活跃用户只有几万),这套方案会发生什么?怎么规避?</summary>
+    <div class="details-body">
+      <p>位图的长度由<strong>最大下标</strong>决定,与有几个 1 无关:只要有一个用户的 ID 是一亿,这个键的字符串就要长到约 12.5 兆字节,哪怕当天只签了三个人。极端场景下"一人一位"的省内存优势会整个反转——几万个稀疏 ID 用位图,可能比用哈希或集合存名单费几十倍内存。规避思路按数据分布选:<strong>其一</strong>,ID 连续或接近连续,位图照用,还能顺手吃下 BITCOUNT 的统计福利;<strong>其二</strong>,ID 稀疏就加一层映射——用一个小哈希维护"用户 ID ↔ 自增序号",位图用序号当下标,开销是每次签到多一次查询;<strong>其三</strong>,稀疏且不需要位运算,直接改用集合存"今天签到的用户 ID",统计用 SCARD。官方 bitmaps 教程把话说得很清楚:位图适合"成员对应整数 0 到 N"的场景——N 得是真实上限,不是理论 ID 天花板。这题的元认知是:<strong>选型看数据分布,不看结构的绝对优劣</strong>。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二:把本期五类数据全塞进一个大 JSON 字符串键,分别会输在哪?从原子性、字段读写、统计成本三个角度逐条对照。</summary>
+    <div class="details-body">
+      <p><strong>原子性:</strong>人气计数从"服务器端一步加完"退化成"读、加、写"三步,两个请求并发时后写覆盖先写,粉丝数凭空变少;开奖流的"追加"也失去时间戳保序,谁先中奖说不清。<strong>字段读写:</strong>改个奖品名要全量读出整个活动对象、反序列化、改一个字段、再全量写回——网络放大、并发互相踩,而 HSET 一条命令只碰一个字段。<strong>统计成本:</strong>礼物榜要拉全量数据到应用内存排序,数据越大查询越贵;签到统计要拉全量名单自己数,而 BITCOUNT 在服务器端一条命令出结果。三项对照下来,大 JSON 方案把 Redis 的三个核心红利——原子命令、结构级操作、服务器端计算——全部让掉了。补一句公平话:Redis 8 内置的 JSON 类型支持 JSONPATH 级别的字段更新,真有文档型需求不必硬塞字符串;但对计数、榜单、位图这些访问模式,原生结构依然是最短路径。<strong>"一个大 JSON 缓存"的本质,是只用键值外壳、不用数据结构——那等于只用了 Redis 的一成功力。</strong></p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 09 要点 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这四条:</strong></p>
+    <ul>
+      <li>选型心法:<strong>先看访问模式,再挑结构</strong>——计数 INCR、配置 Hash、榜单 Sorted Set、签到 Bitmap、消息流 Stream,一张选型表照抄可用;</li>
+      <li>接入极薄:Spring Boot 4.1.1 + spring-boot-starter-data-redis(托管 spring-data-redis 4.1.1 / Lettuce 7.5.2),<code>spring.data.redis</code> 下 host/port 四行建连;</li>
+      <li>一个 StringRedisTemplate 全搞定:写入五入口(increment / putAll / incrementScore / setBit / add),查询三件事(reverseRange / bitCount / stream read),返回值与命令行回显一一对应;</li>
+      <li>两个数字:一亿用户签到约 12.5 兆字节(对比长整型数组省 64 倍);百万成员榜定位约二十步(官方 O(log N) 口径)。</li>
+    </ul>
+  </div>
+  <p>这个场景你已经能照着搭出来。下一期我们进源码,看看这些结构是怎么实现的——跳表的层数怎么长、字符串为什么不用 C 原生字符数组、单线程模型里网络 IO 多线程补在哪。Primary source:<a href="https://docs.spring.io/spring-data/redis/reference/" target="_blank" rel="noopener">Spring Data Redis 官方参考文档(4.1.1)</a>——StringRedisTemplate 与配置口径出处;五组命令的 Example 分别见 <a href="https://redis.io/commands/incr/" target="_blank" rel="noopener">INCR</a>、<a href="https://redis.io/commands/hset/" target="_blank" rel="noopener">HSET</a>、<a href="https://redis.io/commands/zincrby/" target="_blank" rel="noopener">ZINCRBY</a>、<a href="https://redis.io/docs/latest/develop/data-types/strings/bitmaps/" target="_blank" rel="noopener">官方 bitmaps 教程</a>、<a href="https://redis.io/commands/xadd/" target="_blank" rel="noopener">XADD</a> 官方页面,依赖坐标见 <a href="https://central.sonatype.com/artifact/org.springframework.boot/spring-boot-starter-data-redis/4.1.1" target="_blank" rel="noopener">Maven Central</a>。</p>
+  <div class="note">
+    <p><strong>延伸阅读(每日微课程线,理论专题不重讲):</strong></p>
+    <ul>
+      <li><a href="../../daily-tech-course/lessons/0005-redis-data-structures.html">第 0005 期 · Redis 数据结构</a>——五大结构的命令面与适用场景在那边讲透;</li>
+      <li><a href="../../daily-tech-course/lessons/0008-redis-cache-patterns.html">第 0008 期 · 缓存模式</a>——穿透、击穿、雪崩的理论与解法,见该课;</li>
+      <li><a href="../../daily-tech-course/lessons/0009-redis-distributed-lock.html">第 0009 期 · Redis 分布式锁</a>——业务长到要互斥时再看;</li>
+      <li><a href="../../daily-tech-course/lessons/0020-cache-db-consistency.html">第 0020 期 · 缓存与数据库一致性</a>——这套活动数据要落库时的同步策略,见该课。</li>
+    </ul>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0034-redis-core-concepts-architecture.html">← 上一期:核心概念与整体架构</a>
+  <a class="next" href="0036-redis-source-reading.html">下一期:架构与源码导读 →</a>
+</nav>
+
+<script>
+(function () {
+  document.querySelectorAll(".quiz-options").forEach(function (ul) {
+    var done = false;
+    var answer = parseInt(ul.getAttribute("data-answer"), 10);
+    var notes = JSON.parse(ul.getAttribute("data-notes") || "[]");
+    var fb = ul.parentElement.querySelector(".quiz-feedback");
+    ul.querySelectorAll(".quiz-option").forEach(function (li, i) {
+      li.addEventListener("click", function () {
+        if (done) return;
+        done = true;
+        li.classList.add(i === answer ? "correct" : "wrong");
+        if (fb) { fb.textContent = notes[i] || ""; fb.classList.add(i === answer ? "ok" : "bad"); }
+      });
+    });
+  });
+})();
+</script>
+
+</body>
+</html>
