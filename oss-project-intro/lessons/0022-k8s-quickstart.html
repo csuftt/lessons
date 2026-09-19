@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Kubernetes 系列第 2 期：5 分钟跑起来 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0022</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0021-k8s-what-and-why.html">上一期：0021</a> · Kubernetes 系列第 2 期 / 共 6 期 · <a href="https://kubernetes.io" target="_blank" rel="noopener">kubernetes.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · KUBERNETES 系列第 2 期：5 分钟跑起来</p>
+  <h1>5 分钟跑起来 Kubernetes：minikube 起本地集群，亲手部署第一个工作负载</h1>
+  <p class="subtitle">上一期立住了心智模型：你只声明期望状态，一群控制器负责把现实拉到那里。这一期把这句话变成实物——官方 hello-minikube 教程全程走一遍：minikube 一条命令起一个本地单节点集群，kubectl 部署第一个 Deployment、暴露成 Service、在浏览器里亲眼看到应用响应。全文基于 v1.37.x（1.37.0，2026-08-26 发布，GitHub Latest；minikube 官方命令参考中 --kubernetes-version 的 stable 口径同为 v1.37.0，2026-09-19 复核），命令与预期输出逐字对照 kubernetes.io 官方教程与 minikube 官方文档，本地方案选型与高频报错一并给全，跑不通先对号入座再怀疑人生。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 容器编排平台 · Go · Apache-2.0</span>
+    <span class="tag">📦 基于 v1.37.x（1.37.0）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 2 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 路线 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>本期路线与跑通判定</h2>
+  <p>五步路线：<strong>装工具 → 起集群 → 判就绪 → 部署 → 暴露访问</strong>。全部走完，三条判定都满足才算跑通：</p>
+  <div class="card">
+    <ul class="steps">
+      <li>① <strong>集群起来了：</strong><code>minikube status</code> 回显 host / kubelet / apiserver 三行 Running、kubeconfig Configured（官方教程原样输出）；</li>
+      <li>② <strong>工作负载真跑起来了：</strong><code>kubectl get pods</code> 看到 hello-node 的 Pod 状态 1/1 Running；</li>
+      <li>③ <strong>浏览器访问成功：</strong><code>minikube service hello-node</code> 自动开浏览器并显示应用响应（官方教程原话："opens up a browser window that serves your app"）。</li>
+    </ul>
+  </div>
+  <p>这条路线用的 minikube 是官方"学习环境"主推工具——kubernetes.io 的入门教程 hello-minikube 就是围着它写的。上一期说"声明式 API + 控制器模式"，本期你会亲眼看到一次：提交一个 Deployment 声明，Pod 自己出现。</p>
+</section>
+
+<!-- ================= 02 选型 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>本地集群方案选型：三条路，本期跟官方教程走 minikube</h2>
+  <p>官方 Install Tools 页把"本机跑 K8s"指向两个工具：<strong>kind</strong>（"requires that you have either Docker or Podman installed"）和 <strong>minikube</strong>（"runs an all-in-one or a multi-node local Kubernetes cluster on your personal computer…so that you can try out Kubernetes, or for daily development work"）。加上 Docker Desktop 内置的 K8s 开关，常见三条路：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>方案</th><th>定位</th><th>依赖</th><th>适合谁</th></tr></thead>
+    <tbody>
+      <tr><td><strong>minikube</strong></td><td>官方学习环境主推；官方教程的配套工具；addon 生态（dashboard、metrics-server 一键开）</td><td>容器或虚拟机管理器（Docker / Hyper-V / KVM 等）</td><td>跟官方教程入门、本地开发，本期主线</td></tr>
+      <tr><td>kind</td><td>"Kubernetes in Docker"，官方同页推荐，起停快</td><td>Docker 或 Podman</td><td>CI 流水线、自动化测试</td></tr>
+      <tr><td>Docker Desktop</td><td>桌面端内置 K8s 开关（设置里一键启用，非官方文档学习环境推荐项）</td><td>Docker Desktop 本体</td><td>已装 Docker Desktop、只想"顺手能用"</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p><strong>本期选 minikube</strong>，理由很朴素：要跟的官方教程就是 minikube 教程，命令能逐字对照。前置要求出自 minikube 官方 start 文档：<strong>2 核以上 CPU、2GB 空闲内存、20GB 磁盘、网络连接、一个容器或虚拟机管理器</strong>——近五年的电脑基本都达标。驱动方面官方 drivers 页按平台标了 preferred：Windows 是 Hyper-V 与 Docker，macOS 是 Docker 与 VFkit，Linux 是 Docker 与 KVM2；启动时用 <code>--driver</code> 可以显式指定。</p>
+</section>
+
+<!-- ================= 03 安装 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>第一步：装 minikube 与 kubectl（两条命令的事）</h2>
+  <p>安装命令出自 minikube 官方 start 文档，按平台三选一：</p>
+  <pre><code># Windows（官方文档另有 choco install minikube 等价方式）
+winget install Kubernetes.minikube
+
+# macOS
+brew install minikube
+
+# Linux（官方文档原文命令）
+curl -LO https://github.com/kubernetes/minikube/releases/latest/download/minikube-linux-amd64
+sudo install minikube-linux-amd64 /usr/local/bin/minikube &amp;&amp; rm minikube-linux-amd64</code></pre>
+  <p>kubectl 有两种姿势。<strong>其一独立安装</strong>（官方 Install Tools 页按操作系统给安装器）；<strong>其二先不装</strong>——minikube 官方 start 文档给了免装用法 <code>minikube kubectl -- get po -A</code>，并建议设别名 <code>alias kubectl="minikube kubectl --"</code>。学习期推荐后者，少装一样东西。装完验证：</p>
+  <pre><code>$ minikube version
+minikube version: v1.39.0
+commit: ...</code></pre>
+  <p class="note">版本号随安装时点变化：2026-09-19 官方 Latest 为 v1.39.0（2026-09-02 发布）。首行格式如上，commit 哈希随版本而异。kubectl 验证用 <code>kubectl version --client</code>。</p>
+</section>
+
+<!-- ================= 04 start ================= -->
+<section>
+  <h2><span class="sec-num">04</span>第二步：一条命令，起一个单节点集群</h2>
+  <pre><code>$ minikube start</code></pre>
+  <p>官方要求在具备管理员权限（但非 root）的终端里运行。接下来一两分钟，终端会滚动一段进度输出，关键几行（节选；文本随驱动与系统而异）：</p>
+  <pre><code>* Automatically selected the docker driver
+* Creating docker container (CPUs=2, Memory=4000MB) ...
+* Preparing Kubernetes v1.37.0 on Docker ...
+* Verifying Kubernetes components...
+* Enabled addons: default-storageclass, storage-provisioner
+* Done! kubectl is now configured to use "minikube" cluster and "default" namespace by default</code></pre>
+  <p>逐行读：先<strong>选驱动</strong>（官方 start 页：可用驱动取决于操作系统，<code>--driver</code> 可显式指定）；再<strong>建容器/虚拟机、准备 Kubernetes</strong>——注意 "Preparing Kubernetes v1.37.0" 这行：minikube 官方命令参考里 <code>--kubernetes-version</code> 的说明原文是 "'stable' for v1.37.0"，也就是默认 stable 正是本系列基准版本，不需要额外指定；最后 <strong>Done! 那一行是本步的完成标志</strong>——kubectl 已自动配置好，能直接对集群说话。</p>
+  <p>官方教程对这份集群的定义只有一句："The command minikube start creates a single-Node cluster. That Node acts as both the control plane and a worker Node."——<strong>单节点，既是控制平面又是工作节点</strong>。上一期画的"控制平面 + 工作节点"分工，在这里浓缩进一台机器：教学沙盘，不是生产形态，这个差距值得在思考题里想想。两个常用可选项一并记住：多实例用 <code>-p</code> 起 profile（官方描述"allow having multiple instances of minikube independently"）；国内网络环境拉镜像慢，官方命令参考给了 <code>--image-mirror-country=cn</code>。</p>
+</section>
+
+<!-- ================= 05 判定 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>第三步：就绪判定——status、get nodes、cluster-info</h2>
+  <p>官方 hello-minikube 教程的判定命令是 <code>minikube status</code>，预期输出原样：</p>
+  <pre><code>$ minikube status
+minikube
+type: Control Plane
+host: Running
+kubelet: Running
+apiserver: Running
+kubeconfig: Configured</code></pre>
+  <p>五行读三层：<strong>机器层</strong> host 在跑，<strong>节点层</strong> kubelet 在跑，<strong>控制面层</strong> apiserver 在跑，最后 kubeconfig 已配置——kubectl 与集群的"通信录"就位。再看一眼节点清单：</p>
+  <pre><code>$ kubectl get nodes
+NAME       STATUS   ROLES           AGE   VERSION
+minikube   Ready    control-plane   45s   v1.37.0</code></pre>
+  <p>五列表格：名字叫 minikube、状态 Ready、角色 control-plane；AGE 与 VERSION 随环境而变（STATUS 为 Ready 即就绪判定通过）。官方 kubectl 安装文档还给了第三个口径：<code>kubectl cluster-info</code>——"If you see a URL response, kubectl is correctly configured to access your cluster"，看到 URL 就说明 kubectl 配置正确。顺带认识 <strong>kubeconfig</strong>：官方文档原话，minikube 集群部署成功时会自动生成 kubeconfig 文件，默认在 <code>~/.kube/config</code>——kubectl 就是靠它找到集群的，这也是第 07 节"上下文切换"报错的根源。</p>
+</section>
+
+<!-- ================= 06 工作负载 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>第四步：第一个工作负载——部署、暴露、访问</h2>
+  <p>主菜来了。官方教程的部署命令逐字照录（一个带 Web 服务器的测试镜像，容器内监听 8080）：</p>
+  <pre><code># Run a test container image that includes a webserver
+$ kubectl create deployment hello-node --image=registry.k8s.io/e2e-test-images/agnhost:2.53 -- /agnhost netexec --http-port=8080
+
+$ kubectl get deployments
+NAME         READY   UP-TO-DATE   AVAILABLE   AGE
+hello-node   1/1     1            1           1m
+
+$ kubectl get pods
+NAME                          READY   STATUS    RESTARTS   AGE
+hello-node-5f76cf6ccf-br9b5   1/1     Running   0          1m</code></pre>
+  <p>注意，我们没写一行 YAML——<code>kubectl create deployment</code> 帮你生成了一份"要 1 个副本"的声明提交上去，<strong>谁来执行？</strong>正是上一期的控制器模式：</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 260" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar22" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar22a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="20" y="40" width="150" height="90" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="95" y="72" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">kubectl create</text>
+    <text x="95" y="92" text-anchor="middle" fill="var(--muted)" font-size="9.5">提交期望状态：1 个副本</text>
+    <text x="95" y="110" text-anchor="middle" fill="var(--muted)" font-size="9.5">镜像 agnhost:2.53</text>
+
+    <rect x="230" y="40" width="160" height="90" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="310" y="72" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">API Server</text>
+    <text x="310" y="92" text-anchor="middle" fill="var(--muted)" font-size="9.5">唯一入口 · 落账</text>
+    <text x="310" y="110" text-anchor="middle" fill="var(--muted)" font-size="9.5">etcd 存一份（第 16~20 期）</text>
+
+    <rect x="450" y="24" width="130" height="56" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="515" y="48" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">Deployment 控制器</text>
+    <text x="515" y="66" text-anchor="middle" fill="var(--muted)" font-size="9">对账：副本数 1</text>
+    <rect x="450" y="96" width="130" height="56" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="515" y="120" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">ReplicaSet</text>
+    <text x="515" y="138" text-anchor="middle" fill="var(--muted)" font-size="9">保持 1 个 Pod</text>
+
+    <rect x="630" y="96" width="110" height="56" rx="10" fill="var(--warn-bg)" stroke="var(--accent)"/>
+    <text x="685" y="118" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">Pod · Running</text>
+    <text x="685" y="136" text-anchor="middle" fill="var(--muted)" font-size="9">agnhost · 8080</text>
+
+    <line x1="170" y1="85" x2="226" y2="85" stroke="var(--muted)" marker-end="url(#ar22)"/>
+    <line x1="390" y1="72" x2="446" y2="55" stroke="var(--accent-3)" marker-end="url(#ar22a)"/>
+    <line x1="515" y1="80" x2="515" y2="92" stroke="var(--muted)" marker-end="url(#ar22)"/>
+    <line x1="580" y1="124" x2="626" y2="124" stroke="var(--accent-3)" marker-end="url(#ar22a)"/>
+
+    <rect x="230" y="170" width="220" height="64" rx="10" fill="var(--card)" stroke="var(--line)" stroke-dasharray="5 3"/>
+    <text x="340" y="196" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">Service · LoadBalancer</text>
+    <text x="340" y="216" text-anchor="middle" fill="var(--muted)" font-size="9">8080:30369/TCP · EXTERNAL-IP 为 pending</text>
+    <line x1="685" y1="152" x2="454" y2="188" stroke="var(--muted)" stroke-dasharray="4 3" marker-end="url(#ar22)"/>
+    <text x="580" y="162" text-anchor="middle" fill="var(--muted)" font-size="8.5">expose 暴露</text>
+    <rect x="510" y="176" width="120" height="52" rx="10" fill="var(--bg-accent)" stroke="var(--line)"/>
+    <text x="570" y="198" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">minikube service</text>
+    <text x="570" y="216" text-anchor="middle" fill="var(--muted)" font-size="9">浏览器直达应用</text>
+    <line x1="510" y1="202" x2="454" y2="202" stroke="var(--accent-3)" marker-end="url(#ar22a)"/>
+    <text x="20" y="252" fill="var(--muted)" font-size="9.5">一条 create 命令触发的链路：声明进 API Server → 控制器对账 → Pod 出现；expose 加一层 Service，minikube service 帮本地浏览器找到它</text>
+  </svg>
+  </div>
+
+  <p>集群里发生了什么：Deployment 控制器发现"声明要 1 个副本、现实 0 个"，于是创建 ReplicaSet，ReplicaSet 拉起 Pod——<code>get pods</code> 里那个 <code>hello-node-5f76cf6ccf-br9b5</code> 就是产物（后缀哈希每次不同）。看看它自己的日志，官方教程原样输出：</p>
+  <pre><code>$ kubectl logs hello-node-5f76cf6ccf-br9b5
+I0911 09:19:26.677397       1 log.go:195] Started HTTP server on port 8080
+I0911 09:19:26.677586       1 log.go:195] Started UDP server on port 8081</code></pre>
+  <p>服务在容器里跑着，但官方教程说得很清楚：默认 Pod 只能被集群内部网络访问，<strong>要从外面访问，得把它暴露成 Service</strong>：</p>
+  <pre><code>$ kubectl expose deployment hello-node --type=LoadBalancer --port=8080
+
+$ kubectl get services
+NAME         TYPE           CLUSTER-IP      EXTERNAL-IP   PORT(S)          AGE
+hello-node   LoadBalancer   10.108.144.78   &lt;pending&gt;     8080:30369/TCP   21s
+kubernetes   ClusterIP      10.96.0.1       &lt;none&gt;        443/TCP          23m</code></pre>
+  <p>反直觉的一幕：<code>EXTERNAL-IP</code> 是 <code>&lt;pending&gt;</code>——不是坏了。官方原话：在支持负载均衡器的云厂商上，这里会被分配一个外部 IP；<strong>在 minikube 上，LoadBalancer 类型通过 <code>minikube service</code> 命令访问</strong>。本地没有云厂商的负载均衡器，这个 IP 永远 pending，minikube 用自己的方式把端口 30369 接到你的浏览器：</p>
+  <pre><code>$ minikube service hello-node</code></pre>
+  <p>浏览器自动打开、页面显示应用的响应——三条跑通判定全部达成。这里插一句官方警告（原话）："The agnhost container has a /shell endpoint, which is useful for debugging, but dangerous to expose to the public internet. Do not run this on an internet-facing cluster, or a production cluster."——<strong>这个测试镜像带调试后门，只在本地玩，别暴露到公网</strong>。另外官方教程开头还有一个加分项：<code>minikube dashboard</code> 一条命令打开官方 Web 界面，能在页面上创建 Deployment 和 Service——底层就是 minikube 的 addon 机制，起一个临时代理把默认只在内网可达的 dashboard 映射出来。收尾清理也是两条：<code>kubectl delete service hello-node</code>、<code>kubectl delete deployment hello-node</code>，集群本身 <code>minikube stop</code> 即可——官方提醒：还想继续学就不用 delete。</p>
+</section>
+
+<!-- ================= 07 报错 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>高频报错速查：现象 → 原因 → 解法</h2>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>现象</th><th>原因</th><th>解法</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>minikube start</code> 启动即失败，报驱动相关错误</td>
+        <td>容器/虚拟机管理器没装或没启动——前置要求里那项"容器或虚拟机管理器"缺了</td>
+        <td>按官方 drivers 页对号安装（Windows 优先 Hyper-V 或 Docker），或 <code>--driver</code> 换一个已有的</td>
+      </tr>
+      <tr>
+        <td>start 卡在下载镜像、超时重试</td>
+        <td>首次启动要下载容器镜像与二进制，网络慢是第一高频翻车</td>
+        <td>先重试；国内网络环境按官方命令参考加 <code>--image-mirror-country=cn</code>；反复失败 <code>minikube delete</code> 后重来</td>
+      </tr>
+      <tr>
+        <td>kubectl 连不上或操作了别的集群</td>
+        <td>本机有多套 kubeconfig 上下文，当前 context 不是 minikube</td>
+        <td><code>kubectl config get-contexts</code> 查看，<code>kubectl config use-context minikube</code> 切换，<code>kubectl cluster-info</code> 验证</td>
+      </tr>
+      <tr>
+        <td>Pod 一直起不来，状态 ImagePullBackOff</td>
+        <td>应用镜像拉取失败——镜像名拼错或网络不通（镜像在 registry.k8s.io）</td>
+        <td><code>kubectl describe pod</code> 看 Events 定位；网络问题多为等待重试后自愈</td>
+      </tr>
+      <tr>
+        <td>start 中途失败，提示内存/磁盘不足</td>
+        <td>前置要求未满足：2GB 空闲内存、20GB 磁盘、2 核 CPU</td>
+        <td>关掉吃内存的应用再试，或 <code>--memory</code> 显式分配（官方格式 <code>&lt;number&gt;[&lt;unit&gt;]</code>，单位 b/k/m/g）</td>
+      </tr>
+      <tr>
+        <td>想彻底重来</td>
+        <td>实验环境堆了一堆试验品</td>
+        <td><code>minikube delete</code> 连集群一起删，<code>minikube start</code> 全新开始——本地沙盘，重来零成本</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ================= 08 quiz ================= -->
+<section>
+  <h2><span class="sec-num">08</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. minikube start 起的集群，官方教程怎么描述它的形态？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，minikube start 默认起的就是单节点集群，多节点要用额外参数单独配置。","对的：官方原话——创建单节点集群，该节点既是控制平面又是工作节点。","不对，这不是 Docker Swarm 那类集群模式，minikube 起的是一套真正的 Kubernetes 控制面与节点。"]'>
+        <li class="quiz-option">一个多节点高可用集群</li>
+        <li class="quiz-option">单节点集群，该节点既是控制平面又是工作节点</li>
+        <li class="quiz-option">只有控制平面、没有工作节点</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. kubectl get services 里 hello-node 的 EXTERNAL-IP 显示 &lt;pending&gt;，官方的解释是？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，服务本身是通的，pending 只是没有外部 IP。","不对，等也等不来：本地没有云厂商的负载均衡器组件。","对的：官方原话——支持负载均衡器的云上会分配外部 IP；在 minikube 上要通过 minikube service 命令访问。"]'>
+        <li class="quiz-option">Service 创建失败，需要删了重建</li>
+        <li class="quiz-option">再等几分钟就会自动分配</li>
+        <li class="quiz-option">云上会分配外部 IP；minikube 上改用 minikube service 命令访问</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 为什么 kubectl 不装独立客户端也能用？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：官方 start 文档给的就是 minikube kubectl -- get po -A，并建议把 kubectl 别名到 minikube kubectl --。","不对，kubectl 必须有可执行文件，只是 minikube 自带了一份。","不对，kubectl 走 kubeconfig 连集群，不进容器执行。"]'>
+        <li class="quiz-option">minikube 自带 kubectl，可用 minikube kubectl -- 调用</li>
+        <li class="quiz-option">kubectl 只是文档里的示例命令，实际不存在</li>
+        <li class="quiz-option">kubectl 会自动安装进容器里运行</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. 部署后 kubectl get pods 看到 ImagePullBackOff，第一步该干什么？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，那是起集群的命令，集群已在运行，Pod 层面的问题重起集群不解决。","对的：kubectl describe pod 看 Events 能看到镜像拉取失败的具体原因（镜像名、网络）。","不对，Pod 名是系统生成的，删了它 ReplicaSet 会再建一个，问题原样复现。"]'>
+        <li class="quiz-option">立刻 minikube delete 重来</li>
+        <li class="quiz-option">kubectl describe pod 看 Events 定位拉取失败原因</li>
+        <li class="quiz-option">删掉 Pod 让它自动重建</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 09 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：minikube 单节点"既是控制平面又是工作节点"，与生产集群的控制面/工作面分离相比，你今天学到的哪些东西是通用的，哪些只是本地沙盘的形态？</summary>
+    <div class="details-body">
+      <p>分两层看。<strong>通用的是 API 与对象模型</strong>：kubectl 的命令面、Deployment/Service/Pod 的声明方式、控制器对账的行为、kubeconfig 与上下文机制——今天在单节点沙盘上的每一次操作，语法与语义都和生产集群一致，官方文档也不用区分场景，这正是"可移植"承诺的一部分。<strong>本地形态特有的至少三处</strong>：其一，控制面与负载挤在同一台机器，etcd、apiserver 与业务容器抢 CPU 内存，生产上控制面独立部署、甚至买云厂商托管（你只管工作节点）；其二，LoadBalancer 的 <code>&lt;pending&gt;</code> 是本地没有云负载均衡器的产物，生产云上它会变成真实 IP，流量入口的玩法（Ingress、Gateway API）也更丰富；其三，单节点没有"调度"可言——Pod 永远落在唯一节点上，调度器的两阶段过滤打分（第 5 期展开）在这里是空转。所以正确的学习姿势：<strong>把沙盘当语法练习场，别把沙盘当生产缩影——形态差异清单留着，上生产时逐条对账</strong>。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：本期只用一条 kubectl create deployment 命令、没写 YAML，K8s 就把 Pod 拉起来了。那"写 YAML 文件再 kubectl apply"多出来的那一步，到底多在哪里？</summary>
+    <div class="details-body">
+      <p>两种方式提交的东西是同类的——都是一份期望状态。差别在<strong>声明存在于哪里</strong>：create 命令把声明"说"给集群听，说过就散了，除了你的命令历史，集群外没有任何记录；<strong>apply 把声明固化成文件</strong>，文件进版本库、过评审、可回滚、可复制到另一个集群——上一期说的"状态是数据，不是记忆"，在生产语境下就是"状态是文件，进 Git"。四个具体差距：<strong>其一可重现</strong>——新同事拿着同一份 YAML 在任何集群 apply 出同一个结果，create 的历史做不到；<strong>其二可演进</strong>——改文件重新 apply，K8s 算出差异只改动必要部分，而 create 是无差别的"再说一遍"；<strong>其三可组合</strong>——Service、ConfigMap、多个 Deployment 的关系在文件目录里一目了然；<strong>其四可审计</strong>——谁在什么时候改了什么，Git 记得。所以官方教程用 create 帮你迈第一步（少学一层文件格式），而第 4 期实战会切到 YAML + apply 的生产姿势——那时你会感谢今天的沙盘已经把对象模型练熟了。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 10 要点 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这四条：</strong></p>
+    <ul>
+      <li>本地方案三选一：minikube（官方教程配套、addon 生态）是入门主线，kind 快起快停适合 CI，Docker Desktop 属于顺手开关——前置要求只有 2 核、2GB 空闲内存、20GB 磁盘；</li>
+      <li>两条命令起步：<code>minikube start</code> 起单节点集群（该节点既是控制平面又是工作节点），kubectl 可用 <code>minikube kubectl --</code> 免装；默认 stable 的 Kubernetes 版本即 1.37.0，与本系列基准一致；</li>
+      <li>跑通判定三条：status 三行 Running + kubeconfig Configured、get pods 显示 Running、<code>minikube service hello-node</code> 浏览器看到应用响应；</li>
+      <li>EXTERNAL-IP pending 不是故障：本地没有云负载均衡器，访问走 minikube service；agnhost 测试镜像带调试后门，只玩本地别上公网。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 3 期《核心概念与整体架构》——声明式 API 的术语体系（对象、资源、标签与选择器）、控制平面四件套怎么分工，以及一次部署从 kubectl 到 Pod 运行的完整旅程：今天看到的每一步，下期给出内部原理图。Primary source：<a href="https://kubernetes.io/docs/tutorials/hello-minikube/" target="_blank" rel="noopener">Kubernetes 官方教程 · Hello Minikube</a>——本期部署、暴露、访问与全部输出出处；minikube 安装、前置要求与驱动见 <a href="https://minikube.sigs.k8s.io/docs/start/" target="_blank" rel="noopener">minikube 官方文档 · Start</a> 与 <a href="https://minikube.sigs.k8s.io/docs/drivers/" target="_blank" rel="noopener">Drivers 页</a>，start 命令参数见 <a href="https://minikube.sigs.k8s.io/docs/commands/start/" target="_blank" rel="noopener">minikube start 命令参考</a>，本地工具选型官方口径见 <a href="https://kubernetes.io/docs/tasks/tools/" target="_blank" rel="noopener">Install Tools</a>，版本与发布记录见 <a href="https://github.com/kubernetes/kubernetes/releases" target="_blank" rel="noopener">GitHub Releases</a>。</p>
+  <div class="note">
+    <p><strong>延伸阅读（每日微课程线，对象使用与排障不重讲）：</strong></p>
+    <ul>
+      <li><a href="../../daily-tech-course/lessons/0024-k8s-ingress-service-traffic.html">第 0024 期 · Kubernetes 流量入口：Service、Ingress 与 Gateway API</a>——今天 expose 出来的 Service 只是流量入口的最小演示，生产级入口配置与排障在那边讲透；</li>
+      <li><a href="../../daily-tech-course/lessons/0016-k8s-hpa.html">第 0016 期 · Kubernetes HPA 自动伸缩</a>——Deployment 的副本数今天写死为 1，让它随负载自动伸缩的用法见该课。</li>
+    </ul>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0021-k8s-what-and-why.html">← 上一期：认识 Kubernetes</a>
+  <a class="next" href="0023-k8s-core-concepts-architecture.html">下一期：核心概念与整体架构 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

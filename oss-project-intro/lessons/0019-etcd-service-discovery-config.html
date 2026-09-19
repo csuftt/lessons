@@ -151,7 +151,7 @@ if err != nil {
 }
 defer cli.Close()
 
-// ① 申请 15 秒租约（官方示例注释：minimum lease TTL is 5-second）
+// ① 申请 15 秒租约（官方 Grant leases 示例注释：# grant a lease with 60 second TTL）
 resp, err := cli.Grant(context.TODO(), 15)
 if err != nil {
     log.Fatal(err)
@@ -240,7 +240,7 @@ $ etcdctl get --prefix /services/
     </div>
   </div>
   <div class="warn">
-    <p><strong>TTL 不是越短越好：</strong>官方示例注释给出下限——minimum lease TTL is 5-second。演示用 15 秒；生产按"心跳周期 × 容忍次数"定，一次网络抖动就误摘半活的实例。租约续约语义在分布式锁场景是同一套原理的延伸，对照阅读见 <a href="../../daily-tech-course/lessons/0009-redis-distributed-lock.html">每日微课程线第 0009 期 · Redis 分布式锁</a>。目标③达成。</p>
+    <p><strong>TTL 不是越短越好：</strong>官方文档说明租约有最小 TTL、由应用在 grant 时指定，实际 TTL 不低于该最小值、由 etcd 集群选择，页面上并没有给出具体下限数值（Grant leases 示例注释原文：# grant a lease with 60 second TTL）。演示用 15 秒；生产按"心跳周期 × 容忍次数"定，一次网络抖动就误摘半活的实例。租约续约语义在分布式锁场景是同一套原理的延伸，对照阅读见 <a href="../../daily-tech-course/lessons/0009-redis-distributed-lock.html">每日微课程线第 0009 期 · Redis 分布式锁</a>。目标③达成。</p>
   </div>
 </section>
 
@@ -306,10 +306,10 @@ pool.size=64</code></pre>
       <p class="quiz-feedback"></p>
     </div>
     <div class="quiz-q">
-      <p class="quiz-question">3. 官方示例注释给出：lease 的最小 TTL 是多少？</p>
-      <ul class="quiz-options" data-answer="1" data-notes='["下限没这么低，再往上看官方注释。","对：官方 lease 示例注释原文——minimum lease TTL is 5-second。","15 秒是本期演示取值，不是官方下限。"]'>
-        <li class="quiz-option">1 秒</li>
+      <p class="quiz-question">3. 官方 Grant leases 示例注释里，grant 的租约 TTL 是多少？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["5 秒不是官方数字，官方页并没有给出 TTL 下限数值。","对：注释原文——# grant a lease with 60 second TTL。","15 秒是本期演示取值，不是官方示例值。"]'>
         <li class="quiz-option">5 秒</li>
+        <li class="quiz-option">60 秒</li>
         <li class="quiz-option">15 秒</li>
       </ul>
       <p class="quiz-feedback"></p>
@@ -353,7 +353,7 @@ pool.size=64</code></pre>
     <ul>
       <li>临时注册一句话：<strong>前缀目录 + lease 挂键 + keepalive 续约</strong>——进程在键在，进程亡键亡；</li>
       <li>发现 = 快照 + 直播：启动 <code>get --prefix</code> 拿全量，之后 <code>watch --prefix</code> 收增量，事件按全局 revision 排序；</li>
-      <li>自动摘除不需要清理任务：TTL 到期由服务端原子删键并派发 DELETE，消费方与真实存活没有窗口差；TTL 下限 5 秒（官方注释），按"心跳周期 × 容忍次数"定；</li>
+      <li>自动摘除不需要清理任务：TTL 到期由服务端原子删键并派发 DELETE，消费方与真实存活没有窗口差；TTL 参考官方示例注释取值（# grant a lease with 60 second TTL），按"心跳周期 × 容忍次数"定；</li>
       <li>配置热更新：先 get 补基线，再从当前 revision 起 watch；比轮询少了半个周期的平均延迟，配置历史还能 <code>--rev</code> 回溯；</li>
       <li>客户端两条线：Go clientv3 文档最全，以其为纲；Java 用 jetcd 0.8.7（io.etcd:jetcd-core），对照见第 02 节表格。</li>
     </ul>
