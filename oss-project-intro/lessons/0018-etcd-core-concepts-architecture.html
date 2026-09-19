@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · etcd 系列第 3 期：核心概念与整体架构 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0018</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0017-etcd-quickstart.html">上一期：0017</a> · etcd 系列第 3 期 / 共 5 期 · <a href="https://etcd.io" target="_blank" rel="noopener">etcd.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · ETCD 系列第 3 期：核心概念与整体架构</p>
+  <h1>etcd 核心概念与整体架构：一把全局版本号、一套 Raft 术语与一条写请求的旅程</h1>
+  <p class="subtitle">上一期我们跑通了 etcd 的第一公里：一条命令起单成员集群，put 回 OK、get 两行回显、watch 瞬间推送、lease 让键自灭，健康检查判定跑通。但回头看，那个 OK 来得并不简单——写入先在哪记账、谁点头、最后落到哪，命令行一个字都没说。这一期把 etcd 的户口本翻开：键值模型的六个核心名词配类比和一句话定义——revision、version、MVCC、watch、lease、compaction；Raft 侧的四个角色——leader、follower、learner、log；一张自绘三层架构图看懂 API 层、共识层与存储层怎么分工，顺带回答两个值得琢磨的问题——读请求凭什么可以不走共识、revision 为什么是全局单调而不是每个键各自计数。最后打开源码仓库，把顶层模块一一对号入座。全文基于 3.7.x（v3.7.1，2026-07-23 发布，2026-09-19 于 GitHub Releases 与官方文档复核），概念表述逐条对照官方 v3.7 文档。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 分布式键值存储 · Go · Apache-2.0</span>
+    <span class="tag">📦 基于 etcd 3.7.x（3.7.1）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 3 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 承上启下 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>上一期的 OK，背后其实有一条流水线</h2>
+  <p>第 2 期我们验证过三条判定：<code>put</code> 回 <code>OK</code>、<code>get</code> 固定两行、健康检查回显"successfully committed proposal"。其中健康检查那条已经漏了底：<strong>一次写入的真实身份是一条"提案"，要走完共识确认才算数</strong>。也就是说，那个轻描淡写的 OK 背后，etcd 内部跑完了一整条流水线：请求先变成提案、提案先记进预写日志（WAL）、多数派点头后应用到多版本存储、再顺手把变更事件推给所有订阅者。这条流水线上的每个岗位，都有一个正式名词。</p>
+  <p>用户视角的 etcd 核心词汇，说穿了就是十个小名词：<strong>键值模型侧六个——revision、version、MVCC、watch、lease、compaction；共识侧四个——leader、follower、learner、log</strong>。后面不管你用 etcd 做服务发现还是配置中心，本质都是在跟这十块积木打交道。先发名片架，再上架构图对号入座。</p>
+</section>
+
+<!-- ================= 02 键值模型六件套 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>键值模型六件套：类比 + 一句话定义 + 关键点</h2>
+
+  <div class="grid-2">
+    <div class="card">
+      <h4>① Revision 全局版本号——整栋楼的快递流水号</h4>
+      <p><strong>一句话定义：</strong>整个键空间共用一个单调递增的计数器，官方 data model 文档原话：每次原子修改都会在键空间上"创建一个新 revision"。</p>
+      <ul>
+        <li>类比小区快递柜：<strong>出库流水号是全网一个计数器</strong>，不是每个柜格各数各的——放一件包裹，全楼的流水号一起涨；</li>
+        <li>官方口径：<strong>Revisions are monotonically increasing over the lifetime of a cluster</strong>（集群存活期内单调递增）；store 从 revision 1 起步；</li>
+        <li>它就是 etcd 的"全局逻辑时钟"——watch 靠它排队，历史读靠它定位，钩子二细讲。</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>② Version 键内版本——每个柜格自己的计数</h4>
+      <p><strong>一句话定义：</strong>单个 key 自己的修改次数，从创建那一刻起算。</p>
+      <ul>
+        <li>key 的一生是一"代"（generation）：创建时 version=1，每次修改加一；</li>
+        <li>删除时写一块<strong>墓碑（tombstone）</strong>，当前一代终结、version 归零——下次重建又从 1 开始；</li>
+        <li>注意分清：revision 回答"全库第几笔写"，version 回答"这个键第几笔写"。</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>③ MVCC 多版本——旧值都在，可以时间旅行</h4>
+      <p><strong>一句话定义：</strong>多版本并发控制——新值写入不覆盖旧值，旧版本保留到压缩为止，官方管查历史叫"time travel queries"。</p>
+      <ul>
+        <li>物理形态是一棵<strong>持久 B+ 树</strong>，键是 (major, sub, type) 三元组——major 就是 revision；旁边还有一颗内存 btree 索引加速按键查询；</li>
+        <li>第 2 期那句"写入即存在"现在有了下半句：<strong>写入即留痕</strong>——每个历史 revision 都能原样读回；</li>
+        <li>快照便宜、watch 历史事件，都吃的是"旧版本还在"这个红利。</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>④ Watch 订阅——按流水号排序的变更广播</h4>
+      <p><strong>一句话定义：</strong>订阅某个键或前缀，变更事件按 revision 顺序推送上门——第 2 期亲眼看过的那一幕。</p>
+      <ul>
+        <li>官方 data model 的原话是"ranging over revisions with watchers is efficient"——watch 直接复用全局 revision 这把尺子；</li>
+        <li>事件里带着事件发生的 revision，消费端能对齐顺序、不重不漏；</li>
+        <li>配置下发、服务目录同步，底层都是这一条订阅通道。</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>⑤ Lease 租约——一组键共享的 TTL 倒计时</h4>
+      <p><strong>一句话定义：</strong>先申请一个带 TTL 的租约，把一批键挂上去；到期或主动撤销，整组键一起自动删除。</p>
+      <ul>
+        <li>客户端用 <code>lease keep-alive</code> 持续续期——人还在，租约就在；掉线了，键跟着租约一起消失；</li>
+        <li>节点存活检测、临时注册（第 4 期服务发现的底座）都长在这套机制上；</li>
+        <li>拿它做分布式锁的原理对照，见每日微课程线 <a href="../../daily-tech-course/lessons/0009-redis-distributed-lock.html">第 0009 期 · Redis 分布式锁</a>。</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>⑥ Compaction 压缩与 Snapshot 快照——房间的断舍离</h4>
+      <p><strong>一句话定义：</strong>compaction 把指定 revision 之前的旧版本清掉；snapshot 是定期的全量快照文件。</p>
+      <ul>
+        <li>多版本不是免费午餐：<code>etcdctl compact 5</code> 之后，读 revision 4 及更早的请求直接报错（第 05 节演示）；</li>
+        <li>官方存储文件文档：快照大约每 <strong>--snapshot-count 次（默认 100'000）已应用提案</strong>落一份；</li>
+        <li>不压缩，数据只增不减——生产上这是一个需要规划的例行运维项。</li>
+      </ul>
+    </div>
+  </div>
+  <p class="note"><span class="h">版本备注</span>以上术语与官方表述已对照 etcd v3.7 文档 Data model / API guarantees / Persistent storage files / etcd API 各页核对（2026-09-19）。版本基线：当前 GA 稳定线 <strong>v3.7.1</strong>（2026-07-23 发布，GitHub Releases 标 Latest），3.6 与 3.5 线并行维护。</p>
+</section>
+
+<!-- ================= 03 Raft 四名词 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>Raft 侧四个角色：一场永不散会的班委会</h2>
+  <p>共识层的词汇可以类比一场班委会：<strong>leader 是主持例会的班长，follower 是参与表决的班委，learner 是只听不投的旁听生，log 是一本会期连着会期的会议纪要</strong>。四个角色各一句话：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>角色</th><th>类比</th><th>一句话职责</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Leader 领导者</strong></td><td>班长</td><td>任期（term）内主持一切写入：把请求变成提案，安排日志复制</td></tr>
+      <tr><td><strong>Follower 跟随者</strong></td><td>班委</td><td>接收 leader 复制来的日志，参与投票表决；leader 掉线时参与竞选</td></tr>
+      <tr><td><strong>Learner 学习者</strong></td><td>旁听生</td><td>官方 learner 设计文档：以<strong>非投票成员</strong>身份入群，先追平 leader 日志，再由 member promote 转正——新成员不再拖累法定人数</td></tr>
+      <tr><td><strong>Log 日志</strong></td><td>会议纪要</td><td>每条写请求先成为一条日志；复制到多数派才算提交，然后应用到状态机</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note"><span class="h">读码提示</span>Raft 的工程实现已拆成独立仓库 <a href="https://github.com/etcd-io/raft" target="_blank" rel="noopener">etcd-io/raft</a>（module 路径 go.etcd.io/raft/v3），etcd 主仓库按模块引用。官方 README 里列着同一批使用方：etcd、Kubernetes、Docker Swarm、CockroachDB、TiDB——一份班委手册，好几家学校在用。它只管算法本身，网络收发和落盘由使用方自己接。</p>
+</section>
+
+<!-- ================= 04 整体架构 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>整体架构：三层楼，一条写请求的旅程</h2>
+  <p>十块积木拼上三层楼，就是 etcd 的全景。读图三句话：<strong>API 层只管接待，共识层管点头，存储层管记账与落库</strong>。实线是写请求的路径，虚线是变更事件的回推。</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 540" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" style="max-width:100%">
+    <defs>
+      <marker id="ar-n" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar-a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent)"/>
+      </marker>
+      <marker id="ar-g" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+
+    <!-- 客户端 -->
+    <rect x="30" y="14" width="200" height="54" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="130" y="36" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">etcdctl / clientv3 应用</text>
+    <text x="130" y="54" text-anchor="middle" fill="var(--muted)" font-size="9.5">客户端 · gRPC 打到 2379</text>
+    <line x1="130" y1="68" x2="130" y2="94" stroke="var(--muted)" marker-end="url(#ar-n)"/>
+
+    <!-- API 层 -->
+    <rect x="20" y="98" width="720" height="104" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="36" y="120" fill="var(--ink)" font-size="11" font-weight="700">API 层 · gRPC Server</text>
+    <text x="200" y="120" fill="var(--muted)" font-size="9.5">官方 etcd API 文档定义的六个服务 · 客户端唯一入口</text>
+
+    <rect x="36" y="134" width="104" height="52" rx="7" fill="var(--card)" stroke="var(--line)"/>
+    <text x="88" y="156" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">KV</text>
+    <text x="88" y="173" text-anchor="middle" fill="var(--muted)" font-size="8.5">读写与压缩</text>
+    <rect x="152" y="134" width="104" height="52" rx="7" fill="var(--card)" stroke="var(--line)"/>
+    <text x="204" y="156" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">Watch</text>
+    <text x="204" y="173" text-anchor="middle" fill="var(--muted)" font-size="8.5">事件流</text>
+    <rect x="268" y="134" width="104" height="52" rx="7" fill="var(--card)" stroke="var(--line)"/>
+    <text x="320" y="156" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">Lease</text>
+    <text x="320" y="173" text-anchor="middle" fill="var(--muted)" font-size="8.5">租约管理</text>
+    <rect x="384" y="134" width="104" height="52" rx="7" fill="var(--card)" stroke="var(--line)"/>
+    <text x="436" y="156" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">Auth</text>
+    <text x="436" y="173" text-anchor="middle" fill="var(--muted)" font-size="8.5">用户与角色</text>
+    <rect x="500" y="134" width="104" height="52" rx="7" fill="var(--card)" stroke="var(--line)"/>
+    <text x="552" y="156" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">Cluster</text>
+    <text x="552" y="173" text-anchor="middle" fill="var(--muted)" font-size="8.5">成员增删查</text>
+    <rect x="616" y="134" width="108" height="52" rx="7" fill="var(--card)" stroke="var(--line)"/>
+    <text x="670" y="156" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">Maintenance</text>
+    <text x="670" y="173" text-anchor="middle" fill="var(--muted)" font-size="8.5">快照 · 碎片整理</text>
+
+    <!-- API -> Raft -->
+    <line x1="240" y1="202" x2="240" y2="246" stroke="var(--accent)" marker-end="url(#ar-a)"/>
+    <text x="252" y="228" fill="var(--accent)" font-size="9.5">写请求变成提案 · 读请求按一致性模式分流</text>
+
+    <!-- Raft 层 -->
+    <rect x="20" y="250" width="470" height="122" rx="10" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="36" y="272" fill="var(--ink)" font-size="11" font-weight="700">Raft 共识层 · 日志复制</text>
+    <text x="190" y="272" fill="var(--muted)" font-size="9.5">复制到多数派才算提交</text>
+
+    <rect x="36" y="286" width="136" height="70" rx="8" fill="var(--card)" stroke="var(--accent)"/>
+    <text x="104" y="308" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">Leader</text>
+    <text x="104" y="325" text-anchor="middle" fill="var(--muted)" font-size="8.5">任期 term 内主持</text>
+    <text x="104" y="341" text-anchor="middle" fill="var(--muted)" font-size="8.5">安排日志复制</text>
+    <rect x="186" y="286" width="136" height="70" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="254" y="308" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">Follower</text>
+    <text x="254" y="325" text-anchor="middle" fill="var(--muted)" font-size="8.5">收日志 · 参与投票</text>
+    <text x="254" y="341" text-anchor="middle" fill="var(--muted)" font-size="8.5">掉线时参与竞选</text>
+    <rect x="336" y="286" width="138" height="70" rx="8" fill="var(--card)" stroke="var(--line)" stroke-dasharray="5 3"/>
+    <text x="405" y="308" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">Learner</text>
+    <text x="405" y="325" text-anchor="middle" fill="var(--muted)" font-size="8.5">旁听不投票</text>
+    <text x="405" y="341" text-anchor="middle" fill="var(--muted)" font-size="8.5">追平后 promote</text>
+
+    <!-- 成员间通信 -->
+    <rect x="510" y="250" width="230" height="122" rx="10" fill="var(--card)" stroke="var(--line)" stroke-dasharray="5 3"/>
+    <text x="625" y="274" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">成员间通道 · 端口 2380</text>
+    <text x="625" y="298" text-anchor="middle" fill="var(--muted)" font-size="9">Leader ↔ Follower 的日志复制消息</text>
+    <text x="625" y="316" text-anchor="middle" fill="var(--muted)" font-size="9">竞选投票也走这里</text>
+    <text x="625" y="340" text-anchor="middle" fill="var(--muted)" font-size="9">单成员集群里用不上（第 2 期）</text>
+    <line x1="490" y1="311" x2="506" y2="311" stroke="var(--muted)" stroke-dasharray="4 3" marker-end="url(#ar-n)"/>
+
+    <!-- Raft -> 存储层 -->
+    <line x1="240" y1="372" x2="240" y2="416" stroke="var(--accent)" marker-end="url(#ar-a)"/>
+    <text x="252" y="398" fill="var(--accent)" font-size="9.5">已提交的日志应用到状态机</text>
+
+    <!-- 存储层 -->
+    <rect x="20" y="420" width="720" height="100" rx="10" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="36" y="442" fill="var(--ink)" font-size="11" font-weight="700">存储层 · 先记账，再落库</text>
+
+    <rect x="36" y="454" width="220" height="52" rx="7" fill="var(--card)" stroke="var(--accent)"/>
+    <text x="146" y="474" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">WAL 预写日志</text>
+    <text x="146" y="492" text-anchor="middle" fill="var(--muted)" font-size="8.5">追加写 · member/wal/ 下 64MB 切一段</text>
+    <rect x="272" y="454" width="220" height="52" rx="7" fill="var(--card)" stroke="var(--line)"/>
+    <text x="382" y="474" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">MVCC B+ 树后端</text>
+    <text x="382" y="492" text-anchor="middle" fill="var(--muted)" font-size="8.5">以 (major, sub, type) 为键 · 旧版本都留</text>
+    <rect x="508" y="454" width="216" height="52" rx="7" fill="var(--card)" stroke="var(--line)"/>
+    <text x="616" y="474" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">Snapshot 快照</text>
+    <text x="616" y="492" text-anchor="middle" fill="var(--muted)" font-size="8.5">约每 10 万次已应用提案落一份</text>
+
+    <!-- watch 回推 -->
+    <path d="M700,416 C720,330 700,250 660,206" fill="none" stroke="var(--accent-3)" stroke-dasharray="4 3" marker-end="url(#ar-g)"/>
+    <text x="712" y="310" fill="var(--accent-3)" font-size="9">变更事件</text>
+    <text x="712" y="324" fill="var(--accent-3)" font-size="9">按 revision 派发</text>
+
+    <text x="20" y="534" fill="var(--muted)" font-size="9.5">分层与文件口径对照官方 v3.7 文档：etcd API（六个 gRPC 服务）、persistent storage files（WAL 与快照）、data model（B+ 树与 revision）</text>
+  </svg>
+  </div>
+
+  <p>顺着实线把一条写请求走完：<strong>客户端 <code>put</code> 打到 2379 的 gRPC KV 服务 → leader 把请求包成一条 Raft 提案、追加进 WAL → 复制给 follower，凑够多数派确认 → 已提交的日志应用到状态机：全局 revision 加一、改动写进 MVCC B+ 树 → 回给客户端那个 OK → watch 订阅者按 revision 顺序收到变更事件</strong>。崩溃恢复也在这张图里：状态机靠重放 WAL 补账，快照把重放的起点往前挪——这就是"先记账再落库"的完整含义。</p>
+
+  <div class="grid-2">
+    <div class="card">
+      <h4>钩子一：读请求为什么可以不走共识？</h4>
+      <p>官方 API guarantees 文档给了两条路：<strong>线性一致读（默认）必须经过 Raft 共识流程</strong>，读之前先确认自己还握着最新状态，代价是多一轮协商；<strong>serializable 读则由成员本地直接应答，不需要跟其他节点达成共识</strong>——可能读到相对过时的数据，换来的是更低延迟与更高吞吐（官方 API 参考对 Range 的描述：linearizable by default，higher latency and lower throughput）。命令行上就是 <code>etcdctl get 键 --consistency=s</code>。监控巡检、大盘展示这类"读个大概"的场景可以走右边省成本；配置读取这种"差一个版本就出错"的场景，别省。</p>
+    </div>
+    <div class="card">
+      <h4>钩子二：revision 为什么是全局单调，而不是每个键各计各的？</h4>
+      <p>反着想：如果版本号 per-key，watch 就没有一条统一的时间线给所有事件排队——你订阅一组前缀，事件之间比不出先后；事务（txn）也无法原子地领到"这一笔写"的全局序号。官方 data model 的设计是：<strong>每次原子修改创建一个新 revision，全库共用</strong>——watch 复用这把尺子（ranging over revisions with watchers is efficient），历史读用 <code>--rev</code> 直达任意时刻，压缩（compact）也才有单一的"清到第几号"的口径。<strong>一把全局刻度尺，换来的是全系统对"先后"的零争议</strong>——第 05 节的演示链会让你亲眼看到：改另一个键，你的 revision 也会涨。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 05 源码模块地图 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>打开仓库：顶层模块地图</h2>
+  <p>概念清楚了，再看源码仓库就不慌。以 GitHub 上 etcd-io/etcd 主分支（go.work 所列模块，2026-09-19 核对；阅读源码建议锁定 tag <strong>v3.7.1</strong>）为准，常用模块一句话：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>顶层模块</th><th>一句话职责</th></tr></thead>
+    <tbody>
+      <tr><td><code>api/</code></td><td>gRPC API 与 protobuf 定义：KV/Watch/Lease/Auth/Cluster/Maintenance 六个服务的接口契约</td></tr>
+      <tr><td><code>server/</code></td><td>服务端主体：etcdserver（Raft 集成、请求处理）与 storage/（WAL、MVCC 后端）都在这</td></tr>
+      <tr><td><code>client/</code></td><td>客户端库：clientv3（v3 gRPC 客户端）与共享的 transport 等基础包</td></tr>
+      <tr><td><code>etcdctl/</code></td><td>命令行客户端——第 2 期敲的 put/get/watch/lease 命令的真身</td></tr>
+      <tr><td><code>etcdutl/</code></td><td>运维工具：快照恢复、备份、碎片整理（3.5 起从 etcdctl 拆出）</td></tr>
+      <tr><td><code>pkg/</code></td><td>各模块共用的基础工具包（transport、wait、schedule 等）</td></tr>
+      <tr><td><code>cache/</code></td><td>实验性的客户端缓存库：本地缓存 + watch 保持一致（v3.7 时代的新成员）</td></tr>
+      <tr><td><code>tests/</code></td><td>集成与 e2e 测试套件——读码时最好的"用法示例库"</td></tr>
+      <tr><td><code>tools/</code></td><td>benchmark 压测等辅助工具</td></tr>
+      <tr><td><code>raft/</code>（独立仓库）</td><td>Raft 算法本体在 etcd-io/raft（go.etcd.io/raft/v3），主仓库按模块引用——见第 03 节</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note"><span class="h">读码提示</span>三个模块记优先级：<code>server/etcdserver</code> 是请求进共识层的入口，<code>server/storage</code> 是 MVCC 与 WAL 的家，<code>api/</code> 是所有接口的契约——第 5 期源码导读（MVCC、watch 与 lease 的设计决策）就从这三个进门。</p>
+</section>
+
+<!-- ================= 06 quiz ================= -->
+<section>
+  <h2><span class="sec-num">06</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. etcd 的 revision 是什么口径的计数器？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["那是 version 的口径：单个键自己的修改次数，从创建起算。","对：官方 data model——每次原子修改在键空间上创建一个新 revision，全库共用，集群存活期内单调递增。","revision 和租约无关：租约是键的 TTL 归属机制，不是计数口径。"]'>
+        <li class="quiz-option">每个键各自维护一份</li>
+        <li class="quiz-option">全库共用一个，单调递增</li>
+        <li class="quiz-option">每个租约单独维护一份</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 默认的线性一致读，代价是什么？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["方向反了：串行化读才可能读到相对过时的数据，线性一致读不会。","读路径本身不落盘新增数据，代价不在磁盘写入。","对：官方原话——linearized requests must go through the Raft consensus process；serializable 读才由成员本地应答。"]'>
+        <li class="quiz-option">可能读到相对过时的数据</li>
+        <li class="quiz-option">每次读都会多落一次盘</li>
+        <li class="quiz-option">读之前要走一遍 Raft 共识流程</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. etcdctl compact 5 之后，etcdctl get --rev=4 键 会发生什么？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["读到旧值是压缩前的行为：revision 4 还在历史里才读得到。","对：官方样例原样——Error: etcdserver: mvcc: required revision has been compacted。","不会回落到最新值：历史读要的就是那一时刻，读不到就明说。"]'>
+        <li class="quiz-option">返回 revision 4 当时的旧值</li>
+        <li class="quiz-option">报错：required revision has been compacted</li>
+        <li class="quiz-option">自动回落到返回最新值</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. learner（学习者）在集群里是什么角色？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对：官方 learner 设计文档——以非投票成员入群追日志，由 member promote 转正，新成员不再影响法定人数。","learner 不只是只读：转正后就是普通投票成员，设计目标是缓解扩容痛点。","备份由快照与运维工具负责，learner 的定位是安全加入集群。"]'>
+        <li class="quiz-option">非投票成员，追平日志后转正</li>
+        <li class="quiz-option">永久只读副本，不能转正</li>
+        <li class="quiz-option">专门负责备份的节点</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 07 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：写请求为什么必须"先记账（WAL）再落库"，顺序反过来会怎样？快照和 WAL 又是怎么配合的？</summary>
+    <div class="details-body">
+      <p>先看承诺：etcd 对 KV 接口的第一个保证是<strong>持久性（durability）</strong>——写入一旦向你确认，断电重启后必须还在。WAL（预写日志）就是这份承诺的兑现凭证：<strong>提案在应用到状态机之前先追加落盘</strong>，而且官方存储文件文档明确它是追加写——条目"不在原位覆盖，后写的同位条目取代前者"。反过来看"先改状态机再记账"的反事实方案：状态机改完、WAL 还没落盘的瞬间宕机，这条已经向客户端回过 OK 的写入就蒸发了——确认过的事没了下文，持久性承诺破产；而"先记账再落库"最坏情况只是"记了账还没应用"，重启后<strong>重放 WAL 补齐状态机</strong>，一切对得上。快照的角色是给重放一个起点：官方口径约每 10 万次已应用提案（--snapshot-count，默认 100'000）落一份快照文件，恢复时先加载快照、再重放其后的 WAL——没有快照，就要从开天辟地重放全部日志；没有 WAL，快照之后的新写入无从补齐。<strong>一个管"起点"，一个管"增量"，合起来才是完整的崩溃恢复</strong>。这套"预写日志 + 周期快照"的组合拳不是 etcd 独有，数据库、消息队列、共识系统里随处可见——理解一次，处处受益。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：第 2 期那个单成员集群里，Raft 的四个角色都还在吗？谁来当 leader、多数派怎么算？</summary>
+    <div class="details-body">
+      <p>都在，一个不少。单成员集群也要走完整的协议流程：启动照样有选举，它自己当选 leader；写入照样生成提案、照样落 WAL、照样"复制到多数派"——只是多数派的定义是<strong>超过半数，1/1 也是多数派</strong>，所以确认退化成"自己点头"，延迟很小，但第 2 期思考一说过：<strong>共识协议的容错红利在这个形态里是零</strong>。follower 的戏份由谁接？没有别人，leader 身兼两角；learner 则完全没戏份——集群里只有它一个成员，谈不上"新成员追日志"。反过来做实验也行：单机上用 member add 加成员时，官方会提示用 <code>--learner</code> 让新成员先做旁听生——这正是 learner 机制存在的意义：<strong>扩容先追平再投票，别让一张新面孔拖垮表决</strong>。所以正确的理解是：单成员集群是共识机制的"教学沙盘"，四个角色、一条流水线全都在演，只是台下没有观众。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 08 要点 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这几条：</strong></p>
+    <ul>
+      <li>十块积木：键值侧 revision / version / MVCC / watch / lease / compaction，共识侧 leader / follower / learner / log——revision 是全库一把的流水号，version 是每个键自己的计数；</li>
+      <li>三层分工：API 层（gRPC 六服务）只管接待，Raft 共识层管点头（复制到多数派才算提交），存储层先记账（WAL 追加写）再落库（MVCC B+ 树）；</li>
+      <li>一条写请求的旅程：put → 提案进 WAL → 多数派确认 → revision 加一写进 B+ 树 → 回 OK → watch 按 revision 派发事件；</li>
+      <li>两个反直觉：读可以不走共识（serializable 换性能，可能读旧）；revision 全局单调，才养得起 watch 排队与 --rev 时间旅行；</li>
+      <li>仓库地图：api/ 是契约，server/ 是主体，etcdctl/etcdutl 是命令行双工具，Raft 本体在独立仓库 etcd-io/raft。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 4 期《实战场景：服务发现与配置管理怎么落地》——把今天的 lease 和 watch 用到真实场景：服务上线注册临时键、掉线键自动消失、配置变更推送生效，端到端跑通一个最小例子，中间件与 Spring 集成的最小配置一并给全。本期每个名词都会变成实战里实打实的一步。</p>
+  <p><strong>延伸阅读：</strong>Primary source 官方文档四页：<a href="https://etcd.io/docs/v3.7/learning/data_model/" target="_blank" rel="noopener">Data model（v3.7）</a>（revision、version、tombstone、B+ 树的一手出处）、<a href="https://etcd.io/docs/v3.7/learning/api_guarantees/" target="_blank" rel="noopener">API guarantees（v3.7）</a>（线性一致与串行化读的权威定义）、<a href="https://etcd.io/docs/v3.7/learning/persistent-storage-files/" target="_blank" rel="noopener">Persistent storage files（v3.7）</a>（WAL 与快照文件格式）、<a href="https://etcd.io/docs/v3.7/learning/api/" target="_blank" rel="noopener">etcd API（v3.7）</a>（六个 gRPC 服务总览）；learner 机制细节见 <a href="https://etcd.io/docs/v3.7/learning/design-learner/" target="_blank" rel="noopener">etcd learner design</a>，命令与回显样例见 <a href="https://etcd.io/docs/v3.7/dev-guide/interacting_v3/" target="_blank" rel="noopener">Interacting with etcd（v3.7）</a>，Raft 库见 <a href="https://github.com/etcd-io/raft" target="_blank" rel="noopener">github.com/etcd-io/raft</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0017-etcd-quickstart.html">← 上一期：5 分钟跑起来</a>
+  <a class="next" href="0019-etcd-service-discovery-config.html">下一期：实战场景 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

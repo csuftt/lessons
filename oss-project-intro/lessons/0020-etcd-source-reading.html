@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · etcd 系列第 5 期：架构与源码导读 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0020</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0019-etcd-service-discovery-config.html">上一期：0019</a> · etcd 系列第 5 期 / 共 5 期 · <a href="https://etcd.io" target="_blank" rel="noopener">etcd.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · ETCD 系列第 5 期：架构与源码导读</p>
+  <h1>etcd 架构与源码导读：工业级 Raft、读请求的协商与 MVCC 的设计决策</h1>
+  <p class="subtitle">前四期交付了跑起来的集群、十块积木和两个端到端最小系统，这一期换挡进源码，回答四个"凭什么"：Raft 实现凭什么成工业标准（算法与 IO 解耦）、线性一致读凭什么可以不走完整共识（ReadIndex 协商）、多版本凭什么读历史比读当下还顺（tree index 与 bbolt 双层记账）、lease 心跳凭什么敢不进共识（checkpoint 兜底）。一条写请求的源码旅程串起全部调用链，收尾给一张六步读码路线图。代码逐行核对自 tag v3.7.1 与 Raft 库 v3.7.0。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 分布式键值存储 · Go · Apache-2.0</span>
+    <span class="tag">📦 源码基准 etcd v3.7.1 · Raft 库 v3.7.0（2026-09-19 逐行核对）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 5 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 路线 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>本期路线：先抓决策，再顺着决策找类</h2>
+  <p>近十万行的服务端仓库别顺着读。前四期积累的概念——revision、watch、lease、提案流水线——正好是读码的藏宝图：<strong>先锁定三个最值得学的设计决策，再顺着决策找类</strong>。类会搬家（read.go 就搬进过子包），决策稳定。三个决策与两条配套链路：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>看点</th><th>一句话结论</th><th>源码坐标（v3.7.1）</th></tr></thead>
+    <tbody>
+      <tr><td>决策一 · Raft 做成最小库</td><td>只管算法状态机，网络与磁盘留给使用方</td><td><code>github.com/etcd-io/raft</code> raft.go + <code>server/etcdserver/raft.go</code></td></tr>
+      <tr><td>决策二 · 读请求的协商</td><td>强一致读不写日志：确认下标 + 等应用位点</td><td><code>server/etcdserver/read/read.go</code></td></tr>
+      <tr><td>决策三 · MVCC 双层记账</td><td>内存索引答"哪个版本"，bbolt 答"内容是什么"</td><td><code>server/storage/mvcc/</code> index.go、kvstore_txn.go</td></tr>
+      <tr><td>配套 · watch 推送</td><td>synced 直达、unsynced 对账、victims 兜底</td><td><code>server/storage/mvcc/watchable_store.go</code></td></tr>
+      <tr><td>配套 · lease 租约</td><td>续约不进共识，checkpoint 定期把剩余 TTL 存进日志</td><td><code>server/lease/lessor.go</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note"><span class="h">版本口径</span>etcd 主仓 tag <code>v3.7.1</code>（2026-07-23 发布）；其 <code>server/go.mod</code> 钉定 Raft 库 <code>v3.7.0</code>（独立仓库 etcd-io/raft）。类名与路径均按这两个 tag 的 raw 文件核对。</p>
+</section>
+
+<!-- ================= 02 决策一 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>决策一：Raft 库——算法的最小化，使用的最大化</h2>
+  <p>先回答"凭什么成工业标准"。README 的自我介绍两句句句是设计宣言：一是<strong>只实现 Raft 算法本身，网络与磁盘都留给使用方</strong>（原文：both network and disk IO are left to the user）；二是自称 2016 年起<strong>生产环境使用最广的 Raft 库</strong>，用户列表里躺着 etcd、Kubernetes、Docker Swarm、CockroachDB、TiDB。共识算法是共用的难题，网络与磁盘却是各家各异的现实——把难题做成<strong>纯状态机</strong>，任何系统都能带着自己的 IO 来用。</p>
+  <p>etcd 自己是第一个使用方，接入点在 <code>server/etcdserver/raft.go</code>：一个循环把算法库的产出逐批落地——</p>
+  <pre><code>// server/etcdserver/raft.go · raftNode.start 主循环（节选，v3.7.1）
+for {
+    select {
+    case &lt;-r.ticker.C:
+        r.tick()                       // 时钟推进：选举超时、心跳，全靠它喂
+    case rd := &lt;-r.Ready():            // 算法库交出一批"待办"
+        if len(rd.ReadStates) != 0 {   // ① 读请求的回执（决策二的入口）
+            select { case r.readStateC &lt;- rd.ReadStates[...]: ... }
+        }
+        // ② leader 先把消息发出去，再慢慢落盘（Raft 论文 10.2.1）
+        if islead { r.transport.Send(r.processMessages(rd.Messages)) }
+        if err := r.storage.Save(rd.HardState, rd.Entries); ...  // ③ WAL 落盘
+        select { case r.applyc &lt;- ap: ... }                      // ④ 已提交条目交给应用层
+        r.Advance()
+    }
+}</code></pre>
+  <p>这个循环就是"解耦"的全部秘密：<strong>算法库不知道 WAL 与网络的存在，使用方不需要懂选举与复制的内部状态机</strong>，两边只用 tick/Ready/Advance 三个握手交接。换种做法会怎样？把网络与存储焊死进算法库，每个想用 Raft 的系统都得改造它的 IO 假设——README 里那串用户列表就不会存在。</p>
+  <p class="note"><span class="h">读码坐标</span>算法本体 raft 仓库 <code>raft.go</code> 的 <code>Step()</code>；使用侧 <code>server/etcdserver/raft.go</code>。两边都是一屏能翻完的量级——理解共识不用啃整个 etcd，这是"最小化"的收益。</p>
+</section>
+
+<!-- ================= 03 决策二 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>决策二：读请求的协商——为什么不写日志也能线性一致</h2>
+  <p>官方 API guarantees 措辞很强硬：<strong>linearized requests must go through the Raft consensus process</strong>。但"走共识流程"不等于"写一条日志"。每次读都当提案走完整复制——正确，但读多的系统日志会被读请求灌满。etcd 的选择是 <strong>ReadIndex 协商</strong>：向多数派确认"当前提交下标"，然后<strong>读本机状态机</strong>——零日志条目，结果仍线性一致。</p>
+  <p>入口在 <code>v3_server.go</code> 的 <code>Range</code>：非 Serializable 的读先挂起等待；协商本体在 <code>server/etcdserver/read/read.go</code>：</p>
+  <pre><code>// server/etcdserver/read/read.go · v3.7.1（节选）
+func (r *Read) LinearizableReadLoop() {
+    for {
+        // ... 攒一批读请求后：
+        confirmedIndex, err := r.requestCurrentIndex(leaderChangedNotifier)
+        // requestCurrentIndex → sendReadIndex → r.raft.ReadIndex(...)：向算法库要下标
+        if err != nil { nr.notify(err); continue }
+        appliedIndex := r.server.AppliedIndex()
+        if appliedIndex &lt; confirmedIndex {
+            // 本机应用位点还没追上多数派确认的下标：等到追上为止
+            select {
+            case &lt;-r.server.ApplyWait(confirmedIndex):
+            case &lt;-r.server.Stopping(): return
+            }
+        }
+        nr.notify(nil)   // 放行这一批读：现在读本机状态机，结果必不落后于 confirmedIndex
+    }
+}</code></pre>
+  <p>两个细节都写在源码里：其一，<strong>leader 上任后还没提交过当前任期的日志时，ReadIndex 请求先搁置</strong>（raft.go 的 <code>!r.committedEntryInCurrentTerm()</code> 分支，read.go 重试日志原话 "first commit in current term"）；其二，<strong>confirmedIndex 是"已提交"下标不是"已应用"下标</strong>，拿到后还要 <code>ApplyWait</code> 等状态机追平——提交与应用是两本账，差一步线性一致就破产。算法库侧只三行：leader 随心跳向多数派确认下标（quorum），follower 转发给 leader，单成员集群（第 2 期那个）走 <code>IsSingleton</code> 分支直接以 committed 应答。</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 320" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar20" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar20a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+    <line x1="120" y1="70" x2="120" y2="300" stroke="var(--line)"/>
+    <line x1="400" y1="70" x2="400" y2="300" stroke="var(--line)"/>
+    <line x1="660" y1="70" x2="660" y2="300" stroke="var(--line)"/>
+    <rect x="60" y="30" width="120" height="34" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="120" y="52" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">客户端</text>
+    <rect x="330" y="30" width="140" height="34" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="400" y="52" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">本成员（leader）</text>
+    <rect x="580" y="30" width="160" height="34" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="660" y="52" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">多数派成员</text>
+
+    <line x1="120" y1="105" x2="400" y2="105" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#ar20a)"/>
+    <text x="260" y="97" text-anchor="middle" fill="var(--accent)" font-size="10">① 线性一致读挂起（LinearizableReadNotify）</text>
+    <line x1="400" y1="145" x2="660" y2="145" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#ar20a)"/>
+    <text x="530" y="137" text-anchor="middle" fill="var(--accent)" font-size="10">② ReadIndex 随心跳问一圈：我的已提交下标算数吗</text>
+    <line x1="660" y1="185" x2="400" y2="185" stroke="var(--muted)" stroke-dasharray="5 3" marker-end="url(#ar20)"/>
+    <text x="530" y="177" text-anchor="middle" fill="var(--muted)" font-size="10">③ 多数派点头（quorum 确认，无日志条目）</text>
+    <rect x="330" y="210" width="140" height="30" rx="7" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="400" y="230" text-anchor="middle" fill="var(--ink)" font-size="9.5">confirmedIndex 到手</text>
+    <line x1="400" y1="250" x2="400" y2="278" stroke="var(--muted)" marker-end="url(#ar20)"/>
+    <text x="408" y="268" fill="var(--muted)" font-size="9.5">④ 等本机应用位点追上 confirmedIndex，再读本机状态机应答</text>
+    <line x1="400" y1="278" x2="120" y2="278" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#ar20a)"/>
+    <text x="260" y="270" text-anchor="middle" fill="var(--accent)" font-size="10">⑤ 放行读请求：零日志条目的线性一致读</text>
+    <text x="20" y="314" fill="var(--muted)" font-size="9.5">对照：走日志的读多付一条提案日志；ReadIndex 只花一次心跳往返，日志零污染</text>
+  </svg>
+  </div>
+
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>读模式</th><th>代价</th><th>适用</th></tr></thead>
+    <tbody>
+      <tr><td>linearizable（ReadIndex）</td><td>一次多数派心跳往返 + 等应用位点，零日志</td><td>默认模式，"差一个版本就出错"的读</td></tr>
+      <tr><td>serializable</td><td>本机直接应答，可能读到旧值</td><td>监控大盘、巡检类"读个大概"</td></tr>
+      <tr><td>lease read（raft 库可选）</td><td>靠时钟租约免心跳确认（README：relies on the clock）</td><td>时钟有保障才敢用，etcd 主线未采用</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ================= 04 决策三 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>决策三：MVCC 双层记账——读历史为什么比读当下还顺</h2>
+  <p>第 3 期说过 revision 是全库一把的流水号，本期看它怎么落账。写入落点在 <code>kvstore_txn.go</code> 的 <code>put</code>：第一笔变更领 <code>beginRev+1</code> 作 main，事务内第几笔当 sub；值本体按 <strong>revision 字节序</strong>写进 bbolt，同时内存树索引登记新版本。</p>
+  <pre><code>// server/storage/mvcc/kvstore_txn.go · put（节选，v3.7.1）
+rev := tw.beginRev + 1                       // 本事务的全局 revision
+_, created, ver, err := tw.s.kvindex.Get(key, rev)  // 查旧代：拿 created/version
+idxRev := Revision{Main: rev, Sub: int64(len(tw.changes))}
+ibytes = RevToBytes(idxRev, ibytes)          // 键 = revision 的字节序编码
+kv := &amp;mvccpb.KeyValue{ Key: key, Value: value,
+    CreateRevision: c, ModRevision: rev, Version: ver + 1, ... }
+tw.tx.UnsafeSeqPut(schema.Key, ibytes, d)    // ① 值本体 → bbolt（backend）
+tw.s.kvindex.Put(key, idxRev)                // ② 版本登记 → 内存树索引
+
+// revision.go 的字节格式原注释：前 8 字节 main 大端 + '_' + 后 8 字节 sub
+// 墓碑（删除）在尾部再追加 1 字节标记 't'</code></pre>
+  <p>双层记账的分工：<strong>内存 <code>treeIndex</code>（B 树按 key 组织，keyIndex 记录各代 revision 区间）答"这个键在那个时刻的版本号"；数据本体按 revision 字节序躺在 bbolt 里，答"那个版本的值是什么"</strong>。字节格式是点睛之笔：main 大端序，<strong>按字节比较就是按时间线比较</strong>——顺序扫描等于沿时间线回放，<code>--rev</code> 历史读、watch 断线补发吃的就是这个红利。</p>
+  <p>换种做法会怎样？历史值和最新值混在一张按 key 排序的表里，读历史要扫全量记录再过滤，越老越慢；双层记账把两个问题拆开、各用最合适的数据结构。代价明码标价：旧版本只增不减，<strong>compaction 负责断舍离</strong>（第 3 期那个 <code>required revision has been compacted</code> 报错的出处）——留多久是运维规划项。</p>
+</section>
+
+<!-- ================= 05 配套链路 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>两条配套链路：watch 推送与 lease 心跳</h2>
+  <h3>watch：三本账管推送</h3>
+  <p>写入应用完成后，事件从哪来？<code>watchable_store_txn.go</code> 的 <code>End()</code> 把变更打包成事件，调 <code>s.notify(rev, evs)</code>——<strong>快路径</strong>：已同步的 watcher 直达通道。<code>watchable_store.go</code> 里 watcher 分三本账：<strong>synced</strong>（已跟上进度）、<strong>unsynced</strong>（断线重连追历史的）、<strong>victims</strong>（通道满了暂存的）。对账由 <code>syncWatchersLoop</code> 驱动，<strong>每 100ms 一轮</strong>：挑出组内最小起点 minRev，<code>rangeEvents</code> 从 bbolt 捞 <code>[minRev, curRev+1)</code> 的事件逐个补发——第 4 期断线补发的服务端实现。快慢两条路共用第 4 节的 revision 存档，没有第二份事件存储。</p>
+  <h3>lease：心跳不进共识，checkpoint 兜底</h3>
+  <p>第 4 期的 keepalive 心跳，服务端不走 Raft——<code>v3_server.go</code> 原注释："renewals don't go through raft; forward to leader manually"。<strong>续约只是 leader 在内存过期堆里刷新一下时间</strong>，每次心跳都写日志的话，租约一多共识日志会被心跳淹没。但纯内存记账有破绽：leader 切换后新主内存是空的，所有租约"满血复活"。<strong>checkpoint 补上这个洞</strong>：<code>lessor.go</code> 默认每 5 分钟把存活租约的剩余 TTL 批量写进共识日志（单批上限 1000 条、限速每秒 1000 条），v3.6 起持久化默认开启；新 leader <code>Promote</code> 时按剩余时间恢复——租约不"换个主子就重置倒计时"。到期撤销走 <code>LeaseRevoke</code> 提案删键（Revoke 里先排序再删，注释写明"否则各成员 backend 哈希会不一致"），键删除与租约删除同事务——第 4 期"到期删键即广播"的源码落点。</p>
+</section>
+
+<!-- ================= 06 旅程与路线图 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>一条写请求的源码旅程 + 读码路线图</h2>
+  <p>把前四节串成一条链——从 gRPC 入口到落库再到广播，每站一行，路径都核对过 tag：</p>
+  <pre><code>$ etcdctl put /config/order-service "pool.size=64"   # 那个 OK 的完整旅程
+v3rpc  key.go kvServer.Txn                 # gRPC 入口（api/v3rpc/key.go）
+ └─ etcdserver  v3_server.go Txn
+     └─ processInternalRaftRequestOnce     # 注册等待 → r.Propose 提案
+         └─ raft 库 raft.go Step           # 算法状态机：追加日志、复制
+             └─ raftNode Ready 循环        # leader 先发消息 → WAL 落盘
+                 └─ apply.go Apply        # uberApplier 分发 InternalTxn
+                     └─ txn.go Txn        # etcdserver/txn/txn.go
+                         └─ mvcc storeTxnWrite.put   # revision 领号、双层落账
+                             ├─ UnsafeSeqPut → bbolt      # 值本体
+                             └─ End: currentRev++ → notify(rev, evs)
+                                 └─ synced watcher 通道 → gRPC watch 流推送</code></pre>
+  <p>读码路线图六步，每步只回答一个问题，从体感进、沿调用链走：</p>
+  <div class="steps">
+    <div class="step"><span class="step-n">1</span><div><strong>体感复现：</strong>第 2 期的 put/get/watch/lease 各跑一遍——先知道命令背后应有什么事，再去源码找它。</div></div>
+    <div class="step"><span class="step-n">2</span><div><strong>入口与提案：</strong>key.go → v3_server.go 的 <code>Txn</code> 与 <code>processInternalRaftRequestOnce</code>——请求在哪变成提案。</div></div>
+    <div class="step"><span class="step-n">3</span><div><strong>共识与落盘：</strong>etcdserver/raft.go 的 Ready 循环对照 raft 仓库的 <code>Step</code>——日志怎么落、消息怎么发。</div></div>
+    <div class="step"><span class="step-n">4</span><div><strong>应用与多版本：</strong>apply/ → txn/txn.go → mvcc/kvstore_txn.go——revision 怎么领、账怎么记。</div></div>
+    <div class="step"><span class="step-n">5</span><div><strong>读协商：</strong>etcdserver/read/read.go——不写日志的线性一致读靠什么。</div></div>
+    <div class="step"><span class="step-n">6</span><div><strong>广播与租约：</strong>watchable_store.go 三本账 + lessor.go 过期堆与 checkpoint——事件怎么送达、租约怎么活下来。</div></div>
+  </div>
+  <p class="note"><span class="h">读码入口表</span>入口：<code>server/etcdserver/</code>（请求与 Raft 集成）、<code>server/etcdserver/read/</code>（读协商）、<code>server/etcdserver/apply/</code>（应用分发）、<code>server/storage/mvcc/</code>（多版本与 watch）、<code>server/lease/</code>（租约）；算法本体在独立仓库 etcd-io/raft。tag 切到 v3.7.1 / v3.7.0 再读，别在默认分支迷路。</p>
+</section>
+
+<!-- ================= 07 架构师借鉴 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>架构师视角：能搬回自己系统的三件事</h2>
+  <ul>
+    <li><strong>把"共用的难题"做成纯状态机，把"各异的现实"留给使用方。</strong>做可复用组件时常把"我假设你怎么存、怎么传"焊死进去，复用价值当场归零；分层线画在"算法稳定、环境多变"的边界上，是这套库最值得抄的一刀；</li>
+    <li><strong>强一致不一定要付"每次都写日志"的全价。</strong>确认下标、等本机追平、读本机状态——把一次全量复制换成一次心跳确认，配置中心、元数据服务可以直接借这笔账；</li>
+    <li><strong>双层记账 + 全局单调序列。</strong>内存索引管"哪个版本"、追加友好的存储管"内容"，一把全局流水号养活排序、补发、回溯三件套——做事件溯源、变更推送时，比"每处各记各的时间戳"便宜得多。</li>
+  </ul>
+</section>
+
+<!-- ================= 08 quiz ================= -->
+<section>
+  <h2><span class="sec-num">08</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. Raft 库（github.com/etcd-io/raft）刻意不包含哪部分？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["算法本体恰恰是它唯一包含的东西：Step/tick/Ready 全在库里。","对：README 原话——both network and disk IO are left to the user，传输与存储由使用方实现。","成员变更（conf change）是算法库实现的特性之一，README features 里有列。"]'>
+        <li class="quiz-option">选举与日志复制的算法本体</li>
+        <li class="quiz-option">网络传输与磁盘持久化</li>
+        <li class="quiz-option">成员变更与日志压缩</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. ReadIndex 线性一致读，拿到 confirmedIndex 之后为什么还要 ApplyWait？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["多数派确认在 requestCurrentIndex 里已完成，不是 ApplyWait 的事。","读路径不产生日志，无所谓落盘。","对：confirmedIndex 是已提交下标，状态机可能还没应用到那里；追平前读本机就是读旧值，线性一致破产。"]'>
+        <li class="quiz-option">还要再等一次多数派确认</li>
+        <li class="quiz-option">为了等 WAL 落盘完成</li>
+        <li class="quiz-option">confirmedIndex 是已提交下标，要等本机状态机应用到该下标才能读</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. MVCC 双层记账里，内存 treeIndex 和 bbolt 各管什么？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对：treeIndex 只存键到版本的映射（keyIndex 各代区间），值本体按 revision 字节序放在 bbolt。","历史值也有本体，躺在 bbolt 里，不是只留最新。","事务过滤是 Range 参数的事，不是 treeIndex 的职责。"]'>
+        <li class="quiz-option">treeIndex 管键到 revision 的索引，bbolt 管各版本的值本体</li>
+        <li class="quiz-option">treeIndex 存最新值，bbolt 只存历史值</li>
+        <li class="quiz-option">treeIndex 负责事务过滤，bbolt 负责排序</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. lease 的 keepalive 心跳为什么不直接写进 Raft 日志？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["心跳延迟要求低，恰恰是它进共识不划算的原因（日志会被心跳淹没），不是进不去。","对：续约只在 leader 内存过期堆刷新；checkpoint 每 5 分钟把剩余 TTL 批量落进共识日志兜底。","租约状态并非不进共识——checkpoint 就是把它定期写进日志，只是不逐次心跳都写。"]'>
+        <li class="quiz-option">心跳对延迟要求低，共识流程跟不上</li>
+        <li class="quiz-option">逐次心跳写日志会淹没共识日志，改由 checkpoint 定期落剩余 TTL</li>
+        <li class="quiz-option">租约状态不要求一致性，纯内存就够</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 09 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：每次读都走一遍完整日志复制，与 ReadIndex 正确性等价吗？成本差在哪？lease read 省掉心跳确认，赌的是什么？<span class="chev">展开解析 ▾</span></summary>
+    <div class="details-body">
+      <p>正确性等价——读作为提案走日志，应用后应答，读到的状态同样不落后于任何先前完成的写，Raft 论文也把"用日志实现线性一致读"列为可行做法。差距全在成本：<strong>走日志的读要付一条日志的复制+落盘+应用全价，还挤占写请求的日志空间</strong>，读多的系统写吞吐直接受损。ReadIndex 把它降级成"心跳里捎带一次下标确认"：一个 RTT 换来"我确实是 leader、下标已过半数"的凭证，然后读本机状态机——日志零污染。</p>
+      <p>lease read 更激进：leader 靠"时钟租约"自我声明，连心跳确认都省，代价是把正确性押在<strong>全组时钟漂移有界</strong>上——旧 leader 的租约在别人眼里过期而它自己不知道，就可能出现两个"合法读出口"。README 对它的注释直白写了 "relies on the clock"。三种读是同一道题的三档定价：<strong>日志复制（最贵最稳）→ ReadIndex（一个 RTT，零日志）→ 时钟租约（零协商，赌时钟）</strong>。etcd 停在中间档：不赌时钟，也不为读付日志全价——"默认档"的选择最见设计者的权衡。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：watch 断线补发为什么敢直接从 bbolt 捞历史，不在内存另留一份？把 100ms 对账改成每次写入实时遍历，又会怎样？<span class="chev">展开解析 ▾</span></summary>
+    <div class="details-body">
+      <p>敢直接捞，是因为第 4 节的双层记账让"捞历史"近乎免费：事件就是 revision 字节序下的变更记录，<code>rangeEvents</code> 一次顺序扫描 <code>[minRev, curRev+1)</code> 就拿到，不需要任何"事件表"冗余。反事实——内存里为 watch 单独留全量历史——等于把 MVCC 记过的账再记一遍：内存无界增长，compaction 清掉的历史还得单独清理，两本账迟早对不上。<strong>单一事实源 + 按需捞取</strong>才是底气；代价只是补发有 100ms 量级的对账周期，完全可以接受。</p>
+      <p>再看对账节奏。每 100ms 批量对账一轮：先挑全组最小 revision，一次扫描喂饱整组 watcher——<strong>摊销扫描成本</strong>。改成每次写入实时遍历，延迟虽好，但写入放大随订阅数上涨；何况补发请求大多成片出现（重启、重连、新建订阅），批处理天然贴合这个负载。第三本账兜底：通道满的进 victims 独立重试，不阻塞写入主流程。三本账合起来是教科书式的<strong>背压分级</strong>：顺的走快路，慢的排队，堵的缓冲。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 10 要点 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>本期要点与系列收尾</h2>
+  <div class="card card-tip">
+    <p><strong>带走这几条：</strong></p>
+    <ul>
+      <li>Raft 库只做算法状态机（tick/Ready/Advance 握手），网络与磁盘归使用方——etcd、Kubernetes、CockroachDB 共用一份实现（raft v3.7.0）；</li>
+      <li>线性一致读不写日志：ReadIndex 确认提交下标 + ApplyWait 等应用位点追平，一个心跳往返换零日志污染（read.go）；</li>
+      <li>MVCC 双层记账：内存 treeIndex 答"哪个版本"，bbolt 按 revision 字节序存"内容是什么"——历史读等于顺序扫描，compaction 是留档的账单；</li>
+      <li>watch 三本账：synced 直达、unsynced 每 100ms 对账补发、victims 兜底——补发直接吃 revision 存档；</li>
+      <li>lease 心跳不进共识（leader 内存记账），checkpoint 默认每 5 分钟把剩余 TTL 写进日志（v3.6 起默认持久化），切换不再"满血复活"。</li>
+    </ul>
+  </div>
+  <p><strong>系列收尾：</strong>etcd 的入门就聊到这里——五期走完"认识、跑起来、概念与架构、实战、读源码"一条龙，Kubernetes 的元数据心脏你能拆开看了。下期开启新项目 <strong>Kubernetes</strong>：项目池里的大项目，用 6 期从声明式 API 与控制器模式讲起——它的 API Server 底下，正是这五期读过的 etcd。</p>
+  <p><strong>延伸阅读：</strong>Primary source 官方源码与文档：<a href="https://github.com/etcd-io/raft/blob/v3.7.0/README.md" target="_blank" rel="noopener">etcd-io/raft README（v3.7.0）</a>（最小化设计与用户列表的一手出处）、<a href="https://github.com/etcd-io/etcd/blob/v3.7.1/server/etcdserver/read/read.go" target="_blank" rel="noopener">read.go（tag v3.7.1）</a>（ReadIndex 协商本体）、<a href="https://etcd.io/docs/v3.7/learning/api_guarantees/" target="_blank" rel="noopener">etcd API guarantees（v3.7）</a>（线性一致的权威定义）、<a href="https://github.com/etcd-io/etcd/blob/v3.7.1/server/storage/mvcc/kvstore_txn.go" target="_blank" rel="noopener">kvstore_txn.go（tag v3.7.1）</a>（MVCC 写路径）。</p>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0019-etcd-service-discovery-config.html">← 上一期：实战场景</a>
+  <span class="next">etcd 系列完 · 回<a href="../index.html">课程目录</a></span>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

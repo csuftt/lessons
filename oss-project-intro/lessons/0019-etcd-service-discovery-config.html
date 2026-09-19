@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · etcd 系列第 4 期：实战场景 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0019</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0018-etcd-core-concepts-architecture.html">上一期：0018</a> · etcd 系列第 4 期 / 共 5 期 · <a href="https://etcd.io" target="_blank" rel="noopener">etcd.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · ETCD 系列第 4 期：实战场景</p>
+  <h1>etcd 实战场景：服务发现与配置管理怎么落地</h1>
+  <p class="subtitle">上一期我们铺完了 etcd 的十块积木与三层楼：revision、watch、lease 你都叫得出名字了。这一期让它们上岗干活——亲手做出两个端到端最小系统：其一，服务注册与发现，实例启动申请租约、把地址写进前缀目录、心跳续约，进程被杀不清理、15 秒内自动摘除，消费方 watch 前缀实时感知上下线；其二，配置管理，改一条配置，订阅实例即时收到推送热更新，顺带看看它比轮询好在哪。客户端主用官方 Go clientv3（文档覆盖最全），Java 受众的 jetcd 坐标与对照一并给全。全文基于 etcd 3.7.x（v3.7.1，2026-07-23 发布）与 jetcd 0.8.7（2026-08-27 发布，2026-09-19 于 GitHub Releases 与 Maven Central 复核），命令与回显逐条对照官方 v3.7 文档。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 分布式键值存储 · Go · Apache-2.0</span>
+    <span class="tag">📦 基于 etcd 3.7.x（3.7.1）· clientv3 / jetcd 0.8.7</span>
+    <span class="tag-date">📅 2026-09-19 · 第 4 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景与蓝图 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>场景与蓝图：同一个 etcd，两种经典用法</h2>
+  <p>微服务上线后马上会遇到两件事：<strong>服务实例上上下下，调用方怎么找得到活着的实例</strong>；<strong>一份配置改了，怎么让所有实例即时生效</strong>。这两件事恰好各占 etcd 的一块积木：前者靠 lease（实例的生死线）+ watch（上下线广播），后者靠 watch（配置推送）+ MVCC（改坏了可回溯）。第 3 期的两个钩子，在实战里都会给你答案。两条线的战场如下图：</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 380" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar19" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar19b" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+
+    <!-- 线一：服务注册与发现 -->
+    <rect x="16" y="24" width="728" height="156" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="32" y="46" fill="var(--ink)" font-size="11.5" font-weight="700">线一 · 服务注册与发现：进程在键在，进程亡键亡</text>
+
+    <rect x="32" y="62" width="170" height="102" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="117" y="84" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">order-service × 2</text>
+    <text x="117" y="104" text-anchor="middle" fill="var(--muted)" font-size="9">启动：申请租约 TTL 15s</text>
+    <text x="117" y="120" text-anchor="middle" fill="var(--muted)" font-size="9">注册键挂上租约</text>
+    <text x="117" y="136" text-anchor="middle" fill="var(--muted)" font-size="9">keepalive 心跳续约</text>
+    <text x="117" y="152" text-anchor="middle" fill="var(--muted)" font-size="9">kill -9 也不怕（第 05 节）</text>
+
+    <rect x="272" y="62" width="200" height="102" rx="8" fill="var(--card)" stroke="var(--accent)"/>
+    <text x="372" y="84" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">/services/order/ 前缀目录</text>
+    <text x="372" y="104" text-anchor="middle" fill="var(--muted)" font-size="9">inst-1 → 10.0.4.11:8080（租约 1）</text>
+    <text x="372" y="120" text-anchor="middle" fill="var(--muted)" font-size="9">inst-2 → 10.0.4.12:8080（租约 2）</text>
+    <text x="372" y="140" text-anchor="middle" fill="var(--muted)" font-size="9">TTL 到期：服务端删键 + 派发事件</text>
+
+    <rect x="542" y="62" width="186" height="102" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="635" y="84" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">消费方（如 gateway）</text>
+    <text x="635" y="104" text-anchor="middle" fill="var(--muted)" font-size="9">启动：get --prefix 拿全量快照</text>
+    <text x="635" y="120" text-anchor="middle" fill="var(--muted)" font-size="9">之后：watch --prefix 收增量</text>
+    <text x="635" y="140" text-anchor="middle" fill="var(--muted)" font-size="9">PUT 上线 / DELETE 下线</text>
+
+    <line x1="202" y1="100" x2="272" y2="100" stroke="var(--accent)" stroke-width="2" marker-end="url(#ar19b)"/>
+    <text x="237" y="90" text-anchor="middle" fill="var(--accent)" font-size="9">注册</text>
+    <line x1="472" y1="100" x2="542" y2="100" stroke="var(--muted)" marker-end="url(#ar19)"/>
+    <text x="507" y="90" text-anchor="middle" fill="var(--muted)" font-size="9">快照 + 事件流</text>
+
+    <!-- 线二：配置管理 -->
+    <rect x="16" y="208" width="728" height="150" rx="10" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="32" y="230" fill="var(--ink)" font-size="11.5" font-weight="700">线二 · 配置管理：改一条配置，订阅者即时热更新</text>
+
+    <rect x="32" y="248" width="170" height="92" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="117" y="270" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">配置发布（运维/后台）</text>
+    <text x="117" y="290" text-anchor="middle" fill="var(--muted)" font-size="9">etcdctl put /config/order-service</text>
+    <text x="117" y="306" text-anchor="middle" fill="var(--muted)" font-size="9">一次写入即发布</text>
+    <text x="117" y="322" text-anchor="middle" fill="var(--muted)" font-size="9">历史版本 --rev 可回溯</text>
+
+    <rect x="272" y="248" width="200" height="92" rx="8" fill="var(--card)" stroke="var(--accent)"/>
+    <text x="372" y="270" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">/config/order-service</text>
+    <text x="372" y="290" text-anchor="middle" fill="var(--muted)" font-size="9">普通键值对，不挂租约</text>
+    <text x="372" y="306" text-anchor="middle" fill="var(--muted)" font-size="9">写入提交后 watch 即刻推送</text>
+    <text x="372" y="322" text-anchor="middle" fill="var(--muted)" font-size="9">对比轮询见第 06 节</text>
+
+    <rect x="542" y="248" width="186" height="92" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="635" y="270" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">order-service 实例们</text>
+    <text x="635" y="290" text-anchor="middle" fill="var(--muted)" font-size="9">启动：先 get 补齐当前配置</text>
+    <text x="635" y="306" text-anchor="middle" fill="var(--muted)" font-size="9">watch 从当前 revision 起</text>
+    <text x="635" y="322" text-anchor="middle" fill="var(--muted)" font-size="9">收到 PUT：重新加载生效</text>
+
+    <line x1="202" y1="294" x2="272" y2="294" stroke="var(--accent)" stroke-width="2" marker-end="url(#ar19b)"/>
+    <text x="237" y="284" text-anchor="middle" fill="var(--accent)" font-size="9">put</text>
+    <line x1="472" y1="294" x2="542" y2="294" stroke="var(--muted)" marker-end="url(#ar19)"/>
+    <text x="507" y="284" text-anchor="middle" fill="var(--muted)" font-size="9">推送变更</text>
+
+    <text x="16" y="374" fill="var(--muted)" font-size="9.5">读法：上面一条线管"谁活着"，下面一条线管"用什么配置"——键的形态不同（临时 vs 持久），积木都是第 3 期那几块</text>
+  </svg>
+  </div>
+
+  <p>全程四条目标，做完一条勾一条：</p>
+  <div class="card">
+    <ul class="steps">
+      <li>① <strong>注册：</strong>实例启动申请 15 秒租约，把地址写进 <code>/services/order/</code> 前缀目录，keepalive 持续续约；</li>
+      <li>② <strong>发现：</strong>消费方启动拉一次前缀快照，然后 watch 前缀，实例上下线实时知道；</li>
+      <li>③ <strong>自愈：</strong>直接杀掉一个实例进程（不给优雅下线机会），15 秒内键自动消失、消费方收到 DELETE 事件；</li>
+      <li>④ <strong>热更新：</strong>改一条配置，订阅实例即时收到推送，对比轮询的延迟差距。</li>
+    </ul>
+  </div>
+  <p class="note"><span class="h">分工提醒</span>本期只演示"用 etcd 怎么做"。租约续约语义在分布式锁场景的同源用法属于跨场景话题，延伸阅读见第 05 节与每日微课程线，原理不换皮重讲。</p>
+</section>
+
+<!-- ================= 02 客户端选型与版本 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>客户端选型：Go 主讲，Java 对照</h2>
+  <p>先钉版本与选型。<strong>服务端</strong>沿用系列基准：etcd <strong>3.7.x（v3.7.1，2026-07-23 发布，GitHub Releases 标 Latest）</strong>，就是第 2 期跑起来的单成员集群。<strong>客户端</strong>的选择，官方文档给了明确信号：<a href="https://etcd.io/docs/v3.7/integrations/" target="_blank" rel="noopener">官方 Libraries and tools 页</a>把 <code>etcd/client/v3</code> 列为"the officially maintained Go client for v3"，Java 侧的 jetcd 自述"official java client for etcd v3"。两者文档厚度差很多：官方 v3.7 文档对 clientv3 的建连、读写、watch、lease 有成体系的示例；jetcd 的 README 只覆盖建连和 put/get，lease/watch 要看仓库里的 jetcd-ctl 示例工程。本期正文<strong>主用 clientv3 讲机制</strong>——不是偏心，是文档全；Java 的坐标与逐操作对照本节给全：</p>
+  <pre><code>&lt;dependency&gt;
+  &lt;groupId&gt;io.etcd&lt;/groupId&gt;
+  &lt;artifactId&gt;jetcd-core&lt;/artifactId&gt;
+  &lt;version&gt;0.8.7&lt;/version&gt;   &lt;!-- 2026-08-27 发布，Maven Central 当前最新 --&gt;
+&lt;/dependency&gt;</code></pre>
+  <p>三个客户端做同一件事的对照，每一行后面都会出现一次：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>操作</th><th>etcdctl（v3 API）</th><th>Go clientv3</th><th>Java jetcd 0.8.7</th></tr></thead>
+    <tbody>
+      <tr><td>建连</td><td>开箱即用（3.4+ 默认 v3 API）</td><td><code>clientv3.New(Config{Endpoints: ...})</code></td><td><code>Client.builder().endpoints(...).build()</code></td></tr>
+      <tr><td>申请租约</td><td><code>lease grant 15</code></td><td><code>cli.Grant(ctx, 15)</code></td><td><code>lease.grant(15)</code>（返回 CompletableFuture）</td></tr>
+      <tr><td>挂租约写入</td><td><code>put --lease=&lt;ID&gt;</code></td><td><code>clientv3.WithLease(resp.ID)</code></td><td><code>PutOption.builder().withLeaseId(id)</code></td></tr>
+      <tr><td>心跳续约</td><td><code>lease keep-alive &lt;ID&gt;</code></td><td><code>cli.KeepAlive(ctx, id)</code>（通道）</td><td><code>lease.keepAlive(id, observer)</code>（回调）</td></tr>
+      <tr><td>前缀订阅</td><td><code>watch --prefix &lt;前缀&gt;</code></td><td><code>clientv3.WithPrefix()</code></td><td><code>WatchOption.builder().withPrefix(...)</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note"><span class="h">版本备注</span>jetcd 0.8.7（2026-08-27）以依赖升级为主；0.8.6 起 CI 以 etcd 3.5/3.6 为基准跑集成测试，对接 3.7 服务端走同一套 v3 gRPC API。官方 README 另声明其"work-in-progress and may break backward compatibility"——生产引入前锁好版本。核对自 <a href="https://github.com/etcd-io/jetcd" target="_blank" rel="noopener">github.com/etcd-io/jetcd</a> 与 <a href="https://central.sonatype.com/artifact/io.etcd/jetcd-core" target="_blank" rel="noopener">Maven Central 版本页</a>（2026-09-19）。</p>
+</section>
+
+<!-- ================= 03 注册 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>场景一（上）：注册——lease 就是实例的生死线</h2>
+  <p>注册的键有讲究：<strong>前缀当目录，末段当实例号</strong>——<code>/services/order/inst-1</code>，值就是实例地址。前缀目录等于服务的花名册，这为后面"按前缀订阅"铺了路。注册分三步，代码几乎是官方示例的原形：</p>
+  <pre><code>cli, err := clientv3.New(clientv3.Config{
+    Endpoints:   []string{"localhost:2379"},   // 第 2 期起的单成员集群
+    DialTimeout: 5 * time.Second,
+})
+if err != nil {
+    log.Fatal(err)
+}
+defer cli.Close()
+
+// ① 申请 15 秒租约（官方示例注释：minimum lease TTL is 5-second）
+resp, err := cli.Grant(context.TODO(), 15)
+if err != nil {
+    log.Fatal(err)
+}
+
+// ② 注册键挂上租约：租约在，键在
+_, err = cli.Put(context.TODO(), "/services/order/inst-1",
+    "10.0.4.11:8080", clientv3.WithLease(resp.ID))</code></pre>
+  <p>第三步是心跳——<code>KeepAlive</code> 返回一个续约应答通道，官方示例同样写成"起循环读通道"：</p>
+  <pre><code>// ③ keepalive 心跳续约：客户端活着，租约就一直被续
+ch, kaerr := cli.KeepAlive(context.TODO(), resp.ID)
+if kaerr != nil {
+    log.Fatal(kaerr)
+}
+for ka := range ch {
+    log.Println("租约已续，当前 TTL:", ka.TTL)
+}</code></pre>
+  <p>实例 <code>inst-2</code> 照抄一份（各申请各的租约）。跑起来后，用第 2 期学过的命令看花名册——正是官方文档 <code>get --prefix</code> 的回显格式：</p>
+  <pre><code>$ etcdctl get --prefix /services/
+/services/order/inst-1
+10.0.4.11:8080
+/services/order/inst-2
+10.0.4.12:8080</code></pre>
+  <div class="card card-tip">
+    <p><strong>为什么键必须挂租约？</strong>如果用普通 <code>put</code> 注册，进程崩溃后键会永远躺在那——花名册上全是"幽灵实例"，消费方调过去就是超时。挂上租约后，键的生命周期和进程的生命周期被 etcd 绑定：客户端持续续约则键在，客户端死了续约停止，TTL 一到服务端自动删键。</p>
+  </div>
+</section>
+
+<!-- ================= 04 发现 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>场景一（中）：发现——get 是快照，watch 是直播</h2>
+  <p>消费方要维护一份"活着的实例列表"，姿势是两段式：<strong>启动先 <code>get</code> 前缀拿全量快照，再 <code>watch</code> 前缀收增量</strong>。只 get 不 watch，列表会过期；只 watch 不 get，错过的上线补不回来。watch 的代码就是官方前缀订阅示例的原形：</p>
+  <pre><code>// 快照：全量拉一次前缀（WithPrefix 等价于 etcdctl get --prefix）
+getResp, err := cli.Get(context.TODO(),
+    "/services/order/", clientv3.WithPrefix())
+
+// 直播：订阅前缀，之后每次上下线都会从通道里冒出来
+rch := cli.Watch(context.Background(),
+    "/services/order/", clientv3.WithPrefix())
+for wresp := range rch {
+    for _, ev := range wresp.Events {
+        log.Printf("%s %q : %q", ev.Type, ev.Kv.Key, ev.Kv.Value)
+    }
+}</code></pre>
+  <p>这段代码里藏着第 3 期钩子二的答案：<code>Watch</code> 只用了 <code>clientv3.WithPrefix()</code> 一个选项，<strong>客户端什么都没做，事件却按全局 revision 的顺序送上门</strong>——服务端靠那把全局流水号给所有事件排队。watch 通道里的事件长这样（打印格式与官方示例一致）：</p>
+  <pre><code>PUT "/services/order/inst-1" : "10.0.4.11:8080"
+PUT "/services/order/inst-2" : "10.0.4.12:8080"</code></pre>
+  <p>命令行等效验证（终端 A 挂起，终端 B 注册实例，A 瞬间打印——官方 watch 原样行为）：</p>
+  <pre><code>$ etcdctl watch --prefix /services/
+PUT
+/services/order/inst-1
+10.0.4.11:8080</code></pre>
+  <p class="note"><span class="h">口径备注</span>事件类型枚举就是 PUT 与 DELETE 两种（官方 watch 示例的预期输出注释即此格式）；DELETE 事件的 Value 为空。至此目标①②达成。</p>
+</section>
+
+<!-- ================= 05 杀进程自动摘除 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>场景一（下）：进程被杀，15 秒内自动摘除</h2>
+  <p>最考验注册中心的是<strong>不告而别</strong>：实例被 <code>kill -9</code>、机器断电——没有任何机会执行"注销代码"。租约的价值此刻全兑现：续约停止 → TTL 倒计时走完 → <strong>服务端主动删键并派发 DELETE 事件</strong>。全程不需要任何一方写"清理逻辑"。时间线拉出来看：</p>
+  <pre><code>$ kill -9 &lt;inst-1 进程号&gt;     # 模拟宕机：不给优雅下线的机会
+
+# 消费方 watch 端（≤15 秒内）自动打印：
+DELETE "/services/order/inst-1" : ""
+
+# 再看花名册：inst-1 没了，inst-2 还在
+$ etcdctl get --prefix /services/
+/services/order/inst-2
+10.0.4.12:8080</code></pre>
+  <p>"服务端删键"的语义是官方明写的：<code>lease revoke</code> 原注"foo 已随租约撤销删除"，TTL 自然到期与主动撤销效果相同。比"自己写定时任务扫表清理"好在哪？这就是本期的第一个钩子：</p>
+  <div class="grid-2">
+    <div class="card">
+      <h4>反事实：心跳时间戳 + 定时任务清理</h4>
+      <ul>
+        <li>实例定期上报心跳，注册中心另起扫描任务比对"最后心跳时间"，超时删记录；</li>
+        <li>扫描任务是个新组件——它会挂、会延迟，阈值紧了误删活实例，松了死实例多活一阵；</li>
+        <li>"记录还在但心跳停了"的窗口里，消费方完全无感，调用直接打在死实例上。</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>etcd：lease 到期，原子完成三件事</h4>
+      <ul>
+        <li>存活判定下沉到存储层：TTL 到期，服务端"删键"走第 3 期那条提案流水线，原子完成，没有"删一半"的状态；</li>
+        <li>删除即事件：所有订阅该前缀的消费方<strong>同时</strong>收到 DELETE，花名册与真实存活没有窗口差；</li>
+        <li>零额外组件：心跳由 keepalive 一条流承载，不需要任何人写清理代码。</li>
+      </ul>
+    </div>
+  </div>
+  <div class="warn">
+    <p><strong>TTL 不是越短越好：</strong>官方示例注释给出下限——minimum lease TTL is 5-second。演示用 15 秒；生产按"心跳周期 × 容忍次数"定，一次网络抖动就误摘半活的实例。租约续约语义在分布式锁场景是同一套原理的延伸，对照阅读见 <a href="../../daily-tech-course/lessons/0009-redis-distributed-lock.html">每日微课程线第 0009 期 · Redis 分布式锁</a>。目标③达成。</p>
+  </div>
+</section>
+
+<!-- ================= 06 配置管理 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>场景二：配置管理——推送热更新 vs 轮询</h2>
+  <p>配置线更简单：配置是普通键，<strong>不挂租约</strong>——配置的生命周期跟进程无关，进程全死了配置也该在。变化全在客户端姿势：先 get 补齐当前配置，再从"当前 revision"起 watch，基线与增量无缝衔接：</p>
+  <pre><code>// ① 先取当前配置：getResp.Header.Revision 是此刻的全局流水号
+resp, err := cli.Get(context.TODO(), "/config/order-service")
+
+// ② 从当前 revision 起订阅：中间的写入不会漏，之后的推送不重复
+rch := cli.Watch(context.Background(), "/config/order-service",
+    clientv3.WithRev(resp.Header.Revision))
+for wresp := range rch {
+    for _, ev := range wresp.Events {
+        log.Printf("%s %q : %q", ev.Type, ev.Kv.Key, ev.Kv.Value)
+        // 收到 PUT 即重新加载、应用到运行中的进程
+    }
+}</code></pre>
+  <p>命令行验证（终端 A 挂起订阅，终端 B 改配置——A 瞬间收到推送，回显与官方 watch 样例一致）：</p>
+  <pre><code>:: 终端 B：发布新配置（改线程池大小）
+$ etcdctl put /config/order-service "pool.size=64"
+OK
+:: 终端 A：几乎同时自己打印出——
+PUT
+/config/order-service
+pool.size=64</code></pre>
+  <p>对比老朋友"定时轮询"，本期的第二个钩子就来了：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>维度</th><th>watch 推送</th><th>轮询（如每 30 秒 get 一次）</th></tr></thead>
+    <tbody>
+      <tr><td>感知延迟</td><td>写入提交后服务端即刻推送</td><td>平均半个周期（约 15 秒），最坏一个周期</td></tr>
+      <tr><td>无效开销</td><td>无变更时零流量（连接挂着不发数据）</td><td>绝大多数轮次是重复读</td></tr>
+      <tr><td>实现负担</td><td>需处理断线重连与 revision 对齐（见下）</td><td>看似简单，但"上次读到哪"要自己记账</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note"><span class="h">生产三注意</span>① <strong>先 get 再 watch</strong>：重启时先有基线，watch 只管增量；② <strong>断线重连不丢事件</strong>：官方文档明确可恢复错误自动重试直到重连，配合全局 revision 排序，补发不乱序；③ <strong>用 <code>WithRequireLeader</code> 包上下文</strong>：防止卡在失去 leader 的成员上（官方原文建议）。配置改坏了不慌——第 3 期的 <code>--rev</code> 时间旅行在这里就是"查上一版配置"的凭据，前提是还没被 compaction 压缩。目标④达成。</p>
+</section>
+
+<!-- ================= 07 quiz ================= -->
+<section>
+  <h2><span class="sec-num">07</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. 实例被 kill -9 后，注册键最终由谁删除？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["自研清理是反事实方案：多一个会挂的组件，还有误删窗口。","对：续约停止、TTL 到期后由 etcd 服务端删键，并派发 DELETE 事件给订阅方。","人工下线只覆盖优雅场景，进程不告而别时帮不上忙。"]'>
+        <li class="quiz-option">注册中心侧另起的定时清理任务</li>
+        <li class="quiz-option">lease 到期后 etcd 服务端删键并派发事件</li>
+        <li class="quiz-option">运维人工调用下线接口</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 消费方想感知 /services/order/ 下所有实例的上下线，watch 的关键选项是？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对：WithPrefix 等价于命令行的 watch --prefix，订阅整个前缀目录。","WithRequireLeader 是防卡在无主成员的保险，不是订阅范围的开关。","WithLease 是注册侧挂租约用的选项，订阅侧用不上。"]'>
+        <li class="quiz-option">clientv3.WithPrefix()</li>
+        <li class="quiz-option">clientv3.WithRequireLeader()</li>
+        <li class="quiz-option">clientv3.WithLease(resp.ID)</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 官方示例注释给出：lease 的最小 TTL 是多少？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["下限没这么低，再往上看官方注释。","对：官方 lease 示例注释原文——minimum lease TTL is 5-second。","15 秒是本期演示取值，不是官方下限。"]'>
+        <li class="quiz-option">1 秒</li>
+        <li class="quiz-option">5 秒</li>
+        <li class="quiz-option">15 秒</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. "先 get 再 watch"之间恰好有别的写入，会漏事件吗？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["漏不漏取决于 watch 起点怎么定，不是必然漏。","对：从 get 返回的 header.revision 起 watch，期间的变更会按全局流水号补发。","轮询才需要自己记上次位置；watch 靠全局 revision 排队补发。"]'>
+        <li class="quiz-option">会，只能重启后重新全量拉取</li>
+        <li class="quiz-option">不会：从 get 返回的 revision 起 watch，变更按号补发</li>
+        <li class="quiz-option">取决于轮询间隔设多长</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 08 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：lease 心跳方案里，"存活判定"的责任在谁？如果改成"实例定期写心跳时间戳、注册中心定时扫描清理"，会出什么问题？</summary>
+    <div class="details-body">
+      <p>先钉住 etcd 方案的责任划分：<strong>存活判定整个下沉到了存储层</strong>。客户端只负责一件事——让 keepalive 流不断；TTL 到期后的"删键"由 etcd 服务端执行，而且这不是旁路脚本：它变成提案、多数派确认、revision 加一，应用后派发 DELETE 事件——<strong>删除本身是一笔被共识保护、被版本号记账、被 watch 广播的正规写入</strong>，这就是"原子完成、没有窗口差"的根源。</p>
+      <p>反事实方案的故障面有四层。第一层，<strong>判定者是新的单点</strong>：扫描任务挂了，死实例就永远躺在花名册里，还得给扫描任务再做存活检测，套娃开始。第二层，<strong>阈值两难</strong>：超时线设紧，一次 GC 停顿或网络抖动就误删活实例；设松，死实例多挂几十秒，请求持续打向死实例。第三层，<strong>时间戳依赖时钟</strong>：比较"最后心跳加阈值是否小于当前时间"，隐含假设各机时钟大致同步，漂移会直接扭曲判定。第四层最隐蔽：<strong>清理动作游离在一致性与广播体系之外</strong>——自研清理删掉记录，消费方要么另建通知机制才知道，要么下次读取才发现；而 lease 方案里"键的存在性"与"实例存活"是同一个事实，watch 订阅的就是它。最后说代价：keepalive 意味着常驻连接，TTL 要在"误摘风险"与"摘除速度"之间取舍——etcd 只是把这笔账从"每个应用自己算"收敛成"存储层统一算"。选型时值得记住：<strong>凡需要多方对同一事实达成一致，优先把这个事实放进共识存储，而不是在应用层各自模拟</strong>。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：watch 断线重连期间发生的变更，凭什么能"补发不漏"？如果补发时历史已被 compaction 压缩，会发生什么？</summary>
+    <div class="details-body">
+      <p>答案还是第 3 期那把全局尺子。官方 watch 文档写明：请求的 revision 是 0 或未指定时，通道只送达"watch 请求到达之后"的事件；而配合 <code>WithRev</code> 指定起点，服务端会把<strong>从那个 revision 之后的所有变更按序补发</strong>。为什么可能？MVCC 把每个 revision 的变更都留了档——补发历史与推送新事件在服务端是同一条按号排序的通道，这是全局单调 revision 养活的第二条命（第一条是第 3 期的 watch 排队与时间旅行）。</p>
+      <p>边界官方也给了明：<strong>待补发的历史已被 compaction 压缩时，watch 会被服务端取消，客户端收到 ErrCompacted 错误后通道关闭</strong>——离线太久就得重新 get 全量快照、再从新 revision 起订，呼应第 3 期的压缩权衡：留档不免费，留多久是运维规划项。另一个细节是官方建议：<strong>watch 的上下文用 <code>WithRequireLeader</code> 包装</strong>——所连成员恰好无 leader（如网络分区）时，普通 watch 会静默等不到事件，带标记的 watch 会收到"no leader"错误并关闭通道，逼着重连到健康成员，避免抱着一条死流自以为"没有变更发生"。把三件事连起来——revision 对齐补发、ErrCompacted 触发全量重建、WithRequireLeader 防静默卡死——就是生产级 watch 客户端的最小正确姿势，也是第 5 期读 watch 源码时的三条主线。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 09 要点 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这几条：</strong></p>
+    <ul>
+      <li>临时注册一句话：<strong>前缀目录 + lease 挂键 + keepalive 续约</strong>——进程在键在，进程亡键亡；</li>
+      <li>发现 = 快照 + 直播：启动 <code>get --prefix</code> 拿全量，之后 <code>watch --prefix</code> 收增量，事件按全局 revision 排序；</li>
+      <li>自动摘除不需要清理任务：TTL 到期由服务端原子删键并派发 DELETE，消费方与真实存活没有窗口差；TTL 下限 5 秒（官方注释），按"心跳周期 × 容忍次数"定；</li>
+      <li>配置热更新：先 get 补基线，再从当前 revision 起 watch；比轮询少了半个周期的平均延迟，配置历史还能 <code>--rev</code> 回溯；</li>
+      <li>客户端两条线：Go clientv3 文档最全，以其为纲；Java 用 jetcd 0.8.7（io.etcd:jetcd-core），对照见第 02 节表格。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 5 期《架构与源码导读》——本期用得最顺手的三块积木，正是 etcd 设计上最值得读的三处：MVCC 的多版本怎么存、watch 的推送链路怎么走、lease 的过期怎么被可靠执行。下期进源码（锁定 tag v3.7.1），把三个"为什么"讲透，并给一份读码路线图。</p>
+  <p><strong>延伸阅读：</strong>Primary source 官方文档：<a href="https://etcd.io/docs/v3.7/dev-guide/interacting_v3/" target="_blank" rel="noopener">Interacting with etcd（v3.7）</a>——本期 etcdctl 命令与回显样例的一手出处；Go 客户端用法见 <a href="https://github.com/etcd-io/etcd/blob/v3.7.1/client/v3/README.md" target="_blank" rel="noopener">clientv3 README（v3.7.1）</a>与 <a href="https://github.com/etcd-io/etcd/tree/v3.7.1/tests/integration/clientv3/examples" target="_blank" rel="noopener">官方示例文件</a>（lease/watch 代码出处）；jetcd 见 <a href="https://github.com/etcd-io/jetcd" target="_blank" rel="noopener">github.com/etcd-io/jetcd</a>、坐标见 <a href="https://central.sonatype.com/artifact/io.etcd/jetcd-core" target="_blank" rel="noopener">Maven Central: io.etcd/jetcd-core</a>、客户端列表见 <a href="https://etcd.io/docs/v3.7/integrations/" target="_blank" rel="noopener">官方 Libraries and tools 页（v3.7）</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0018-etcd-core-concepts-architecture.html">← 上一期：核心概念与整体架构</a>
+  <a class="next" href="0020-etcd-source-reading.html">下一期：架构与源码导读 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

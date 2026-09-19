@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · etcd 系列第 1 期：K8s 的元数据心脏 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0016</span>
+  <span><a href="../index.html">课程目录</a> · etcd 系列第 1 期 / 共 5 期 · <a href="https://etcd.io" target="_blank" rel="noopener">etcd.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · ETCD 系列第 1 期：认识项目</p>
+  <h1>etcd 是什么：K8s 的元数据心脏</h1>
+  <p class="subtitle">开源项目入门系列的每个新主题，都从三个问题开始：它解决什么痛点、凭什么活下来、什么场景该选它。etcd 官网的自我定义是"为分布式系统最关键数据而生的可靠键值存储"，它最大的标签是<strong>强一致</strong>：一次写入要集群多数节点点头才生效，任何时刻任何客户端读到的都是同一份最新状态。上一个项目我们聊完了 Pulsar，今天开启新项目 etcd——它是 Kubernetes 官方文档点名的"全部集群数据的后备存储"，本期带走一个能贯穿全系列的心智模型：<strong>API Server 是门面，etcd 是心脏，集群状态的唯一可信源只有一份</strong>。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 分布式键值存储 · Go · Apache-2.0</span>
+    <span class="tag">📦 基于 etcd 3.7.x（主线 3.7.1）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 1 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 痛点 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>痛点：分布式系统的"共享状态"难题</h2>
+  <p>一个多节点的分布式系统跑起来之后，每台机器都躲不开三个问题：<strong>集群里现在有谁？</strong>（哪些节点活着，谁退出了）；<strong>配置现在是什么？</strong>（参数被谁改过、改到第几版，大家拿到的是不是同一份）；<strong>关键资源归谁？</strong>（谁是主节点、哪台机器持着任务）。这些数据有一个共同画像：<strong>量不大、读得极频繁，但绝不能错</strong>——一旦两个节点对"现在谁活着"得出不同答案，系统就等于精神分裂，各干各的。</p>
+  <p>那为什么不用现成的 MySQL 或 Redis 存这些状态？因为这类数据要的偏偏是通用存储的短板：<strong>强一致</strong>。MySQL 主从复制是异步的，主库挂了提升从库，可能恰好丢掉最后几笔写入；Redis 同样走异步复制，故障切换存在一个"新旧主并存"的窗口。放在订单表上这叫"偶发丢单"，放在成员账本和配置上，就是整个系统的脑裂。分布式系统需要的是一个专门组件：<strong>写要多数派点头、读永远拿到最新值、变更还能主动推送出来</strong>。</p>
+  <p>Kubernetes 就是这个需求的教科书案例：Pod、Service、ConfigMap、各节点的心跳，全部对象都要持久化在一个地方，而调度器、控制器、每台节点上的 kubelet 都要基于<strong>同一份事实</strong>做决定。K8s 官方文档对这块拼图的定语是"Consistent and highly-available"——一致且高可用的键值存储，这就是 etcd 的位置。</p>
+</section>
+
+<!-- ================= 02 etcd 是什么 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>etcd 是什么：分布式的 /etc</h2>
+  <p>官网首页给 etcd 的定义是<strong>"A distributed, reliable key-value store for the most critical data of a distributed system"</strong>——为分布式系统最关键的数据而生的分布式可靠键值存储（etcd.io，2026-09 核对）。名字也直白：<code>/etc</code>（Unix 存配置的标准目录）+ <code>d</code>（distributed），合起来就是"分布式的 /etc"。它 2013 年诞生于 CoreOS 公司——当年做容器操作系统、最先喊出"把服务器当牛羊不当宠物"的那家——2018 年 12 月捐入 CNCF 孵化，2020 年 11 月 24 日正式毕业。</p>
+  <p>拆开看，etcd 不只是一个"存键值对的 Redis 替代品"，它是围绕元数据场景的一组组合拳：</p>
+  <ul>
+    <li><strong>强一致键值存储：</strong>每次写入都要集群多数节点确认（Raft 多数派）才返回成功，宁可拒绝服务也不给你一份旧数据——"一致性优先"写进了骨子里；</li>
+    <li><strong>watch 变更推送：</strong>客户端订阅某个键或前缀，一旦有变更立刻收到推送，不用自己轮询——配置下发、服务目录同步都靠它；</li>
+    <li><strong>lease 租约：</strong>给一批键绑定一个带 TTL 的租约，客户端定期续期，掉线了键就自动消失——"节点存活检测"有了标准底座；</li>
+    <li><strong>MVCC 多版本：</strong>每次修改都留版本号，能查"这个配置上一版是什么"——回溯、审计、增量同步的地基（第 5 期源码导读展开）。</li>
+  </ul>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar1g" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+
+    <rect x="20" y="40" width="150" height="70" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="95" y="68" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">kubectl / 客户端</text>
+    <text x="95" y="88" text-anchor="middle" fill="var(--muted)" font-size="9.5">人 · 应用 · 终端</text>
+
+    <rect x="230" y="24" width="240" height="104" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="350" y="48" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">API Server · 门面</text>
+    <text x="350" y="66" text-anchor="middle" fill="var(--muted)" font-size="9.5">唯一的读写入口 · 鉴权 · 校验</text>
+    <rect x="246" y="80" width="100" height="34" rx="6" fill="var(--bg-accent)" stroke="var(--line)"/>
+    <text x="296" y="95" text-anchor="middle" fill="var(--ink)" font-size="10">接请求</text>
+    <text x="296" y="108" text-anchor="middle" fill="var(--muted)" font-size="8.5">先落账再回复</text>
+    <rect x="354" y="80" width="100" height="34" rx="6" fill="var(--bg-accent)" stroke="var(--line)"/>
+    <text x="404" y="95" text-anchor="middle" fill="var(--ink)" font-size="10">发变更</text>
+    <text x="404" y="108" text-anchor="middle" fill="var(--muted)" font-size="8.5">watch 推给订阅者</text>
+
+    <line x1="170" y1="72" x2="226" y2="72" stroke="var(--muted)" marker-end="url(#ar1)"/>
+    <text x="198" y="62" text-anchor="middle" fill="var(--muted)" font-size="8.5">读写</text>
+
+    <rect x="530" y="24" width="210" height="104" rx="10" fill="var(--warn-bg)" stroke="var(--accent)"/>
+    <text x="635" y="48" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">etcd 集群 · 心脏</text>
+    <text x="635" y="66" text-anchor="middle" fill="var(--muted)" font-size="9.5">强一致 · 多数派写入</text>
+    <rect x="546" y="80" width="178" height="34" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="635" y="95" text-anchor="middle" fill="var(--ink)" font-size="10">键值 + watch + lease</text>
+    <text x="635" y="108" text-anchor="middle" fill="var(--muted)" font-size="8.5">所有状态只有这一份</text>
+
+    <line x1="470" y1="72" x2="526" y2="72" stroke="var(--accent-3)" marker-end="url(#ar1g)"/>
+    <text x="498" y="62" text-anchor="middle" fill="var(--accent-3)" font-size="8.5">落账</text>
+
+    <rect x="20" y="200" width="450" height="76" rx="10" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="245" y="226" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">调度器 · 控制器 · kubelet</text>
+    <text x="245" y="246" text-anchor="middle" fill="var(--muted)" font-size="9.5">从不互相对账，也从不直连存储</text>
+    <text x="245" y="264" text-anchor="middle" fill="var(--muted)" font-size="9.5">各自 watch 自己关心的那部分状态</text>
+    <line x1="245" y1="196" x2="300" y2="132" stroke="var(--muted)" stroke-dasharray="4 3" marker-end="url(#ar1)"/>
+    <text x="236" y="176" fill="var(--muted)" font-size="8.5">都只跟门面说话</text>
+
+    <rect x="530" y="200" width="210" height="76" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="635" y="226" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">丢了会怎样？</text>
+    <text x="635" y="246" text-anchor="middle" fill="var(--muted)" font-size="9.5">整个集群失忆</text>
+    <text x="635" y="264" text-anchor="middle" fill="var(--muted)" font-size="9.5">所以官方文档让你先备份</text>
+
+    <text x="20" y="318" fill="var(--muted)" font-size="9.5">门面管进出，心脏管真相：K8s 把"全部集群数据"押在 etcd 一处，换来所有组件共享同一份事实</text>
+  </svg>
+  </div>
+
+  <p>对应到现实：<strong>API Server 是门面——所有进出都走它；etcd 是心脏——集群状态的唯一可信源；控制器们是不记账的工人——只订阅心脏的每次跳动来干活。</strong>每一次 <code>kubectl</code> 操作，落地都是 API Server 背后的一次 etcd 读写。这也是 K8s 官方文档紧跟着补一句"如果你的集群用 etcd 做后备存储，请务必给数据准备备份计划"的原因——心脏停跳，集群失忆。</p>
+</section>
+
+<!-- ================= 03 关键数据 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>关键数据与版本演进：三线并行，心跳依旧</h2>
+  <p>社区面上（2026-09-19 GitHub 核对）：etcd-io/etcd 仓库 <strong>52.3k Stars、10.5k Forks</strong>，Go 编写，Apache-2.0 协议，累计发布 <strong>292 个版本</strong>。仓库 About 一栏写着的就是官网那句话。比星数更有分量的是它的"身位"：CNCF 毕业项目、Kubernetes 官方钦定的数据底座——<strong>每一个在运行的 K8s 集群里，都跑着一个 etcd</strong>，这是所有开源项目里罕见的"被事实标准绑定"的采用面。</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>版本线</th><th>当前（2026-09）</th><th>定位</th></tr></thead>
+    <tbody>
+      <tr><td>3.5 LTS</td><td><strong>3.5.33</strong>（2026-07-23）</td><td>长期支持线，仍在发补丁</td></tr>
+      <tr><td>3.6</td><td><strong>3.6.14</strong>（2026-07-23）</td><td>上一代稳定线，持续维护</td></tr>
+      <tr><td>3.7（当前主线）</td><td><strong>3.7.1</strong>（2026-07-23，GitHub Latest）</td><td>本系列基准；3.7.0 于 2026-07-08 首发</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">数据来源：GitHub Releases 页与仓库首页，2026-09-19 核对。注意这个细节：<strong>三条版本线在同一天（2026-07-23）各发了一个补丁版</strong>——多条线并行维护是 etcd 的常态，因为存量 K8s 集群锁死在各版本线上，社区必须一直回头照顾它们。本系列以 <strong>3.7.x 为基准</strong>，命令与输出逐条对照官方文档。</p>
+</section>
+
+<!-- ================= 04 心智模型 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>心智模型：小而关键的"心脏经济学"</h2>
+  <p>etcd 最反直觉的一点：<strong>这个装着"全球最流行集群管理系统全部状态"的库，官方建议的数据上限只有 8 GiB（默认配额 2 GiB，来源：etcd.io 文档 Limit 页，2026-09 核对）</strong>。官网口径的吞吐是"每秒数千次写入"——放到业务数据库的标准里毫不起眼。这不是性能不行，而是定位使然：元数据的价值不在"多"，在"真"。为"小数据"配最重的协议，换来的是<strong>任何时刻绝不分叉、绝不回到过去</strong>。</p>
+  <div class="card card-tip">
+    <p><strong>这套定位换来了三个"白送"的能力：</strong></p>
+    <ul>
+      <li><strong>组件间的信任不需要对账：</strong>所有控制面组件从同一份状态出发工作，没有"我以为你有、你以为我有"的世纪难题；</li>
+      <li><strong>变更即事件：</strong>watch 让"状态变了"本身成为通知，配置下发从"推文件再重启"变成"订阅即生效"；</li>
+      <li><strong>存活检测是内建的：</strong>lease 租约到期自动清账，谁掉线了系统立刻知道——注册中心、选主、分布式锁都在这块底座上长出来。</li>
+    </ul>
+  </div>
+  <p>读到这里你可能想深挖 Raft 选举、线性一致性读这些原理细节——本系列第 3 期和第 5 期会专门展开，本期只立住一个判断：<strong>元数据存储选型的第一问不是"多快"，而是"散不掉、丢不了、推得出"</strong>。</p>
+</section>
+
+<!-- ================= 05 什么场景选它 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>什么场景该选它（以及不该）：与 ZooKeeper / Consul 对比</h2>
+  <p>元数据底座这个赛道，etcd 有两个老对手。选型视角一句话画像（均为各项目官方文档口径的公开事实）：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>项目</th><th>一句话画像</th><th>擅长</th><th>注意点</th></tr></thead>
+    <tbody>
+      <tr><td><strong>etcd</strong></td><td>K8s 的元数据心脏，CNCF 毕业项目</td><td>强一致 KV + watch 推送 + lease；gRPC API；云原生生态默认底座</td><td>数据量小（建议 ≤8 GiB）；吞吐有限，不是业务库</td></tr>
+      <tr><td>ZooKeeper</td><td>分布式协调元老，ZAB 协议</td><td>临时节点、选主、存量生态深厚</td><td>Java 技术栈偏重；watch 是一次性的，客户端要自己重挂</td></tr>
+      <tr><td>Consul</td><td>HashiCorp 的服务网络方案</td><td>服务发现全家桶：健康检查、DNS 接口、多数据中心</td><td>KV 是配角；治理与许可跟随 HashiCorp 商业路线</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="card">
+    <p><strong>✅ 适合：</strong></p>
+    <ul>
+      <li><strong>做 K8s 生态或云原生基础设施的数据底座：</strong>自研平台想跟 K8s 的运维习惯、客户端库、社区经验对齐，etcd 是默认答案；</li>
+      <li><strong>需要"强一致 + 变更推送 + 存活检测"三件套的场景：</strong>选主、分布式锁、服务目录、配置分发，lease + watch 直接覆盖；</li>
+      <li><strong>正确性敏感的协调场景：</strong>宁可写入慢一点（多数派确认），也要保证各节点看到同一份事实。</li>
+    </ul>
+    <p><strong>❌ 不必：</strong></p>
+    <ul>
+      <li><strong>存业务大数据量：</strong>8 GiB 建议上限摆在那里，它是心脏不是仓库，业务数据找数据库和对象存储；</li>
+      <li><strong>只当缓存或队列用：</strong>这类弱一致性需求 Redis 和消息队列更便宜也更擅长；</li>
+      <li><strong>已有 ZooKeeper 且运转良好：</strong>没有痛点不为新架构付迁移成本——这条判断捷径在每个项目上都成立。</li>
+    </ul>
+  </div>
+  <p>一条判断捷径：<strong>需要"强一致 + watch + lease"三件套、或要与 K8s 生态对齐——占一条就该认真评估 etcd；要的是大容量存储或纯服务发现，另有更合适的工具。</strong></p>
+  <div class="note">
+    <p><strong>延伸阅读（每日微课程线，相关场景）：</strong></p>
+    <ul>
+      <li><a href="../../daily-tech-course/lessons/0009-redis-distributed-lock.html">第 0009 期 · Redis 分布式锁</a>——文中对比过 ZooKeeper/etcd 临时节点方案在正确性敏感场景的位置，可对照阅读。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= 06 quiz ================= -->
+<section>
+  <h2><span class="sec-num">06</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. "etcd"这个名字的来历是？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，etcd 与事件驱动架构无关，它比这个流行语早得多。","不对，ETD 缩写的说法没有出处。","对的：/etc 是 Unix 存配置的标准目录，加 d 表示 distributed——分布式的 /etc，官网与社区材料口径一致。"]'>
+        <li class="quiz-option">event-driven architecture 的缩写</li>
+        <li class="quiz-option">一种 ETD 数据格式的守护进程</li>
+        <li class="quiz-option">/etc（Unix 配置目录）+ d（distributed），分布式的 /etc</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. Kubernetes 官方文档对 etcd 的定位是？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，那是运行时组件的口径，etcd 不跑容器也不做调度。","对的：官方文档原话是“一致且高可用的键值存储，作为 Kubernetes 全部集群数据的后备存储”，并提醒务必备份。","不对，etcd 不负责容器镜像，镜像在镜像仓库里。"]'>
+        <li class="quiz-option">容器运行时的状态缓存，加速 Pod 启动</li>
+        <li class="quiz-option">一致且高可用的键值存储，作为 Kubernetes 全部集群数据的后备存储</li>
+        <li class="quiz-option">镜像仓库的后端，存储容器镜像层</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 成员账本、集群配置这类数据，为什么不放 MySQL 主从或 Redis？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：它们走异步复制，故障切换存在丢最近写入的窗口；元数据错一分，系统就脑裂，所以宁要强一致的“慢”。","不对，MySQL 主从的瓶颈不在写入速度。","不对，恰恰相反，etcd 为小数据而生，容量从来不是它的卖点。"]'>
+        <li class="quiz-option">它们是异步复制，故障切换可能丢最近写入；元数据要的是强一致</li>
+        <li class="quiz-option">MySQL 主从写入速度跟不上心跳频率</li>
+        <li class="quiz-option">etcd 的存储容量比 MySQL 大得多</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. 按本期的判断捷径，哪个场景不该选 etcd？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，这正是三件套的典型场景，lease + watch 直接覆盖。","不对，与 K8s 生态对齐是 etcd 的默认主场。","对的：官方建议上限 8 GiB，etcd 是心脏不是仓库；海量业务数据该找数据库或对象存储。"]'>
+        <li class="quiz-option">自研调度平台需要选主与节点存活检测</li>
+        <li class="quiz-option">云原生基础设施要与 K8s 的运维习惯对齐</li>
+        <li class="quiz-option">把数 TB 的业务订单数据迁进来当主库用</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 07 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：etcd 只存"小数据"，却用最重的多数派协议保护它——这笔账划算在哪？什么情况下反过来不划算？</summary>
+    <div class="details-body">
+      <p>先算收益侧。多数派写入的代价是<strong>延迟和可用性</strong>：每次写要过半节点确认，网络分区时宁可不服务。换来的是一条铁律——<strong>任何时刻、任何节点、任何客户端，读到的状态都是同一份，且不回退</strong>。元数据恰好是"错一分就全盘分裂"的数据：成员账本上差一个节点，两个分区各自选出主，就是脑裂；配置版本差一版，灰度和回滚全部失真。所以这笔账的本质是：<strong>用可控的延迟代价，买"系统逻辑单一事实源"这条生命线</strong>——而元数据的写入频率天然低（秒级心跳、偶尔的配置变更），这点延迟代价几乎感觉不到。再算不划算的反面：当数据变成"量大、可容忍短暂不一致、以读吞吐为先"的业务数据，多数派协议的代价就开始压过收益，该换普通数据库。一句话：协议的重量要跟"数据错了会怎样"成正比——<strong>账本论克卖，仓库论吨卖</strong>。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：公司已有一套 ZooKeeper 在运行，现在新起一个自研调度平台，底座选 ZooKeeper 还是 etcd？给出你的评估框架。</summary>
+    <div class="details-body">
+      <p>这是选型题里最常见的一类："存量在左，新生态在右"，建议从四个维度打分。<strong>维度一：跟着生态走。</strong>新平台如果预计要上 K8s 或对接云原生工具链，etcd 的客户端库、社区案例、运维文档都是现成的，ZooKeeper 在这个生态里是" guest"；反之如果团队要复用大量既有 ZooKeeper 运维脚本与告警体系，存量优势是真的。<strong>维度二：语义匹配度。</strong>需要 watch 推送（尤其前缀订阅、变更事件流）和 lease 租约，etcd 的 API 是为这些场景设计的；ZooKeeper 的 watch 触发一次即失效、临时节点的会话语义要小心维护——用 Curator 能缓解，但那是补丁不是设计。<strong>维度三：运维面增量。</strong>多引入一个技术栈就是多一套升级、监控、故障预案——老实评估团队能养几套。<strong>维度四：退出成本。</strong>底座数据模型简单（KV），选错了迁移代价可控；真正贵的是周边代码的耦合。我的倾向：<strong>新平台、面向云原生，选 etcd；纯粹复用存量运维能力、需求就是选主加锁，ZooKeeper 继续用没有错</strong>——错的是"因为熟悉就默认"或"因为新就追新"。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 08 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这四句话：</strong></p>
+    <ul>
+      <li>分布式系统的共享状态三问：谁活着、配置对不对、资源归谁——量小、读多、绝不能错，需要强一致 + 推送 + 存活检测；</li>
+      <li>etcd = 分布式的 /etc：强一致键值（多数派写入）+ watch 变更推送 + lease 租约 + MVCC 多版本；</li>
+      <li>心智模型：API Server 是门面，etcd 是心脏——K8s 全部集群数据的后备存储，唯一可信源只有一份；</li>
+      <li>版本基准 3.7.x（3.7.1，2026-07-23），三线并行维护；官方建议数据上限 8 GiB，它是心脏不是仓库。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 2 期《5 分钟跑起来》——从 GitHub Releases 下载官方二进制，一条命令起一个单机 etcd，用 <code>etcdctl</code> 写入第一个键、读回它，再亲手 watch 一次变更推送。命令与预期输出逐条对照官方文档，跑通它，"心脏"就不再只是比喻。</p>
+  <p><strong>Primary source：</strong><a href="https://etcd.io/docs/v3.7/" target="_blank" rel="noopener">etcd 官方文档（v3.7）</a>——本期定义与命令口径出自该文档站；K8s 侧定位见 <a href="https://kubernetes.io/docs/concepts/architecture/" target="_blank" rel="noopener">Kubernetes 官方文档 · Architecture</a>，版本与下载见 <a href="https://github.com/etcd-io/etcd/releases" target="_blank" rel="noopener">GitHub Releases</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev">← 课程目录</span>
+  <a class="next" href="0017-etcd-quickstart.html">下一期：5 分钟跑起来 etcd →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

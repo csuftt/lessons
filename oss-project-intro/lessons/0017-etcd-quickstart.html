@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · etcd 系列第 2 期：5 分钟跑起来 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0017</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0016-etcd-what-and-why.html">上一期：0016</a> · etcd 系列第 2 期 / 共 5 期 · <a href="https://etcd.io" target="_blank" rel="noopener">etcd.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · ETCD 系列第 2 期：5 分钟跑起来</p>
+  <h1>5 分钟跑起来 etcd：两个二进制、五条命令，亲手完成第一次读写</h1>
+  <p class="subtitle">上一期我们认识了 etcd 的定位：API Server 是门面，etcd 是心脏——K8s 全部集群数据的后备存储。这一期把心脏请到自己机器上，官方快速上手页的第一句话就是承诺："Get etcd up and running in less than 5 minutes!"。下载官方二进制，一条命令起一个单成员集群，亲手写入第一个键、读回它、订阅一次变更推送，最后用官方口径判定跑通。全文基于 3.7.x（v3.7.1，2026-07-23 发布，2026-09-19 于 GitHub Releases 与官方文档复核），命令与预期输出逐字对照官方文档，Docker 方式与高频报错一并给全，跑不通先对号入座再怀疑人生。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 分布式键值存储 · Go · Apache-2.0</span>
+    <span class="tag">📦 基于 etcd 3.7.x（3.7.1）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 2 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 路线 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>本期路线与跑通判定</h2>
+  <p>四步路线：<strong>装好 → 起服务 → 第一次读写 → 订阅与判定</strong>。全部走完，满足三条判定才算跑通：</p>
+  <div class="card">
+    <ul class="steps">
+      <li>① <strong>服务起来了：</strong>启动终端持续滚动日志（官方 Note：info 级日志可直接忽略），进程不退、光标停在日志末尾——是长活服务的正常形态，不是卡死；</li>
+      <li>② <strong>写得进、读得出：</strong><code>put</code> 回显 <code>OK</code>，<code>get</code> 固定两行——键名一行、值一行，与官方 quickstart 印的一字不差；</li>
+      <li>③ <strong>健康检查通过：</strong><code>etcdctl endpoint health</code> 回显 <code>is healthy: successfully committed proposal</code>——健康＝能提交提案，不是端口应答（官方 etcdctl 文档口径）。</li>
+    </ul>
+  </div>
+  <p>这条路线起的是官方 quickstart 原话里的 <strong>single-member cluster（单成员集群）</strong>。上一期讲的"多数派写入"，在单机版里由它自己给自己点头——学习够用，生产的差别在思考题一里展开。</p>
+</section>
+
+<!-- ================= 02 环境 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>环境要求：平台分三层，磁盘比 CPU 金贵</h2>
+  <p>etcd 的"支持平台"不是一句"跨平台"就完事，官方 v3.7 支持平台页把平台分成三档，档位决定你能理直气壮到什么程度：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>架构</th><th>操作系统</th><th>支持层</th><th>官方口径</th></tr></thead>
+    <tbody>
+      <tr><td>AMD64 / ARM64</td><td>Linux</td><td><strong>Tier 1</strong></td><td>全部测试通过，维护者完全支持</td></tr>
+      <tr><td>AMD64 / ARM64</td><td>Darwin（macOS）</td><td>Tier 3</td><td rowspan="2">只保证能编译，测试很少甚至没有，"should be considered unstable"（官方原话）</td></tr>
+      <tr><td>AMD64</td><td>Windows</td><td>Tier 3</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>翻译一下：<strong>Linux 是主场；macOS 能跑但别较真；Windows 只在第三层</strong>——官方没有给"Windows 走 Docker"的明文指引，稳妥做法就是第 09 节的容器方式，容器里跑的是 Tier 1 的 Linux 镜像。</p>
+  <p>硬件方面，单机学习毫无门槛（官方硬件建议页口径）：典型集群只要 <strong>2-4 核、8GB 内存</strong>；真正金贵的是磁盘——共识协议要求每个请求持久化落盘，官方给的下限是 <strong>50 顺序 IOPS</strong>、推荐 SSD。本机起一个单成员集群，任何近十年的电脑都行。</p>
+</section>
+
+<!-- ================= 03 安装 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>第一步：安装——官方下载脚本，三个可执行文件</h2>
+  <p>官方安装页的主线方式是预构建二进制（pre-built binaries），要求"choosing release <strong>v3.7.0 or later</strong>"。官方发布页针对每个版本给了现成下载脚本，v3.7.1 的 Linux 段节选如下（原文见 GitHub Releases v3.7.1 说明）：</p>
+  <pre><code>ETCD_VER=v3.7.1
+
+# choose either URL（两条下载线二选一：谷歌云存储 / GitHub Releases）
+GOOGLE_URL=https://storage.googleapis.com/etcd
+GITHUB_URL=https://github.com/etcd-io/etcd/releases/download
+DOWNLOAD_URL=${GOOGLE_URL}
+
+rm -f /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz
+rm -rf /tmp/etcd-download-test &amp;&amp; mkdir -p /tmp/etcd-download-test
+curl -L ${DOWNLOAD_URL}/${ETCD_VER}/etcd-${ETCD_VER}-linux-amd64.tar.gz -o /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz
+tar xzvf /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz -C /tmp/etcd-download-test --strip-components=1 --no-same-owner
+rm -f /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz</code></pre>
+  <p>解压出来三个可执行文件：<strong><code>etcd</code>（服务端）、<code>etcdctl</code>（命令行客户端）、<code>etcdutl</code>（运维工具）</strong>——本期主角是前两个。按官方安装页，把可执行文件加入 PATH（移到 <code>/usr/local/bin</code>，或把解压目录加进 PATH），然后验证——官方在 quickstart 页用 Important 标出这句话："Ensure that you perform the last step of the installation instructions to verify that etcd is in your path." <strong>最后一步验证别省</strong>，PATH 没配好，下一步直接 command not found：</p>
+  <pre><code>$ etcd --version
+etcd Version: 3.7.0
+...</code></pre>
+  <p class="note">输出样例取自官方安装页（样例基于 v3.7.0，装 3.7.1 时首行相应变化，格式一致）。对照方式两条：macOS/Linux 可 <code>brew install etcd</code>——官方明确警告系统包里的版本可能明显过旧，Linux 发行版仓库"强烈不建议"；源码构建要 Go 1.21+ 加 <code>./scripts/build.sh</code>，门槛最高，入门不必。</p>
+</section>
+
+<!-- ================= 04 启动 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>第二步：一条命令，起一个单成员集群</h2>
+  <pre><code>$ etcd</code></pre>
+  <p>就这一条。终端开始滚动一屏屏 JSON 日志——新手最容易在这里慌，官方 Note 原话："The output produced by etcd are logs — info-level logs can be ignored." <strong>这些输出就是日志，info 级直接忽略</strong>，不必逐行研究。服务起来后长这样：</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 190" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <rect x="30" y="50" width="170" height="70" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="115" y="80" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">etcdctl / 客户端</text>
+    <text x="115" y="100" text-anchor="middle" fill="var(--muted)" font-size="9.5">新开的那个终端</text>
+
+    <rect x="290" y="36" width="220" height="98" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="400" y="64" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">etcd 进程 · 单成员集群</text>
+    <text x="400" y="84" text-anchor="middle" fill="var(--muted)" font-size="9.5">一条命令拉起 · 前台运行</text>
+    <text x="400" y="102" text-anchor="middle" fill="var(--muted)" font-size="9.5">日志滚动 = 工作状态，info 级可忽略</text>
+    <text x="400" y="120" text-anchor="middle" fill="var(--muted)" font-size="9.5">停止：该终端 Ctrl-C</text>
+
+    <rect x="600" y="50" width="140" height="70" rx="10" fill="var(--code-bg)" stroke="var(--line)" stroke-dasharray="5 3"/>
+    <text x="670" y="78" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">2380 · 成员间</text>
+    <text x="670" y="98" text-anchor="middle" fill="var(--muted)" font-size="9">单机用不上；多节点时是</text>
+    <text x="670" y="112" text-anchor="middle" fill="var(--muted)" font-size="9">成员同步通道（第 3 期）</text>
+
+    <line x1="200" y1="78" x2="284" y2="78" stroke="var(--muted)" marker-end="url(#ar2)"/>
+    <line x1="284" y1="92" x2="200" y2="92" stroke="var(--accent-3)" marker-end="url(#ar2)"/>
+    <text x="242" y="66" text-anchor="middle" fill="var(--muted)" font-size="9">put / get / watch</text>
+    <text x="242" y="112" text-anchor="middle" fill="var(--muted)" font-size="9">端口 2379 · 客户端入口</text>
+    <line x1="510" y1="85" x2="594" y2="85" stroke="var(--muted)" stroke-dasharray="4 3" marker-end="url(#ar2)"/>
+    <text x="552" y="74" text-anchor="middle" fill="var(--muted)" font-size="9">端口 2380</text>
+    <text x="380" y="170" text-anchor="middle" fill="var(--muted)" font-size="9.5">端口语义对照官方安装页 Docker 命令：--listen-client-urls 2379 / --listen-peer-urls 2380</text>
+  </svg>
+  </div>
+
+  <p>两个端口各管一头：<strong>2379 给客户端进出</strong>（etcdctl 和各语言客户端连的就是它），<strong>2380 给集群成员之间说话</strong>——单机版暂时用不上，多节点时它就是 Raft 同步的通道。服务形态：前台进程、不退出、光标停在日志末尾。想让它在后台待着不是本期话题，实验阶段前台跑最直观。</p>
+</section>
+
+<!-- ================= 05 读写 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>第三步：第一次读写（官方 quickstart 原文）</h2>
+  <p><strong>再开一个新终端</strong>——让起服务的那个继续滚日志。官方 quickstart 第三、四步原文，可逐字对照：</p>
+  <pre><code>$ etcdctl put greeting "Hello, etcd"
+OK
+
+$ etcdctl get greeting
+greeting
+Hello, etcd</code></pre>
+  <p>两个细节值得嚼。<strong>其一，写入即存在：</strong><code>put</code> 成功就回一个词 OK，不需要提前"建键"——对比上一门消息队列课还得先建 Topic，键值模型把仪式感全省了。<strong>其二，回显固定两行：</strong><code>get</code> 的输出第一行键名、第二行值，后面所有读命令都保持这个两行式。几个顺手的小开关（出自官方交互文档）：<code>--print-value-only</code> 只取值；<code>--prefix</code> 按前缀批量读；<code>--hex</code> 十六进制展示。</p>
+</section>
+
+<!-- ================= 06 watch ================= -->
+<section>
+  <h2><span class="sec-num">06</span>第四步：watch，亲眼看一次变更推送</h2>
+  <p>两个终端配合：终端 A 先订阅，终端 B 再写入。命令与回显出自官方交互文档：</p>
+  <pre><code># 终端 A：订阅后挂起等待
+$ etcdctl watch foo
+
+# 终端 B：写入触发变更
+$ etcdctl put foo bar
+
+# 终端 A 在写入的瞬间自己打印：
+PUT
+foo
+bar</code></pre>
+  <p>没有谁去轮询，<strong>变更主动送上门</strong>——上一期说的"变更即事件"，配置下发从"推文件再重启"变成"订阅即生效"，就是这一幕的实物。watch 还支持前缀订阅：<code>etcdctl watch --prefix foo</code>，一条订阅盯住一组键，这是配置目录同步的用法雏形。</p>
+</section>
+
+<!-- ================= 07 lease ================= -->
+<section>
+  <h2><span class="sec-num">07</span>顺手一把：lease，会自灭的临时键</h2>
+  <p>官方交互文档的 lease 样例走一遍（编号每次随机，你敲出来会是另一串数字，别慌）：</p>
+  <pre><code># 申请一个 60 秒的租约
+$ etcdctl lease grant 60
+lease 32695410dcc0ca06 granted with TTL(60s)
+
+# 把键挂到租约上
+$ etcdctl put --lease=32695410dcc0ca06 foo bar
+OK
+
+# 主动撤销租约
+$ etcdctl lease revoke 32695410dcc0ca06
+lease 32695410dcc0ca06 revoked
+
+$ etcdctl get foo
+# empty response since foo is deleted due to lease revocation（官方原注）</code></pre>
+  <p>租约就是<strong>给一批键装的 TTL 倒计时</strong>：到期或主动撤销，挂在上面的键全部自动清掉，再读就是空。节点存活检测、临时注册，都长在这套机制上——上一期说"存活检测是内建的"，这就是实物。除了 revoke，还有 <code>lease keep-alive</code> 持续续期：客户端活着就续，掉线了租约到期、键自动消失。</p>
+</section>
+
+<!-- ================= 08 判定 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>跑通判定：endpoint health</h2>
+  <pre><code>$ etcdctl endpoint health
+127.0.0.1:2379 is healthy: successfully committed proposal: took = 2.095242ms</code></pre>
+  <p>回显逐段读：<strong>健康、成功提交了一条提案、耗时两毫秒上下</strong>（输出取自官方 etcdctl 文档）。官方对"不健康"的定义是"cannot participate in consensus with the rest of the cluster"——<strong>无法参与共识</strong>。所以这条命令的实质是往集群里提交一条探测提案、走完整个共识与落盘流程，比"端口能连上"严格得多：端口在、共识瘫痪的实例照样存在，但提案过不去。三条判定到这里全部验收，五分钟目标达成。</p>
+</section>
+
+<!-- ================= 09 Docker ================= -->
+<section>
+  <h2><span class="sec-num">09</span>Docker 方式对照：Windows 用户的稳妥路径</h2>
+  <p>官方安装页给了完整的容器命令（主仓库 gcr.io，样例 tag 为 v3.7.0，想用 3.7.1 换标签即可；Windows 下把行尾 <code>\</code> 换成 <code>^</code>）：</p>
+  <pre><code>ETCD_VER=v3.7.0
+
+rm -rf /tmp/etcd-data.tmp &amp;&amp; mkdir -p /tmp/etcd-data.tmp &amp;&amp; \
+docker run \
+  -p 2379:2379 \
+  -p 2380:2380 \
+  --mount type=bind,source=/tmp/etcd-data.tmp,destination=/etcd-data \
+  --name etcd-gcr-${ETCD_VER} \
+  gcr.io/etcd-development/etcd:${ETCD_VER} \
+  /usr/local/bin/etcd \
+  --name s1 \
+  --data-dir /etcd-data \
+  --listen-client-urls http://0.0.0.0:2379 \
+  --advertise-client-urls http://0.0.0.0:2379 \
+  --listen-peer-urls http://0.0.0.0:2380 \
+  --initial-advertise-peer-urls http://0.0.0.0:2380 \
+  --initial-cluster s1=http://0.0.0.0:2380 \
+  --initial-cluster-token tkn \
+  --initial-cluster-state new \
+  --log-level info \
+  --logger zap \
+  --log-outputs stderr</code></pre>
+  <p>逐段拆：两个 <code>-p</code> 把客户端口与成员口映射到宿主机；<code>--mount</code> 把数据目录挂出容器，删容器不丢数据；后面一串参数把单成员集群的监听地址、广播地址、初始集群写死——<strong>容器里不写广播地址，宿主机客户端第一步寻址就碰壁</strong>，这和 Pulsar 的 <code>--advertised-address</code> 是同一个道理。验证用官方安装页原样的清单（容器内外同一套 CLI，回显与第 05-08 节一致）：</p>
+  <pre><code>docker exec etcd-gcr-${ETCD_VER} /usr/local/bin/etcd --version
+docker exec etcd-gcr-${ETCD_VER} /usr/local/bin/etcdctl version
+docker exec etcd-gcr-${ETCD_VER} /usr/local/bin/etcdctl endpoint health
+docker exec etcd-gcr-${ETCD_VER} /usr/local/bin/etcdctl put foo bar
+docker exec etcd-gcr-${ETCD_VER} /usr/local/bin/etcdctl get foo</code></pre>
+</section>
+
+<!-- ================= 10 报错 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>高频报错速查：现象 → 原因 → 解法</h2>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>现象</th><th>原因</th><th>解法</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>command not found</code></td>
+        <td>PATH 没配好——正是官方 quickstart 用 Important 强调的"最后一步验证别省"</td>
+        <td>回官方安装页第 3 步：把 etcd / etcdctl 所在目录加入 PATH，再跑 <code>etcd --version</code> 验证</td>
+      </tr>
+      <tr>
+        <td>etcdctl 报连接被拒（connection refused）</td>
+        <td>服务端没起，或还没就绪就开始敲客户端命令</td>
+        <td>回启动终端确认 <code>etcd</code> 进程还在滚日志；确认 2379 已监听后再开客户端终端</td>
+      </tr>
+      <tr>
+        <td>API 版本对不上 / 老脚本行为怪异</td>
+        <td><code>ETCDCTL_API</code> 版本坑：v3.4 起默认 v3 接口，更老的客户端要 <code>export ETCDCTL_API=3</code>；且 v2 接口建的键 v3 接口查不到（官方交互文档原注）</td>
+        <td>统一走 v3：显式设 <code>ETCDCTL_API=3</code>，别混用两代接口的键</td>
+      </tr>
+      <tr>
+        <td><code>brew install etcd</code> 装出来的版本很旧</td>
+        <td>系统包里的版本可能明显过旧（官方安装页警告），Linux 发行版仓库"强烈不建议"</td>
+        <td>改用第 03 节官方二进制；装完 <code>etcd --version</code> 核对版本号</td>
+      </tr>
+      <tr>
+        <td>服务端启动失败、日志报端口相关错误</td>
+        <td>2379 或 2380 被其他进程占用</td>
+        <td>看启动日志定位端口，停掉占用进程或改监听端口（客户端命令需同步 <code>--endpoints</code>）</td>
+      </tr>
+      <tr>
+        <td>本机跑得好好的，换台机器远程连不上</td>
+        <td>跨机访问牵扯防火墙与广播地址，不只端口问题</td>
+        <td>先确认防火墙放行 2379；远程部署还涉及 advertise 地址配置，属多节点部署话题，第 3 期后再回头看</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ================= 11 quiz ================= -->
+<section>
+  <h2><span class="sec-num">11</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. 启动 etcd 后终端滚个不停的日志，官方建议怎么对待？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，恰恰相反：官方 Note 原话是 info 级日志可以直接忽略，逐行研究反而耽误正事。","不对，这些日志不用重定向走，前台直出终端是正常形态。","对的：官方 Note 原话——The output produced by etcd are logs, info-level logs can be ignored。"]'>
+        <li class="quiz-option">逐行读懂才算启动成功</li>
+        <li class="quiz-option">必须重定向到文件，否则会丢</li>
+        <li class="quiz-option">它们就是日志，info 级可直接忽略</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. etcdctl get greeting 的回显是？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，那只有一行，键值模型的读取回显是两行式。","对的：官方 quickstart 原样——第一行键名 greeting，第二行值 Hello, etcd。","不对，OK 是 put 的回显，get 不回 OK。"]'>
+        <li class="quiz-option">一行：Hello, etcd</li>
+        <li class="quiz-option">两行：键名 greeting，值 Hello, etcd</li>
+        <li class="quiz-option">一个词：OK</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. endpoint health 回显"successfully committed proposal"，这个判定为什么比"端口能连上"严格？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：官方口径——无法参与共识才叫不健康；探测提案走完了共识与落盘全流程，端口在、共识瘫痪的实例提交不了提案。","不对，健康检查与 TLS 配置无关，探测走的就是正常写入路径。","不对，它真的提交了提案，回显原文就是 successfully committed proposal。"]'>
+        <li class="quiz-option">它真实提交了一条提案，走完共识与落盘流程</li>
+        <li class="quiz-option">它额外校验了 TLS 证书链</li>
+        <li class="quiz-option">它只是 ICMP 探测的另一种写法，实质一样</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. 关于 ETCDCTL_API 版本坑，哪个说法符合官方文档？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，v3.4 起 etcdctl 默认就走 v3 接口，不需要每条命令都显式设置。","不对，官方交互文档原注：v2 接口创建的键无法通过 v3 接口查询，两代接口不互通。","对的：v3.4 起默认 v3；更老的客户端才需要 export ETCDCTL_API=3，且 v2 建的键 v3 查不到。"]'>
+        <li class="quiz-option">任何版本都必须显式 export ETCDCTL_API=3</li>
+        <li class="quiz-option">v2 与 v3 接口的键互相可见</li>
+        <li class="quiz-option">v3.4 起默认 v3；v2 建的键 v3 查不到</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 12 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">12</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：单成员集群里"多数派"怎么成立？它和生产三节点集群的差距，只是少了两台机器吗？</summary>
+    <div class="details-body">
+      <p>多数派的定义是"超过半数确认"，单成员集群的半数就是它自己——<strong>1/1 也是多数派</strong>，所以上一期讲的共识流程并没有缺席，只是投票人只剩一个：写入确认从"等过半节点点头"退化成"自己点头"，延迟自然小，但这恰恰意味着<strong>共识协议的容错红利在这个形态里是零</strong>。生产三节点集群容忍 1 台故障（2/3 仍构成多数派）、五节点容忍 2 台；单成员任何故障都直接不可用，只剩磁盘上那份数据可救。第二个差距在<strong>见证者</strong>：多数派的价值是"任何决定至少过半的人知道"，单机版没有第二个见证者，磁盘一坏，"当时到底写没写"就死无对证——这也是官方文档反复强调备份的原因。所以正确的理解是：<strong>单成员集群是共识机制的"教学沙盘"，协议还在、容错不在</strong>；第 3 期讲 Raft 与一条写请求的旅程时，会看到同一个协议在多节点上怎样靠心跳、选举与日志复制活起来。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：为什么官方把"能提交提案"当健康标准，而不是"端口能连上"？顺着这个口径，生产上该盯哪些信号？</summary>
+    <div class="details-body">
+      <p>先看两种判定的差别。端口探测只证明<strong>进程活着、网络可达</strong>；而 etcd 的价值承诺是"每次写入过多数派、任何读取拿到最新值"，这份承诺的兑现路径是<strong>提案 → 共识确认 → 落盘 → 状态机生效</strong>，任何一环卡住，端口照样亮着，但集群已经不健康——磁盘写延迟飙升让心跳超时、网络分区让成员掉出多数派、文件句柄耗尽让写入失败，都是"端口在、共识瘫"的典型形态。官方 etcdctl 文档对不健康的定义正是"cannot participate in consensus"（无法参与共识），<code>endpoint health</code> 用一条真实探测提案把这整条路径走一遍，能走通才算数。顺着这个口径，生产监控该盯的就不是"进程在不在"：<strong>写延迟分位数（落盘耗时）、提议提交速率、选举次数、成员是否掉出多数派</strong>——这几个信号共同回答一个问题：这个心脏还在不在正常泵血。这也是为什么第 02 节说磁盘是 etcd 最金贵的硬件：共识协议对写延迟极其敏感，磁盘一慢，最先死的就是提案这条路。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 13 要点 ================= -->
+<section>
+  <h2><span class="sec-num">13</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这四条：</strong></p>
+    <ul>
+      <li>平台分三层：Linux 是 Tier 1 主场，macOS/Windows 是 Tier 3——Windows 稳妥走 Docker 方式跑 Tier 1 镜像；硬件下限极低，磁盘（50 顺序 IOPS 起、推荐 SSD）比 CPU 金贵；</li>
+      <li>安装三选一：官方二进制为主线（v3.7.0+，两个主角 <code>etcd</code> / <code>etcdctl</code>），Docker 对照给全，系统包防旧；PATH 验证这步官方用 Important 标出，别省；</li>
+      <li>五条命令第一天地板：<code>put</code> 回 OK（写入即存在）、<code>get</code> 两行回显（键名+值）、<code>watch</code> 瞬间推送、<code>lease</code> 让键自灭、<code>endpoint health</code> 判定跑通——全部出自官方文档原样；</li>
+      <li>跑通判定＝健康检查通过：健康＝能提交提案、参与共识，不是端口应答；ETCDCTL_API 版本坑与连接被拒先查速查表。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 3 期《核心概念与整体架构》——键值模型的术语体系（revision、lease、watch 三件套怎么咬合）、Raft 共识入门，以及一条写请求从 etcdctl 到落盘的完整旅程：今天那个 <code>OK</code>，到底是怎么被"点头"的。Primary source：<a href="https://etcd.io/docs/v3.7/quickstart/" target="_blank" rel="noopener">etcd 官方文档 · Quickstart（v3.7）</a>——本期主线路线与全部命令出处；安装细节见 <a href="https://etcd.io/docs/v3.7/install/" target="_blank" rel="noopener">Install（v3.7）</a>，命令行读写、watch 与 lease 见 <a href="https://etcd.io/docs/v3.7/dev-guide/interacting_v3/" target="_blank" rel="noopener">Interacting with etcd（v3.7）</a>，平台分层与硬件口径分别见 <a href="https://etcd.io/docs/v3.7/op-guide/supported-platform/" target="_blank" rel="noopener">Supported platforms</a> 与 <a href="https://etcd.io/docs/v3.7/op-guide/hardware/" target="_blank" rel="noopener">Hardware recommendations</a>，版本与下载脚本见 <a href="https://github.com/etcd-io/etcd/releases" target="_blank" rel="noopener">GitHub Releases</a>。锁与选主这类延伸场景的原理对照，可读每日微课程线 <a href="../../daily-tech-course/lessons/0009-redis-distributed-lock.html">第 0009 期 · Redis 分布式锁</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0016-etcd-what-and-why.html">← 上一期：认识 etcd</a>
+  <a class="next" href="0018-etcd-core-concepts-architecture.html">下一期：核心概念与整体架构 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>
