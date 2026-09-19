@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · TDengine 系列第 3 期:核心概念与整体架构 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0029</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0028-tdengine-quickstart.html">上一期:0028</a> · TDengine 系列第 3 期 / 共 5 期 · <a href="https://www.taosdata.com" target="_blank" rel="noopener">taosdata.com ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · TDENGINE 系列第 3 期:核心概念与整体架构</p>
+  <h1>TDengine 核心概念与整体架构:超级表、vnode 与数据分片</h1>
+  <p class="subtitle">上一期我们把 TDengine 跑了起来:Docker 起容器、建出第一张超级表,taosBenchmark 一条命令灌进 1 亿条。但那 1 亿条存在哪、被谁管着、怎么在集群里摊开,命令行一个字没提。这一期把 TDengine 的"户口本"翻开:先认全两套术语——数据模型侧的超级表、子表、标签、时间戳主键,服务侧的 taosd、taosAdapter、dnode、mnode、vnode;再自绘一张整体架构图,跟着一条写入走完全程;最后打开源码仓库,把 source 目录下的模块一一对号入座。全文基于 v3.4.x(文档站 Latest v3.4.2,2026-09-19 复核;GitHub Releases Latest 为 ver-3.4.1.6,2026-04-30 发布),架构与概念表述逐条对照官方文档《技术内幕》各页。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 时序数据库 · C · AGPL-3.0</span>
+    <span class="tag">📦 基于 v3.4.x(文档站 v3.4.2)</span>
+    <span class="tag-date">📅 2026-09-19 · 第 3 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 承上启下 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>上一期的 1 亿条,此刻在哪里?</h2>
+  <p>第 2 期收尾时,taosBenchmark 往 test 库写了 <strong>10,000 张子表、共 1 亿条数据</strong>,<code>SELECT COUNT(*)</code> 用 0.075 秒返回(官方文档样例)。现在问三个命令行没回答的问题:<strong>这 1 亿条存在哪?10,000 张子表由谁管?为什么 COUNT 全库能快成这样?</strong>答案藏在<strong>分片(sharding)与副本(replica)</strong>两个关键词里——官方《整体架构》开宗明义:TDengine 从第一天起就按分布式高可靠架构设计,通过节点虚拟化辅以负载均衡。</p>
+  <p>先把名片发齐。用户视角的 TDengine 词汇分两摞:<strong>数据模型侧五个——库、超级表、子表、标签、时间戳主键,第 2 期你全都敲过;服务侧六个——taosd、taosAdapter、taosc、dnode、mnode、vnode,藏在进程与集群里</strong>。前五个管"数据长什么样",后六个管"系统怎么跑"。先发名片,再上架构图对号入座。</p>
+</section>
+
+<!-- ================= 02 数据模型侧 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>数据模型侧五件套:从架构视角重看第 2 期</h2>
+  <p>第 2 期我们从"怎么用"的角度碰过它们,现在换架构视角,每个词补一句"它在系统里是什么":</p>
+  <div class="grid-2">
+    <div class="card">
+      <h4>① 库(Database)——分区的档案室</h4>
+      <p><strong>一句话定义:</strong>官方定义"库是 TDengine 中用于管理一组表的集合",一个实例可以有多个库,各库独立配置存储策略。</p>
+      <ul>
+        <li>库是 vnode 分配的单位:<strong>一个 vnode 只属于一个数据库</strong>,删除库时它的所有 vgroup 一并销毁;</li>
+        <li>第 2 期敲的 KEEP、BUFFER、DURATION 全是库级参数,每个 vnode 各自执行。</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>② 超级表(STable)——虚位模板,不存一行</h4>
+      <p><strong>一句话定义:</strong>把同一类型的数据采集点聚成一张逻辑统一表的数据结构,自身不存储任何数据。</p>
+      <ul>
+        <li>第 2 期你只建了它没写入——不是漏了,是它<strong>本来就不存数据</strong>;</li>
+        <li>架构视角:超级表的 schema 登记在元数据里,修改模板所有子表立即生效。</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>③ 子表——真正存数据的实体</h4>
+      <p><strong>一句话定义:</strong>隶属于某张超级表的具体表,一个数据采集点一张,按超级表模板创建。</p>
+      <ul>
+        <li>子表的数据按时间追加存在<strong>它所属的 vnode</strong> 上;一张表的数据不跨 vnode(第 05 节细说为什么);</li>
+        <li>单 vnode 可管理的表上限官方口径为 100 万——第 1 期"表爆炸"的顾虑,架构层在这里兜底。</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>④ 标签 + ⑤ 时间戳主键——静态属性与唯一坐标</h4>
+      <p><strong>一句话定义:</strong>标签是采集点上"通常不随时间变化"的静态属性;时间戳是每张表的第一列、主键。</p>
+      <ul>
+        <li>标签值<strong>存在 vnode 的元数据里</strong>(官方《存储引擎》:子表标签信息与标签索引都在其中,用 B+ 树管理)——建表写死、不随每条数据重复存,这就是压缩率的来源之一;</li>
+        <li>时间戳主键让"同设备数据按时间有序"变成物理事实,追加写与范围查都吃这红利。</li>
+      </ul>
+    </div>
+  </div>
+  <p class="note"><span class="h">边界说明</span>怎么选标签、怎么设计列这类<strong>建模方法论</strong>,每日微课程线<a href="../../daily-tech-course/lessons/0015-tdengine-supertable.html">第 0015 期 · TDengine 超级表与子表数据建模</a>已讲透,本系列不换皮重讲;本期只回答"它们在架构里是什么、存在哪"。</p>
+</section>
+
+<!-- ================= 03 服务侧六名词 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>服务侧六个名词:一家连锁物流分仓</h2>
+  <p>服务侧词汇可以类比一家<strong>连锁物流分仓体系</strong>:仓库、库区、总台账房、前台收发室,各司其职。六个名词一句话:</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>名词</th><th>类比</th><th>一句话职责(官方口径)</th></tr></thead>
+    <tbody>
+      <tr><td><strong>taosd</strong></td><td>仓库本身</td><td>"TDengine 数据库引擎的核心服务"——服务端主进程,默认监听 6030</td></tr>
+      <tr><td><strong>dnode</strong></td><td>一座分仓</td><td>"taosd 在物理节点上的一个运行实例"——集群的物理实体,至少要有一个</td></tr>
+      <tr><td><strong>vnode</strong></td><td>仓内独立库区</td><td>为数据分片、负载均衡而引入的虚拟节点,有<strong>独立的运行线程、内存空间和持久化存储路径</strong>;一个 vnode 只属于一个数据库</td></tr>
+      <tr><td><strong>vgroup</strong></td><td>互为备份的库区组</td><td>不同 dnode 上的 vnode 组成的逻辑单元,内部走 Raft;<strong>vnode 数量决定副本数</strong>(replica 默认 1)</td></tr>
+      <tr><td><strong>mnode</strong></td><td>总台账房</td><td>元数据(用户、数据库、超级表)的存储管理中心,又称 MetaNode;最多 3 个组成虚拟组,Raft 协议,更新必须在 leader 上执行</td></tr>
+      <tr><td><strong>taosAdapter</strong></td><td>前台收发室</td><td>"TDengine 集群和应用程序之间的桥梁和适配器"——RESTful/WebSocket 都走它(6041),各语言连接器经它通信</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>补两位"编外人员":<strong>taosc</strong> 是内嵌在各语言连接库里的应用驱动——缓存元数据、转发请求,还替服务端做"最后一级的聚合、排序、过滤";<strong>qnode</strong> 是专职查询计算的节点,不绑定数据库——官方说,引入它实现了<strong>存储和计算的分离</strong>。</p>
+</section>
+
+<!-- ================= 04 整体架构 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>自绘整体架构:一条写入的完整旅程</h2>
+  <p>把七个名词拼上数据流,就是 TDengine 的全景。读图三句话:<strong>taosAdapter 管接待,mnode 管查户口,vnode 管存数据</strong>。实线是写入路径,虚线是查询时的元数据与聚合协作。</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 560" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" style="max-width:100%">
+    <defs>
+      <marker id="ar29" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar29a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent)"/>
+      </marker>
+      <marker id="ar29g" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+
+    <!-- 客户端 -->
+    <rect x="30" y="16" width="220" height="56" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="140" y="38" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">应用 / taosBenchmark</text>
+    <text x="140" y="56" text-anchor="middle" fill="var(--muted)" font-size="9.5">各语言连接器内嵌 taosc 驱动</text>
+    <text x="140" y="70" text-anchor="middle" fill="var(--muted)" font-size="8.5">缓存元数据 · 最后一级聚合</text>
+
+    <!-- taosAdapter -->
+    <rect x="30" y="96" width="220" height="66" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="140" y="118" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">taosAdapter(6041)</text>
+    <text x="140" y="136" text-anchor="middle" fill="var(--muted)" font-size="9">RESTful / WebSocket 接入</text>
+    <text x="140" y="151" text-anchor="middle" fill="var(--muted)" font-size="9">兼容 InfluxDB/OpenTSDB 写入</text>
+    <line x1="140" y1="72" x2="140" y2="92" stroke="var(--muted)" marker-end="url(#ar29)"/>
+    <text x="152" y="86" fill="var(--muted)" font-size="8.5">WebSocket(推荐)或原生 6030</text>
+
+    <!-- taosd 大框 -->
+    <rect x="20" y="186" width="720" height="230" rx="10" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="36" y="210" fill="var(--ink)" font-size="11.5" font-weight="700">taosd 进程 = dnode(一座分仓)</text>
+    <text x="240" y="210" fill="var(--muted)" font-size="9.5">生产集群 = 多个 dnode 组队(firstEp 指路)</text>
+
+    <!-- mnode -->
+    <rect x="36" y="226" width="200" height="170" rx="8" fill="var(--card)" stroke="var(--accent)" stroke-dasharray="5 3"/>
+    <text x="136" y="248" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">mnode 元数据中心</text>
+    <text x="136" y="266" text-anchor="middle" fill="var(--muted)" font-size="8.5">用户 · 数据库 · 超级表 schema</text>
+    <text x="136" y="284" text-anchor="middle" fill="var(--muted)" font-size="8.5">最多 3 个组成虚拟组(Raft)</text>
+    <text x="136" y="306" text-anchor="middle" fill="var(--accent)" font-size="8.5">"这张表在哪个 vnode?"</text>
+    <text x="136" y="324" text-anchor="middle" fill="var(--accent)" font-size="8.5">查询路由从这里出发</text>
+    <rect x="52" y="340" width="168" height="40" rx="6" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="136" y="357" text-anchor="middle" fill="var(--muted)" font-size="8.5">第一个 mnode 部署时自动创建</text>
+    <text x="136" y="372" text-anchor="middle" fill="var(--muted)" font-size="8.5">其余用 SQL 手动增删</text>
+
+    <!-- vnode -->
+    <rect x="260" y="226" width="270" height="170" rx="8" fill="var(--card)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="395" y="248" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">vnode V1(leader)· 库区</text>
+    <text x="395" y="266" text-anchor="middle" fill="var(--muted)" font-size="8.5">子表 d1001 / d1002 / …… 的数据都在这</text>
+    <rect x="276" y="280" width="238" height="46" rx="6" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="395" y="297" text-anchor="middle" fill="var(--muted)" font-size="8.5">写入路径:验证 → 写 WAL → 写内存跳表</text>
+    <text x="395" y="314" text-anchor="middle" fill="var(--muted)" font-size="8.5">(多副本时先转发 follower,超半数确认)</text>
+    <rect x="276" y="336" width="114" height="44" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="333" y="354" text-anchor="middle" fill="var(--ink)" font-size="8.5" font-weight="700">meta(B+ 树)</text>
+    <text x="333" y="370" text-anchor="middle" fill="var(--muted)" font-size="8">表 schema + 标签值</text>
+    <rect x="400" y="336" width="114" height="44" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="457" y="354" text-anchor="middle" fill="var(--ink)" font-size="8.5" font-weight="700">tsdb 时序数据</text>
+    <text x="457" y="370" text-anchor="middle" fill="var(--muted)" font-size="8">data/head/sma/stt 文件</text>
+
+    <!-- vgroup 说明 -->
+    <rect x="546" y="226" width="178" height="170" rx="8" fill="var(--warn-bg)" stroke="var(--accent)" stroke-dasharray="5 3"/>
+    <text x="635" y="250" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">vgroup(库区备份组)</text>
+    <text x="635" y="270" text-anchor="middle" fill="var(--muted)" font-size="8.5">replica=2 时:V1 的副本</text>
+    <text x="635" y="286" text-anchor="middle" fill="var(--muted)" font-size="8.5">躺在另一座 dnode 上</text>
+    <text x="635" y="308" text-anchor="middle" fill="var(--accent)" font-size="8.5">vgroup 内部 Raft 选主</text>
+    <text x="635" y="326" text-anchor="middle" fill="var(--accent)" font-size="8.5">vnode 数 = 副本数</text>
+    <text x="635" y="352" text-anchor="middle" fill="var(--muted)" font-size="8">replica 默认 1:单机沙盘</text>
+    <text x="635" y="368" text-anchor="middle" fill="var(--muted)" font-size="8">里 vgroup 退化为单 vnode</text>
+    <line x1="530" y1="311" x2="542" y2="311" stroke="var(--muted)" stroke-dasharray="4 3" marker-end="url(#ar29)"/>
+
+    <!-- mnode -> vnode 协作 -->
+    <line x1="236" y1="300" x2="256" y2="300" stroke="var(--accent-3)" stroke-dasharray="4 3" marker-end="url(#ar29g)"/>
+
+    <!-- 写入 -> 存储 -->
+    <line x1="395" y1="416" x2="395" y2="452" stroke="var(--accent)" marker-end="url(#ar29a)"/>
+    <text x="407" y="440" fill="var(--accent)" font-size="9.5">内存池刷盘:先 META 后 TSDB(LSM,后台合并 stt)</text>
+
+    <!-- 落盘 -->
+    <rect x="20" y="456" width="720" height="84" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="36" y="478" fill="var(--ink)" font-size="11" font-weight="700">磁盘上的 /var/lib/taos:按 vnode 分目录落盘</text>
+    <rect x="36" y="490" width="215" height="38" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="143" y="506" text-anchor="middle" fill="var(--ink)" font-size="8.5" font-weight="700">vnode/wal</text>
+    <text x="143" y="520" text-anchor="middle" fill="var(--muted)" font-size="8">预写日志 · 崩溃恢复靠它</text>
+    <rect x="266" y="490" width="215" height="38" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="373" y="506" text-anchor="middle" fill="var(--ink)" font-size="8.5" font-weight="700">meta 文件</text>
+    <text x="373" y="520" text-anchor="middle" fill="var(--muted)" font-size="8">B+ 树 · 标签/schema 的家</text>
+    <rect x="496" y="490" width="228" height="38" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="610" y="506" text-anchor="middle" fill="var(--ink)" font-size="8.5" font-weight="700">tsdb:head/data/sma/stt/tomb</text>
+    <text x="610" y="520" text-anchor="middle" fill="var(--muted)" font-size="8">按 duration 分文件 · 列存压缩</text>
+
+    <!-- 查询虚线 -->
+    <path d="M700,456 C730,340 700,120 260,44" fill="none" stroke="var(--accent-3)" stroke-dasharray="4 3" marker-end="url(#ar29g)"/>
+    <text x="620" y="120" fill="var(--accent-3)" font-size="9">查询:mnode 给路由,各 vnode 并行扫</text>
+    <text x="620" y="136" fill="var(--accent-3)" font-size="9">taosc 做最后一级聚合</text>
+
+    <text x="20" y="554" fill="var(--muted)" font-size="9.5">口径对照官方 v3.4.2 文档:技术内幕·整体架构(dnode/mnode/vnode/vgroup、写入与复制)、技术内幕·存储引擎(vnode 存储三部分、LSM)、组件说明(taosd/taosAdapter)</text>
+  </svg>
+  </div>
+
+  <p>顺着实线把第 2 期那条 <code>INSERT INTO d1002 ... VALUES(NOW, 10.2, 219, 0.32)</code> 走完:<strong>连接器把请求交给 taosAdapter(或原生连 6030)→ taosc 用缓存的元数据定位表,没缓存就先问 mnode"这张表在哪个 vnode" → 请求落到该 vnode:leader 验证后先写 WAL 保证持久性,再写内存跳表(多副本时同步转发 follower、超半数确认) → 内存池到阈值,后台刷成磁盘文件:元数据进 meta,时序数据按 LSM 进 tsdb,后台还会合并 stt 文件</strong>。走通这一条,第 2 期的三条跑通判定就都有了架构解释。</p>
+
+  <div class="grid-2">
+    <div class="card">
+      <h4>钩子一:为什么"一个采集点一张表"反而省存储?</h4>
+      <p>直觉上"1 万台设备拆 1 万张表"很浪费,架构账正好相反。<strong>其一,标签只存一份</strong>——location、groupId 挂在 vnode 的元数据里(官方口径:标签信息与标签索引用 B+ 树管理),不随每条读数重复写;大宽表方案里,每行都得背一遍设备属性。<strong>其二,列存压缩吃得更饱</strong>——单设备电流电压缓变,块内相邻值高度相似,官方样例压缩率 <strong>23.98%</strong>(压到约 1/4,演示链②量过)。建模方法完整版见 daily 线 <a href="../../daily-tech-course/lessons/0015-tdengine-supertable.html">0015 期</a>。</p>
+    </div>
+    <div class="card">
+      <h4>钩子二:vnode 怎么把写入并行度打开?</h4>
+      <p>每个 vnode 有<strong>独立的运行线程、内存空间和持久化存储路径</strong>(官方原话),等于库内自带并行单元:10,000 张子表由一致性哈希摊到多个 vnode,各写各的 WAL、各刷各的盘——<strong>一张表的数据不跨 vnode</strong>,单表内天然无锁追加;跨表聚合时 mnode 给路由、各 vnode 并行扫描、taosc 做最后一级归并。这就是 COUNT(*) 0.075 秒和"1 亿条十几秒灌完"的架构底气。调优细节见 daily 线 <a href="../../daily-tech-course/lessons/0022-tdengine-write-read-performance.html">0022 期</a>。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 05 演示:在命令行里看架构 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>亲手验证:三条命令给架构做体检</h2>
+  <p>架构不只画在纸上,回到第 2 期的容器里,几条命令就能摸到它。<strong>其一,清点物理节点</strong>——官方三节点 docker-compose 集群的 <code>SHOW DNODES</code>(官方运维文档样例回显):</p>
+  <pre class="codeblock"><code>taos&gt; show dnodes;
+id | endpoint  | vnodes | support_vnodes | status | create_time          | reboot_time           | note |
+=================================================================================================
+1  | td1:6030  |   0    |       85       | ready  | 2025-08-21 01:56:41.630 | 2025-08-21 01:56:41.462 | |
+2  | td2:6030  |   1    |       85       | ready  | 2025-08-21 01:56:43.203 | 2025-08-21 01:56:43.453 | |
+3  | td3:6030  |   0    |       85       | ready  | 2025-08-21 01:56:43.296 | 2025-08-21 01:56:43.491 | |
+Query OK, 3 row(s) in set (0.006355s)</code></pre>
+  <p>一列一个故事:<strong>endpoint 是"FQDN:6030"</strong>(一个 taosd 进程对应一个 dnode);<strong>vnodes 列说数据落在谁家</strong>——样例里全集群当时只有 1 个 vnode,分在了 td2 上;<strong>support_vnodes 是每个 dnode 承载 vnode 的上限</strong>(默认与 CPU 核数挂钩)。第 2 期单机容器里跑这条命令,看到的自然只有 id=1 一行。</p>
+  <p><strong>其二,给存储做解剖</strong>——<code>SHOW TABLE DISTRIBUTED</code> 把一张子表在 vnode 里的物理形态摊开(官方文档样例回显):</p>
+  <pre class="codeblock"><code>taos&gt; SHOW TABLE DISTRIBUTED d0\G;
+Total_Blocks=[5] Total_Size=[93.65 KB] Average_size=[18.73 KB] Compression_Ratio=[23.98 %]
+Total_Rows=[20000] Inmem_Rows=[0] MinRows=[3616] MaxRows=[4096] Average_Rows=[4000]
+Total_Tables=[1] Total_Files=[2] Total_Vgroups=[1]</code></pre>
+  <p>三行回显正好对应三个概念:数据切成 5 个块(默认块上限 maxRows=4096 行)、<strong>压缩率 23.98%</strong>(钩子一的实锤)、这些块属于 1 个 vgroup——<strong>vnode 才是数据文件的家</strong>。</p>
+  <p><strong>其三,向元数据要答案</strong>——information_schema 里的表实为视图,只能查询、可用 SELECT 筛选排序(官方说明),给架构做体检最常用的四张:</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>视图</th><th>关键列(官方定义)</th><th>能回答什么</th></tr></thead>
+    <tbody>
+      <tr><td><code>ins_databases</code></td><td>name · vgroups · replica · ntables</td><td>一个库摊了几个 vgroup、几副本、多少张表</td></tr>
+      <tr><td><code>ins_dnodes</code></td><td>id · endpoint · vnodes · support_vnodes · status</td><td>每座"分仓"扛了几个 vnode、活没活</td></tr>
+      <tr><td><code>ins_vgroups</code></td><td>vgroup_id · tables · v1_dnode · is_ready</td><td>分片实际分布:每个 vgroup 在哪个 dnode、管多少表</td></tr>
+      <tr><td><code>ins_tables</code></td><td>table_name · stable_name · vgroup_id · type</td><td>任意子表的 vnode 归属与所属超级表</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>一条 <code>SELECT table_name, vgroup_id FROM information_schema.ins_tables;</code> 就能看到 10,000 张子表的 vnode 分配——<strong>分布一直都在,单机只是所有 vnode 住在同一座仓</strong>。</p>
+</section>
+
+<!-- ================= 06 源码仓库地图 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>打开仓库:source 目录模块地图</h2>
+  <p>概念挂到代码上。以 GitHub 上 taosdata/TDengine 主分支为准(2026-09-19 核对;读码建议锁定 tag <strong>ver-3.4.1.6</strong>),C 项目重架构轻读码——每个目录一句话:</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>目录</th><th>一句话职责</th></tr></thead>
+    <tbody>
+      <tr><td><code>source/client/</code></td><td>客户端驱动 taosc:连接管理、元数据缓存、最后一级聚合(各语言连接器的底座)</td></tr>
+      <tr><td><code>source/dnode/</code></td><td>服务端节点主体:mnode(元数据)、vnode(时序数据)、qnode(查询)、snode(流计算)都在这</td></tr>
+      <tr><td><code>source/libs/</code></td><td>内部公共库:parser(SQL 解析)、planner/executor(计划与执行)、scheduler(调度)、tdb(存储引擎)、wal(预写日志)等</td></tr>
+      <tr><td><code>source/common/</code></td><td>前后端共享的结构与协议定义</td></tr>
+      <tr><td><code>source/os/</code> 与 <code>source/util/</code></td><td>跨平台系统调用封装与基础工具函数(C 项目的"地基件")</td></tr>
+      <tr><td><code>tools/</code></td><td>辅助工具,含 shell/(taos 命令行真身)等</td></tr>
+      <tr><td><code>deps/</code> 与 <code>include/</code></td><td>第三方依赖与对外头文件接口</td></tr>
+      <tr><td><code>examples/</code> 与 <code>tests/</code></td><td>多语言示例与测试套件——读码时最好的"用法示例库"</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note"><span class="h">读码提示</span>优先级记三个:<code>source/dnode/vnode</code>(第 5 期"存算一体与缓存降采样"的主战场)、<code>source/dnode/mnode</code>(元数据与路由)、<code>source/libs/tdb</code>(存储引擎)。taos 命令行不在 source/ 里,在 tools/shell。</p>
+</section>
+
+<!-- ================= 07 quiz ================= -->
+<section>
+  <h2><span class="sec-num">07</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. 一个 vgroup 里的 vnode 数量,决定的是什么?</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对,dnode 是物理节点数量,与 vgroup 内 vnode 数无关。","不对,vnode 数量不决定库的数量;一个 vnode 只属于一个库,但一个库有多个 vnode。","对的:官方架构文档原话——vgroup 中的 vnode 数量决定了数据的副本数,replica 默认为 1。"]'>
+        <li class="quiz-option">集群里 dnode 的总数</li>
+        <li class="quiz-option">数据库能建多少张超级表</li>
+        <li class="quiz-option">这份数据的副本数</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 子表 d1001 的数据,在 vnode 之间是怎么摆的?</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对,恰好相反:一张表的数据不跨 vnode,这是官方架构文档明确的口径。","对的:一致性哈希定位表所在 vnode,一张表的数据全在该 vnode 上,按时间分区落盘。","不对,随机分配就没有一致性哈希定位与本地性可言了。"]'>
+        <li class="quiz-option">按时间范围切到多个 vnode,并行存</li>
+        <li class="quiz-option">整表落在一个 vnode 上,不跨 vnode</li>
+        <li class="quiz-option">随机分配到任意 vnode,每次写入可能换</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 子表的标签值(如 location='北京')存在哪里?</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对,超级表自身不存任何数据,标签也不存。","不对,标签是静态属性,不随每条数据重复写入,这正是省存储的关键。","对的:官方存储引擎文档——vnode 的元数据包含子表的标签信息与标签索引,用 B+ 树管理。"]'>
+        <li class="quiz-option">存在超级表里,所有子表共享一份</li>
+        <li class="quiz-option">随每条时序数据重复写入数据文件</li>
+        <li class="quiz-option">存在子表所属 vnode 的元数据里,建表时写死</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. 各语言连接器走 WebSocket 通信时,必须有哪个组件?</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的:官方组件文档——各语言连接器通过 WebSocket 通信,因此必须安装 taosAdapter(6041 端口)。","不对,mnode 是元数据中心,不负责接入协议转换。","不对,taosc 是客户端驱动,WebSocket 接入靠服务端的 taosAdapter。"]'>
+        <li class="quiz-option">taosAdapter(监听 6041)</li>
+        <li class="quiz-option">mnode(监听 6030)</li>
+        <li class="quiz-option">taosc(客户端内嵌驱动)</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 08 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>思考题(点击展开解析)</h2>
+  <details class="q-card">
+    <summary>思考一:官方规定"一张表的数据不跨 vnode"。为什么不反过来——把一张大表切开摊到多个 vnode 上并行写,不是更快吗?</summary>
+    <div class="details-body">
+      <p>先看 TDengine 的世界里"一张表"是什么:一个采集点的全部读数,按时间严格递增追加。把它切开摊到多个 vnode,写入端确实多几条并行道,但代价立刻出现。<strong>其一,顺序性被打散</strong>——单设备数据天然按时间有序,集中在一个 vnode 上是纯追加写、块内连续存储,切开后读"这台设备最近一小时"要跨 vnode 归并排序;<strong>其二,并行度放错了地方</strong>——时序场景的写入压力来自"设备多"而非"单设备写不赢":电表一秒几条,真正的海量来自千万设备,而设备即子表,子表按一致性哈希摊到 vnode,<strong>并行度在"表→vnode"这一层已经打开了</strong>,犯不着单表内部再切;<strong>其三,一致性成本</strong>——vgroup 内本就有 Raft 复制,单表再跨 vnode 会让副本协议、WAL、事务边界全部复杂化。封死这条路,换来的是时序场景最值钱的三样:单表写路径极简、数据本地性极好、单 vnode 表上限 100 万足够用。再深一步:官方文档提到"按时间段划分数据文件实现分区"(duration 参数)——<strong>TDengine 的横向切分不在表内做,而在时间轴上做</strong>:同表数据按时间切成文件,超过 KEEP 期限整文件删除。表间切 vnode、表内切时间,两个维度各干各的,这是时序库分片设计的教科书答案。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二:第 2 期的单机容器里 replica=1,只有一座"分仓"。mnode 和 vgroup 的 Raft 那一套,在这个沙盘里还存在吗?</summary>
+    <div class="details-body">
+      <p>存在,一个不少——这正是 TDengine "单机即最小集群"设计的体现。<strong>mnode 侧:</strong>第一个 mnode 部署时自动创建,单机沙盘里它照样在岗,元数据(用户、库、超级表 schema)照样由它管理;"最多 3 个组成虚拟组"的上限用不上,它自己就是 leader,更新操作照样走"leader 执行"的规矩。<strong>vnode 侧:</strong>建库时 replica 默认 1,每个 vgroup 里只有一个 vnode——按官方定义"vgroup 由不同 dnode 上的 vnode 组成",此时"组"退化成单成员,但 Raft 的角色体系照演:它自己当选 leader,写入照样"验证 → 写 WAL → 写内存跳表",只是"超半数副本确认"的多数派是 1/1,确认退化成自己点头,复制开销为零。<strong>代价也要认清:</strong>第 2 期思考二说过,单机沙盘没有容错红利——容器一删数据就没了;生产上用 replica 2/3 把 vgroup 成员摊到不同 dnode,leader 挂了 follower 顶上,才是 Raft 副本组的完整形态。所以正确的理解是:<strong>沙盘是"副本数为 1 的最小集群",架构图里每个部件都在岗,只是多数派和备份的戏份被压缩了</strong>。这也是第 2 期学的所有 SQL 到集群里原样能跑的原因——从单机到集群,变的不是语法,是 vnode 们住进了几座仓库。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 09 要点 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五条:</strong></p>
+    <ul>
+      <li>两套术语:模型侧"库/超级表/子表/标签/时间戳主键"管数据长相;服务侧"taosd/dnode/vnode/vgroup/mnode/taosAdapter"管系统运行——超级表不存数据,标签躺在 vnode 元数据里;</li>
+      <li>一条写入的旅程:taosAdapter 接待(6041)→ mnode 给路由 → leader vnode 写 WAL、写内存跳表 → 刷盘:meta 走 B+ 树,时序数据走 LSM;</li>
+      <li>分片与副本:vnode 是分片单元(独立线程/内存/盘),一张表不跨 vnode;vgroup 是副本单元,vnode 数 = 副本数(replica 默认 1);</li>
+      <li>命令行能摸到架构:SHOW DNODES 看"仓",SHOW TABLE DISTRIBUTED 看"块与压缩率"(官方样例 23.98%),information_schema 的 ins_tables/ins_vgroups 查 vnode 归属;</li>
+      <li>仓库地图:source/client 是驱动,source/dnode 是服务端主体,source/libs 装 parser/tdb/wal,taos 命令行在 tools/shell。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告:</strong>第 4 期《实战场景:把设备数据接进 TDengine》——今天这条"写入旅程"要跑真的:从设备模拟到落库查询端到端接通,附与 Spring Cloud 集成的最小配置。</p>
+  <p><strong>Primary source:</strong><a href="https://docs.taosdata.com/internals/arch/" target="_blank" rel="noopener">TDengine 官方文档 · 技术内幕:整体架构(v3.4.2)</a>——本期 dnode/mnode/vnode/vgroup 定义、写入与复制流程、分片与负载均衡口径均出自该页;存储文件细节见<a href="https://docs.taosdata.com/internals/storage/" target="_blank" rel="noopener">技术内幕:存储引擎</a>,组件定义见 <a href="https://docs.taosdata.com/operations-and-tooling/components/taosd/" target="_blank" rel="noopener">taosd</a> 与 <a href="https://docs.taosdata.com/operations-and-tooling/components/taosadapter/" target="_blank" rel="noopener">taosAdapter</a> 组件页,元数据视图见 <a href="https://docs.taosdata.com/tdengine-sql/system-info/meta/" target="_blank" rel="noopener">information_schema 元数据视图</a>,源码目录见 <a href="https://github.com/taosdata/TDengine" target="_blank" rel="noopener">github.com/taosdata/TDengine</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0028-tdengine-quickstart.html">← 上一期:5 分钟跑起来</a>
+  <a class="next" href="0030-tdengine-in-action.html">下一期:实战场景 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对,再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

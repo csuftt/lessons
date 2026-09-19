@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · TDengine 系列第 5 期:架构与源码导读 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0031</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0030-tdengine-in-action.html">上一期:0030</a> · TDengine 系列第 5 期 / 共 5 期 · <a href="https://www.taosdata.com" target="_blank" rel="noopener">taosdata.com ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · TDENGINE 系列第 5 期:架构与源码导读</p>
+  <h1>TDengine 架构与源码导读:vnode 存算一体与缓存降采样</h1>
+  <p class="subtitle">上一期我们把设备数据端到端接进了 TDengine:模拟设备、写入落库、查询回读一次打通。最后一期换挡进源码——但不逐行读,C 项目重架构轻读码,我们抓三个最值得学的设计决策:标签与数据为什么分家存、vnode 的"存算一体"到底一体化在哪、最新值缓存与流计算怎么把读压力降下来。每个决策都给足三件事:为什么这么设计、解决什么问题、换种做法会怎样,最后合成一张读码路线图。所有文件路径与函数行号逐个核对自 GitHub tag <strong>ver-3.4.1.6</strong>(2026-09-19),读码时先切到这个 tag。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 时序数据库 · C · AGPL-3.0</span>
+    <span class="tag">📦 基于 3.4.x(源码 tag ver-3.4.1.6)</span>
+    <span class="tag-date">📅 2026-09-19 · 第 5 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 承上启下 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>从"会用"到"会读":本期路线</h2>
+  <p>四期下来,你已经会建超级表、灌 1 亿条、画出"mnode 管户口、vnode 管存数"的架构图,还端到端接通过设备数据。但有三个问题,命令行不会回答:<strong>子表的标签"北京.厂区A"躺在磁盘哪里?"写 WAL、写内存跳表"在代码里是哪几个函数、按什么顺序执行?"内建缓存"凭什么敢说查最新值不用扫数据文件?</strong>本期就用源码回答这三问,一个看点一节。</p>
+  <p>导读策略和 Netty 那期一样:<strong>不从第一行顺着读,先抓设计决策,再顺着决策找函数</strong>。3.4 刚做完一轮重架构,最能说明"C 项目重架构轻读码"——vnode 实现被整个重排进七个子目录(bse/inc/meta/sma/tq/tsdb/vnd,第 05 节有截图),旧文的文件路径大量失效;但"数据怎么分片、写入怎么落盘、缓存怎么命中"这些决策稳定。类会搬家,决策不会。</p>
+  <p class="note"><span class="h">版本口径</span>源码基准 GitHub Latest <strong>ver-3.4.1.6</strong>(2026-04-30 发布),文档站已走到 3.4.2 线;本期函数行号全部对照该 tag 核对(2026-09-19),不带记忆里的路径。</p>
+</section>
+
+<!-- ================= 02 看点一 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>设计决策一:标签与数据分家,各自住进最合适的房子</h2>
+  <p>第 2 期建子表时你敲过 <code>CREATE TABLE d1001 USING meters TAGS ('北京.厂区A', 2)</code>——标签只在建表那一刻出现,之后一万次写入都不用再管它。这不是语法糖,是存储层的分家:<strong>标签进了 vnode 的元数据,由 meta 模块管理;时序数据进了 tsdb,按列存文件落盘</strong>。第 3 期从文档角度说过"标签信息与标签索引都在 vnode 元数据里,用 B+ 树管理",现在补上源码坐标:元数据实现在 <code>source/dnode/vnode/src/meta/</code>(metaTable.c 管表的登记与查询),底下垫的是 <code>source/libs/tdb/</code>——TDengine 自研的 B+ 树存储引擎,事务接口在 <code>tdb.h</code>。</p>
+  <p>分家的红利第 3 期量过一个:官方样例压缩率 <strong>23.98%</strong>——数据文件每行只有时间戳和采集列,设备属性一个字节不占,单设备读数缓变,列存压缩吃得更饱。另一个常被忽略:<strong>改模板立即生效</strong>。超级表加一列,元数据里改一份 schema,一万张子表同时"长出"新列,数据文件一行不用动——schema 与数据解耦,是模板化建模的存储底气。</p>
+  <p>源码里还有个值得驻足的细节:每条写入落到 vnode 时,<code>vnodeHandleDataWrite</code>(vnodeSvr.c:2432)先用 <code>metaGetInfo</code> 查子表登记信息,核对所属超级表和 schema 版本,对不上直接拒写。<strong>标签分家没让写入变松,反而多了一道免费的合法性闸门</strong>。建模方法论(标签怎么选、宽表怎么拆)第 3 期已链到每日课程线 <a href="../../daily-tech-course/lessons/0015-tdengine-supertable.html">0015 期</a>,不换皮重讲。</p>
+</section>
+
+<!-- ================= 03 看点二 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>设计决策二:vnode 存算一体,一条写入的完整旅程</h2>
+  <p>"存算一体"这词容易被讲玄。对 TDengine 的 vnode 来说它很具体:<strong>一个 vnode 独占自己的线程、内存和磁盘路径,这条数据的写入、事务、查询、合并全在同一分片内完成</strong>——不把数据搬到别的节点去算。看一条写入的完整旅程,每一步都给函数坐标:</p>
+  <pre><code># 一条 INSERT 的 vnode 内旅程(tag ver-3.4.1.6,行号已核对)
+taosAdapter/连接器收到写入
+ └─ 请求路由到该子表所在的 vnode(第 3 期:mnode 给路由)
+     └─ vnodeSvr.c: vnodeProcessWriteMsg(799)        # 写消息入口
+         └─ case TDMT_VND_SUBMIT(917)
+             └─ vnodeProcessSubmitReq(3207)           # 解码、自动建表
+                 └─ vnodeHandleDataWrite(2432)
+                     ├─ metaGetInfo(2452)             # 查元数据:表存在?schema 对?
+                     └─ tsdbInsertTableData           # tsdbMemTable.c:119
+                         └─ 写进内存表(MemTable)     # 此刻数据可查
+
+# 在这之前:预写日志已经落了
+syncRaftLog.c: walAppendLog(266)                       # Raft 层先记日志再应用
+
+# 内存攒够后异步提交落盘
+vnodeCommit.c: vnodeCommit(322)
+ ├─ walPersist(408)                                    # 预写日志落盘持久化
+ ├─ tsdbCommitBegin(418) / tsdbCacheCommit(423)
+ └─ tsdbCommitCommit(434)                              # 内存表刷成数据文件</code></pre>
+  <p>两个最值得咀嚼的选择。<strong>其一,先日志后应用</strong>:写入先进 Raft 层记预写日志,多数派确认后才应用到内存表。顺序换过来行不行?不行——崩溃恢复时,日志是"这条数据到底收没收"的唯一凭证;先应用后记日志,宕机瞬间会出现"用户收到成功、数据却消失"的窗口。<strong>其二,内存表是查询路径的一部分</strong>:数据进内存表那一刻就可查,持久化异步进行——写入延迟和查询新鲜度不必互相等待,这是时序库高吞吐的关键权衡。</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar31" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar31a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+
+    <rect x="14" y="20" width="150" height="64" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="89" y="44" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">taosAdapter / 连接器</text>
+    <text x="89" y="62" text-anchor="middle" fill="var(--muted)" font-size="8.5">接入与协议适配</text>
+    <text x="89" y="76" text-anchor="middle" fill="var(--muted)" font-size="8.5">路由到数据所在 vnode</text>
+    <line x1="164" y1="52" x2="196" y2="52" stroke="var(--muted)" marker-end="url(#ar31)"/>
+
+    <rect x="200" y="20" width="170" height="64" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="285" y="40" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">Raft 复制层(libs/sync)</text>
+    <text x="285" y="58" text-anchor="middle" fill="var(--muted)" font-size="8.5">walAppendLog 先记预写日志</text>
+    <text x="285" y="73" text-anchor="middle" fill="var(--muted)" font-size="8.5">多数派确认后才应用</text>
+    <line x1="370" y1="52" x2="402" y2="52" stroke="var(--muted)" marker-end="url(#ar31)"/>
+
+    <rect x="406" y="20" width="176" height="64" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="494" y="40" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">vnodeProcessWriteMsg</text>
+    <text x="494" y="58" text-anchor="middle" fill="var(--muted)" font-size="8.5">vnodeSvr.c:799 → 917 → 3207</text>
+    <text x="494" y="73" text-anchor="middle" fill="var(--muted)" font-size="8.5">metaGetInfo 校验(2432/2452)</text>
+    <line x1="582" y1="52" x2="614" y2="52" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#ar31a)"/>
+
+    <rect x="618" y="20" width="128" height="64" rx="8" fill="var(--card)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="682" y="44" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">内存表 MemTable</text>
+    <text x="682" y="62" text-anchor="middle" fill="var(--muted)" font-size="8.5">tsdbInsertTableData</text>
+    <text x="682" y="76" text-anchor="middle" fill="var(--muted)" font-size="8.5">tsdbMemTable.c:119</text>
+
+    <text x="380" y="106" text-anchor="middle" fill="var(--accent)" font-size="9.5">此刻数据已可查(内存表在查询路径上);持久化异步进行 ↓</text>
+
+    <rect x="618" y="130" width="128" height="70" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="682" y="152" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">last/last_row 缓存</text>
+    <text x="682" y="170" text-anchor="middle" fill="var(--muted)" font-size="8.5">tsdbCache.c 写入顺带更新</text>
+    <text x="682" y="186" text-anchor="middle" fill="var(--muted)" font-size="8.5">LRU + 持久化(看点三)</text>
+    <line x1="682" y1="84" x2="682" y2="126" stroke="var(--accent)" marker-end="url(#ar31a)"/>
+    <text x="694" y="110" fill="var(--accent)" font-size="8.5">同一路径顺带更新</text>
+
+    <rect x="330" y="130" width="240" height="70" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="450" y="150" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">异步提交 vnodeCommit(322)</text>
+    <text x="450" y="168" text-anchor="middle" fill="var(--muted)" font-size="8.5">walPersist(408)→ tsdbCommitBegin(418)</text>
+    <text x="450" y="184" text-anchor="middle" fill="var(--muted)" font-size="8.5">tsdbCacheCommit(423)→ Commit(434)</text>
+    <line x1="618" y1="90" x2="500" y2="126" stroke="var(--muted)" marker-end="url(#ar31)"/>
+    <text x="560" y="112" fill="var(--muted)" font-size="8.5">内存攒够后</text>
+
+    <rect x="14" y="130" width="280" height="70" rx="8" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="154" y="150" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">数据文件 + 后台合并</text>
+    <text x="154" y="168" text-anchor="middle" fill="var(--muted)" font-size="8.5">tsdbMerge.c: tsdbMergerOpen(56)/tsdbMergeFileSet(372)</text>
+    <text x="154" y="184" text-anchor="middle" fill="var(--muted)" font-size="8.5">tsdbMergeTree.c: tMergeTreeOpen2(1013) 多路归并</text>
+    <line x1="326" y1="165" x2="298" y2="165" stroke="var(--muted)" marker-end="url(#ar31)"/>
+    <text x="312" y="152" fill="var(--muted)" font-size="8.5">刷盘</text>
+
+    <rect x="14" y="224" width="732" height="56" rx="8" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="30" y="246" fill="var(--ink)" font-size="10" font-weight="700">存算一体的账:写入、事务、查询、合并在同一分片闭环——单表数据不跨 vnode,写路径天然串行无跨节点协调</text>
+    <text x="30" y="266" fill="var(--muted)" font-size="9">对照:计算存储分离的架构(如存算分离的消息平台)把"算"抽成无状态层——一致性协议更重,换来的是弹性扩缩容。TDengine 把"算"留在数据旁,换本地性与简单。</text>
+  </svg>
+  </div>
+
+  <p class="note"><span class="h">换种做法会怎样</span>拆成"存储节点 + 计算节点"的存算分离,弹性扩缩容和资源隔离更灵活,但每条写入多一跳网络、每笔事务的提交协议跨节点,时序场景"写入永远大于天"的诉求第一个不答应。TDengine 的取舍:<strong>查询侧用 qnode 做存算分离(第 3 期提过),写入侧坚守存算一体</strong>——两头的便宜各拿一头。</p>
+</section>
+
+<!-- ================= 04 看点三 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>设计决策三:缓存与降采样,让"读最新"和"读趋势"都不扫盘</h2>
+  <p>时序查询有两副面孔:<strong>监控大屏每秒问"电流现在多少"(最新值),报表问"过去 24 小时每 10 分钟均值多少"(降采样)</strong>。两副面孔的读压力,TDengine 用两套机制分别卸掉。</p>
+  <p><strong>第一套:最新值缓存。</strong>建库参数 <code>CACHEMODEL</code>(官方取值 none/last_row/last_value/both):last_row 缓存每张子表最近一行,last_value 缓存每列最近的非 NULL 值——正好对上 <code>LAST_ROW</code> 与 <code>LAST</code> 两个函数。实现在 <code>source/dnode/vnode/src/tsdb/tsdbCache.c</code>(四千余行):内存里是 LRU 缓存,底下垫一层持久化键值引擎(RocksDB)——<code>tsdbCachePutToLRU</code>(1410)管内存命中,<code>tsdbCachePutToRocksdb</code>(1388)管持久化,重启后不必重建;<code>tsdbCacheCommit</code>(775)在提交时把脏项刷下去。查询侧入口在 <code>tsdbCacheRead.c</code>:<code>tsdbCacherowsReaderOpen</code>(280)打开缓存读游标,<code>tsdbRetrieveCacheRows</code>(441)按表批量取回最新值,内部调 <code>tsdbCacheGetBatch</code>(tsdbCache.c:2686)。</p>
+  <p>精髓在更新时机:<strong>缓存更新挂在写入路径上</strong>(写入流程顺带调 <code>tsdbCacheRowFormatUpdate</code>,tsdbCache.c:1620),不是查询未命中才回填。于是"读最新值"永远不打扰数据文件——写入时多付一次内存写,换来监控大屏类查询的常数时间应答。官方文档也诚实提醒:频繁切换 CACHEMODEL 可能导致 LAST/LAST_ROW 结果短期不准——缓存与数据是最终一致,这是这套设计的代价。</p>
+  <p><strong>第二套:降采样交给流计算与预聚合。</strong>"每 10 分钟一个均值"这类连续聚合,答案是<strong>写入时就算好</strong>:流计算由 snode 承载(<code>source/dnode/snode/src/snode.c</code> 是入口,3.4 把流处理主体重构成 <code>source/libs/new-stream/</code>),vnode 侧的触发装配在 <code>vnd/vnodeStream.c</code>;另一路是超级表上的 rollup 预聚合(<code>source/dnode/vnode/src/sma/</code>,tsdb 文件族里能看到 tsdbFSet2.c 的 rollup sma 提交记录)。聚合结果随数据一起落地,<strong>查询读的是算好的结果,不是现场扫原始数据</strong>。两条机制合起来,才是第 1 期"内建缓存、流式计算"的完整含义。</p>
+  <p class="note"><span class="h">核对说明</span>CACHEMODEL/CACHESIZE 的取值与语义对照官方文档《数据库管理》页(3.4 文档站,2026-09-19 截图留档于本期素材);写入性能调优见每日课程线 <a href="../../daily-tech-course/lessons/0022-tdengine-write-read-performance.html">0022 期</a>。</p>
+</section>
+
+<!-- ================= 05 读码路线图 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>读码路线图:五步走完 vnode 主干</h2>
+  <p>clone 仓库后第一步先切 tag:<code>git checkout ver-3.4.1.6</code>(GitHub 网页版用左上角分支选择器切)。C 仓库两百万行,别硬啃,沿数据流走五步,每步只回答一个问题:</p>
+  <div class="steps">
+    <div class="step"><span class="step-n">1</span><div><strong>先摸地形:</strong>打开 <code>source/dnode/vnode/src/</code>——七个子目录就是 vnode 的全部家当(bse 块存储、inc 头文件、meta 元数据、sma 预聚合、tq 订阅、tsdb 时序引擎、vnd 本体)。回答"vnode 由哪几块拼成"。</div></div>
+    <div class="step"><span class="step-n">2</span><div><strong>跟一条写入:</strong><code>vnd/vnodeSvr.c</code> 的 <code>vnodeProcessWriteMsg</code>(799 行)进,顺 TDMT_VND_SUBMIT 分支到 <code>tsdb/tsdbMemTable.c</code> 的 <code>tsdbInsertTableData</code>(119 行)。回答"一条数据从消息到内存表经过几道门"。</div></div>
+    <div class="step"><span class="step-n">3</span><div><strong>看提交与合并:</strong><code>vnd/vnodeCommit.c</code> 的 <code>vnodeCommit</code>(322 行)读提交节奏,再到 <code>tsdb/tsdbMerge.c</code>(<code>tsdbMergerOpen</code>,56 行)与 <code>tsdb/tsdbMergeTree.c</code>(<code>tMergeTreeOpen2</code>,1013 行)看多路归并怎么把小文件滚成大文件。</div></div>
+    <div class="step"><span class="step-n">4</span><div><strong>验缓存命中:</strong><code>tsdb/tsdbCache.c</code> 与 <code>tsdb/tsdbCacheRead.c</code> 对着读——写入侧更新(1620 行)、查询侧取数(441 行)。回答"最新值查询为什么不用碰数据文件"。</div></div>
+    <div class="step"><span class="step-n">5</span><div><strong>看查询下推:</strong><code>vnd/vnodeQuery.c</code> 看查询在 vnode 内的入口,配合第 3 期"mnode 给路由、taosc 做最后一级归并"。回答"跨表聚合怎么被拆到各 vnode 并行"。</div></div>
+  </div>
+  <p>三条纪律照旧:带着问题读,每步只追一条链;用调试器别用眼睛(第 2 期的容器还在,taosBenchmark 灌一轮数据,断点打在 vnodeProcessSubmitReq);文件名以 tag 实际内容为准,3.4 重架构后旧文路径大量失效,别被带偏。</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>看点</th><th>入口(tag ver-3.4.1.6)</th><th>一句话说明</th></tr></thead>
+    <tbody>
+      <tr><td>标签与元数据</td><td><code>source/dnode/vnode/src/meta/</code> + <code>source/libs/tdb/</code></td><td>标签登记与索引,B+ 树底座</td></tr>
+      <tr><td>写入链</td><td><code>vnd/vnodeSvr.c</code>(799/3207/2432)→ <code>tsdb/tsdbMemTable.c</code>(119)</td><td>消息到内存表的四道门</td></tr>
+      <tr><td>预写日志</td><td><code>source/libs/sync/src/syncRaftLog.c</code>(266)</td><td>Raft 层先记日志再应用</td></tr>
+      <tr><td>提交落盘</td><td><code>vnd/vnodeCommit.c</code>(322/408/418/434)</td><td>内存表刷成数据文件的节奏</td></tr>
+      <tr><td>后台合并</td><td><code>tsdb/tsdbMerge.c</code>(56/372)、<code>tsdb/tsdbMergeTree.c</code>(1013)</td><td>LSM 式多路归并</td></tr>
+      <tr><td>最新值缓存</td><td><code>tsdb/tsdbCache.c</code>(2855/1620/2686)、<code>tsdb/tsdbCacheRead.c</code>(280/441)</td><td>LRU + 持久化两级,写入顺带更新</td></tr>
+      <tr><td>流计算/预聚合</td><td><code>source/dnode/snode/src/snode.c</code>、<code>source/libs/new-stream/</code>、<code>vnode/src/sma/</code></td><td>连续聚合的触发与落地</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ================= 06 架构师借鉴 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师视角:三件能搬回自己系统的事</h2>
+  <h3>主数据与事实数据分家存</h3>
+  <p>标签与数据分离,本质是<strong>"变化慢的属性"与"疯涨的事实"分开治理</strong>。对应到业务系统:订单的收货地址快照跟着订单走(事实),商品的类目树单独一张维表(属性);设备档案与设备读数分表。判断标准一句话:这份数据是"每行都要带"还是"登记一次就够"?登记一次的进主数据,每行都带的进事实表——别让事实表背着主数据的行囊跑长跑,那是存储与压缩率的双输。</p>
+  <h3>写入的"先记账、后干活、攒批落盘"</h3>
+  <p>这条写入链是通用模式:<strong>先顺序追加日志(Raft/WAL)拿到持久性与顺序,再应用到内存结构即时可见,攒够批量再整理成有序文件,后台合并压放大</strong>。你会在消息队列、LSM 族存储、甚至支付系统的流水表设计里反复见到它。值得抄的还有"应用即生效"的读新鲜度权衡:别等落盘才可查——代价是要把崩溃恢复的凭证做扎实,日志就是那本死账。</p>
+  <h3>读压力要"预付",不要"现结"</h3>
+  <p>最新值缓存与流计算降采样是同一个思想的两面:<strong>把读时的计算挪到写时一次性付出</strong>。大屏接口、首页聚合、报表看板,凡是"问题反复问、答案变化慢"的读,都值得问一句:能不能在写入路径顺带维护答案?缓存的一致性账也要学 TDengine 的诚实——文档明说切换缓存模式后结果短期可能不准,把语义讲清楚,比装作强一致更让使用者安心。</p>
+</section>
+
+<!-- ================= 07 quiz ================= -->
+<section>
+  <h2><span class="sec-num">07</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. 一条 INSERT 在 vnode 内生效的过程中,预写日志(walAppendLog)是在哪一步落的?</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对,那样宕机时会出现已应用但无凭证的数据,恢复时无法对账。","对的:syncRaftLog.c 的 walAppendLog(266) 在 Raft 层先记日志,多数派确认后才由 vnodeProcessWriteMsg 应用到内存表。","不对,预写日志在应用之前就落了,内存提交前的 walPersist 只是把它持久化收尾。"]'>
+        <li class="quiz-option">应用进内存表之后、异步提交之前补记</li>
+        <li class="quiz-option">Raft 层先记日志,多数派确认后才应用到内存表</li>
+        <li class="quiz-option">内存表提交落盘时才写日志</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 数据进入内存表(MemTable)后、异步提交完成前,这条数据能被查询到吗?</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对。内存表在查询路径上,数据写入即可查,持久化是异步的——这是写入延迟与查询新鲜度不必互相等待的权衡。","不对,那样写入延迟和查询新鲜度就绑死了,高吞吐无从谈起。","恰好相反:未落盘的数据查不到,落盘后才可见。"]'>
+        <li class="quiz-option">能,内存表本身就是查询路径的一部分</li>
+        <li class="quiz-option">不能,必须等提交落盘后才可见</li>
+        <li class="quiz-option">不能,要等后台合并完成后才可见</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. last/last_row 缓存(LRU + 持久化键值引擎)的更新时机是?</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["那是查询未命中回填的思路,TDengine 没这么做——回填要扫数据文件,恰恰是它想省掉的开销。","定时任务会有滞后窗口,监控大屏受不了。","对。写入流程顺带调 tsdbCacheRowFormatUpdate(tsdbCache.c:1620)更新缓存,读最新值永远不打扰数据文件。"]'>
+        <li class="quiz-option">查询未命中时回填,类似旁路缓存</li>
+        <li class="quiz-option">后台定时任务周期性刷新</li>
+        <li class="quiz-option">挂在写入路径上,写入顺带更新</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. "vnode 存算一体"里"一体"指的是?</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["内存与磁盘只是介质之分,不是\u201c一体\u201d的含义;任何数据库都有内存和磁盘。","对:数据的写入、事务、查询、合并在同一 vnode 分片内闭环,独占线程/内存/盘,不把数据搬去别处算。","加密只保护静态数据,与存算架构无关。"]'>
+        <li class="quiz-option">内存表和数据文件存在同一个目录里</li>
+        <li class="quiz-option">写入、事务、查询、合并在同一分片内闭环完成</li>
+        <li class="quiz-option">数据落盘前先做一层加密存储</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 08 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>思考题(点击展开解析)</h2>
+  <details class="q-card">
+    <summary>思考一:如果把写入顺序反过来——先应用到内存表、再异步补记预写日志,省一次同步等待,会出什么问题?<span class="chev">展开解析 ▾</span></summary>
+    <div class="details-body">
+      <p>表面看省了一次磁盘等待,实际把三样东西全赔进去。<strong>其一,持久性失去凭证:</strong>内存表是易失的,日志是"这条写入到底发生过没有"的唯一凭证;先应用后记日志,进程在两步之间宕机,用户已收到"写入成功",恢复后数据却凭空消失——对时序库这是不可接受的静默丢数。<strong>其二,复制顺序失去依据:</strong>vgroup 里多副本靠 Raft 日志的 index 定先后,日志后补意味着各副本可能按不同顺序应用同一批写入,leader 切换后数据分叉,对账成本远高于省下的那几毫秒。<strong>其三,提交语义失去锚点:</strong>第 3 期讲的"内存攒够后提交"依赖"已应用的写入必然已在日志里"这条不变量,vnodeCommit(322) 才能放心按版本推进;反过来写,提交流程要额外处理"日志缺口",复杂度指数上升。正确的问题不是"能不能省这次等待",而是"这次等待能不能更便宜"——TDengine 的答案是把日志做成顺序追加写(顺序盘是最快的盘),wal_fsync_period 等参数把"等多久"交给使用者定价。顺序换不得,成本可以调。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二:你的系统要做一个"每台设备当前状态"的接口,一万台设备、每秒几千条更新,读多写少。照搬 TDengine 的缓存设计,关键要抄哪三点?<span class="chev">展开解析 ▾</span></summary>
+    <div class="details-body">
+      <p>第一,抄"挂在写入路径上":状态接口读的是"每台设备最新一条",若每次读都去原始表里捞 <code>MAX(ts)</code>,等于用全表聚合回答一个常数问题。TDengine 在写入流程里顺带更新缓存(tsdbCacheRowFormatUpdate),读路径永远不回源——你的系统也该在写入口多付一次内存写(按设备 ID 哈希一份当前值),让读变成一次哈希查找。<strong>第二,抄两级结构:</strong>纯内存缓存重启即空,冷启动全量回源可能打垮库;TDengine 的 LRU 底下垫一层持久化键值引擎(tsdbCachePutToRocksdb),重启后大部分命中来自持久层,不用重建。对应到你:本地缓存 + 一个可持久化的 KV(公司主栈里 Redis 正合适)分层兜底。<strong>第三,抄"诚实的一致性语义":</strong>TDengine 文档明说切换 CACHEMODEL 后 LAST/LAST_ROW 结果短期可能不准——缓存方案的边界要写进接口文档:你的"当前状态"允许几秒滞后?切换缓存时怎么过渡?把语义钉死,比事后解释"为什么偶尔不一致"体面得多。至于降采样那一半(历史趋势类查询),思路同源:预聚合、定时物化,别让报表去扫流水。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 09 收官 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>系列收束:五期带走什么</h2>
+  <div class="card card-tip">
+    <p><strong>TDengine 入门系列五期回顾:</strong></p>
+    <ul>
+      <li>会用层(第 1-4 期):"一个数据采集点一张表"的心智模型、Docker 起服务建超级表、超级表/vnode/分片副本的架构全景、把设备数据端到端接进来;</li>
+      <li>会读层(本期):标签与数据分家存(meta + tdb)、一条写入的源码旅程(vnodeProcessWriteMsg → 内存表,先日志后应用)、最新值缓存(LRU + 持久化,写入顺带更新)与流计算降采样;</li>
+      <li>能抄走的三个词:主数据与事实分治、先记账后干活攒批落盘、读压力预付不现结;</li>
+      <li>读码路线五步:摸地形 → 跟写入 → 看提交合并 → 验缓存 → 看查询下推,源码基准 tag ver-3.4.1.6。</li>
+    </ul>
+    <p>TDengine 的入门就聊到这里,下期开启新项目 <strong>Redis</strong>——同样从"是什么、凭什么活下来"讲起,它的数据结构设计取舍正好和本期"为场景定制存储"的思路隔空呼应。</p>
+    <p>Primary source:<a href="https://docs.taosdata.com/reference/taos-sql/database/" target="_blank" rel="noopener">官方文档 · 数据库管理(CACHEMODEL/CACHESIZE 参数)</a>;架构与存储细节见 <a href="https://docs.taosdata.com/internals/arch/" target="_blank" rel="noopener">技术内幕:整体架构</a> 与 <a href="https://docs.taosdata.com/internals/storage/" target="_blank" rel="noopener">技术内幕:存储引擎</a>;源码与 tag 见 <a href="https://github.com/taosdata/TDengine/tree/ver-3.4.1.6" target="_blank" rel="noopener">github.com/taosdata/TDengine @ ver-3.4.1.6</a>。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0030-tdengine-in-action.html">← 上一期:实战场景</a>
+  <span class="next">TDengine 系列完 · 回课程目录</span>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对,再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

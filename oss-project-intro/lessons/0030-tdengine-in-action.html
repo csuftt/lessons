@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · TDengine 系列第 4 期:实战场景 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0030</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0029-tdengine-core-concepts-architecture.html">上一期:0029</a> · TDengine 系列第 4 期 / 共 5 期 · <a href="https://www.taosdata.com" target="_blank" rel="noopener">taosdata.com ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · TDENGINE 系列第 4 期:实战场景</p>
+  <h1>把设备数据接进 TDengine:从 JDBC 连接到窗口聚合的端到端实战</h1>
+  <p class="subtitle">前三期你认识了 TDengine、把它跑了起来、画出了架构地图——但业务代码还一行没写。这一期把"写入旅程"接上真实应用:用官方 Java 连接器 taos-jdbcdriver,走 WebSocket 连上第 2 期跑起来的容器,把设备心跳数据端到端写进去——自动建表写入让设备上线零 DDL,一条 INSERT 批量写一批心跳,LAST_ROW 随手查设备最新状态,INTERVAL 窗口聚合出每分钟平均电流;最后用 schemaless 行协议做对照,连超级表都自动建。全文基于 v3.4.x + taos-jdbcdriver 3.9.2(Maven Central 2026-09-19 核对),连接方式、依赖坐标、代码与回显逐条对照官方文档。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 时序数据库 · Java · AGPL-3.0</span>
+    <span class="tag">📦 基于 v3.4.x(文档站 v3.4.2)+ taos-jdbcdriver 3.9.2</span>
+    <span class="tag-date">📅 2026-09-19 · 第 4 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景设定 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>场景设定:一千台设备的"心跳",怎么接进来?</h2>
+  <p>场景刻意选小,但把时序数据接入最有代表性的动作都装进去了:<strong>1000 台智能电表,每台每 10 秒上报一条心跳</strong>——采集时间、电流、电压、功率相位;设备上线前无法逐台写 DDL,数据要随时能查"这台设备现在什么样",还要能出"每分钟平均电流"这样的趋势线。数据流如下图:</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar30" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar30b" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+
+    <rect x="16" y="110" width="170" height="110" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="101" y="136" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">设备 × 1000</text>
+    <text x="101" y="158" text-anchor="middle" fill="var(--muted)" font-size="9.5">每 10 秒一条心跳</text>
+    <text x="101" y="176" text-anchor="middle" fill="var(--muted)" font-size="9.5">ts / current / voltage / phase</text>
+    <text x="101" y="198" text-anchor="middle" fill="var(--muted)" font-size="9">上线前不知道有几台</text>
+
+    <rect x="256" y="96" width="230" height="138" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="371" y="122" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">Java 接入应用</text>
+    <text x="371" y="144" text-anchor="middle" fill="var(--muted)" font-size="9.5">taos-jdbcdriver 3.9.2</text>
+    <text x="371" y="162" text-anchor="middle" fill="var(--muted)" font-size="9.5">自动建表写入 · 批量上报</text>
+    <text x="371" y="180" text-anchor="middle" fill="var(--muted)" font-size="9.5">最近值查询 · 窗口聚合</text>
+    <text x="371" y="204" text-anchor="middle" fill="var(--accent)" font-size="9">本期全部代码都在这一层</text>
+
+    <rect x="556" y="70" width="190" height="190" rx="10" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="651" y="94" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">TDengine 3.4.x(第 2 期容器)</text>
+    <rect x="572" y="106" width="158" height="38" rx="8" fill="var(--card)" stroke="var(--accent)"/>
+    <text x="651" y="122" text-anchor="middle" fill="var(--muted)" font-size="9">taosAdapter(6041)· WebSocket 接入</text>
+    <text x="651" y="137" text-anchor="middle" fill="var(--muted)" font-size="9">官方推荐连接方式</text>
+    <rect x="572" y="152" width="158" height="88" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="651" y="172" text-anchor="middle" fill="var(--muted)" font-size="9">power 库 · 超级表 meters</text>
+    <text x="651" y="190" text-anchor="middle" fill="var(--muted)" font-size="9">子表 d1001 … d1000</text>
+    <text x="651" y="208" text-anchor="middle" fill="var(--muted)" font-size="9">标签:location / group_id</text>
+    <text x="651" y="226" text-anchor="middle" fill="var(--muted)" font-size="9">心跳数据按时间追加落盘</text>
+
+    <line x1="186" y1="165" x2="252" y2="165" stroke="var(--accent)" stroke-width="2" marker-end="url(#ar30b)"/>
+    <text x="219" y="152" text-anchor="middle" fill="var(--accent)" font-size="9">批量上报</text>
+    <line x1="486" y1="150" x2="552" y2="140" stroke="var(--accent)" stroke-width="2" marker-end="url(#ar30b)"/>
+    <text x="519" y="128" text-anchor="middle" fill="var(--accent)" font-size="9">写入</text>
+    <line x1="552" y1="200" x2="486" y2="210" stroke="var(--muted)" stroke-dasharray="4 3" marker-end="url(#ar30)"/>
+    <text x="519" y="228" text-anchor="middle" fill="var(--muted)" font-size="9">查询</text>
+
+    <text x="380" y="312" text-anchor="middle" fill="var(--muted)" font-size="10">读法:实线是数据主路,虚线是查询回路——本期任务是把这条链路用纯 JDBC 走通</text>
+  </svg>
+  </div>
+
+  <p>全程四条目标,做完一条勾一条:</p>
+  <div class="card">
+    <ul class="steps">
+      <li>① <strong>连接器接入:</strong>官方 taos-jdbcdriver,走 WebSocket 连上第 2 期的容器,不装任何客户端驱动;</li>
+      <li>② <strong>自动建表写入:</strong>设备心跳一条 INSERT 进库,子表不存在自动建——设备上线零 DDL;</li>
+      <li>③ <strong>最近值查询:</strong>一条 SQL 查回每台设备最新一条心跳,大屏轮询就用它;</li>
+      <li>④ <strong>窗口聚合:</strong>INTERVAL 按分钟聚合平均电流,趋势线数据一句话出来;最后用 schemaless 做一次"协议直连"对照。</li>
+    </ul>
+  </div>
+  <p class="note">怎么设计标签、怎么划分超级表这类<strong>建模方法论</strong>,每日微课程线<a href="../../daily-tech-course/lessons/0015-tdengine-supertable.html">第 0015 期 · TDengine 超级表与子表数据建模</a>已讲透;写入与查询的<strong>性能调优</strong>见 <a href="../../daily-tech-course/lessons/0022-tdengine-write-read-performance.html">第 0022 期 · TDengine 写读性能实践</a>。本期只讲"用 Java 把链路跑通",不换皮重讲。</p>
+</section>
+
+<!-- ================= 02 依赖与版本 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>依赖与版本:一个连接器,先选对连接方式</h2>
+  <p>Java 侧只需要一个依赖:<strong>官方连接器 taos-jdbcdriver</strong>。版本动笔前在 Maven Central 核对过,最新 release 是 <strong>3.9.2</strong>(2026-09-16 发布):</p>
+  <pre><code>&lt;dependency&gt;
+  &lt;groupId&gt;com.taosdata.jdbc&lt;/groupId&gt;
+  &lt;artifactId&gt;taos-jdbcdriver&lt;/artifactId&gt;
+  &lt;version&gt;3.9.2&lt;/version&gt;
+&lt;/dependency&gt;</code></pre>
+  <p>三份版本账本一起对齐:</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>组件</th><th>版本</th><th>出处</th><th>负责什么</th></tr></thead>
+    <tbody>
+      <tr><td>TDengine 服务端</td><td>3.4.x(文档站 v3.4.2)</td><td>第 2 期 Docker 容器</td><td>存数据、跑 SQL</td></tr>
+      <tr><td>taos-jdbcdriver</td><td>3.9.2</td><td>Maven Central(2026-09-19 核对)</td><td>JDBC 驱动:建连、执行 SQL、写入</td></tr>
+      <tr><td>JRE / JDBC 标准</td><td>JRE 8+ / JDBC 4.2+</td><td>官方连接器文档"兼容性"一节</td><td>驱动运行环境</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="warn">
+    <p><strong>连接方式三选一,先选对再写码:</strong>官方文档明确"推荐使用 WebSocket 连接"——通过 taosAdapter(6041 端口)通信,<strong>不依赖客户端驱动</strong>,还带兼容性保证(服务端 v3.3.6.0 及以上,连接器 3.6.0+)。而原生连接(jdbc:TAOS://,走 6030,要装 taosc 客户端驱动)和 REST 连接(jdbc:TAOS-RS://)<strong>都将于 2027-01-01 下线</strong>,官方已发出废弃通知。老文章里那两类 URL,现在别再抄进新项目。</p>
+  </div>
+  <p>一句话记住选型逻辑:WebSocket 连接的地址走 <strong>6041</strong>,请求先到 taosAdapter——正是第 3 期说的"前台收发室";原生连接虽然少一跳,但要给每台部署机器装平台相关的驱动库,分发成本高,官方已经宣判。本期全程 WebSocket。</p>
+</section>
+
+<!-- ================= 03 建连与建超级表 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>第一步:一条 URL 建连,两张 SQL 建模</h2>
+  <p>WebSocket 连接的 URL 规范是 <code>jdbc:TAOS-WS://host:6041/db?user=…&amp;password=…</code>,驱动类为 <code>com.taosdata.jdbc.ws.WebSocketDriver</code>——taos-jdbcdriver 3.x 遵循 JDBC 4.0 的 SPI 自动发现,<strong>不需要写 Class.forName</strong>。URL 里直接带上库名 <code>power</code>(第 2 期建的),连接即默认库:</p>
+  <pre><code>String url = "jdbc:TAOS-WS://localhost:6041/power?user=root&amp;password=taosdata";
+try (Connection conn = DriverManager.getConnection(url)) {
+    System.out.println("[ OK ] Connection established.");   // 官方示例同款回显
+}</code></pre>
+  <p>连接拿到了,建数据模型。两条 SQL 与第 2 期命令行里敲的完全一致——<strong>SQL 不变,只是换了执行入口</strong>:以前在 taos 命令行敲,现在从 Java 发过去:</p>
+  <pre><code>try (Statement stmt = conn.createStatement()) {
+    stmt.executeUpdate("CREATE DATABASE IF NOT EXISTS power "
+        + "PRECISION 'ms' KEEP 3650 DURATION 10 BUFFER 16");
+    stmt.executeUpdate("USE power");
+    stmt.executeUpdate("CREATE STABLE IF NOT EXISTS meters ("
+        + "ts TIMESTAMP, current FLOAT, voltage INT, phase FLOAT) "
+        + "TAGS (location VARCHAR(64), group_id INT)");
+}</code></pre>
+  <p>超级表是"模板":四列采集量 + 两个标签。<code>IF NOT EXISTS</code> 让这段代码天然幂等——应用重启多少次,模型只有一份。到这一步,目标①达成:一个依赖、一条 URL、零本地驱动安装。</p>
+</section>
+
+<!-- ================= 04 写入 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>第二步:自动建表写入,设备上线零 DDL</h2>
+  <p>写入的核心是<strong>自动建表</strong>语法(第 2 期埋的伏笔):<code>INSERT INTO 子表 USING 超级表 TAGS(标签值) VALUES(…)</code>——子表不存在就先按模板建一张再写,存在就直接写。<strong>设备上线瞬间,子表自动出现</strong>,应用侧没有任何建表代码:</p>
+  <pre><code>// 单台设备上报一条心跳(设备号、标签值由上报数据携带)
+String sql = "INSERT INTO d1001 USING meters TAGS('California.SanFrancisco', 2) "
+           + "VALUES (NOW, 10.3, 219, 0.31)";
+stmt.executeUpdate(sql);</code></pre>
+  <p>实战里设备是攒一批再发的(每 10 秒一条,一次同步 10 分钟的数据)。<strong>一条 INSERT 写多行、甚至多张子表</strong>,这是官方示例的标准写法——一条语句同时写 d1001、d1002 两张表:</p>
+  <pre><code>String sql = "INSERT INTO "
+    + "d1001 USING meters TAGS(2, 'California.SanFrancisco') VALUES "
+    + "(NOW + 1a, 10.3, 219, 0.31) (NOW + 2a, 12.6, 218, 0.33) (NOW + 3a, 12.3, 221, 0.31) "
+    + "d1002 USING meters TAGS(3, 'California.SanFrancisco') VALUES "
+    + "(NOW + 1a, 10.3, 218, 0.25)";
+int rows = stmt.executeUpdate(sql);
+System.out.println("insert " + rows + " rows.");   // 官方 JDBCDemo 同款回显</code></pre>
+  <p>这里藏着本期最重要的一个<strong>性能反直觉</strong>,官方文档常见问题一节写得很直白:用 JDBC 标准的 <code>addBatch()</code> / <code>executeBatch()</code> 做"批量写入",<strong>不会带来性能提升</strong>——因为驱动只是把 SQL 按顺序逐条执行,和服务端的交互次数一点没少。官方给出的三条正路:</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>写入方式</th><th>怎么用</th><th>适合场景</th></tr></thead>
+    <tbody>
+      <tr><td>一条 INSERT 拼多个 values</td><td>上面的写法,一次网络往返写一批</td><td>中小批量、代码最简单</td></tr>
+      <tr><td>参数绑定(PreparedStatement)</td><td>tbname 与标签、列都作为绑定列,预编译后循环绑定</td><td>大批量高频写入,免 SQL 拼接注入风险</td></tr>
+      <tr><td>多线程并发插入</td><td>按设备或分片拆到多个线程</td><td>配合前两者继续压吞吐</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="card card-tip">
+    <p><strong>为什么"多 values 拼接"赢在交互次数:</strong>对 TDengine 这种写入极快的服务端,Java 端一次 <code>executeUpdate</code> 的耗时大头在网络往返和语句解析上。100 条心跳逐条发 = 100 次往返;拼成一条 = 1 次。参数绑定的 <code>addBatch</code> 在 taos-jdbcdriver 3.x 的 WebSocket 连接下则走预编译语句复用(3.9.1 起还支持 stmtCacheSize 缓存),同样是"少交互"思路——两条路殊途同归,想深挖见 daily 线 0022 期。</p>
+  </div>
+</section>
+
+<!-- ================= 05 查询 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>第三步:查最近值与窗口聚合,大屏两个接口就齐了</h2>
+  <p>先查"设备现在什么样"。TDengine 专门为"最新一条"准备了 <code>LAST_ROW</code>:取<strong>最后一行的值,不忽略空值</strong>——和取"最后非空值"的 <code>LAST</code> 有细微差别。查单台设备直接指定子表;查全部设备就在超级表上 <code>PARTITION BY tbname</code>,每台设备各取各的最新行:</p>
+  <pre><code>SELECT LAST_ROW(ts), LAST_ROW(current), LAST_ROW(voltage)
+FROM meters PARTITION BY tbname;</code></pre>
+  <p>再出"每分钟平均电流"趋势线。<code>INTERVAL(1m)</code> 把数据按一分钟切窗,<code>_wstart</code> 是每个窗口的起始时间;SELECT 列表里只有聚合函数时,每个窗口输出一行聚合结果。把窗口聚合配上标签过滤,就能只看某一组设备:</p>
+  <pre><code>SELECT _wstart, AVG(current) FROM d1001
+WHERE ts >= NOW - 1h INTERVAL(1m);</code></pre>
+  <p>两段查询跑起来,回显长这样(数值取自官方示例写入的那批心跳:10.3、12.6、12.3 三条在 10:29 窗口,13.4 一条在 10:30 窗口;回显格式对照官方文档):</p>
+  <pre class="codeblock"><code>taos&gt; SELECT LAST_ROW(ts), LAST_ROW(current) FROM d1001;
+         last_row(ts)         |    last_row(current) |
+=====================================================
+ 2026-09-19 10:30:01.000     |             13.40000 |
+Query OK, 1 row(s) in set (0.004514s)
+
+taos&gt; SELECT _wstart, AVG(current) FROM d1001 INTERVAL(1m);
+         _wstart              |        avg(current) |
+==============================================
+ 2026-09-19 10:29:00.000     |             11.73333 |
+ 2026-09-19 10:30:00.000     |             13.40000 |
+Query OK, 2 row(s) in set (0.008816s)</code></pre>
+  <p>目标③④达成。注意这两条查询的执行形态正好是第 3 期架构图的"查询回路":mnode 给路由,各 vnode 并行扫,taosc 做最后一级聚合——设备越多,这条回路摊得越开,大屏轮询越敢写。最近值查询还有一类进阶用法(结合缓存 last_row 与流计算持续输出),属于性能与建模话题,daily 线 0022 期已覆盖。</p>
+</section>
+
+<!-- ================= 06 schemaless 对照 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>对照实验:schemaless 行协议,连超级表都不用建</h2>
+  <p>前面四步都假设"超级表是我建的"。但如果设备上报的字段<strong>今天三个明天五个</strong>,schema 由数据源说了算,就该请出 TDengine 的<strong>无模式写入(schemaless)</strong>:直接写 InfluxDB 行协议,一行字符串一个数据点,格式 <code>measurement,tag_set field_set timestamp</code>。连接对象上就能调用(官方 API:<code>Connection.write</code>):</p>
+  <pre><code>String[] lines = {
+    "meters,location=California.LosAngeles,groupid=2 "
+        + "current=11.8,voltage=221,phase=0.28 1648432611249000",
+    "meters,location=California.LosAngeles,groupid=3 "
+        + "current=10.8,voltage=223,phase=0.29 1648432611249300"
+};
+conn.write(lines, SchemalessProtocolType.LINE,
+           SchemalessTimestampType.MICRO_SECONDS);   // 官方 LineProtocolExample 同款</code></pre>
+  <p>跑完去库里看,TDengine 替你做了三件事,全部零 DDL:</p>
+  <div class="card">
+    <ul class="steps">
+      <li>① <strong>超级表自动建:</strong>行协议里的 <code>measurement</code>(device_metrics)不存在就自动建为超级表;</li>
+      <li>② <strong>列自动增:</strong>下一批数据多了个 <code>humidity</code> 字段?超级表自动加上这一列(只增不减);</li>
+      <li>③ <strong>子表自动建:</strong>子表名由 measurement + 标签做 MD5 映射自动生成(固定 <code>t_</code> 前缀),标签值统一按 NCHAR 处理。</li>
+    </ul>
+  </div>
+  <p>两种写入怎么选?给你一张对照表:</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th></th><th>INSERT INTO … USING(本期主线)</th><th>schemaless 行协议(本节对照)</th></tr></thead>
+    <tbody>
+      <tr><td>schema 控制权</td><td>应用侧显式建模,类型精确</td><td>数据侧说了算,自动建表加列</td></tr>
+      <tr><td>子表名</td><td>自己起(d1001,语义清晰)</td><td>自动生成 t_ + MD5,可配置改</td></tr>
+      <tr><td>适合场景</td><td>业务建模稳定,要按标签聚合</td><td>多协议接入源、字段多变的边缘侧</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">一个工程提醒:schemaless 的标签值统一转 NCHAR,如果后面又要用 SQL 按标签做数值比较,自动转型的类型可能不如显式建模清爽——<strong>能显式建模就显式建模,schemaless 留给"schema 不可控"的场景</strong>。这正是"写入方式是分层工具箱"的含义。</p>
+</section>
+
+<!-- ================= 07 quiz ================= -->
+<section>
+  <h2><span class="sec-num">07</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. 新写的 Java 应用接 TDengine 3.4,官方推荐的连接方式是?</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对,原生连接需要安装客户端驱动,官方已宣布 2027-01-01 下线。","不对,REST 连接同样在 2027-01-01 下线名单里,别再写进新项目。","对的:官方文档明确推荐 WebSocket 连接,走 taosAdapter 的 6041 端口,免装客户端驱动。"]'>
+        <li class="quiz-option">原生连接 jdbc:TAOS://,走 6030 端口</li>
+        <li class="quiz-option">REST 连接 jdbc:TAOS-RS://,HTTP 通用</li>
+        <li class="quiz-option">WebSocket 连接 jdbc:TAOS-WS://,走 6041</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 用 addBatch()/executeBatch() 批量写入,为什么官方说没有性能提升?</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对,与网络带宽无关,与执行方式有关。","对的:官方 FAQ 原话——SQL 按添加顺序依次执行,与服务端的交互次数没有减少;正路是拼多 values、参数绑定或多线程。","不对,自动建表发生在子表不存在时,不是性能瓶颈的主因。"]'>
+        <li class="quiz-option">网络带宽被 JSON 序列化占满了</li>
+        <li class="quiz-option">SQL 仍逐条执行,服务端交互次数没减少</li>
+        <li class="quiz-option">自动建表在批量里被反复触发</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. LAST_ROW 和 LAST 的差别是什么?</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的:官方窗口函数文档——LAST_ROW 取最后一行、不忽略空值;LAST 取最后一个非空值。","不对,两者都不限定时间范围,都是针对窗口或分区的取值函数。","不对,两个都能用在子表和超级表上,差别只在空值处理。"]'>
+        <li class="quiz-option">LAST_ROW 取最后一行不忽略空值,LAST 取最后非空值</li>
+        <li class="quiz-option">LAST 只能查子表,LAST_ROW 只能查超级表</li>
+        <li class="quiz-option">LAST_ROW 是 LAST 的别名,完全等价</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 08 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>思考题(点击展开解析)</h2>
+  <details class="q-card">
+    <summary>思考一:官方为什么要给原生连接和 REST 连接定死"2027-01-01 下线"?从驱动分发、通信形态、功能演进三个角度,分别推一遍 WebSocket 的胜因。</summary>
+    <div class="details-body">
+      <p>先看<strong>驱动分发</strong>:原生连接要求每个部署了 Java 应用的机器都装上平台相关的客户端驱动(Linux 是 libtaos.so,Windows 是 taos.dll),版本还得和服务端对齐——JVM 应用引一个 jar 就能跑的惯例被打破了,连接器每次升级都拖着一串驱动包变更。WebSocket 连接只需要一个 taos-jdbcdriver,不依赖任何本地库,这是"官方文档特别强调不需要依赖客户端驱动"的原因,也是 Java 生态最看重的一点。再看<strong>通信形态</strong>:REST 是一问一答的短连接 HTTP,每次请求都要重建会话语义,延迟和并发能力都吃亏,后来者 WebSocket 天生就是长连接,还支持多端点负载均衡与自动重连(3.7.5 起)。最后看<strong>功能演进</strong>:近两年连接器的新能力几乎全落在 WebSocket 通道上——高效写入(asyncWrite=stmt)、Decimal/BLOB 类型、参数绑定缓存、传输压缩、连接器高可用端点发现,而原生通道基本只剩维护。综合起来,这是一次教科书式的"收拢通道"决策:维护三条通道的成本,远高于把全部新特性押在一条上的收益。给我们的借鉴是:自家系统里同一种能力若有多个接入协议并存,尽早定主推通道并给出迁移期限,拖着不决只会让三边都做不深。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二:自动建表写入是"子表不存在就建",那 1000 台设备同时上线会怎样?设备离线半年后重新上线,标签改了、又多了个新字段,INSERT USING 会发生什么?</summary>
+    <div class="details-body">
+      <p>分三段推。<strong>并发上线:</strong>INSERT USING 的自动建表是幂等的——表不存在就建、存在就直接写,1000 台设备同时上报不会互相覆盖;按第 3 期的架构,这 1000 张子表会被一致性哈希摊到多个 vnode 上,建表请求各自落在自己 vnode 的元数据里,并发建表互不阻塞,这正是"单 vnode 表上限 100 万"敢开这么大的原因之一。<strong>标签变更:</strong>子表已存在时,TAGS 子句里的标签值不会改写历史标签——想改设备属性要走 <code>ALTER TABLE … SET TAG</code>(标签躺在 vnode 元数据里,改的是元数据,不重写数据)。所以"设备换了安装位置"这类事件,要作为一条显式的变更操作,而不是指望下一条 INSERT 顺手改掉。<strong>新增字段:</strong>如果设备固件升级后多报了一个字段,显式建模的路径是 <code>ALTER STABLE meters ADD COLUMN</code>——模板一改,所有子表立即生效(第 3 期讲过超级表 schema 存元数据);而如果走的是 schemaless,新字段会自动加列(只增不减)。两相对照就更清楚"两条写入路线"的分工:INSERT USING 给"schema 在我手里"的业务,加列是显式决策;schemaless 给"schema 跟着设备走"的边缘场景,加列是自动行为。理解了这些边界,自动建表就不是一个"省事的语法糖",而是一套带规则的变更协议。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 09 要点 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五条:</strong></p>
+    <ul>
+      <li>连接方式先选对:WebSocket(jdbc:TAOS-WS://,6041)是官方推荐,免装客户端驱动;原生与 REST 连接 2027-01-01 下线,老 URL 别再抄;</li>
+      <li>依赖只有一个:com.taosdata.jdbc:taos-jdbcdriver 3.9.2(Maven Central 2026-09-19 核对),JRE 8+ / JDBC 4.2+,无需 Class.forName;</li>
+      <li>设备上线零 DDL:INSERT INTO 子表 USING 超级表 TAGS(…) VALUES(…) 自动建表,一条 INSERT 拼多张子表多行批量写;</li>
+      <li>批量正路是"少交互":addBatch/executeBatch 逐条执行不提速(官方 FAQ),拼多 values、参数绑定、多线程才是官方给的三条路;</li>
+      <li>最近值用 LAST_ROW(不忽略空值),趋势线用 INTERVAL 窗口聚合(_wstart + AVG);schema 管不住时换 schemaless,超级表、列、子表全自动建。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告:</strong>第 5 期《架构与源码导读:vnode 存算一体与缓存降采样》——应用侧这些 SQL 的背后,vnode 怎么把"存储、计算、缓存"捏在一处:数据先写内存再落盘的取舍、"最新值查询为什么快"的缓存设计、降采样怎么在读写之间找平衡,并给一份"从哪个目录开始读"的地图。</p>
+  <p><strong>Primary source:</strong><a href="https://docs.taosdata.com/developer-guide/connectors-reference/java/" target="_blank" rel="noopener">TDengine 官方文档 · Java 连接器(v3.4.2)</a>——本期依赖坐标、连接方式、版本历史、addBatch 结论与 schemaless API 均出自该页;连接方式选型见<a href="https://docs.taosdata.com/developer-guide/connect/" target="_blank" rel="noopener">建立连接</a>,参数绑定推荐写法见<a href="https://docs.taosdata.com/developer-guide/stmt/" target="_blank" rel="noopener">参数绑定</a>,无模式写入见<a href="https://docs.taosdata.com/developer-guide/schemaless/" target="_blank" rel="noopener">schemaless</a>,窗口聚合与 LAST_ROW 语义见 <a href="https://docs.taosdata.com/tdengine-sql/data-query/query/" target="_blank" rel="noopener">SQL 查询</a> 与 <a href="https://docs.taosdata.com/tdengine-sql/data-query/window-function/" target="_blank" rel="noopener">窗口函数</a>;官方示例程序在 <a href="https://github.com/taosdata/TDengine/tree/main/docs/examples/JDBC" target="_blank" rel="noopener">TDengine 仓库 docs/examples/JDBC</a>,驱动坐标在 <a href="https://central.sonatype.com/artifact/com.taosdata.jdbc/taos-jdbcdriver" target="_blank" rel="noopener">Maven Central</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0029-tdengine-core-concepts-architecture.html">← 上一期:核心概念与整体架构</a>
+  <a class="next" href="0031-tdengine-source-reading.html">下一期:架构与源码导读 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对,再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

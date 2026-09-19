@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · Function Calling 与工具调用：教会大模型动手 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0027</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0026-embedding-vector-store.html">上一期：Embedding 与向量库选型</a> · <a href="https://www.bilibili.com/video/BV14yet61Exm" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">AI · AI 大模型应用系列第 3 讲（工具调用篇）</p>
+  <h1>教会大模型动手：Function Calling 与工具调用</h1>
+  <p class="subtitle">前两讲解决了大模型"知道得更多"（RAG 外挂知识、向量库管检索），这一讲解决"做得到"——用户说"帮我把预发环境的订单服务扩到 4 副本"，助手不该甩回一篇扩容文档，而是真的去调接口把事办了。Function Calling 的心智模型一句话就能说清：模型永远不执行任何东西，它只输出结构化的调用意图，执行永远发生在你的代码里。今天讲透这个协议循环、工具的接口设计、执行编排层的安全闸门，以及"编参数、幻觉工具、死循环"三类经典事故的根治办法。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🤖 AI 大模型应用</span>
+    <span class="tag-date">📅 2026-09-19 · 第 27 期</span>
+    <span class="tag time">⏱ 预计阅读 10 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>一个"会说不会做"与"会做就出事"的连环复盘</h2>
+  <p>集团 IT 的智能运维助手第一版上线：接了知识库（就是前两讲那套 RAG），问什么都能答一段，工单却一张没少——用户问"帮我把 2033 预发环境的订单服务扩到 4 副本"，它礼貌地回了扩容操作手册的链接。<strong>会说，不会做</strong>，转人工率纹丝不动。</p>
+  <p>第二版接上工具，三天出了三起事故：</p>
+  <ul>
+    <li><strong>编参数：</strong>用户说的是"预发环境"，模型调用扩容工具时 environment 参数填了 <code>prod</code>；副本数给的是字符串 <code>"4.0"</code>，工具侧类型校验直接炸——幸好炸了；</li>
+    <li><strong>幻觉工具：</strong>提示词的背景资料里提到过"重启服务"这个能力，但工具从没注册，模型一本正经地调用了 <code>restart_service</code>，应用层收到一个不存在的函数名；</li>
+    <li><strong>死循环：</strong>某个查询工具超时返回错误，模型把同一个调用原样重发了 11 次，token 烧穿预算，页面转圈 90 秒才报错。</li>
+  </ul>
+  <p>复盘结论：<strong>三起事故没有一起是"模型不行"，全是工程层没接住</strong>。参数编造是 schema 约束缺位，幻觉工具是"给模型看的能力"与"实际注册的工具"两本账没对齐，死循环是编排层没有轮次与重试预算。工具调用这件事，模型的职责边界其实非常窄——理解今天这套协议循环，你就知道该把可靠性建设押在哪几层。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：模型只表态，你的代码才动手</h2>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar27" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar27a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <text x="380" y="20" text-anchor="middle" fill="var(--muted)" font-size="13">协议循环：一次工具调用 = 一来一回两轮对话，可多轮续行</text>
+
+    <!-- 顶部：用户与应用 -->
+    <rect x="20" y="42" width="150" height="52" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="95" y="64" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">用户</text>
+    <text x="95" y="82" text-anchor="middle" fill="var(--muted)" font-size="9.5">"扩到 4 副本"</text>
+    <line x1="170" y1="68" x2="210" y2="68" stroke="var(--muted)" marker-end="url(#ar27)"/>
+
+    <!-- 中上：LLM -->
+    <rect x="214" y="42" width="180" height="52" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="304" y="64" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">大模型（决策者）</text>
+    <text x="304" y="82" text-anchor="middle" fill="var(--muted)" font-size="9.5">读工具 schema → 决定调不调、怎么调</text>
+
+    <!-- 右上：tool_call 产物 -->
+    <rect x="440" y="36" width="300" height="64" rx="8" fill="var(--code-bg)" stroke="var(--accent-3)"/>
+    <text x="454" y="56" fill="var(--ink)" font-size="10.5" font-weight="700">模型产出：tool_call（结构化意图，不是执行）</text>
+    <text x="454" y="72" fill="var(--muted)" font-size="9">{ "name": "scale_deployment",</text>
+    <text x="454" y="86" fill="var(--muted)" font-size="9">　"arguments": { "env": "staging", "replicas": 4 } }</text>
+    <line x1="394" y1="60" x2="436" y2="60" stroke="var(--accent-3)" stroke-width="1.6" marker-end="url(#ar27a)"/>
+
+    <!-- 执行层 -->
+    <rect x="20" y="150" width="720" height="64" rx="8" fill="var(--code-bg)" stroke="var(--accent)"/>
+    <text x="380" y="172" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">你的应用（执行者）：schema 校验 → 鉴权 → 执行真实函数 → 组装结果</text>
+    <text x="380" y="192" text-anchor="middle" fill="var(--muted)" font-size="10">校验拦编参数 · 鉴权拦越权 · 超时与重试预算拦死循环 · 审计留痕</text>
+    <path d="M590,100 C590,125 540,138 480,146" fill="none" stroke="var(--accent-3)" stroke-width="1.6" marker-end="url(#ar27a)"/>
+    <text x="620" y="126" fill="var(--ink)" font-size="9.5">① 应用代为执行</text>
+
+    <!-- 结果回传 -->
+    <path d="M200,150 C160,130 120,105 100,98" fill="none" stroke="var(--accent-3)" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#ar27a)"/>
+    <text x="120" y="128" fill="var(--ink)" font-size="9.5">② 结果以 tool 消息回传</text>
+
+    <!-- 底部要点 -->
+    <rect x="20" y="240" width="720" height="72" rx="8" fill="var(--bg-accent)" stroke="var(--accent)"/>
+    <text x="34" y="262" fill="var(--ink)" font-size="11" font-weight="700">三个关键认知</text>
+    <text x="34" y="281" fill="var(--ink)" font-size="10.5">① 模型输出的只是 JSON 意图，跑不跑、怎么跑，决定权全在你的执行层</text>
+    <text x="34" y="299" fill="var(--ink)" font-size="10.5">② 工具 schema 是模型的"API 合同"，约束越严，编参数空间越小　③ 循环可多轮：拿到结果后模型可继续调下一个工具</text>
+  </svg>
+  </div>
+
+  <p><strong>Function Calling 的本质是一次职责分离</strong>：模型是决策者，负责"该不该调、调哪个、参数填什么"；你的应用是执行者，负责校验、鉴权、真正执行与结果回传。协议是一个循环：用户请求连同一批工具定义（JSON Schema）发给模型；模型若决定用工具，返回的不是自然语言而是一条 <code>tool_call</code>（函数名 + 参数 JSON）；你的代码执行后把结果以 <code>tool</code> 角色消息追加进对话再发给模型；模型据此生成回答——<strong>或继续发起下一个调用</strong>，直到它认为任务完成。这个"继续"就是 Agent 的种子，本期先把单循环讲扎实。</p>
+
+  <h3>为什么必须结构化，而不是让模型自己"说清楚"</h3>
+  <p>早期做法是提示词里写"请按 JSON 格式输出调用意图"再自己解析——模型偶尔会好心加上一句"好的，以下是您要的 JSON"，解析就崩了。现在的 Function Calling 把这层契约交给了协议本身：<strong>工具定义用 JSON Schema 描述，模型的输出受 schema 约束</strong>。OpenAI 的 <code>strict: true</code>（Structured Outputs）进一步保证参数严格贴合 schema——代价是 schema 要按规矩写：所有对象 <code>additionalProperties: false</code>、全部字段列入 <code>required</code>、可选字段写成 <code>type: ["string", "null"]</code>。<strong>把 schema 当 API 合同来设计，是工具调用可靠性的第一来源</strong>：枚举用 <code>enum</code> 约束（环境只有 staging/prod，模型就没机会编出 uat）、类型定死（replicas 是 integer 就不会出现 <code>"4.0"</code>）。</p>
+
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>控制参数</th><th>作用</th><th>工程时机</th></tr>
+    <tr><td><code>tool_choice: auto</code></td><td>模型自行决定调不调、调几个（默认）</td><td>通用助手的默认档</td></tr>
+    <tr><td><code>tool_choice: required</code></td><td>本回合必须至少调一个工具</td><td>强制走结构化抽取的管线</td></tr>
+    <tr><td><code>tool_choice: 指定函数</code></td><td>锁定只调这一个</td><td>确定性路由，不给模型选择权</td></tr>
+    <tr><td><code>parallel_tool_calls</code></td><td>允许一回合并行发多个调用</td><td>读操作可开（查三台机器水位）；写操作务必关</td></tr>
+  </table>
+  </div>
+  <p>并行调用是双刃剑：三个独立的只读查询并行发，延迟从串行的 3×300ms 压到约 300ms；但两个写操作并行执行，谁先谁后不可控，还可能重复下单——<strong>读并行、写串行</strong>是底线。</p>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：编排层是可靠性的一半</h2>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar27b" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <text x="380" y="20" text-anchor="middle" fill="var(--muted)" font-size="13">工具调用的执行编排层：四道闸门串起来，模型永远在闸门外面</text>
+
+    <!-- 模型 -->
+    <rect x="20" y="44" width="140" height="180" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="90" y="72" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">大模型</text>
+    <text x="90" y="92" text-anchor="middle" fill="var(--muted)" font-size="9.5">只产出调用意图</text>
+    <text x="90" y="108" text-anchor="middle" fill="var(--muted)" font-size="9.5">tool_call JSON</text>
+    <text x="90" y="136" text-anchor="middle" fill="var(--muted)" font-size="9">看到的：</text>
+    <text x="90" y="152" text-anchor="middle" fill="var(--muted)" font-size="9.5">注册表里的</text>
+    <text x="90" y="168" text-anchor="middle" fill="var(--muted)" font-size="9.5">schema 清单</text>
+    <text x="90" y="196" text-anchor="middle" fill="var(--muted)" font-size="8.5">提示词里提过但没注册</text>
+    <text x="90" y="210" text-anchor="middle" fill="var(--muted)" font-size="8.5">的能力=幻觉温床</text>
+
+    <line x1="160" y1="100" x2="205" y2="100" stroke="var(--muted)" marker-end="url(#ar27b)"/>
+
+    <!-- 四道闸 -->
+    <rect x="209" y="44" width="330" height="180" rx="10" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="374" y="66" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">编排层（你的代码，可靠性主战场）</text>
+    <rect x="225" y="80" width="140" height="30" rx="6" fill="var(--card)" stroke="var(--accent-3)"/>
+    <text x="295" y="99" text-anchor="middle" fill="var(--ink)" font-size="9.5">① schema 校验</text>
+    <rect x="385" y="80" width="140" height="30" rx="6" fill="var(--card)" stroke="var(--accent-3)"/>
+    <text x="455" y="99" text-anchor="middle" fill="var(--ink)" font-size="9.5">② 权限与配额</text>
+    <rect x="225" y="122" width="140" height="30" rx="6" fill="var(--card)" stroke="var(--accent-3)"/>
+    <text x="295" y="141" text-anchor="middle" fill="var(--ink)" font-size="9.5">③ 执行沙箱/超时</text>
+    <rect x="385" y="122" width="140" height="30" rx="6" fill="var(--card)" stroke="var(--accent-3)"/>
+    <text x="455" y="141" text-anchor="middle" fill="var(--ink)" font-size="9.5">④ 审计与可观测</text>
+    <rect x="225" y="164" width="300" height="46" rx="6" fill="var(--warn-bg)" stroke="var(--bad)"/>
+    <text x="375" y="182" text-anchor="middle" fill="var(--ink)" font-size="9.5" font-weight="700">循环控制：最大轮数 3~5 · 同参重试 ≤2 次 · 总超时</text>
+    <text x="375" y="199" text-anchor="middle" fill="var(--muted)" font-size="8.5">治死循环的开关全在这里，不在提示词里求模型"别重复"</text>
+
+    <line x1="539" y1="100" x2="584" y2="100" stroke="var(--muted)" marker-end="url(#ar27b)"/>
+
+    <!-- 工具层 -->
+    <rect x="588" y="44" width="152" height="180" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="664" y="70" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">工具层</text>
+    <text x="664" y="92" text-anchor="middle" fill="var(--muted)" font-size="9.5">内部方法 / REST</text>
+    <text x="664" y="108" text-anchor="middle" fill="var(--muted)" font-size="9.5">MCP 服务</text>
+    <text x="664" y="136" text-anchor="middle" fill="var(--muted)" font-size="9">返回：</text>
+    <text x="664" y="152" text-anchor="middle" fill="var(--muted)" font-size="9.5">结构化结果 或</text>
+    <text x="664" y="168" text-anchor="middle" fill="var(--muted)" font-size="9.5">结构化错误</text>
+    <text x="664" y="196" text-anchor="middle" fill="var(--muted)" font-size="8.5">写操作带确认与幂等键</text>
+
+    <!-- 底部 -->
+    <rect x="20" y="244" width="720" height="44" rx="8" fill="var(--bg-accent)" stroke="var(--accent)"/>
+    <text x="34" y="262" fill="var(--ink)" font-size="10.5" font-weight="700">三起事故在图上的落点</text>
+    <text x="34" y="280" fill="var(--ink)" font-size="10.5">编参数→闸①拦　越权创建→闸②拦　死循环→循环控制拦　幻觉工具→注册表与提示词对齐</text>
+  </svg>
+  </div>
+
+  <h3>工具的接口设计：像设计公共 API 一样设计工具</h3>
+  <ul>
+    <li><strong>小而专，动词命名：</strong>一个工具一件事（<code>get_deployment_status</code>、<code>scale_deployment</code>），别做万能的 <code>k8s_operator</code>——描述写不清"什么时候该用它"，模型选择准确率直线下降；</li>
+    <li><strong>description 写"何时用"而非"是什么"：</strong>"用户询问副本数、资源水位、部署状态时使用"远好于"获取部署信息"——模型靠描述做路由，这是它唯一的菜单；</li>
+    <li><strong>参数尽机器可判：</strong>枚举用 <code>enum</code>、格式用 <code>format</code>、边界用 <code>minimum/maximum</code>，把"预发"到 <code>staging</code> 的翻译收进 schema 或工具内部，别指望模型自由发挥；</li>
+    <li><strong>幂等与结构化错误：</strong>可重试的工具必须幂等（幂等键），失败返回结构化错误对象（错误码 + 人可读原因），让模型能读懂并决定纠正参数还是放弃——抛异常给编排层，模型就失去了自愈机会。</li>
+  </ul>
+
+  <h3>安全三道闸：不信模型的自觉，信架构的约束</h3>
+  <p>第一道，<strong>鉴权在工具内部做</strong>：以"当前用户"的身份执行（工具拿到的是用户凭证或按用户映射的服务账号），模型永远碰不到凭证——第 01 节"越权创建别人工单"那种事故，根因就是把鉴权寄托给了模型的判断。第二道，<strong>写操作过确认</strong>：扩容、下单、删除这类有后果的动作，执行前把"将对 X 做 Y"回显给用户确认（human-in-the-loop），高危操作再加审批流。第三道，<strong>最小权限</strong>：每个工具只授它需要的权限，查询工具就不该持有写凭证——权限面越小，模型被提示词注入攻击后的爆炸半径越小。<strong>工具一旦接上，模型就成了新的攻击入口，注入防御与权限收敛必须同步做。</strong></p>
+
+  <h3>工具生态：MCP 把工具从"方法"升级成"服务"</h3>
+  <p>工具写到十几个，重复造轮子就开始亏：每个应用各自包一遍数据库、仓库、云厂商的接口。MCP（Model Context Protocol）把工具的发现、描述与调用标准化成协议——工具提供方实现一次 MCP server，任何支持 MCP 的客户端（IDE、Agent 框架、Spring AI 应用）都能挂载使用。对架构师的意义：<strong>企业内部把高频能力沉淀成 MCP 工具服务统一治理</strong>（注册、鉴权、审计一处收口），应用侧只做编排——Spring AI 1.0 已内置 MCP client/server 支持，这与微服务时代"能力平台化"是同一个演进逻辑。</p>
+
+  <div class="callout">
+    <p class="callout-title">两笔账：token 与延迟</p>
+    <p><strong>token 账：</strong>每个工具的 schema 都随每轮请求计入输入 token（一个工具约 100~300 token），20 个工具全挂 = 每轮多付数千 token，还稀释模型的选择准确率——工具按场景分组装载，别一股脑全上。<strong>延迟账：</strong>每轮循环 = 一次模型往返（1~3 秒）+ 工具执行时间，3 轮任务轻松 10 秒——把"模型能不能少跑几轮"当成设计目标：能一次给足的上下文别让模型查三轮，确定性的前置步骤（如先查权限）在代码里做掉，不交给模型。</p>
+  </div>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：Spring AI 的工具调用三件套</h2>
+
+  <p>Spring AI 1.0 GA 的工具模型非常薄：一个 <code>@Tool</code> 注解把普通方法变成模型可调用的工具，<code>@ToolParam</code> 描述参数，注册进 ChatClient 即可——schema 生成、协议解析、方法反射调用全部由框架完成，你只写业务方法。</p>
+
+  <h3>定义工具（description 写"何时用"，参数用枚举收敛）</h3>
+  <pre><code><span class="c-kw">@Component</span>
+<span class="c-kw">public class</span> DeployTools {
+
+  <span class="c-kw">@Tool</span>(description = <span class="c-str">"查询指定环境的部署状态：副本数、就绪数、CPU与内存水位。"
+</span>      + <span class="c-str">"用户询问服务运行状态、是否扩容前评估时使用"</span>)
+  <span class="c-kw">public</span> DeployStatus getStatus(
+      <span class="c-kw">@ToolParam</span>(description = <span class="c-str">"目标环境：预发=staging，生产=prod"</span>) Environment env) {
+    <span class="c-kw">return</span> deployClient.query(env);          <span class="c-com">// 以当前用户身份执行（鉴权在内部）</span>
+  }
+
+  <span class="c-kw">@Tool</span>(description = <span class="c-str">"扩容指定环境的Deployment副本数。写操作：调用前必须已获得用户确认"</span>)
+  <span class="c-kw">public</span> ScaleResult scale(
+      <span class="c-kw">@ToolParam</span>(description = <span class="c-str">"目标环境"</span>, required = <span class="c-kw">true</span>) Environment env,
+      <span class="c-kw">@ToolParam</span>(description = <span class="c-str">"目标副本数，1~20"</span>, required = <span class="c-kw">true</span>) <span class="c-kw">int</span> replicas) {
+    <span class="c-kw">return</span> deployClient.scale(env, replicas); <span class="c-com">// 服务端幂等键=env+服务+发起者</span>
+  }
+  <span class="c-kw">public enum</span> Environment { staging, prod }  <span class="c-com">// 枚举即 enum 约束，编不出第三个值</span>
+}</code></pre>
+
+  <h3>注册并对话</h3>
+  <pre><code>ChatClient ai = ChatClient.builder(chatModel)
+    .defaultSystem(<span class="c-str">"你是运维助手。只使用提供的工具操作环境，"
+</span>        + <span class="c-str">"执行写操作前先复述动作并等用户确认"</span>)
+    .defaultTools(deployTools)              <span class="c-com">// 注册：schema 自动生成</span>
+    .build();
+
+String answer = ai.prompt().user(<span class="c-str">"把预发订单服务扩到4副本"</span>)
+    .call().content();
+<span class="c-com">// 框架自动完成：模型返回tool_call → 反射调用scale(staging,4) → 结果回传 → 模型总结</span></code></pre>
+
+  <div class="card card-tip">
+    <h4>✅ 上线体检清单</h4>
+    <p>☐ 工具 schema 按合同设计：枚举/类型/边界全上，strict 模式可用则开　☐ 提示词里提到的能力与注册表严格对齐，删掉一切"幽灵能力"描述　☐ 编排层有最大轮数、同参重试上限与总超时　☐ 鉴权在工具内部以用户身份执行，模型不碰凭证　☐ 写操作回显确认 + 幂等键　☐ 工具返回结构化错误而非抛异常　☐ 全链路审计：谁、调了什么工具、什么参数、结果如何　☐ 工具按场景分组装载，控制每轮 schema 的 token 开销　☐ 并行只开读操作，写操作强制串行</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>模型只表态，你的代码动手：</strong>Function Calling 输出的是结构化调用意图（JSON），校验、鉴权、执行、回传全在你的编排层——可靠性建设的主战场在工程侧，不在提示词里。</li>
+    <li><strong>schema 就是 API 合同：</strong>enum 约束取值、类型定死、边界显式；strict 模式把"编参数"的空间压到最小。工具描述写"什么时候用"，模型靠它做路由。</li>
+    <li><strong>编排层四道闸 + 循环预算：</strong>schema 校验拦编参数、权限配额拦越权、沙箱超时拦事故、审计留痕可追责；最大轮数与同参重试上限治死循环。</li>
+    <li><strong>安全不信模型自觉：</strong>鉴权在工具内部以用户身份执行、写操作回显确认、最小权限收敛爆炸半径——接上工具的模型就是新的攻击入口。</li>
+    <li><strong>两笔账别忘算：</strong>工具 schema 每轮都付 token，按场景分组装载；每轮循环都是一次模型往返，确定性的步骤在代码里做掉，别让模型多跑。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目一：运维平台沉淀了 40 个工具（查询、扩缩容、发布、日志、数据库操作……），产品要求"全都给助手挂上"。① 全量挂载会带来哪些具体问题？② 给出你的治理方案。③ 如果工具数量未来涨到 200 个，架构要怎么演进？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>三重代价：</strong>token 账——40 个工具 schema 每轮约 4000~12000 token，全部请求都在为"模型看得见的菜单"付费，成本随轮次×并发线性放大；准确率账——选项越多模型选错率越高，相近工具（查日志 vs 搜日志）的描述差异会被稀释，误路由概率上升；安全账——每次对话的可操作面都等于全量工具，一次提示词注入能摸到的攻击面也是全量的。</p>
+      <p>② <strong>治理三板斧：</strong>按场景分组装载——对话开始时由意图分类（或入口场景）决定挂哪一组工具，运维巡检对话只挂查询组，发布窗口只挂发布组；工具合并与分层——高频复合操作沉淀成粗粒度工具（"重启并验证"一个工具内部做两步，比让模型编排两个工具少一轮往返、少一分出错面）；注册表治理——命名规范、描述评审、schema 模板统一，把工具当公共 API 管理，有 owner、有版本、有废弃流程。</p>
+      <p>③ <strong>200 个量级走"工具检索"：</strong>把工具的名称+描述+参数摘要做成向量索引，每轮按用户意图先检索 Top-K 个工具再动态注入请求——本质是拿上一讲的 RAG 思路治理工具菜单（"RAG over tools"），模型每轮只见 10~20 个相关工具，token 与准确率同时受控；再往上是工具网关/MCP 目录服务：统一注册发现、按调用方权限动态裁剪可见工具、审计全收口——工具规模化后的形态，就是当年 API 网关治理服务的那条老路。</p>
+    </div>
+  </details>
+
+  <details class="q-card">
+    <summary>题目二：审计日志显示，模型用完全合法的参数调用了 create_ticket 工具，但创建出的工单归属人不是发起对话的用户——参数没编、工具也没抛错。① 这起事故的问题出在哪一层？② 鉴权应该放在哪里、以谁的身份执行？③ 写操作类工具还需要哪些防误伤设计？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>出在信任边界划错：</strong>参数合法只说明 schema 合同履行了，不代表授权成立。根因是编排层把"模型说调谁"当成了"用户授权做什——assignee 参数是模型从上下文里填的（可能是对话里出现过的第三个人名），而工具侧无主见地信了它。模型填的每一个参数都属于"不可信输入"，与用户表单提交的字段同级，必须过同样的授权校验。</p>
+      <p>② <strong>鉴权收进工具内部，身份跟着用户走：</strong>工具以"当前登录用户"的身份调用下游（凭证由编排层从会话注入，模型全程碰不到），create_ticket 的 assignee 即使允许指定他人，也要校验"当前用户是否有替他人建单的权限"；需要跨用户操作的高权限场景，用按用户映射的服务账号 + 显式授权记录，而不是给工具一把万能钥匙。原则一句话：<strong>模型的判断决定"做什么"，用户的身份决定"能做什么"，两者在工具入口合流。</strong></p>
+      <p>③ <strong>写操作四件套：</strong>回显确认——执行前把完整动作（工具、关键参数、影响范围）复述给用户，确认后才放行（高危再加审批流）；幂等键——客户端生成、服务端去重，网络重试不会变成重复创建；影响面预检——能 dry-run 的操作先跑 dry-run（扩容前先校验配额与水位）；审计留痕——谁、经确认与否、以何身份、调了什么、参数与结果全记录，事后可追责可回放。四件套合起来，才配得上"让模型动手"这四个字。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>OpenAI 官方 Function Calling 指南（工具定义 schema、tool_choice 与并行调用控制、strict 模式约束的权威参考，本期协议侧口径来源）：<br>
+    <a href="https://platform.openai.com/docs/guides/function-calling" target="_blank" rel="noopener">https://platform.openai.com/docs/guides/function-calling</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>Spring AI 官方文档的 Tool Calling 与 MCP 章节（@Tool 注解、ToolCallback、MCP client/server 集成）：<a href="https://docs.spring.io/spring-ai/reference/api/tools.html" target="_blank" rel="noopener">docs.spring.io/spring-ai/reference/api/tools.html</a>。前两讲见 <a href="0025-rag-retrieval-augmented-generation.html">0025 · RAG 检索增强架构</a>与 <a href="0026-embedding-vector-store.html">0026 · Embedding 与向量库选型</a>——知识外挂与语义检索的上下文都在那两讲。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0026-embedding-vector-store.html">← 上一期：Embedding 与向量库选型</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 27 期 · AI 大模型应用系列 · 下一期预告：架构与中间件运维通用 —— Prometheus + Grafana 监控体系</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
