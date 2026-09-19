@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Prometheus 系列第 3 期：核心概念与整体架构 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0044</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0043-prom-quickstart.html">上一期：0043</a> · Prometheus 系列第 3 期 / 共 5 期 · <a href="0045-prom-in-action.html">下一期：0045</a> · <a href="https://prometheus.io/docs" target="_blank" rel="noopener">prometheus.io/docs ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · PROMETHEUS 系列第 3 期：核心概念与整体架构</p>
+  <h1>看懂 Prometheus：概念地图与整体架构</h1>
+  <p class="subtitle">上一期我们把 Prometheus 跑了起来，亲手查出了第一条曲线。但一条指标被它"抓走"之后经历了什么？PromQL 花括号背后是什么模型？抓不到的目标去哪了？本期你带走一张<strong>概念地图</strong>：指标名加标签集等于一条时间序列、四种指标类型各管什么场景、job/instance 与服务发现怎么配合、head 与 block 两级存储怎么做到写吞吐与读性能各得其所、双实例"笨办法"为什么反而是对的高可用——最后自绘一张整体架构图，并把源码仓库顶层目录逐个认脸。概念表述逐条核对 prometheus.io 官方文档，模块地图逐个核对 GitHub tag v3.14.0 仓库树。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">📈 监控与告警 · Go · Apache-2.0（CNCF 毕业项目）</span>
+    <span class="tag">📦 基于 v3.14.0（2026-08-17，GitHub Latest）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 3 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 系列地图 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>系列地图：本期是概念承重墙</h2>
+  <p>老规矩先看地图。第 1 期立住了心智模型——指标时序的采集、存储、查询一体机；第 2 期把服务跑起来，Targets 页第一个目标变绿，Graph 页画出第一条曲线。<strong>本期是五期里的承重墙</strong>：术语体系、抓取体系、查询模型、存储架构一次铺完。本期结束时你应该能回答两个问题：<strong>一条指标从被抓取到能查询，经历了什么？PromQL 眼中的世界长什么样？</strong>第 4 期实战里每个名词都会变成实打实的配置，第 5 期源码导读沿着本期画好的模块地图往下读。</p>
+</section>
+
+<!-- ================= 02 术语体系 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>术语一条链：指标名 + 标签集 = 一条时间序列</h2>
+  <p>先记最核心的等式：<strong>指标名 + 一组键值对标签，唯一标识一条时间序列</strong>。官方《Data model》原话："Every time series is uniquely identified by its metric name and optional key-value pairs called labels"——每条时间序列由指标名加可选的键值对标签唯一标识。序列上的每个点叫<strong>样本（sample）</strong>：一个 float64 值，加一个毫秒精度的时间戳。名字加标签怎么写成一行？官方表示法长这样：</p>
+  <div class="codeblock"><pre>api_http_requests_total{method="POST", handler="/messages"}
+{__name__="api_http_requests_total", method="POST", handler="/messages"}</pre></div>
+  <p>第二行是等价写法：指标名本质就是一个名叫 <code>__name__</code> 的特殊标签（官方注明这与 OpenTSDB 同款表示法）。用一张图把整条链串起来：</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 240" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar44a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="14" y="30" width="216" height="180" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="122" y="58" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">指标名 metric name</text>
+    <rect x="30" y="74" width="184" height="30" rx="6" fill="var(--bg)" stroke="var(--line)"/>
+    <text x="122" y="94" text-anchor="middle" fill="var(--accent-3)" font-size="10" font-weight="700">http_requests_total</text>
+    <text x="122" y="128" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">标签集 labels</text>
+    <rect x="30" y="142" width="184" height="30" rx="6" fill="var(--bg)" stroke="var(--line)"/>
+    <text x="122" y="162" text-anchor="middle" fill="var(--muted)" font-size="9">method="POST" · code="200"</text>
+    <text x="122" y="196" text-anchor="middle" fill="var(--muted)" font-size="8.5">键值对 · 标签值一变就是新序列</text>
+
+    <line x1="230" y1="120" x2="284" y2="120" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar44a)"/>
+    <text x="257" y="106" text-anchor="middle" fill="var(--muted)" font-size="8.5">组合成身份</text>
+
+    <rect x="288" y="52" width="200" height="136" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="388" y="82" text-anchor="middle" fill="var(--accent-3)" font-size="11.5" font-weight="700">一条时间序列</text>
+    <text x="388" y="104" text-anchor="middle" fill="var(--muted)" font-size="9">time series</text>
+    <text x="388" y="128" text-anchor="middle" fill="var(--ink)" font-size="9">同一名字 + 同一标签集</text>
+    <text x="388" y="148" text-anchor="middle" fill="var(--muted)" font-size="9">的样本排队</text>
+    <text x="388" y="172" text-anchor="middle" fill="var(--muted)" font-size="8.5">序列是身份，查询按身份取</text>
+
+    <line x1="488" y1="120" x2="542" y2="120" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar44a)"/>
+    <text x="515" y="106" text-anchor="middle" fill="var(--muted)" font-size="8.5">随时间生长</text>
+
+    <rect x="546" y="30" width="200" height="180" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="646" y="56" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">样本 sample</text>
+    <rect x="562" y="70" width="168" height="28" rx="6" fill="var(--bg)" stroke="var(--line)"/>
+    <text x="646" y="88" text-anchor="middle" fill="var(--muted)" font-size="8.5">…值 1027 @ 时间戳 t₁</text>
+    <rect x="562" y="104" width="168" height="28" rx="6" fill="var(--bg)" stroke="var(--line)"/>
+    <text x="646" y="122" text-anchor="middle" fill="var(--muted)" font-size="8.5">…值 1083 @ 时间戳 t₂</text>
+    <rect x="562" y="138" width="168" height="28" rx="6" fill="var(--bg)" stroke="var(--line)"/>
+    <text x="646" y="156" text-anchor="middle" fill="var(--muted)" font-size="8.5">…值 1130 @ 时间戳 t₃</text>
+    <text x="646" y="192" text-anchor="middle" fill="var(--muted)" font-size="8.5">float64 值 + 毫秒时间戳</text>
+    <text x="14" y="228" fill="var(--muted)" font-size="9.5">官方口径：每条时间序列由指标名 + 标签集唯一标识；任何标签值的增删改都会生成一条新时间序列</text>
+  </svg>
+  </div>
+
+  <p class="note">两条官方细则值得钉住：<strong>标签值一变（增删改都算）就是一条全新序列</strong>——所以"把用户 ID 塞进标签"这种做法会让序列数爆炸，标签是低基数的维度，不是业务主键；<strong>标签值为空等价于标签不存在</strong>。这就是第 1 期说的多维数据模型的落地：维度是标签，查询时拿标签当筛子。</p>
+</section>
+
+<!-- ================= 03 四种指标类型 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>四种指标类型：各管一个场景</h2>
+  <p>官方《Metric types》把指标分四种。概念层先记"各自适合什么"——第 4 期实战再上手用：</p>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>类型</th><th>官方定义一句话</th><th>适合什么场景</th></tr></thead>
+    <tbody>
+      <tr><td><strong>counter 计数器</strong></td><td>单调递增的累计值，只在重启时归零</td><td>请求量、错误量、完成任务数——<strong>想算速率就用它</strong>（配 <code>rate()</code>）</td></tr>
+      <tr><td><strong>gauge 仪表盘</strong></td><td>可自由上下浮动的单一数值</td><td>温度、内存用量、并发数——看当下水位</td></tr>
+      <tr><td><strong>histogram 直方图</strong></td><td>按可配置桶对观测值计数，另给总和与次数</td><td>请求耗时、响应大小——<strong>配 <code>histogram_quantile()</code> 算分位数</strong>，桶可跨实例聚合</td></tr>
+      <tr><td><strong>summary 摘要</strong></td><td>客户端在滑动窗口内算好分位数直接暴露</td><td>单实例分位数直读——分位数<strong>不能跨实例聚合</strong>，这是与 histogram 的核心分界</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note">histogram 暴露的是一组序列：<code>名字_bucket{le="上界"}</code> 累计桶、<code>名字_sum</code> 总和、<code>名字_count</code> 次数；summary 则给 <code>名字{quantile="0.9"}</code> 这样的分位数序列。选型口诀：<strong>要跨实例算 P99，用 histogram 在服务端算；单机自己看自己，summary 客户端算好更省事</strong>。</p>
+</section>
+
+<!-- ================= 04 抓取体系 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>抓取体系：job、instance 与服务发现</h2>
+  <p>第 2 期你配过 <code>scrape_configs</code>，现在把背后的概念钉牢。官方《Jobs and instances》的定义：<strong>"一个可以被抓取的端点叫 instance（实例），通常对应一个进程；一组同用途的 instance 叫 job（作业）</strong>"——比如 api-server 四个副本就是一个 job 下的四个 instance。抓取时 Prometheus 自动给每个样本附加 <code>job</code> 和 <code>instance</code> 标签（后者是目标的 host:port），所以"哪台机器来的数据"不用业务自己埋点。</p>
+  <p>目标名单从哪来？官方 Configuration 的原话："目标可以通过 static_configs 静态配置，也可以用受支持的服务发现机制动态发现"。服务发现（SD）是独立模块：Kubernetes 的 <code>kubernetes_sd_configs</code>、Consul 的 <code>consul_sd_configs</code>、DNS、文件（<code>file_sd_configs</code>）等一整排 <code>*_sd_configs</code>，监控端直接问基础设施"现在有哪些目标"，扩容缩容不用改监控配置。静态配置适合固定设备，SD 适合云原生弹性环境——Kubernetes 对象与控制面的机制，K8s 系列课已讲过，延伸阅读见 <a href="0023-k8s-core-concepts-architecture.html">K8s 系列第 3 期</a>。目标在抓取前还能过一道 <code>relabel_configs</code>——官方一句话："对任何目标及其标签做高级修改"（过滤目标、改写地址），本期知道有这一步就够。</p>
+  <p>还剩一个第 1 期埋的伏笔：Pull 模型"抓不到"怎么办？答案第 2 期你已经见过——<strong>每次抓取的结果本身就是一条指标</strong>：<code>up</code> 在实例可达时记 1、抓取失败时记 0（官方定义），还有 <code>scrape_duration_seconds</code>（抓取耗时）等伴生序列。服务发现管"知道去抓谁"，<code>up</code> 管"抓没抓到"——两个机制配合，Pull 的"抓不到即信号"才闭环：目标挂了不用它上报，监控端自己第一个知道。</p>
+</section>
+
+<!-- ================= 05 PromQL 向量模型 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>PromQL 眼中的世界：即时向量与区间向量</h2>
+  <p>PromQL 的表达式结果只有四种类型：即时向量、区间向量、标量、字符串（官方注明最后一种目前未使用）。前两种是日常主力，官方《Querying basics》的示例正好是一组渐进四连：</p>
+  <div class="codeblock"><pre>http_requests_total
+http_requests_total{job="prometheus", group="canary"}
+http_requests_total{job="prometheus"}[5m]
+rate(http_requests_total{job="prometheus"}[5m])</pre></div>
+  <ul>
+    <li><strong>前两行是即时向量选择器</strong>：在评估时刻，每条匹配的序列各返回最近的一个样本（样本超过回看窗口的序列直接不出现）；花括号是标签筛子，<code>=</code> 精确等于、<code>!=</code> 不等、<code>=~</code> 正则匹配、<code>!~</code> 正则不匹配，正则默认完全锚定；</li>
+    <li><strong>第三行是区间向量选择器</strong>：加一个 <code>[5m]</code>，每条序列返回最近 5 分钟的一串样本——它是"一段历史"，不能直接画图，是函数的原料；</li>
+    <li><strong>第四行回答"rate() 这类函数为什么存在"</strong>：counter 只涨不跌，直接看值没有剧情，增速才有。<code>rate()</code> 吃区间向量、吐即时向量——官方定义是"计算区间向量中时间序列的每秒平均增长率"，并且"单调性的断点（比如目标重启导致的计数器归零）会被自动修正"。</li>
+  </ul>
+  <p>一句话记住向量模型：<strong>PromQL 的世界里没有"一行数据"，只有"每条序列此刻的值"（即时向量）和"每条序列一段时间的值"（区间向量）</strong>。第 2 期那条 <code>rate(...[1m])</code> 曲线，原理就在这里。</p>
+</section>
+
+<!-- ================= 06 存储两级 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>存储两级：head 住内存，block 落盘只读</h2>
+  <p>样本写进来之后住哪？官方《Storage》页给出两级结构：<strong>"新写入的样本按两小时一组分块（two-hour blocks）"；当前承接写入的 head block "保存在内存里，并未完整持久化"，靠"预写日志（WAL）在服务重启时可回放"兜底；每攒满两小时，封口成一个磁盘 block（目录里含 chunks 样本、index 索引与 metadata），最初的两小时 block 之后"在后台被压缩合并（compaction）成更长的 block"</strong>：</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 280" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar44b" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="14" y="40" width="120" height="80" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="74" y="74" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">抓取写入</text>
+    <text x="74" y="94" text-anchor="middle" fill="var(--muted)" font-size="8.5">Retrieval 每 15s</text>
+
+    <line x1="134" y1="80" x2="188" y2="80" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar44b)"/>
+
+    <rect x="192" y="26" width="210" height="108" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="297" y="52" text-anchor="middle" fill="var(--accent-3)" font-size="11.5" font-weight="700">head block · 内存常驻</text>
+    <text x="297" y="74" text-anchor="middle" fill="var(--muted)" font-size="8.5">最新约 2 小时样本</text>
+    <text x="297" y="92" text-anchor="middle" fill="var(--muted)" font-size="8.5">可查可写 · 未完整落盘</text>
+    <rect x="206" y="102" width="182" height="24" rx="6" fill="var(--hot-bg)" stroke="var(--accent)"/>
+    <text x="297" y="118" text-anchor="middle" fill="var(--accent-3)" font-size="8.5" font-weight="700">WAL 顺序追加兜底</text>
+
+    <line x1="402" y1="80" x2="456" y2="80" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar44b)"/>
+    <text x="429" y="66" text-anchor="middle" fill="var(--muted)" font-size="8.5">2h 封口</text>
+
+    <rect x="460" y="26" width="210" height="108" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="565" y="52" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">磁盘 block · 2 小时一段</text>
+    <text x="565" y="74" text-anchor="middle" fill="var(--muted)" font-size="8.5">chunks 样本 + index + meta</text>
+    <text x="565" y="92" text-anchor="middle" fill="var(--muted)" font-size="8.5">封口后样本不再改写</text>
+    <text x="565" y="112" text-anchor="middle" fill="var(--muted)" font-size="8.5">删除只记 tombstone 标记</text>
+
+    <rect x="460" y="180" width="210" height="72" rx="10" fill="var(--card)" stroke="var(--line)" stroke-dasharray="5 4"/>
+    <text x="565" y="206" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">后台 compaction</text>
+    <text x="565" y="226" text-anchor="middle" fill="var(--muted)" font-size="8.5">小 block 压缩合并成大 block</text>
+    <line x1="565" y1="134" x2="565" y2="180" stroke="var(--muted)" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ar44b)"/>
+
+    <rect x="130" y="180" width="180" height="72" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="220" y="206" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">PromQL 查询</text>
+    <text x="220" y="226" text-anchor="middle" fill="var(--muted)" font-size="8.5">head + 磁盘 block 一起作答</text>
+    <line x1="192" y1="134" x2="225" y2="180" stroke="var(--muted)" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ar44b)"/>
+    <line x1="460" y1="216" x2="310" y2="216" stroke="var(--muted)" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ar44b)"/>
+    <text x="14" y="272" fill="var(--muted)" font-size="9.5">官方口径：two-hour blocks · head 保内存靠 WAL 兜底 · 初始两小时 block 后台 compaction 成更长 block</text>
+  </svg>
+  </div>
+
+  <p>几个官方数字帮你建立体感：WAL 按段存放在 wal 目录，<strong>单段 128MB，最少保留三段</strong>；数据在磁盘上"平均每个样本只占 1 到 2 字节"；默认保留期 15 天。删除不抹数据：删除记录"存在单独的 tombstone 文件里而不是立刻移除"，合并时才真正清走——上一系列讲 Elasticsearch 的 segment 不可变、删除是标记，是不是同一个思路？</p>
+  <p class="warn">反直觉点：<strong>你以为监控数据第一时间落盘，其实最新两小时住在内存里</strong>。这不是冒险，是算账后的设计——写路径是纯内存追加加 WAL 顺序写，磁盘上只有封口的、紧凑的、只读的 block。写吞吐归内存，读性能归磁盘，各得其所；代价是断电时靠 WAL 回放补回 head 里没封口的样本。为什么这个两级账划算，思考题一展开。</p>
+</section>
+
+<!-- ================= 07 高可用笨办法 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>高可用的"笨办法"：两个实例各抓各的</h2>
+  <p>单机自治换来了简单，也带来了单点问题：机器一挂，这台机器的监控数据就断档，而且"监控自己挂了"恰恰是最需要监控的时刻。怎么办？官方 FAQ 的回答朴素得出人意料："可以。<strong>在两台或多台独立机器上运行配置相同的 Prometheus</strong>（run identical Prometheus servers on two or more separate machines）"——不是组集群，不是选主分片，是各抓各的、互不知道对方存在：</p>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>对比</th><th>直觉方案：监控端组高可用集群</th><th>官方笨办法：两个独立实例各抓各的</th></tr></thead>
+    <tbody>
+      <tr><td>数据一致性</td><td>实例间分片或复制，要维护一致性协议</td><td>数据天然重复，不追求一致——重复是冗余，不是错误</td></tr>
+      <tr><td>故障影响</td><td>选主、再均衡都要时间，故障窗口内监控失明</td><td>谁挂谁下线，幸存实例继续抓，无切换动作</td></tr>
+      <tr><td>重复数据处理</td><td>（本想避免重复才组集群）</td><td>告警经 Alertmanager 自动去重（官方原话 identical alerts will be deduplicated）；长期存储侧 Thanos 类工具做数据去重</td></tr>
+      <tr><td>依赖方向</td><td>监控可用性依赖自身组件的正常协作</td><td>依赖被剥离到最低：两个实例零通信，故障域天然隔离</td></tr>
+    </tbody>
+  </table></div>
+  <p>为什么"笨办法"在监控场景反而是对的？两个理由。<strong>其一，监控系统是最后的观察者，它的可用性不能依赖任何被监控对象，也不该依赖自身那套更容易一起出错的复杂状态</strong>——两个零通信的实例，等于把"协调"这个故障源整个删掉了。<strong>其二，去重比一致性简单得多</strong>：一致性要求每次写入都对齐（难），去重只是把重复的答案合并（易）。查询侧 Grafana 两份数据任选或聚合，告警侧 Alertmanager 天然去重，数据侧 Thanos 类工具封口去重——重复数据用一层"合并"就消化了。</p>
+</section>
+
+<!-- ================= 08 整体架构 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>整体架构：一张图看清全链</h2>
+  <p>把本期所有概念拼回一张图——这是本期的主图，第 4 期实战和第 5 期源码导读都会回到它：</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar44c" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="14" y="40" width="150" height="96" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="89" y="68" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">服务发现</text>
+    <text x="89" y="88" text-anchor="middle" fill="var(--muted)" font-size="8.5">Kubernetes · Consul</text>
+    <text x="89" y="104" text-anchor="middle" fill="var(--muted)" font-size="8.5">DNS · file_sd · 静态</text>
+    <text x="89" y="124" text-anchor="middle" fill="var(--muted)" font-size="8.5">discovery/</text>
+
+    <rect x="14" y="190" width="150" height="80" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="89" y="218" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">被抓目标</text>
+    <text x="89" y="238" text-anchor="middle" fill="var(--muted)" font-size="8.5">应用 / Exporter</text>
+    <text x="89" y="256" text-anchor="middle" fill="var(--muted)" font-size="8.5">暴露 /metrics 端点</text>
+
+    <rect x="230" y="88" width="160" height="140" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="310" y="116" text-anchor="middle" fill="var(--accent-3)" font-size="11.5" font-weight="700">Retrieval 抓取</text>
+    <text x="310" y="138" text-anchor="middle" fill="var(--muted)" font-size="8.5">按 scrape_interval 拉取</text>
+    <text x="310" y="156" text-anchor="middle" fill="var(--muted)" font-size="8.5">附加 job/instance 标签</text>
+    <text x="310" y="176" text-anchor="middle" fill="var(--muted)" font-size="8.5">relabel 改写目标</text>
+    <text x="310" y="196" text-anchor="middle" fill="var(--muted)" font-size="8.5">scrape/ · discovery/</text>
+    <text x="310" y="214" text-anchor="middle" fill="var(--accent-3)" font-size="8.5" font-weight="700">失败记 up=0</text>
+
+    <line x1="164" y1="88" x2="230" y2="128" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar44c)"/>
+    <text x="196" y="96" text-anchor="middle" fill="var(--muted)" font-size="8.5">目标列表</text>
+    <line x1="164" y1="230" x2="230" y2="192" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar44c)"/>
+    <text x="196" y="224" text-anchor="middle" fill="var(--muted)" font-size="8.5">HTTP 拉取</text>
+
+    <rect x="446" y="88" width="150" height="140" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="521" y="116" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">TSDB 本地存储</text>
+    <text x="521" y="138" text-anchor="middle" fill="var(--muted)" font-size="8.5">head · 内存 + WAL</text>
+    <text x="521" y="156" text-anchor="middle" fill="var(--muted)" font-size="8.5">2h 封口 block</text>
+    <text x="521" y="174" text-anchor="middle" fill="var(--muted)" font-size="8.5">后台 compaction</text>
+    <text x="521" y="196" text-anchor="middle" fill="var(--muted)" font-size="8.5">默认留 15 天</text>
+    <text x="521" y="214" text-anchor="middle" fill="var(--muted)" font-size="8.5">tsdb/</text>
+
+    <line x1="390" y1="158" x2="446" y2="158" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar44c)"/>
+    <text x="418" y="144" text-anchor="middle" fill="var(--muted)" font-size="8.5">写入</text>
+
+    <rect x="640" y="60" width="106" height="96" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="693" y="88" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">HTTP API</text>
+    <text x="693" y="108" text-anchor="middle" fill="var(--muted)" font-size="8.5">PromQL 查询</text>
+    <text x="693" y="126" text-anchor="middle" fill="var(--muted)" font-size="8.5">web/ · promql/</text>
+    <line x1="596" y1="120" x2="640" y2="110" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar44c)"/>
+
+    <rect x="600" y="240" width="146" height="70" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="673" y="266" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">Grafana 面板</text>
+    <text x="673" y="286" text-anchor="middle" fill="var(--muted)" font-size="8.5">Prometheus 数据源</text>
+    <line x1="693" y1="156" x2="690" y2="240" stroke="var(--muted)" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ar44c)"/>
+    <text x="712" y="200" text-anchor="middle" fill="var(--muted)" font-size="8">查</text>
+
+    <rect x="380" y="250" width="150" height="64" rx="10" fill="var(--card)" stroke="var(--line)" stroke-dasharray="5 4"/>
+    <text x="455" y="274" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">Rules 规则评估</text>
+    <text x="455" y="292" text-anchor="middle" fill="var(--muted)" font-size="8.5">rules/ · 记录与告警规则</text>
+    <line x1="500" y1="228" x2="466" y2="250" stroke="var(--muted)" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ar44c)"/>
+
+    <rect x="196" y="250" width="150" height="64" rx="10" fill="var(--hot-bg)" stroke="var(--accent)"/>
+    <text x="271" y="274" text-anchor="middle" fill="var(--accent-3)" font-size="10.5" font-weight="700">Alertmanager</text>
+    <text x="271" y="292" text-anchor="middle" fill="var(--muted)" font-size="8.5">去重 · 分组 · 路由</text>
+    <line x1="380" y1="282" x2="346" y2="282" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar44c)"/>
+    <text x="363" y="270" text-anchor="middle" fill="var(--muted)" font-size="8">告警</text>
+
+    <text x="14" y="330" fill="var(--muted)" font-size="9.5">主链实线：服务发现出目标，抓取落 TSDB，查询走 HTTP API；侧路虚线：规则在 TSDB 数据上评估，告警交给独立的 Alertmanager</text>
+  </svg>
+  </div>
+  <p>三条读图要点：<strong>采集、存储、查询在主服务内部闭环</strong>——单二进制里跑着抓取、TSDB 与 HTTP 服务；<strong>告警是侧路</strong>——规则评估产生的告警交给独立部署的 Alertmanager 去重、分组、路由，它挂了不影响采集；<strong>Grafana 走同一条查询通道</strong>——第 4 期它作为看板配套出场。</p>
+</section>
+
+<!-- ================= 09 仓库模块地图 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>源码仓库顶层地图：目录逐个核对</h2>
+  <p>架构要落到代码才踏实。下面是 <code>github.com/prometheus/prometheus</code> 在 tag <strong>v3.14.0</strong> 仓库树上的顶层目录（与本期架构图的框一一对应，目录名全部对照当页树核对）：</p>
+  <div class="codeblock"><pre>prometheus @ v3.14.0 · 顶层目录
+├─ cmd/prometheus/  主程序入口（配套校验工具 promtool 在 cmd/promtool/）
+├─ discovery/       服务发现：kubernetes/consul/dns/file 等 SD 模块
+├─ scrape/          抓取引擎：拉取 /metrics、附加 job/instance 标签、记 up
+├─ config/          配置加载与校验：prometheus.yml 的世界
+├─ tsdb/            本地时序库：head、WAL、block 与 compaction
+├─ promql/          查询引擎：PromQL 解析、规划与求值
+├─ rules/           记录规则与告警规则的周期求值
+├─ storage/         存储接口与 remote read/write 集成
+├─ web/             HTTP API 与内置 Web 界面
+├─ notifier/        告警投递客户端：把告警发给 Alertmanager
+└─ model/ · prompb/ · util/ …  公共数据结构、远程协议、工具库等配套目录</pre></div>
+  <p class="note">读码入口预告：第 5 期源码导读就从这里进——抓取看 <code>scrape/</code>，存储分层看 <code>tsdb/</code>（head.go、db.go），查询看 <code>promql/</code>。本期先把"哪个目录管哪件事"对上号，读码时就不会迷路。</p>
+</section>
+
+<!-- ================= 10 quiz ================= -->
+<section>
+  <h2><span class="sec-num">10</span>随堂一问</h2>
+  <div class="quiz">
+    <div class="quiz-q">
+      <p class="quiz-question">给一条已有序列的某个样本增加了一个新标签（例如补上 handler="/api"），在 Prometheus 眼里发生了什么？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，官方明确：任何标签值的增删改都会生成一条新时间序列，不是在原序列上续写。","对：指标名加标签集是序列的身份，身份变了就是新序列——所以标签只放低基数维度，别把用户 ID 这类高基数值塞进去。","不对，旧序列还在，历史样本不会因此删除。","不对，这是完全合法的操作，只会多出一条序列。"]'>
+        <li class="quiz-option">同一条序列继续续写，只是样本多了个字段</li>
+        <li class="quiz-option">生成一条全新的时间序列，与旧序列并存</li>
+        <li class="quiz-option">旧序列被自动删除，历史样本一并清除</li>
+        <li class="quiz-option">写入报错，样本被丢弃</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 11 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">11</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：head 住内存、block 落盘只读——如果把写路径反过来（每条样本直接落盘）或干脆全内存，各会坏在哪？两级设计到底赚了什么？</summary>
+    <div class="details-body">
+      <p>先看"每条样本直接落盘"会坏在哪。监控写入是持续的中小条流：几万条活跃序列、每十几秒各来一个点，直接落盘意味着磁盘被切成无数随机小写，还要频繁更新索引——机械盘扛不住吞吐，SSD 也被写放大烧寿命；更麻烦的是"边写边改"的文件没法大胆压缩，磁盘占用反而涨。再看"全内存"会坏在哪：容量天花板明显（内存贵），断电即失忆，而监控恰恰要在断电、宕机这类最糟糕的时刻保持记录。两级设计正是把两边最贵的部分都绕开了：<strong>写路径是内存追加加 WAL 顺序写</strong>——随机小写变成了内存里的顺序追加，磁盘上只有 WAL 这种顺序日志；<strong>攒满两小时才封一次口</strong>——落盘从"每条一写"变成"两小时一整块"，封出的 block 数据不再变化，可以放胆做列式压缩（官方口径平均每样本 1 到 2 字节，就是静态数据压缩的红利），也天然对文件系统缓存友好——历史查询碰到的是只读、紧凑、可常驻缓存的文件。崩溃窗口由 WAL 收口：重启回放补回 head 里没封口的样本，代价只是启动时多等一会儿。<strong>一句话：内存买写吞吐，只读 block 买读性能与压缩率，WAL 买崩溃安全——三个承诺各找一个最便宜的机制去兑现</strong>。这套"内存现值 + 不可变落盘 + 顺序日志兜底"的三件套，在 LSMT 类存储、消息队列的页缓存设计里反复出现，值得原样搬进你自己的设计清单。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：双实例笨办法要付双倍抓取压力与双倍存储，为什么官方仍把它当高可用的标准答案？"去重比一致性简单"到底简单在哪？</summary>
+    <div class="details-body">
+      <p>先把"直觉方案"逼到墙角看看它要付什么。如果让两个 Prometheus 实例组集群、分片抓取：谁抓哪一半要协商——协商就要共识协议，共识协议自己会挂、会脑裂、会在网络分区时拒绝服务；实例挂掉要再均衡——再均衡期间那部分目标没人抓，<strong>监控在最需要工作的时刻失明了</strong>；更根本的：这些协调组件全是新代码、新状态、新故障面，而监控系统是"观察者"，观察者自己越复杂，你越分不清看到的问题是系统的还是监控自身的。再看笨办法付什么：双倍抓取压力（对目标的请求翻倍，但抓取是轻量文本拉取，加倍通常无感）、双倍磁盘（官方口径每样本 1 到 2 字节，翻倍往往可接受）、双倍告警（被 Alertmanager 去重）。对比之下结论就出来了：<strong>一致性方案把"数据不重复"当作必须时刻维持的强约束，任何一处失约就是事故；笨办法把"数据重复"当作默认事实，去重只是查询或投递时做一次合并</strong>。一致性是持续付费的"状态"，去重是一次性付费的"计算"；状态会在故障时刻背叛你，计算不会。这个思路在工程里处处通用：DNS 用缓存加 TTL 而不是全局强一致，消息队列允许重复投递加消费端幂等——当"防重复"的代价超过"容重复"的代价时，选后者。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 12 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">12</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五条：</strong></p>
+    <ul>
+      <li>术语一条链：指标名 + 标签集 = 一条时间序列，样本 = float64 值 + 毫秒时间戳；标签值一变就是新序列，所以标签只放低基数维度；</li>
+      <li>四种类型各管一摊：counter 算速率（配 <code>rate()</code>）、gauge 看水位、histogram 在服务端算分位数（可聚合）、summary 客户端直出分位数（不可聚合）；</li>
+      <li>抓取体系：instance 是可抓端点、job 是同类分组，标签自动附加；服务发现管"知道抓谁"，<code>up</code> 0/1 管"抓没抓到"，Pull 的信号闭环在这；</li>
+      <li>PromQL 眼中只有两种向量：即时向量是"每条序列此刻一个值"，区间向量是"一段样本"，<code>rate()</code> 吃区间吐即时并自动修正 counter 重置；</li>
+      <li>存储两级：head 住内存靠 WAL 兜底、两小时封一个只读 block 后台合并——写吞吐与读性能各得其所；高可用官方答案是双实例各抓各的，去重交给 Alertmanager。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>概念地图有了。下一期我们动手做一个端到端的监控实战——给一个真实服务埋点，从暴露指标、配置抓取，到写 PromQL 出曲线、配告警规则触发 Alertmanager，把本期架构图上每个框都跑起来。</p>
+  <p><strong>Primary source：</strong><a href="https://prometheus.io/docs/concepts/data_model/" target="_blank" rel="noopener">Prometheus 官方文档 · Data model</a>——本期术语体系的官方出处；配套页面：<a href="https://prometheus.io/docs/concepts/metric_types/" target="_blank" rel="noopener">Metric types（四种类型定义）</a> · <a href="https://prometheus.io/docs/concepts/jobs_instances/" target="_blank" rel="noopener">Jobs and instances（job/instance 与 up）</a> · <a href="https://prometheus.io/docs/prometheus/latest/storage/" target="_blank" rel="noopener">Storage（head/WAL/block/compaction）</a> · <a href="https://prometheus.io/docs/prometheus/latest/querying/basics/" target="_blank" rel="noopener">Querying basics（向量模型）</a> · <a href="https://prometheus.io/docs/introduction/faq/" target="_blank" rel="noopener">FAQ（高可用官方口径）</a>；模块地图核对于 <a href="https://github.com/prometheus/prometheus/tree/v3.14.0" target="_blank" rel="noopener">prometheus tag v3.14.0 仓库树</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0043-prom-quickstart.html">← 上一期：5 分钟跑起来 Prometheus</a></span>
+  <a class="next" href="0045-prom-in-action.html">下一期：Prometheus 实战：端到端监控 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

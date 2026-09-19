@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Elasticsearch 系列第 4 期：实战场景 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0040</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0039-es-core-concepts-architecture.html">上一期:0039</a> · Elasticsearch 系列第 4 期 / 共 5 期 · <a href="0041-es-source-reading.html">下一期:0041</a> · <a href="https://www.elastic.co/docs" target="_blank" rel="noopener">elastic.co/docs ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · ELASTICSEARCH 系列第 4 期：实战场景</p>
+  <h1>Elasticsearch 实战：端到端做一个商品搜索</h1>
+  <p class="subtitle">上一期拿到了 ES 的概念地图：倒排索引、mapping、segment、分片与写入路径。本期把地图用起来，端到端做一个真实小场景——<strong>商品搜索</strong>：输入关键词返回相关商品，命中的词<strong>高亮</strong>，侧栏给出<strong>品牌分布</strong>。从建索引、声明 mapping，到 bulk 批量上架，再到官方 Java 客户端一次请求拿齐"命中 + 高亮 + 聚合"，每一步都能对回官方文档、照着复现。深挖源码留给第 5 期，本期只做一件事：<strong>让它真实跑起来</strong>。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🔍 搜索引擎 · Java · 实战</span>
+    <span class="tag">📦 ES v9.5.4 + elasticsearch-java 9.5.4（Maven Central 核对）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 4 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 系列地图 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>系列地图：实战把概念变成肌肉记忆</h2>
+  <p>老规矩先看地图。第 1 期立住了心智模型，第 2 期把服务跑起来，第 3 期铺开了概念与架构。<strong>本期是第 4 期实战</strong>：上一期的每个名词——mapping、倒排索引、分片、聚合——都会变成实打实的一步命令或一段代码。第 5 期进源码。本期结束时你应该能独立搭出：一个能搜、能高亮、能按品牌聚合的商品搜索。</p>
+</section>
+
+<!-- ================= 02 需求拆解 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>需求拆解：一个商品搜索要的四样东西</h2>
+  <p>场景很简单：电商站内搜。用户输入"wireless headphones"（无线耳机），系统返回相关商品列表，命中的词标红，侧栏还能按品牌筛。拆成能力清单，ES 三件套全部在场：</p>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>商品搜索需求</th><th>ES 的能力</th><th>背后靠什么</th></tr></thead>
+    <tbody>
+      <tr><td>输关键词，搜出相关商品</td><td>match 全文检索</td><td>title 分词进倒排索引，查词项直接拿文档列表（第 3 期）</td></tr>
+      <tr><td>命中的词标红高亮</td><td>highlight 高亮</td><td>返回时按命中的词项加标记，不另建结构</td></tr>
+      <tr><td>侧栏显示品牌分布、点选筛选</td><td>terms 聚合</td><td>brand 是 keyword，按值分桶计数</td></tr>
+      <tr><td>按价格区间过滤</td><td>range 过滤</td><td>数值字段列存（doc values），范围判断很快</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note">第 3 期的结论"类型声明了，检索行为就定了"在本期全程兑现：这条能力清单里，每个需求都能倒推回 mapping 里的一个字段类型选择。</p>
+</section>
+
+<!-- ================= 03 演示链① mapping ================= -->
+<section>
+  <h2><span class="sec-num">03</span>第一步：建索引，mapping 定生死</h2>
+  <p>演示链第一站，把商品索引建出来。四个字段，每个都<strong>想清楚再声明</strong>：</p>
+  <div class="codeblock"><pre>PUT products
+{
+  "mappings": {
+    "properties": {
+      "title":       { "type": "text" },
+      "description": { "type": "text" },
+      "brand":       { "type": "keyword" },
+      "price":       { "type": "double" }
+    }
+  }
+}</pre></div>
+  <p class="note">标题和描述要参与全文检索，建成 <code>text</code>；品牌要精确过滤和聚合，建成 <code>keyword</code>；价格是数值。请求体结构对照官方《Explicit mapping》样例。为什么这个选择"定生死"？第 05 节踩一个坑你就信了。</p>
+</section>
+
+<!-- ================= 04 演示链② bulk ================= -->
+<section>
+  <h2><span class="sec-num">04</span>第二步：bulk 批量上架八件商品</h2>
+  <div class="codeblock"><pre>POST products/_bulk
+{ "index": { } }
+{ "title": "Wireless Headphones WH-CH520", "description": "wireless bluetooth headphones, 35h battery", "brand": "Sony", "price": 399 }
+{ "index": { } }
+{ "title": "Wireless Mouse M185 Silent", "description": "silent wireless mouse with 2.4G dongle", "brand": "Logitech", "price": 199 }
+:: ……同样格式再写 6 件：Sony×1 · Anker×3 · Xiaomi×1（共 8 件上架）</pre>
+  <pre>{ "errors": false, "took": 34, "items": [ …… 8 个结果逐一回执，全部 created …… ] }</pre></div>
+  <p class="note">格式一句话：<strong>一行元信息声明写到哪，紧跟一行文档，交替往下排</strong>（官方《Index and search basics》批量示例同款）。响应 <code>errors:false</code> 即全部成功。品牌账先记牢：索尼 2、罗技 2、安克 3、小米 1——等会儿聚合的桶要和它对账。</p>
+</section>
+
+<!-- ================= 05 钩子一 text vs keyword ================= -->
+<section>
+  <h2><span class="sec-num">05</span>钩子一：对 title 聚合，ES 当场翻脸</h2>
+  <p>第三站故意踩坑。产品经理说"顺便给搜索词统计个热度"，那就顺手对 title 做个 terms 聚合试试：</p>
+  <div class="codeblock"><pre>GET products/_search
+{
+  "aggs": {
+    "titles": { "terms": { "field": "title" } }
+  }
+}</pre>
+  <pre>{
+  "status": 400,
+  "error": { "type": "illegal_argument_exception",
+    "reason": "Fielddata is disabled on text fields by default. …… Alternatively use a keyword field instead." }
+}</pre></div>
+  <p>服务端回 400，拒绝得干脆利落。错误消息最后一句就是药方：<strong>use a keyword field instead</strong>。这不是故障，是官方设计：</p>
+  <p class="note">官方《Terms aggregation》文档 Note 原文：默认不能对 text 字段做 terms 聚合，用 keyword 字段代替；硬要开 fielddata 也能做，但官方明说会<strong>显著增加内存开销</strong>（来源：elastic.co/docs/reference/aggregations/search-aggregations-bucket-terms-aggregation，2026-09-19 截图）。brand 一开始就建成 keyword，此刻正好派上用场。</p>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>对比</th><th>text：为"找"而建</th><th>keyword：为"对"而建</th></tr></thead>
+    <tbody>
+      <tr><td>写入时</td><td>分词，拆成词项进倒排索引</td><td>不分词，整串当一个值</td></tr>
+      <tr><td>主场</td><td>match 全文检索 + 相关性得分</td><td>精确过滤、排序、terms 聚合分桶</td></tr>
+      <tr><td>禁区</td><td>整串聚合被官方拒绝（fielddata 默认禁用）</td><td>全文检索轮不到它</td></tr>
+      <tr><td>两样都要</td><td colspan="2">text 字段挂一个 keyword 子字段（multi-fields），各干各的</td></tr>
+    </tbody>
+  </table></div>
+  <p class="warn">一字之差，两个世界：text 管找，keyword 管对。mapping 是搜索引擎里的地基工程——建索引那一刻想清楚，后面每一步都是顺路；建错了，检索这一路处处别扭。</p>
+</section>
+
+<!-- ================= 06 Java 接入 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>接入 Java：官方客户端 9.5.4</h2>
+  <p>命令行验证完，接进 Java。客户端用 Elastic <strong>官方 elasticsearch-java</strong>（Java API Client），Maven Central 上当前版本 9.5.4，与服务端同步发版（2026-09-19 核对）；官方兼容口径：<strong>9.x 客户端配 9.x 服务端</strong>。</p>
+  <p class="note">central.sonatype.com 实拍：版本选择器 9.5.4，依赖片段可直接抄（2026-09-19）。依赖只有一个：</p>
+  <div class="codeblock"><pre>&lt;dependency&gt;
+  &lt;groupId&gt;co.elastic.clients&lt;/groupId&gt;
+  &lt;artifactId&gt;elasticsearch-java&lt;/artifactId&gt;
+  &lt;version&gt;9.5.4&lt;/version&gt;
+&lt;/dependency&gt;</pre></div>
+  <p>建连用 9.x 的新写法，一个 <code>of</code> 方法搞定——主机、账号、证书，全是第 2 期领的家当：</p>
+  <div class="codeblock"><pre>ElasticsearchClient es = ElasticsearchClient.of(b -&gt; b
+    .host("https://localhost:9200")
+    .username("elastic").password(password)   // 也可 .apiKey(...)
+    .sslContext(TransportUtils                // 第 2 期拷出的自签证书
+        .sslContextFromHttpCaCrt(new File("http_ca.crt"))));</pre></div>
+  <p class="note"><code>host / username / password / sslContext</code> 均为官方 transport 配置项，<code>TransportUtils.sslContextFromHttpCaCrt</code> 是官方工具方法（核对于 elasticsearch-java 仓库 main 分支源码）。客户端官方建议建一次、全局复用。</p>
+</section>
+
+<!-- ================= 07 一次请求三件事 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>一次请求三件事：match + 高亮 + 聚合</h2>
+  <p>主菜。一次搜索请求把三件事一起办了——搜、高亮、聚合：</p>
+  <div class="codeblock"><pre>SearchResponse&lt;Product&gt; resp = es.search(s -&gt; s
+    .index("products")
+    .query(q -&gt; q.match(m -&gt; m
+        .field("title").query("wireless headphones")))
+    .highlight(h -&gt; h.fields("title", f -&gt; f))
+    .aggregations("brands", a -&gt; a.terms(t -&gt; t.field("brand"))),
+  Product.class);</pre>
+  <pre>:: 一次往返带回三样：hits 命中列表 · 每件的高亮片段 · brands 品牌桶
+:: 聚合默认只统计"命中的文档"——侧栏品牌分布是这一轮搜索的分布</pre></div>
+  <p>每一段写法都能对回官方文档。高亮在 REST 里就是请求体中一个 <code>highlight</code> 对象：</p>
+  <p class="note">官方《Highlighting》：在请求体里加 highlight 对象、声明字段即可，响应里每个命中多一个 highlight 元素，装着加了 <code>&lt;em&gt;</code> 标记的片段（来源：elastic.co/docs/reference/elasticsearch/rest-apis/highlighting，2026-09-19 截图）。Java 那行 <code>fields("title", …)</code> 对应的就是这段 JSON。响应拆解：</p>
+  <div class="codeblock"><pre>System.out.println("共 " + resp.hits().total().value() + " 件");
+for (Hit&lt;Product&gt; hit : resp.hits().hits()) {
+    System.out.println(hit.score() + " "
+        + hit.highlight().get("title").get(0));
+}
+for (StringTermsBucket b : resp.aggregations()
+        .get("brands").sterms().buckets().array()) {
+    System.out.println(b.key().stringValue() + " = " + b.docCount());
+}</pre>
+  <pre>:: imports 略；Product 为 record：title / description / brand / price
+:: sterms = 字符串分桶（brand 是 keyword）；桶 key 转字符串即品牌名</pre></div>
+  <p>跑起来，一轮端到端的控制台回显：</p>
+  <div class="codeblock"><pre>$ mvn -q compile exec:java -Dexec.mainClass=ProductSearch
+共 5 件 · 最高分 2.63
+2.63  &lt;em&gt;Wireless&lt;/em&gt; &lt;em&gt;Headphones&lt;/em&gt; WH-CH520
+2.41  Noise Cancelling &lt;em&gt;Wireless&lt;/em&gt; &lt;em&gt;Headphones&lt;/em&gt; WH-1000XM5
+1.51  &lt;em&gt;Wireless&lt;/em&gt; Mouse M185 Silent
+1.48  &lt;em&gt;Wireless&lt;/em&gt; Earbuds Soundcore Life P3
+1.44  &lt;em&gt;Wireless&lt;/em&gt; Charging Pad 15W
+[ 品牌 ] Anker=2 · Sony=2 · Logitech=1</pre>
+  <pre>:: 得分由 BM25 依词频与文档长度现算，数值随数据集而异
+:: 桶账对上了：Anker 2 + Sony 2 + Logitech 1 = 命中 5 件（小米 0 件，没命中）</pre></div>
+  <p>两个词全中的两副耳机排最前，只含 wireless 的商品跟在后面——这就是相关性排序；品牌分布加起来正好是命中的五件，印证了"聚合只数命中文档"。</p>
+</section>
+
+<!-- ================= 08 解读：得分与桶 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>解读：得分是算出来的，桶是写入时备好的</h2>
+  <p>回显里有两组数字值得多看一眼。<strong>相关性得分（_score）</strong>的三个直觉：</p>
+  <ul>
+    <li><strong>得分是算出来的，不是存出来的：</strong>BM25 综合词频、文档长度、词的稀有度，在查询时实时计算——同一份文档，换个查询词，得分完全不同；</li>
+    <li><strong>两个词全中，贡献翻倍：</strong>wireless 与 headphones 都命中的商品拿到两份词的贡献，稳压只中一个词的——这就是"两个词全中的耳机排最前"的原因；</li>
+    <li><strong>高亮跟着得分走：</strong>highlight 拿命中的词项回原文定位加标记，查询时现加，换个词标记立刻跟着换。</li>
+  </ul>
+  <p><strong>聚合为什么快？</strong>这是本期第二个钩子。聚合不重读文档——它读的是写入时就备好的两样东西：</p>
+  <ul>
+    <li><strong>列存的文档值（doc values）：</strong>第 3 期讲过，segment 不可变、列存让排序聚合同样受益；keyword 字段每个唯一值一行，聚合顺着列数下去就行；</li>
+    <li><strong>全局序数（global ordinals）：</strong>官方口径，terms 聚合不直接收集字符串，而是给每个唯一值发一个整数编号再计数，原话是"带来重要的性能提升"；segment 不可变，序数表建一次反复用。</li>
+  </ul>
+  <p>把这次搜索放回第 3 期的集群图——计算跟着数据走：</p>
+  <div class="diagram">
+  <svg viewBox="0 0 760 240" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar40" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="10" y="70" width="120" height="80" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="70" y="102" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">Java 应用</text>
+    <text x="70" y="122" text-anchor="middle" fill="var(--muted)" font-size="9">search(...)</text>
+    <rect x="170" y="70" width="130" height="80" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="235" y="98" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">协调节点</text>
+    <text x="235" y="118" text-anchor="middle" fill="var(--muted)" font-size="9">接请求 · 扇出</text>
+    <text x="235" y="136" text-anchor="middle" fill="var(--muted)" font-size="9">归并 · 桶相加</text>
+    <rect x="340" y="16" width="200" height="86" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="440" y="40" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">分片 A（每个分片本地执行）</text>
+    <text x="440" y="60" text-anchor="middle" fill="var(--muted)" font-size="9">查本地倒排索引 → 文档列表</text>
+    <text x="440" y="78" text-anchor="middle" fill="var(--muted)" font-size="9">BM25 打分排 Top N</text>
+    <text x="440" y="94" text-anchor="middle" fill="var(--muted)" font-size="9">本地按 brand 分桶计数</text>
+    <rect x="340" y="126" width="200" height="86" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="440" y="150" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">分片 B</text>
+    <text x="440" y="170" text-anchor="middle" fill="var(--muted)" font-size="9">同样本地算一份</text>
+    <text x="440" y="188" text-anchor="middle" fill="var(--muted)" font-size="9">Top N + 桶</text>
+    <rect x="590" y="70" width="160" height="80" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="670" y="98" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">响应</text>
+    <text x="670" y="118" text-anchor="middle" fill="var(--muted)" font-size="9">hits + highlight + brands 桶</text>
+    <line x1="130" y1="110" x2="166" y2="110" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar40)"/>
+    <line x1="300" y1="94" x2="336" y2="64" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar40)"/>
+    <line x1="300" y1="126" x2="336" y2="160" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar40)"/>
+    <line x1="540" y1="60" x2="586" y2="96" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar40)"/>
+    <line x1="540" y1="164" x2="586" y2="128" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar40)"/>
+    <text x="430" y="232" text-anchor="middle" fill="var(--muted)" font-size="9.5">查询阶段各分片自算，归并阶段桶相加、Top N 排全局序——数据分片存放，计算跟着数据走</text>
+  </svg>
+  </div>
+  <p class="callout">还有两处"诚实的标注"：响应里 <code>sum_other_doc_count</code> 与 <code>doc_count_error_upper_bound</code> 说明 terms 聚合是近似计数——唯一值太多时默认只回前十个桶，size 调大要掂量内存，官方还给 <code>search.max_buckets</code> 设了天花板。用得好聚合，先尊重它的边界。</p>
+</section>
+
+<!-- ================= 09 收纪律 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>收纪律：该做的与别做的</h2>
+  <ul>
+    <li>✅ <strong>生产环境显式写 mapping</strong>——动态推断方便试验，但 text/keyword 的选择决定检索行为，建索引前想清楚；</li>
+    <li>✅ <strong>聚合、过滤、排序字段用 keyword / 数值类型</strong>——官方口径，别跟类型对着干；</li>
+    <li>✅ <strong>批量灌数据走 bulk</strong>——一行元信息一行文档；配合第 3 期组合拳：导入前关刷新，导完手动刷；</li>
+    <li>❌ <strong>把高亮文本当业务数据</strong>——高亮片段带 <code>&lt;em&gt;</code> 标记，是给前端展示的；业务逻辑一律用 <code>_source</code> 原文；</li>
+    <li>❌ <strong>对 text 字段硬开 fielddata 凑合聚合</strong>——官方明说显著增加内存；正确姿势是 keyword 或 keyword 子字段。</li>
+  </ul>
+</section>
+
+<!-- ================= 10 quiz ================= -->
+<section>
+  <h2><span class="sec-num">10</span>随堂一问</h2>
+  <div class="quiz">
+    <div class="quiz-q">
+      <p class="quiz-question">搜索"wireless headphones"命中 5 件商品，请求里同时带了 brand 的 terms 聚合。聚合结果的品牌桶计数范围是？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，聚合默认作用在匹配查询的文档上，不是全索引——要全索引分布得单独发不带 query 的聚合请求。","对：聚合默认只统计命中的文档，本期实测 Anker 2 + Sony 2 + Logitech 1 = 命中 5 件，账是对得上的。","不对，聚合在所有命中分片上都执行后归并，不会只算一个分片。","不对，主副本数据一致，聚合跟副本无关。"]'>
+        <li class="quiz-option">A. products 索引里全部 8 件</li>
+        <li class="quiz-option">B. 命中的 5 件</li>
+        <li class="quiz-option">C. 只统计第一个分片上的命中文档</li>
+        <li class="quiz-option">D. 只统计主分片上的文档，副本不参与</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 11 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">11</span>思考题</h2>
+  <details class="q-card">
+    <summary>思考一：brand 建成 keyword、title 建成 text——如果反过来会各发生什么？要是"既想对品牌做模糊搜索、又想按品牌聚合"呢？</summary>
+    <div class="details-body">
+      <p>反着建，两边同时塌。brand 若建成 text：精确过滤 <code>term: "Sony"</code> 会被分词坑掉——标准分词器把 Sony 原样保留是小幸运，换成多词品牌（如 "Logitech G"）拆成两个词项后，term 查询整串就再也匹配不上；聚合直接 400，就是第 05 节那幕。title 若建成 keyword：整串标题变成一个词项，用户搜 wireless 什么都搜不到——倒排索引里根本没有这个词，只有一串完整标题。工程上的正确姿势是 <strong>multi-fields（一子多母）</strong>：title 建成 text 并挂一个 <code>keyword</code> 子字段（官方动态映射默认就给 text 字段配了 title.keyword），写入时一份原文两条索引路径，全文检索走 text、排序聚合走 keyword 子字段；brand 反过来也一样——建成 keyword 满足聚合，模糊搜品牌用 match 查询照样可用（keyword 字段上的 match 会退化为整串匹配，想分词搜就显式加 text 子字段）。一句话：<strong>不是"选一个"，而是"各配各的检索路径"</strong>，mapping 写的就是这份路线图。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：本期聚合只统计命中的文档。如果运营想要"全站品牌分布"和"搜索结果品牌分布"同时出现在一个页面，请求该怎么发？一次请求能都拿到吗？</summary>
+    <div class="details-body">
+      <p>能，而且正是一次请求两份答案的标准场景：ES 的聚合体系里有<strong>桶聚合的嵌套</strong>与 <code>global</code> 聚合。普通聚合挂在 query 作用域下——只统计命中文档，这就是本期侧栏的"搜索结果品牌分布"；而 <code>global</code> 聚合会<strong>脱离查询作用域</strong>，对整个索引分桶——把它套在外层、里面再嵌一个 terms 聚合，拿到的就是全站品牌分布。一个请求体里两者并存：query 管 hits，普通 aggs 管命中的分布，global + terms 管全站分布，响应里按名字各取各的。代价也要知道：global 聚合每次都扫全索引的列存，大索引上它不吃查询条件的便宜，频控和缓存策略要分开评估。这道题的通用结论：ES 的"聚合作用域"是跟着查询走的，<strong>query 是聚合的默认过滤器，global 是显式的逃生门</strong>——理解了作用域，facets 页面怎么拼请求就再也不是玄学。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 12 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">12</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>端到端搭出一个商品搜索：mapping 定类型 → bulk 上架 → Java 官方客户端一次请求拿命中 + 高亮 + 品牌桶；</li>
+      <li>text 与 keyword 一字之差两个世界：text 分词管检索，keyword 整串管聚合过滤，两样都要用 multi-fields；</li>
+      <li>对 text 做 terms 聚合被官方拒绝（fielddata 默认禁用）——报错消息的最后一句就是药方；</li>
+      <li>客户端与服务端同步发版：elasticsearch-java 9.5.4 配 ES 9.5.4，<code>of</code> 方法三行建连；</li>
+      <li>聚合快在写入时：列存 doc values + 全局序数，查询只数桶不重读文档，且默认只统计命中的文档。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>这个搜索你已经能照着搭出来。下一期是系列收官的源码导读——我们进 server 模块，看倒排索引和 segment 到底是怎么实现的，把第 3 期的架构图和本期的三件套全部落到代码上。</p>
+  <p><strong>Primary source：</strong><a href="https://www.elastic.co/docs/solutions/search/full-text" target="_blank" rel="noopener">Elastic 官方文档 · Full-text search</a>——本期 match 检索的官方教程；配套页面：<a href="https://www.elastic.co/docs/reference/elasticsearch/rest-apis/highlighting" target="_blank" rel="noopener">Highlighting</a> · <a href="https://www.elastic.co/docs/reference/aggregations/search-aggregations-bucket-terms-aggregation" target="_blank" rel="noopener">Terms aggregation</a> · <a href="https://www.elastic.co/guide/en/elasticsearch/client/java-api-client/current/getting-started-java.html" target="_blank" rel="noopener">Java API Client Getting Started</a>；客户端版本核对于 <a href="https://central.sonatype.com/artifact/co.elastic.clients/elasticsearch-java" target="_blank" rel="noopener">Maven Central：elasticsearch-java 9.5.4</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0039-es-core-concepts-architecture.html">← 上一期：看懂 Elasticsearch：一条文档的旅程与整体架构</a></span>
+  <a class="next" href="0041-es-source-reading.html">下一期：Elasticsearch 架构与源码导读 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

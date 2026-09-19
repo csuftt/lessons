@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Elasticsearch 系列第 2 期:5 分钟跑起来 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0038</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0037-es-what-and-why.html">上一期:0037</a> · Elasticsearch 系列第 2 期 / 共 5 期 · <a href="https://www.elastic.co/elasticsearch" target="_blank" rel="noopener">elastic.co ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · ELASTICSEARCH 系列第 2 期:5 分钟跑起来</p>
+  <h1>5 分钟跑起来 Elasticsearch:Docker 起单节点,亲手发出第一次搜索</h1>
+  <p class="subtitle">上一期我们认识了 Elasticsearch——分布式搜索与分析引擎,检索日志和做全文搜索都绕不开它。这一期把认识变成动手:用 Docker 把 ES 跑起来,拿到集群信息 JSON 的第一次回显,亲手建索引、写入第一条文档、发出第一次 match 搜索,并说清楚什么输出才算真的跑通。全文基于 v9.5.4(2026-09-15 发布,GitHub Releases Latest 标记,2026-09-19 复核;官方同时还在维护 9.4 与 8.19 两条稳定线),docker run 单节点、密码证书、建索引写入与搜索的命令和响应 JSON 逐字对照 www.elastic.co 官方文档(单节点 Docker 指南与 Index and search basics 官方快速上手),高频报错一并给全,跑不通先对号入座再怀疑人生。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🔍 搜索引擎 · Java · Elastic License 2.0 / SSPL / AGPLv3</span>
+    <span class="tag">📦 基于 v9.5.4(2026-09-15)</span>
+    <span class="tag-date">📅 2026-09-19 · 第 2 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 路线 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>本期路线与跑通判定</h2>
+  <p>五步路线:<strong>起容器 → 判就绪 → 建索引 → 写文档 → 第一次搜索</strong>。全程一条演示链走到底,三条判定都满足才算跑通:</p>
+  <div class="card">
+    <ul class="steps">
+      <li>① <strong>集群信息回显:</strong>向 <code>localhost</code> 的 9200 端口发一个请求,返回一段 JSON,里面有节点名、集群名、版本号,和那句著名的 <code>You Know, for Search</code>;</li>
+      <li>② <strong>写入成功:</strong>写入文档的响应里出现 <code>"result": "created"</code>,数据真的落进去了;</li>
+      <li>③ <strong>搜索命中:</strong>搜索响应里 <code>hits.total.value</code> 至少为 1,刚写的文档能被原样查回来——数据进得去、搜得出才是结果。</li>
+    </ul>
+  </div>
+  <p>先说清一个心理预期:ES 的"跑起来"比 Redis 多两样东西——<strong>密码和证书</strong>。8.0 版本起,官方镜像默认开启安全配置,首次启动会自动生成 elastic 用户密码和 TLS 证书,不再是你爷爷那辈教程里"裸奔 HTTP 想连就连"的玩法。这不是麻烦,是官方替你把生产习惯前置到了第一天,本期照着官方口径走一遍就顺。</p>
+</section>
+
+<!-- ================= 02 版本与选型 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>动手前:钉版本、选路线、看环境</h2>
+  <p>先钉版本。GitHub 发布页上,9.5.4 挂着 Latest 标记(2026-09-15 发布),同一天 9.4.7 也发了补丁——官方同时维护 <strong>9.5 / 9.4 / 8.19 三条稳定线</strong>,这是它的常规节奏。本系列统一以 9.5 线为基准,命令里的镜像 tag 就写 <code>9.5.4</code>,所有命令当日逐字对照过官方文档。</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>安装路线</th><th>怎么装</th><th>适合谁</th></tr></thead>
+    <tbody>
+      <tr><td><strong>docker run 单节点(本期主线)</strong></td><td>官方"单节点 Docker 指南"三条命令,安全自动配置,逐字可对照</td><td>最快跑通、环境干净,Windows/macOS/Linux 通用</td></tr>
+      <tr><td>start-local 一键脚本</td><td><code>curl -fsSL https://elastic.co/start-local | sh</code>,ES + Kibana 一起起(官方本地快速上手首推)</td><td>想一步到位连控制台一起有的懒人</td></tr>
+      <tr><td>Linux 安装包(APT/YUM/压缩包)</td><td>官方仓库安装,systemd 管理服务</td><td>长期挂在 Linux 服务器上</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>本期走 <strong>docker run 单节点</strong>:它是官方单节点专页的口径,每条命令都能逐字对照文档,想卸载时删掉容器和网络就干净。start-local 更省事,但它背后是 Docker Compose 一整套文件,出了问题多一层要查的东西——上手期,命令越短、越贴文档越好。</p>
+  <div class="note">
+    <p><strong>环境要求一句话:</strong>装好 Docker 就行。官方单节点指南特别提醒——<strong>Docker Desktop 用户至少给 4GB 内存</strong>(Settings &gt; Resources 里调);容器本身用 <code>-m 1GB</code> 起步,够本期练习。Linux 裸机跑 Docker Engine 的同学留意一个内核参数 <code>vm.max_map_count</code>,Desktop 用户一般无感——它在高频报错清单里等你。</p>
+  </div>
+</section>
+
+<!-- ================= 03 起容器 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>第一步:三条命令,把 ES 跑起来</h2>
+  <p>官方单节点指南原文,三条命令逐字照抄(镜像 tag 换成我们钉住的 9.5.4):</p>
+  <pre><code>docker network create elastic
+
+docker pull docker.elastic.co/elasticsearch/elasticsearch:9.5.4
+
+docker run --name es01 --net elastic -p 9200:9200 -it \
+  -m 1GB docker.elastic.co/elasticsearch/elasticsearch:9.5.4</code></pre>
+  <p>对照官方口径说三点。<strong>其一,镜像地址</strong>:官方文档的 pull 命令用的是 Elastic 自家镜像仓库 <code>docker.elastic.co</code>,Docker Hub 上的 <code>elastic/elasticsearch</code>(千万级拉取量)是官方同步镜像,两边都是官方出品;<strong>其二,<code>-m 1GB</code></strong>:给容器设内存上限,官方提示这样就不必再手动配 JVM 堆大小;<strong>其三,没有 <code>discovery.type=single-node</code></strong>——老教程里人人都在抄的这个参数,官方命令里已经不需要了,单节点的发现配置由容器自动完成(思考题一细讲)。想后台跑就在 <code>-it</code> 前加个 <code>-d</code>,官方命令是前台启动,密码和日志直出。</p>
+  <p class="note">启动日志末尾会打印 <strong>elastic 用户的密码和 Kibana 的 enrollment token</strong>——官方原话特别提醒:这些凭据只在首次启动时显示一次,当场记下来;忘了也没关系,下一步有重新生成的命令。</p>
+</section>
+
+<!-- ================= 04 健康判定 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>第二步:健康判定,拿到第一段 JSON</h2>
+  <p>密码忘了、或者想要个不用翻日志的密码,用官方命令重新生成;再把 TLS 证书从容器里拷出来——因为 8.0 起默认 HTTPS:</p>
+  <pre><code>docker exec -it es01 /usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic
+export ELASTIC_PASSWORD="你的密码"
+
+docker cp es01:/usr/share/elasticsearch/config/certs/http_ca.crt .</code></pre>
+  <p>然后是本期最激动人心的一行——官方判定"容器在运行"的原样命令:</p>
+  <pre><code>curl --cacert http_ca.crt -u elastic:$ELASTIC_PASSWORD https://localhost:9200</code></pre>
+  <p>返回这样一段 JSON(字段结构取自官方文档样例;集群 UUID、构建哈希等非关键字段省略,<code>number</code> 就是你拉的那个版本号):</p>
+  <pre><code>{
+  "name" : "es01",
+  "cluster_name" : "docker-cluster",
+  "cluster_uuid" : "……",
+  "version" : {
+    "number" : "9.5.4",
+    "build_flavor" : "default",
+    "build_type" : "docker",
+    "lucene_version" : "……"
+  },
+  "tagline" : "You Know, for Search"
+}</code></pre>
+  <p>这段回显信息量不小:<code>name</code> 是节点名,<code>cluster_name</code> 默认叫 docker-cluster,<code>version.number</code> 和你 pull 的 tag 对上,说明"跑的就是这个版本";最下面那句 <code>You Know, for Search</code> 是 ES 从第一版用到今天的官方口号(tagline 字段)。跑通判定第一条达成。<strong>顺带说一句 Kibana</strong>:官方单节点指南的下一节就是"Run Kibana"——<code>docker run --name kib01 --net elastic -p 5601:5601 docker.elastic.co/kibana/kibana:9.5.4</code>,用启动时的 enrollment token 注册,就能在浏览器里用图形控制台操作 ES。本期命令行走完全程,Kibana 留给想点图形界面的你。</p>
+</section>
+
+<!-- ================= 05 建索引与写入 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>第三步:建索引,写入第一条文档</h2>
+  <p>接下来的命令取自官方《Index and search basics》快速上手,展示用 Kibana Console 语法(在终端里把 <code>PUT / GET / POST</code> 换成 <code>curl -X</code> 加请求体即可,末尾思考区给了换算规则)。先建一个叫 <code>books</code> 的索引:</p>
+  <pre><code>PUT books</code></pre>
+  <pre><code>{
+  "acknowledged": true,
+  "shards_acknowledged": true,
+  "index": "books"
+}</code></pre>
+  <p><code>acknowledged: true</code> 就是"建好了"的官方回执。ES 的索引(index)你可以先粗略理解成"存一类文档的容器",名字随意,一个建好就能用——不指定任何参数也行,字段类型让 ES 动态猜(官方叫动态映射,第 3 期细讲)。写入第一条文档,一本《Snow Crash》:</p>
+  <pre><code>POST books/_doc
+{
+  "name": "Snow Crash",
+  "author": "Neal Stephenson",
+  "release_date": "1992-06-01",
+  "page_count": 470
+}</code></pre>
+  <pre><code>{
+  "_index": "books",
+  "_id": "O0lG2IsBaSa7VYx_rEia",
+  "_version": 1,
+  "result": "created",
+  "_shards": { "total": 2, "successful": 2, "failed": 0 }
+}</code></pre>
+  <p>看响应:<code>"result": "created"</code> 出现,跑通判定第二条达成;<code>_id</code> 是 ES 自动生成的文档唯一标识;<code>_version</code> 从 1 起步,每次更新加一。刚才没指定字段类型?没关系,官方快速上手下一步就演示了动态映射:换个新字段再写一条,用 <code>GET books/_mapping</code> 能看到 ES 自动给文本字段配好了 <code>text</code> 加 <code>keyword</code> 子字段、日期配 <code>date</code>、数字配整数类型。一本书太冷清,官方还给了 <code>_bulk</code> 批量接口:NDJSON 格式一行元信息一行文档,一次写入《1984》《Brave New World》等六本,响应里 <code>"errors": false</code> 表示全部成功。</p>
+</section>
+
+<!-- ================= 06 第一次搜索 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>第四步:第一次搜索,match 查询走起</h2>
+  <p>数据进去了,现在搜它。官方快速上手的原样示例——在 <code>name</code> 字段里搜一个小写的 <code>brave</code>:</p>
+  <pre><code>GET books/_search
+{
+  "query": {
+    "match": {
+      "name": "brave"
+    }
+  }
+}</code></pre>
+  <pre><code>{
+  "took": 9,
+  "hits": {
+    "total": { "value": 1, "relation": "eq" },
+    "max_score": 0.6931471,
+    "hits": [ {
+      "_index": "books",
+      "_id": "CwICQpIBO6vvGGiC_3Ls",
+      "_score": 0.6931471,
+      "_source": {
+        "name": "Brave New World",
+        "author": "Aldous Huxley",
+        "release_date": "1932-06-01",
+        "page_count": 268
+      }
+    } ]
+  }
+}</code></pre>
+  <p>逐项解读这份官方响应:<code>match</code> 是全文搜索的标准查询——你搜小写的 <code>brave</code>,它命中的是大写开头的《Brave New World》,因为写入时文本被分词、搜索词也走同样的分词,大小写就这么抹平了,这是全文搜索最不一样的地方;<code>hits.total.value</code> 是命中总数,这里为 1;<code>_score</code> 是相关性得分,搜索结果默认按它从高到低排;<code>_source</code> 原样返回你写入的文档,不需要额外查询。跑通判定第三条达成——<strong>数据进得去、搜得出,ES 就算真的跑通了</strong>。回头加一句 <code>DELETE books,my-explicit-mappings-books</code> 就能删索引重来,官方快速上手也是这么收尾的。</p>
+</section>
+
+<!-- ================= 07 高频翻车 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>高频翻车与解法(对号入座)</h2>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>症状</th><th>原因与官方口径解法</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Linux 上起不来</strong>,日志报 <code>max virtual memory areas vm.max_map_count [65530] is too low, increase to at least [262144]</code></td><td>内核参数不达标。官方文档要求把它设为 <strong>1048576</strong>:<code>sysctl -w vm.max_map_count=1048576</code> 生效,写进 <code>/etc/sysctl.conf</code> 永久。顺带说清口径:262144 是源码里启动检查的下限(低于它拒绝启动),官方文档要求直接设到 1048576,一步到位;Docker Desktop/WSL2 用户一般不用管</td></tr>
+      <tr><td><strong>容器起来就退</strong>,<code>docker ps -a</code> 看到 Exited</td><td>十有八九是内存不足:官方要求 Docker Desktop 至少分配 4GB,容器本身 <code>-m 1GB</code> 起步;先 <code>docker logs es01</code> 看退出原因再对症下药</td></tr>
+      <tr><td><strong>9200 端口被占</strong>,连接被拒或起容器报端口冲突</td><td>查占用(<code>docker ps</code> 看是不是有旧 ES 容器没删,或 <code>lsof -i :9200</code>);或换宿主端口启动:<code>-p 9201:9200</code>,之后访问 localhost 的 9201 端口</td></tr>
+      <tr><td><strong>密码忘了 / 没接住</strong>首次启动打印的密码</td><td>官方命令重新生成:<code>docker exec -it es01 /usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic</code>(凭据只在首次启动显示一次,官方原话)</td></tr>
+      <tr><td><strong>curl 证书报错</strong>(SSL 证书问题)</td><td>8.0 起默认 HTTPS 自签证书,按官方姿势带上 <code>--cacert http_ca.crt</code>;不建议图省事用 <code>-k</code> 跳过校验,好习惯从第一天养成</td></tr>
+      <tr><td><strong>start-local 脚本报错</strong>(Windows)</td><td>官方前置要求:Windows 先装 WSL2,Docker Compose 建议 V2(最低 1.29.0);或直接回到本期 docker run 主线</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ================= 08 quiz ================= -->
+<section>
+  <h2><span class="sec-num">08</span>随堂小测</h2>
+  <div class="quiz">
+    <div class="quiz-q">
+      <p class="quiz-question">1. 8.0 版本起,官方 Docker 镜像首次启动时默认发生什么?</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对,默认是开启安全的,关安全才是要显式配置的老玩法。","不对,密码是自动生成的,不需要你先设。","对的:安全配置自动生效——自动生成 elastic 用户密码和 TLS 证书,默认 HTTPS,凭据只在首次启动时打印一次。"]'>
+        <li class="quiz-option">安全默认关闭,需要手动开启</li>
+        <li class="quiz-option">要求启动前必须设置环境变量密码</li>
+        <li class="quiz-option">自动生成密码与 TLS 证书,默认 HTTPS</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 写入文档的响应里,哪个字段说明"这条文档真的写进去了"?</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对,_index 只说明写到哪个索引,不代表本次写入成功。","对的:官方文档样例里,\"result\": \"created\" 就是写入成功的回执;更新时它会变成 updated。","不对,_version 是版本号从 1 递增,它出现不代表本次写入成功。"]'>
+        <li class="quiz-option">"_index": "books"</li>
+        <li class="quiz-option">"result": "created"</li>
+        <li class="quiz-option">"_version": 1</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 用 match 查询在 name 字段搜小写的 brave,为什么能命中《Brave New World》?</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的:写入时文本被分词,搜索词也走同样分词,大小写在分词环节被抹平——这是全文搜索的标准行为。","不对,match 不是精确整串匹配,那是 term 查询的语义。","不对,ES 没有对书名做特殊处理,靠的是统一的分词与分析。"]'>
+        <li class="quiz-option">文本写入与搜索都经过分词,大小写被抹平</li>
+        <li class="quiz-option">match 会尝试整串精确匹配后再放弃</li>
+        <li class="quiz-option">ES 对书名字段做了大小写特殊处理</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 09 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>思考题(点击展开解析)</h2>
+  <details class="q-card">
+    <summary>思考一:老教程里人人都在抄的 <code>discovery.type=single-node</code> 和 <code>xpack.security.enabled=false</code>,为什么现在的官方 docker run 命令里都不见了?</summary>
+    <div class="details-body">
+      <p>这两个参数分别对应"单节点发现"和"关闭安全",它们消失的原因不同,但方向一致——<strong>官方把正确的事变成了默认值</strong>。先看安全:7.x 及更早,ES 默认不带安全,生产集群裸奔曾是常态,老教程为了本地省事,一律用 <code>xpack.security.enabled=false</code> 关掉认证;8.0 发布时官方下了狠手,把安全变成默认开启并引入自动配置——首次启动自动生成证书、密码和 Kibana 注册令牌,你在本期第四步敲的每条命令,就是在跟这套自动配置打交道。再看发现:以前多节点组集群要手动配发现地址和初始主节点,单节点嫌麻烦就加 <code>discovery.type=single-node</code> 跳过;现在的镜像在单容器场景下自动完成单节点配置,不再需要你声明。那老参数还有效吗?有效,兼容字段还在——但官方文档已不再使用它们,沿用的唯一后果是:你主动关掉了官方默认给你的那层保护。<strong>"默认安全"是 8.0 最重要的产品决定之一</strong>:上手第一分钟就摸到密码和证书,看似变麻烦了,实际是把生产习惯前置到了第一天——这也是读官方文档与读三年前博客的区别,本系列命令逐条对文档的原因正在于此。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二:写入响应刚返回 <code>"result": "created"</code>,立刻发起同样的搜索,新文档一定能被搜到吗?</summary>
+    <div class="details-body">
+      <p>不一定——这正是 ES 被称为<strong>近实时(Near Real Time)搜索</strong>的原因。官方《Index and search basics》原话:Indexed documents are available for search in <em>near real-time</em>。机制上,文档写入后先进入内存缓冲与事务日志,此时它还不可搜;要等后台的刷新(refresh)操作把它写成一个新分片(segment),搜索才能看见它——默认 <code>refresh_interval</code> 是 1 秒,所以通常延迟一秒内可搜,但"立刻"不保证。这个设计是 ES 吞吐量的来源:写入只做内存追加和日志,昂贵的倒排索引构建被攒到后台批量进行,1 秒一次,而不是每篇文档一次。想立刻可见,官方接口也留了口子:写入时带 <code>?refresh=true</code> 或临时把 <code>refresh_interval</code> 调小,代价是吞吐下降。日志检索场景里"晚一秒可搜"几乎无感,所以这个取舍默认成立。写入路径上的缓冲、事务日志与分段,第 3 期核心概念与架构会完整拆开。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 10 要点 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这四条:</strong></p>
+    <ul>
+      <li>三条命令起步:<code>docker network create elastic</code> → <code>docker pull docker.elastic.co/elasticsearch/elasticsearch:9.5.4</code> → <code>docker run --name es01 --net elastic -p 9200:9200 -it -m 1GB …</code>——官方单节点口径,镜像 tag 钉在 9.5.4(2026-09-15 发布);</li>
+      <li>8.0 起默认安全:首启打印 elastic 密码(仅一次,忘了用 elasticsearch-reset-password 重新生成),HTTPS 要拷 <code>http_ca.crt</code> 证书,判定就绪就是 <code>curl --cacert http_ca.crt -u elastic:… https://localhost:9200</code> 拿到带 <code>You Know, for Search</code> 的集群 JSON;</li>
+      <li>上手三板斧对应三条判定:PUT 建索引回 <code>acknowledged: true</code>,POST 写文档回 <code>"result": "created"</code>,match 搜索回 <code>hits.total.value</code> 与按 <code>_score</code> 排序的命中列表——三条全绿才算跑通;</li>
+      <li>高频翻车两件事:Linux 裸机把 <code>vm.max_map_count</code> 设到 1048576(262144 只是启动检查下限),Docker Desktop 至少给 4GB 内存。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告:</strong>第 3 期《核心概念与整体架构》——ES 已经在你机器上跑起来了,下一期我们拆开看索引、分片与集群的核心概念与整体架构:索引背后是什么、倒排索引怎么工作、一条文档写入后在集群里的完整旅程,今天每一步操作都会在那里找到原理注脚。Primary source:<a href="https://www.elastic.co/docs/deploy-manage/deploy/self-managed/install-elasticsearch-docker-basic" target="_blank" rel="noopener">Elastic 官方文档 · Start a single-node cluster in Docker</a>——本期 docker run、密码证书与验证命令的出处;建索引、写入与搜索示例出自 <a href="https://www.elastic.co/docs/solutions/search/get-started/index-basics" target="_blank" rel="noopener">官方快速上手 · Index and search basics</a>;一键脚本见 <a href="https://www.elastic.co/docs/deploy-manage/deploy/self-managed/local-development-installation-quickstart" target="_blank" rel="noopener">Install Elasticsearch locally (quickstart)</a>,内核参数与生产口径见 <a href="https://www.elastic.co/docs/deploy-manage/deploy/self-managed/install-elasticsearch-docker-prod" target="_blank" rel="noopener">Using the Docker images in production</a>,版本发布记录见 <a href="https://github.com/elastic/elasticsearch/releases" target="_blank" rel="noopener">GitHub Releases</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0037-es-what-and-why.html">← 上一期:认识 Elasticsearch</a>
+  <a class="next" href="0039-es-core-concepts-architecture.html">下一期:核心概念与整体架构 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对,再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

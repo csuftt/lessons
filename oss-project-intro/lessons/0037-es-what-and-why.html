@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Elasticsearch 系列第 1 期：分布式搜索与分析引擎 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0037</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0036-redis-source-reading.html">上一期:0036</a> · Elasticsearch 系列第 1 期 / 共 5 期 · <a href="0038-es-quickstart.html">下一期:0038</a> · <a href="https://www.elastic.co/elasticsearch/" target="_blank" rel="noopener">elastic.co ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · ELASTICSEARCH 系列第 1 期：认识项目</p>
+  <h1>Elasticsearch 是什么：分布式搜索与分析引擎</h1>
+  <p class="subtitle">开源项目入门系列的每个新项目，都从三个问题开始：它解决什么痛点、凭什么活下来、什么场景该选它。上一个项目我们聊完了 Redis，今天开启新项目 Elasticsearch——你在各大网站的站内搜索框后面、公司的日志平台里、安全告警系统里见过它的名字。官方定义一句话：<strong>an open source, distributed search and analytics engine</strong>，一台开源的分布式搜索与分析引擎，JSON 文档进、相关性排序的结果出。本期不装任何软件，素材全部来自官方文档与官方仓库，每张图都标出处；你带走四样东西：模糊检索的三堵墙、倒排索引这条心智模型的根、一份四方选型对比，外加许可证风波十五年的来龙去脉。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🔍 搜索与分析引擎 · Java · AGPLv3/ELv2/SSPLv1 三许可</span>
+    <span class="tag">📦 基于 9.5.4（GitHub Latest）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 1 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 痛点 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>痛点："查文本"这件事，通用数据库先撑不住</h2>
+  <p>先看三个每个业务系统都会撞上的查询。电商站要搜"无限适配器"，用户只记得商品名里的两三个词；运维要在昨晚至今的十亿条日志里找出所有带 <code>timeout</code> 的报错；运营要对全量订单按地区、品类、时间段自由组合出报表。这三件事的共同点：<strong>查询条件不是"某个字段等于某个值"，而是"文本里包含某个词"加"按匹配程度排序"</strong>。放进 MySQL 这类关系数据库，很快撞上三堵墙：</p>
+  <ul>
+    <li><strong>模糊匹配只能全表扫描：</strong><code>WHERE name LIKE '%适配器%'</code> 这种前缀带通配符的条件，用不上 B+ 树索引——MySQL 官方手册《Range Optimization》写明，LIKE 能走索引范围扫描的前提是匹配串<strong>不以通配符开头</strong>。前缀一通配，千万行表就一行一行翻；</li>
+    <li><strong>日志检索慢且贵：</strong>日志的查询形状就是"关键词 + 时间范围 + 任意维度过滤"，全靠索引扫描扛不住写入吞吐，也扛不住并发检索；</li>
+    <li><strong>聚合分析弱：</strong>按词分组计数、按时间分桶统计、多维下钻，关系库要写复杂 SQL 慢慢跑，日志场景还要求写入后秒级可查。</li>
+  </ul>
+  <p>三堵墙的根源是同一句错配：<strong>B+ 树为"精确值查找"而生，文本搜索要的是"词级匹配 + 相关性排序"</strong>。解法是把文本拆成词、给每个词建一张"词到文档"的目录——这就是<strong>倒排索引</strong>。2010 年，Shay Banon 在 Lucene 之上包出一层分布式的 JSON 服务，取名 Elasticsearch，后来它成了这个位置的事实标准。</p>
+  <p class="note">延伸一点：B+ 树为什么救不了 <code>LIKE '%词%'</code>，在每日微课程线的 MySQL 索引专题里有执行计划层面的展开，见文末延伸阅读。</p>
+</section>
+
+<!-- ================= 02 是什么 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>是什么：一台搜索与分析引擎，不只是搜索</h2>
+  <p>官方产品页的定义值得逐词读（elastic.co/elasticsearch，2026-09 核对）：<strong>"Elasticsearch is an open source, distributed search and analytics engine built for speed, scale, and AI applications."</strong>——开源的、分布式的搜索与分析引擎，为速度、规模和 AI 应用而生。拆成三段：<strong>搜索</strong>，全文检索带相关性打分；<strong>分析</strong>，对海量文档做秒级聚合；<strong>分布式</strong>，天然分片扩容，从笔记本单节点到上百节点的集群是同一套模型。用法上一切都是 JSON：文档以 JSON 进，查询以 JSON 写，结果以 JSON 出。</p>
+  <p>先看最基本的两步，写入与检索（命令与回显出自官方文档《Index and search basics》，2026-09 核对）：</p>
+  <pre class="codeblock"><code>PUT books
+POST books/_doc
+{ "name": "Snow Crash", "author": "Neal Stephenson",
+  "release_date": "1992-06-01", "page_count": 470 }
+
+GET books/_search
+{ "query": { "match": { "name": "brave" } } }</code></pre>
+  <p>注意 <code>match</code> 查询的形状：查的是 <code>brave</code> 这个<strong>词</strong>，命中的却是《Brave New World》整本书，还带回一个 <code>_score</code> 相关性分值，按匹配程度排序——<code>LIKE</code> 给不了"哪个结果更相关"这回事。这份能力全部长在倒排索引上，把流程画成一张图：</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar37" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+
+    <rect x="16" y="40" width="200" height="110" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="116" y="72" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">写入侧：JSON 文档进</text>
+    <text x="116" y="96" text-anchor="middle" fill="var(--muted)" font-size="9.5">商品 · 日志 · 订单 · 向量</text>
+    <text x="116" y="118" text-anchor="middle" fill="var(--muted)" font-size="9.5">按索引分片落盘</text>
+
+    <line x1="216" y1="95" x2="288" y2="95" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar37)"/>
+    <text x="252" y="80" text-anchor="middle" fill="var(--muted)" font-size="8.5">分析器</text>
+
+    <rect x="292" y="40" width="180" height="110" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="382" y="72" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">分词 + 归一化</text>
+    <text x="382" y="96" text-anchor="middle" fill="var(--muted)" font-size="9.5">"Brave New World"</text>
+    <text x="382" y="116" text-anchor="middle" fill="var(--muted)" font-size="9.5">→ brave / new / world</text>
+
+    <line x1="472" y1="95" x2="544" y2="95" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar37)"/>
+
+    <rect x="548" y="40" width="196" height="110" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="646" y="72" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">倒排索引</text>
+    <text x="646" y="96" text-anchor="middle" fill="var(--muted)" font-size="9.5">brave → 文档 3</text>
+    <text x="646" y="116" text-anchor="middle" fill="var(--muted)" font-size="9.5">world → 文档 3、文档 7</text>
+    <text x="646" y="138" text-anchor="middle" fill="var(--accent-3)" font-size="9">词 → 文档列表，查词典不翻书</text>
+
+    <rect x="292" y="196" width="180" height="100" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="382" y="226" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">查询侧：match 查询</text>
+    <text x="382" y="250" text-anchor="middle" fill="var(--muted)" font-size="9.5">{"match": {"name": "brave"}}</text>
+    <text x="382" y="272" text-anchor="middle" fill="var(--muted)" font-size="9.5">查询词同样过分析器</text>
+
+    <line x1="382" y1="196" x2="382" y2="154" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar37)"/>
+
+    <rect x="548" y="196" width="196" height="100" rx="10" fill="var(--warn-bg)" stroke="var(--line)"/>
+    <text x="646" y="226" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">打分排序后返回</text>
+    <text x="646" y="250" text-anchor="middle" fill="var(--muted)" font-size="9.5">_score 按相关性从高到低</text>
+    <text x="646" y="272" text-anchor="middle" fill="var(--muted)" font-size="9.5">毫秒级，附聚合统计</text>
+
+    <line x1="548" y1="246" x2="476" y2="246" stroke="var(--muted)" stroke-dasharray="4 3"/>
+    <line x1="646" y1="154" x2="646" y2="192" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar37)"/>
+
+    <text x="16" y="318" fill="var(--muted)" font-size="9.5">图例：写入时分词建倒排索引，查询时对查询词查同一本"词典"，按相关性打分排序——"JSON 文档进、相关性排序的结果出"（概念图，倒排细节第 3 期深挖）</text>
+  </svg>
+  </div>
+
+  <p>这张图解释了它为什么快：<strong>搜"brave"不再逐行翻表，而是查一次词典直接拿到文档列表</strong>；代价是写入时要额外分词、建索引，而且新文档默认要等约一秒才可被搜到（官方文档口径：<code>index.refresh_interval</code> 默认 <code>1s</code>，所以官方叫它"近实时"）。还有一个常见误会要澄清：Elasticsearch 不只是"站内搜索框"。官方产品页把它的角色列成检索平台、向量数据库、分析引擎、地理引擎，四大场景各有天地：</p>
+  <ul>
+    <li><strong>应用搜索：</strong>电商商品、内容站、App 内搜索，全文检索加排序过滤的主场；</li>
+    <li><strong>日志与可观测：</strong>ELK/EFK 日志栈的核心就是它——Elasticsearch、Logstash、Kibana 三个字母里的 E 和 K；指标、链路、应用性能监控近年也全并进 Elastic 可观测方案；</li>
+    <li><strong>安全分析（SIEM）：</strong>安全事件与告警数据的检索与关联分析，Elastic 安全方案的地基；</li>
+    <li><strong>AI 检索（RAG）：</strong>8.x 起内建向量检索与混合排序，给大模型当外挂知识库的候选之一。</li>
+  </ul>
+</section>
+
+<!-- ================= 03 关键数据 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>关键数据与版本基准</h2>
+  <p>社区面上（2026-09-19 核对）：elastic/elasticsearch 仓库 <strong>Star 77.9k、Fork 26.1k</strong>，Java 编写，About 自述"Free and Open Source, Distributed, RESTful Search Engine"；仓库累计 <strong>266 个发布版本</strong>、2202 位贡献者。采用面，官方 about 页写着<strong>财富 100 强中超过 75% 在用 Elastic</strong>（"over 75% of the Fortune 100"）；Docker Hub 官方 <code>elastic/elasticsearch</code> 镜像累计拉取 <strong>2686 万余次</strong>（Docker Hub API 当日查询，官方主分发渠道 docker.elastic.co 不计入）。生态面，官方产品页列有 <strong>350+ 集成与各语言客户端</strong>。注意采用与生态均为官方或平台口径，选型前拿自己的数据实测。</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>版本线</th><th>当前（2026-09）</th><th>定位</th></tr></thead>
+    <tbody>
+      <tr><td>9.5（当前稳定）</td><td><strong>9.5.4</strong>（2026-09-15，GitHub Latest）</td><td>本系列基准</td></tr>
+      <tr><td>9.4</td><td>9.4.7（同日发补丁）</td><td>并行维护的稳定线</td></tr>
+      <tr><td>8.19</td><td>8.19.21（2026-09-01 补丁）</td><td>8.x 收尾线，维护窗口内</td></tr>
+      <tr><td>8.16</td><td>2024-08-29 官宣后落地</td><td>首个含 AGPL 选项的版本线</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">数据来源：GitHub 仓库页与 Releases（9.5.4 标记 Latest，2026-09-15 发布，UTC）、elastic.co about 页与产品页、Docker Hub API，均为 2026-09-19 核对。9.x 之后多条稳定线并行维护，升级前先确认自己在哪条线。</p>
+</section>
+
+<!-- ================= 04 许可证风波 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>钩子一：许可证风波——搜索世界的"分家与复合"</h2>
+  <p>Elasticsearch 的许可证故事比 Redis 更早演一遍，两边剧情还惊人地相似（口径核对自 Elastic 官方博客与 Wikipedia，2026-09-19）：</p>
+  <div class="card">
+    <ul>
+      <li><strong>2010—2021 · Apache 2.0 时代：</strong>项目以 Apache 2.0 开源十一年，与 Kibana、Logstash 组成 ELK 栈，长成搜索与日志两个市场的事实标准；</li>
+      <li><strong>2021-01-14 · 改双许可退出开源：</strong>Elastic 宣布自 7.11 起改用 SSPLv1 与 Elastic License 2.0（ELv2）双许可，两者都不是 OSI 认可的开源协议，矛头直指"拿 Elasticsearch 做托管服务转手卖钱"的大型云厂商——AWS 首当其冲；</li>
+      <li><strong>2021-01-21 · AWS 宣布分叉：</strong>AWS 用最后一个 Apache 2.0 版本（7.10.2）分叉，因商标问题同年 4 月更名 <strong>OpenSearch</strong>，Apache 2.0 路线续写；2024-09-16，OpenSearch 被捐给 Linux 基金会旗下的 OpenSearch 软件基金会，走向社区中立治理；</li>
+      <li><strong>2024-08-29 · AGPL 回归：</strong>Elastic 创始人发博《Elasticsearch is Open Source, Again》，宣布新增 AGPLv3 为第三许可选项，自 8.16.0 起生效——AGPLv3、ELv2、SSPLv1 三选一，官方重新自称开源。</li>
+    </ul>
+  </div>
+  <p>对使用者的实际含义：<strong>自用、内部部署，三个许可都不限制</strong>；要改造后对外分发或做托管服务，AGPLv3 是不开商业授权的唯一选择（注意它的传染性：以它分发则你的衍生代码也须 AGPL 开源）；要彻底开源加社区中立治理，直接看 Apache 2.0 的 OpenSearch。而 2021 年那场分叉，也把"搜索选型"从一道题变成了两道——下一节正面对比。</p>
+</section>
+
+<!-- ================= 05 对比 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>与同类对比：一个主角，三个对手</h2>
+  <p>搜索这条赛道上的玩家各有立场（数据为各仓库/官网公开口径，2026-09-19 核对）：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>项目</th><th>定位与技术路线</th><th>协议与治理</th><th>许可证</th><th>热度（2026-09）</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Elasticsearch 9.5</strong></td><td>分布式搜索与分析引擎；倒排索引 + 相关性打分 + 聚合；日志/可观测/安全全栈</td><td>REST + JSON；客户端生态最厚</td><td>AGPLv3 / ELv2 / SSPLv1 三选一</td><td>77.9k Stars</td></tr>
+      <tr><td>MySQL 8 全文索引</td><td>关系库内置 FULLTEXT，ngram 分词可配中日文；省一套组件</td><td>SQL；与业务库同实例</td><td>GPL + 商业双许可</td><td>关系库默认选项</td></tr>
+      <tr><td>OpenSearch 3.8</td><td>ES 7.10 的 Apache 2.0 分叉；API 与 ES 7.10 大体兼容，独立演进</td><td>Linux 基金会中立治理</td><td>Apache-2.0</td><td>13.7k Stars</td></tr>
+      <tr><td>Apache Solr 10</td><td>Lucene 家族最老的搜索服务器；SolrCloud 分片方案成熟，企业搜索老将</td><td>REST；Apache 软件基金会项目</td><td>Apache-2.0</td><td>热度已被拉开身位</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>怎么选？<strong>要全文检索 + 聚合分析 + 日志可观测的全家桶，Elasticsearch 生态最厚；小体量业务库里加个搜索框，MySQL FULLTEXT 够用就别引入一套集群；许可证要彻底开源、治理要社区中立，选 OpenSearch；存量 Solr 系统继续用没问题，新项目今天很少从 Solr 起步。</strong>没有全能冠军，只有场景匹配——把"查文本的形状"和"许可证约束"想清楚，答案自己浮出来。</p>
+</section>
+
+<!-- ================= 06 场景 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>什么场景该选它（以及什么场景是错配）</h2>
+  <div class="card">
+    <p><strong>✅ 适合：</strong></p>
+    <ul>
+      <li><strong>全文检索与相关性排序：</strong>商品搜索、内容检索、站内搜索框——词级匹配加打分，这是它吃饭的本事；</li>
+      <li><strong>日志与可观测检索：</strong>海量日志的关键词 + 时间范围 + 维度过滤查询，ELK 栈的核心位置；</li>
+      <li><strong>聚合分析：</strong>按词分组、按时间分桶、多维下钻的秒级统计，仪表盘与安全分析的地基。</li>
+    </ul>
+    <p><strong>❌ 错配：</strong></p>
+    <ul>
+      <li><strong>当主数据库：</strong>没有跨文档事务、没有 JOIN，账务订单这类"绝对不能错一行"的状态存储交给关系库，ES 只做它的从属索引；</li>
+      <li><strong>严格强一致的点查：</strong>写入默认约一秒后才可搜到（refresh 机制），强一致读不是它的合同；</li>
+      <li><strong>小数据量的单表查询：</strong>百万行以下的搜索框，MySQL 一个 FULLTEXT 索引或普通索引就够，为它养一套 JVM 集群是杀鸡用牛刀。</li>
+    </ul>
+  </div>
+  <p>一条判断捷径：<strong>查询形状是"包含某词 + 按相关性排序 + 大规模聚合"的，ES 进候选；查询形状是"精确匹配 + 事务 + 关联"的，留在关系数据库。</strong>两个相关主题，每日微课程线已有专题，本系列不换皮重讲，选两篇最相关的作为延伸阅读：</p>
+  <div class="note">
+    <p><strong>延伸阅读（每日微课程线，原理与选型不重讲）：</strong></p>
+    <ul>
+      <li><a href="../../daily-tech-course/lessons/0003-mysql-index-explain.html">第 0003 期 · MySQL 索引优化与执行计划</a>——LIKE 前缀通配为什么失效，EXPLAIN 层面的展开；</li>
+      <li><a href="../../daily-tech-course/lessons/0026-embedding-vector-store.html">第 0026 期 · Embedding 与向量库选型</a>——ES 向量检索在向量数据库版图中的位置。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= 07 quiz ================= -->
+<section>
+  <h2><span class="sec-num">07</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. 官方给 Elasticsearch 的定位，哪句最准确？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不够准：它是文档模型，没有表结构、JOIN 和事务，不是关系数据库。","对的：官方定义 an open source, distributed search and analytics engine——开源的分布式搜索与分析引擎。","不够准：缓存是 Redis 的词，Elasticsearch 落盘建倒排索引，不做内存缓存这一行。"]'>
+        <li class="quiz-option">它是一个高性能关系数据库</li>
+        <li class="quiz-option">它是一个开源的分布式搜索与分析引擎</li>
+        <li class="quiz-option">它是一个分布式内存缓存</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. <code>LIKE '%适配器%'</code> 查得慢，Elasticsearch 靠什么把这个量级压下来？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，SSD 只是让全表扫描死得体面一点，量级没变。","不对，ES 也是磁盘存储，它不靠「全内存」换速度。","对的：倒排索引把「翻遍全书」变成「查一次词典」——查词直接拿文档列表，不逐行扫。"]'>
+        <li class="quiz-option">全部数据强制放内存</li>
+        <li class="quiz-option">把机械盘换成 NVMe 固态盘</li>
+        <li class="quiz-option">倒排索引：按词建目录，查询查词典不翻书</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 关于许可证时间线，下列说法正确的是？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：2021 年 1 月从 Apache 2.0 改为 SSPLv1+ELv2，2024 年 8 月加入 AGPLv3 三选一，官方重称开源。","不对，OpenSearch 是 AWS 分叉并捐给 Linux 基金会的项目，与 Elastic 无隶属关系。","不对，方向反了：2021 年 1 月改双许可（SSPL/ELv2），2024 年 8 月才加回 AGPL。"]'>
+        <li class="quiz-option">2021 年改 SSPL/ELv2，2024 年 8 月新增 AGPL，形成三许可任选</li>
+        <li class="quiz-option">OpenSearch 由 Elastic 官方维护，是其开源版本</li>
+        <li class="quiz-option">2021 年先加 AGPL，2024 年改成 SSPL</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. 按本期的判断捷径，哪个场景最不该选 Elasticsearch？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，站内商品搜索是它的吃饭场景。","对的：订单账务要事务和强一致，ES 没有跨文档事务，写完默认约一秒才可搜，当主库是错配。","不对，日志检索 + 聚合正是 ELK 栈的核心用法。"]'>
+        <li class="quiz-option">电商站的商品全文搜索</li>
+        <li class="quiz-option">订单账务的主存储，要求事务与强一致</li>
+        <li class="quiz-option">公司日志平台的关键词检索与聚合分析</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 08 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：MySQL 明明自带 FULLTEXT 全文索引，为什么绝大多数公司要为搜索能力单独养一套 Elasticsearch 集群？是真的需要，还是架构师的洁癖？</summary>
+    <div class="details-body">
+      <p>这道题的答案不在"能不能"，而在"撑不撑得住、好不好用"。逐层拆。<strong>第一层，查询能力的天花板：</strong>MySQL FULLTEXT 提供关键词匹配，但相关性打分模型简单可调参数少，而 ES 的打分、词条加权、模糊容错、同义词、跨字段组合检索（bool 查询）是一套可编程的检索语言，业务搜索做到"用户输入两个错字也能找到商品"这一步，差距就拉开了。<strong>第二层，负载形状的冲突：</strong>搜索负载是"写入持续 + 查询突发 + 聚合重算"，和业务库的事务负载共用一个实例，慢查询互相拖累；ES 独立部署等于给检索负载做了资源隔离，扩容也独立。<strong>第三层，分词生态：</strong>中文分词在 ES 侧有成熟的 ik 等插件，MySQL 的 ngram 分词是"暴力二元切分"，索引膨胀且语义弱。<strong>第四层，数据规模与聚合：</strong>亿级文档的分组统计、时间分桶，ES 的聚合是倒排加列式优化的专用引擎，关系库跑同类 SQL 要扫大量行。<strong>第五层，数据同步的成本才是真正的门槛：</strong>单独养 ES 意味着要维护"业务库到 ES"的同步链路（binlog 订阅或双写），这是一笔实打实的运维账。所以结论是一个决策框架：<strong>数据量小、检索要求浅，FULLTEXT 就是正解，上 ES 是过度设计；检索是产品核心体验、或日志体量上来了，独立搜索集群不是洁癖，是分工。</strong>判断点不在"要不要搜索"，在"搜索在你的系统里是不是一等公民"。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：Elasticsearch 官方自称"近实时"——新文档写入后默认约一秒才可被搜索到。这一秒从哪来？什么业务会被它坑到，又该怎么绕？</summary>
+    <div class="details-body">
+      <p>先把机制说清楚（细节第 3 期展开，这里建立直觉）。ES 写入流程是"先写内存缓冲与事务日志，攒一批生成一个不可变的索引段（segment），段打开后才能被检索"——把"可检索"这个动作批量化的就是 <code>index.refresh_interval</code>，默认 <code>1s</code>，官方文档原话是"新数据多久变为可搜索，默认 1s"。为什么要攒批？因为每来一条文档就重建一次可检索结构，成本会高到写入吞吐崩掉；<strong>这一秒本质是"搜索可见性"和"写入吞吐"之间的交易，ES 选择了吞吐</strong>。谁会被坑？三类：<strong>其一，写后立即读的场景</strong>——用户提交表单后立刻搜索自己的内容，搜不到就提 bug，这是 ES 新手最高频的"事故"；测试脚本插入数据马上断言查询结果，同样会闪失败。<strong>其二，"文档存在性"当锁用</strong>——有人拿"搜到就算存在"做幂等判断，一秒窗口内重复请求全部穿透，这类用法从根上就不该放在搜索侧，强一致判断属于数据库。<strong>其三，监控告警的时效期待</strong>——日志从写入到可查天然带着这一秒多的延迟，秒级 SLA 的告警要另想办法。怎么绕？官方给的旋钮是把 <code>refresh_interval</code> 调小甚至调用带 <code>refresh=true</code> 的接口强制刷新——但每一下刷新都有代价，高频刷新会显著拖慢写入，把默认值改回去的人很快会把改回来。正确姿势是接受这一定位：<strong>搜索与日志分析天然容忍秒级延迟；要"写完立刻准"的数据，根本不该只存在 ES 里。</strong></p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 09 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>Elasticsearch = 开源的分布式搜索与分析引擎——JSON 文档进、相关性排序的结果出（官方口径）；</li>
+      <li>它解决"查文本"的痛点：倒排索引让 <code>LIKE '%词%'</code> 式的全表扫描变成查词典，附带秒级聚合；</li>
+      <li>不只是搜索：应用搜索、日志可观测（ELK 核心）、安全分析、AI 检索（RAG）四大场景；</li>
+      <li>数据面：77.9k Stars、财富 100 强超 75% 使用、350+ 集成（2026-09-19 核对，官方口径）；许可证风波：2021 年 SSPL/ELv2 分家出 OpenSearch，2024 年 AGPL 回归三许可任选；</li>
+      <li>版本基准 9.5.4（GitHub Latest，2026-09-15）；选型捷径：查文本 + 相关性 + 聚合找它，事务 + 强一致 + 关联查询留给关系库，别拿它当主库。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 2 期《5 分钟跑起来》——官方 get-started 的一条命令把 Elasticsearch 和 Kibana 拉起来，亲手建索引、写文档、做第一次检索与聚合，命令与预期输出逐条对照官方文档。</p>
+  <p><strong>Primary source：</strong><a href="https://www.elastic.co/docs/solutions/search/get-started/index-basics" target="_blank" rel="noopener">Elastic 官方文档 · Index and search basics</a>——本期示例与 <code>refresh_interval</code> 默认值均出自该文档（与 9.x 版本匹配）；版本与发布记录见 <a href="https://github.com/elastic/elasticsearch/releases" target="_blank" rel="noopener">GitHub Releases</a>，产品定位见 <a href="https://www.elastic.co/elasticsearch/" target="_blank" rel="noopener">elastic.co 产品页</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0036-redis-source-reading.html">← 上一期：Redis 架构与源码导读</a></span>
+  <a class="next" href="0038-es-quickstart.html">下一期：5 分钟跑起来 Elasticsearch →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

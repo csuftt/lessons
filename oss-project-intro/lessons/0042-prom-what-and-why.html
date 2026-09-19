@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Prometheus 系列第 1 期：指标监控与告警工具集 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0042</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0041-es-source-reading.html">上一期:0041</a> · Prometheus 系列第 1 期 / 共 5 期 · <a href="0043-prom-quickstart.html">下一期:0043</a> · <a href="https://prometheus.io" target="_blank" rel="noopener">prometheus.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · PROMETHEUS 系列第 1 期：认识项目</p>
+  <h1>Prometheus 是什么：指标监控与告警工具集</h1>
+  <p class="subtitle">开源项目入门系列的每个新项目，都从三个问题开始：它解决什么痛点、凭什么活下来、什么场景该选它。上一个项目我们聊完了 Elasticsearch，今天开启新项目 Prometheus——你在公司的监控大屏里、Kubernetes 集群的告警链路里、Grafana 的数据源列表里见过它的名字。官方定义一句话：<strong>an open-source systems monitoring and alerting toolkit</strong>，一套开源的系统监控与告警工具集，把"什么时候坏、坏了多久、影响谁"变成一次曲线查询。本期不装任何软件，素材全部来自官方文档与官方仓库，每张图都标出处；你带走四样东西：故障三连问的痛点、指标时序"采集-存储-查询一体机"这个心智模型、拉取式采集反直觉却是对的原理，外加一份五方选型对比。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">📈 监控与告警 · Go · Apache-2.0（CNCF 毕业项目）</span>
+    <span class="tag">📦 基于 3.14.0（GitHub Latest）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 1 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 痛点 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>痛点："什么时候坏、坏了多久、影响谁"，翻日志答不上来</h2>
+  <p>每个生产系统都绕不开故障三连问：<strong>什么时候坏的？坏了多久？影响了谁？</strong>微服务架构把这三个问题变得格外难——调用链一长，一台机器的问题沿着依赖扩散成一片 symptoms。没上监控系统前，大家的应答方式是人工翻日志，很快撞上三堵墙：</p>
+  <ul>
+    <li><strong>出事先于发现：</strong>服务凌晨两点挂了，第一个知道的是在群里报障的用户——人工盯日志永远是事后诸葛，发现即已迟到；</li>
+    <li><strong>坏了多久说不清：</strong>日志只留下片段，没有连续的历史曲线，故障的起点、持续时长、恢复时间点全靠回忆和拼凑；</li>
+    <li><strong>影响面靠人工连线：</strong>一台机器 CPU 打满，哪些接口变慢、哪些用户受影响，只能逐个服务去翻日志对时间线。</li>
+  </ul>
+  <p>指标监控换了一条思路：<strong>预先定义好数值型指标（请求数、延迟、错误率、资源占用），由监控系统按固定节奏持续采集，存成时间序列</strong>。故障发生时先看曲线——什么时候开始涨、涨了多久、哪些指标一起动——再下钻日志找根因。回答三连问从"翻箱倒柜"变成"一次查询"。2012 年，SoundCloud 的工程师为微服务监控写下这个项目，后来它长成了云原生时代监控的事实标准。</p>
+</section>
+
+<!-- ================= 02 是什么 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>是什么：指标时序的"采集-存储-查询"一体机</h2>
+  <p>官方文档的定义值得逐词读（prometheus.io《Overview》，2026-09 核对）：<strong>"Prometheus is an open-source systems monitoring and alerting toolkit."</strong>——一套开源的系统监控与<strong>告警</strong>工具集。同页的特性清单列了五件事：多维数据模型（指标名 + 标签集定位一条时间序列）、专用查询语言 PromQL、单机自治不依赖分布式存储、基于 HTTP 的拉取式（Pull）采集、服务发现自动找目标。一句话心智模型：<strong>时序数据的"采集-存储-查询"一体机</strong>。</p>
+  <p>先看指标长什么样。被监控端在 HTTP 端点把指标以文本形式摊开，样例出自官方《Exposition formats》文档：</p>
+  <pre class="codeblock"><code># HELP http_requests_total The total number of HTTP requests.
+# TYPE http_requests_total counter
+http_requests_total{method="post",code="200"} 1027
+http_requests_total{method="post",code="400"}    3</code></pre>
+  <p>注意形状：<strong>指标名 + 标签集</strong>才是这条序列的完整身份。同一个 <code>http_requests_total</code>，靠 <code>method</code> 与 <code>code</code> 两枚标签分出多条序列——这就是官方说的<strong>多维数据模型</strong>，标签是查得动的筛子。查询语言 PromQL 把这个优势用足：先选指标名，再用花括号挑标签，配合 <code>rate</code>、<code>sum by</code> 等函数做速率与聚合，"看一眼错误率曲线"就是一行表达式的事。</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 320" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar42" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+
+    <rect x="16" y="60" width="180" height="96" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="106" y="92" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">抓取目标</text>
+    <text x="106" y="116" text-anchor="middle" fill="var(--muted)" font-size="9.5">Exporters / 应用 /metrics 端点</text>
+    <text x="106" y="136" text-anchor="middle" fill="var(--muted)" font-size="9.5">指标以文本摊开等被取</text>
+
+    <line x1="196" y1="108" x2="288" y2="108" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar42)"/>
+    <text x="242" y="92" text-anchor="middle" fill="var(--muted)" font-size="8.5">每 15s 拉取</text>
+
+    <rect x="292" y="60" width="200" height="96" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="392" y="92" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">Prometheus Server</text>
+    <text x="392" y="116" text-anchor="middle" fill="var(--muted)" font-size="9.5">采集 → 本地 TSDB 存储</text>
+    <text x="392" y="136" text-anchor="middle" fill="var(--muted)" font-size="9.5">单机自治 · 不依赖分布式存储</text>
+
+    <rect x="292" y="196" width="200" height="88" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="392" y="228" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">服务发现</text>
+    <text x="392" y="252" text-anchor="middle" fill="var(--muted)" font-size="9.5">Kubernetes / file_sd / DNS</text>
+    <text x="392" y="270" text-anchor="middle" fill="var(--muted)" font-size="9.5">新实例自动进入抓取名单</text>
+    <line x1="392" y1="196" x2="392" y2="160" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar42)"/>
+
+    <line x1="492" y1="92" x2="560" y2="92" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar42)"/>
+    <text x="526" y="78" text-anchor="middle" fill="var(--muted)" font-size="8.5">PromQL</text>
+
+    <rect x="564" y="60" width="180" height="60" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="654" y="96" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">Grafana 面板 / API</text>
+
+    <rect x="564" y="140" width="180" height="76" rx="10" fill="var(--warn-bg)" stroke="var(--line)"/>
+    <text x="654" y="168" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">规则评估 → Alertmanager</text>
+    <text x="654" y="190" text-anchor="middle" fill="var(--muted)" font-size="9.5">告警去重 · 分组 · 路由</text>
+    <line x1="492" y1="140" x2="560" y2="170" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar42)"/>
+
+    <text x="16" y="308" fill="var(--muted)" font-size="9.5">图例：服务发现找到目标，拉取式采集落成本地时序，PromQL 查询、规则触发告警——采集-存储-查询一体机（概念图，第 3 期按官方架构图逐模块拆）</text>
+  </svg>
+  </div>
+
+  <p>把"一体机"的运行方式走一遍：服务发现自动找出要抓的目标，采集器按固定节奏（默认每 15 秒）上门拉数据，存进本机时序数据库 TSDB；查询侧 Grafana 面板与脚本通过 PromQL 取数；规则评估跑在同一份数据上，触发的告警交给独立部署的 Alertmanager 去重、分组、路由。三个关键词——<strong>多维数据模型、PromQL、拉取式采集</strong>——是理解它所有设计的根。</p>
+</section>
+
+<!-- ================= 03 Pull vs Push ================= -->
+<section>
+  <h2><span class="sec-num">03</span>钩子一：Pull 拉取反直觉，却是对的</h2>
+  <p>直觉上，监控数据在被监控端，应该由它<strong>主动上报（Push）</strong>——推过来不就完了？Prometheus 偏偏选了<strong>拉取（Pull）</strong>：监控端按固定节奏上门抓。这个选择反直觉，但放到监控场景里逐条看就通了。官方 FAQ 给了三条拉取的优势（prometheus.io《FAQ》，2026-09 核对）：可以按需多起几个监控实例（比如开发时在自己笔记本上）；<strong>更简单、更可靠地判断目标是否宕机</strong>；可以随时用浏览器手动访问目标看健康状态。落到设计上有三份红利：</p>
+  <ul>
+    <li><strong>抓取失败本身就是信号：</strong>每次抓取，Prometheus 自动生成一条 <code>up</code> 指标——官方文档《Jobs and instances》的定义是"实例可达为 1，抓取失败为 0"。被监控端挂没挂，监控端自己最清楚，不依赖对方"临死前发遗言"；</li>
+    <li><strong>服务发现自动接入：</strong>微服务扩容缩容不用改监控配置，新实例自动进入抓取名单——Push 模式下每个新实例都得被告知"往哪推"；</li>
+    <li><strong>节奏由监控端定，天然防风暴：</strong>抓取间隔由服务端统一控制，数百个目标集体故障时，它们不会反过来用重试流量压垮监控系统——Push 模式的经典事故恰是"故障时全员重试上报"。</li>
+  </ul>
+  <p>Pull 的短板同样明摆着：<strong>目标躲在 NAT/防火墙后，或生命周期短于抓取间隔的批处理任务</strong>，监控端根本没机会上门。官方给的折中是 <strong>Pushgateway</strong>：短任务退出前把指标推上去，再由 Prometheus 统一拉取。官方 FAQ 的结论很克制："我们认为拉取略好，但它不应成为选型监控系统时的主要考量"——真正的取舍在生态与数据模型。</p>
+</section>
+
+<!-- ================= 04 生态 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>生态盘点：主角能干，配角各司其职</h2>
+  <p>官方架构原图（prometheus.io《Overview》附图，2026-09 截取）把分工画得清清楚楚：主服务内含抓取（Retrieval）、时序存储（TSDB）与 HTTP 服务三件套；服务发现在上方；左侧是被监控目标，短任务经 Pushgateway 折中；右上 Alertmanager 独立部署——它挂了也不影响采集存储；右下 Grafana 与各类 API 客户端走同一条 PromQL 查询通道。</p>
+  <p class="note"><img src="../output/0042-prom-what-and-why/images/prom-docs-architecture.png" alt="Prometheus 官方架构图" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px"></p>
+  <ul>
+    <li><strong>Exporter 生态：</strong>数百个官方与社区适配器——节点、MySQL、Redis、Kafka、黑盒探测，一句配置接入现成指标，是它生态最厚的一层；</li>
+    <li><strong>Alertmanager：</strong>独立告警组件，负责去重、静默、分组、路由到邮件/IM/值班系统，与采集存储解耦；</li>
+    <li><strong>Grafana：</strong>看板事实标准，内置 Prometheus 数据源。本系列把它当配角在第 4 期带过，不单列；</li>
+    <li><strong>Pushgateway：</strong>短任务的兜底通道，监控"活不到被抓"的批处理进程。</li>
+  </ul>
+</section>
+
+<!-- ================= 05 关键数据 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>关键数据与版本基准</h2>
+  <p>社区面上（2026-09-19 核对）：prometheus/prometheus 仓库 <strong>Star 66.1k、Fork 10.8k</strong>，Go 编写，About 自述"The Prometheus monitoring system and time series database"，<strong>Apache-2.0</strong> 许可；累计 379 个发布版本。治理面：2016-05-09 被 CNCF 收纳为<strong>第二个托管项目</strong>（官方文档自述，排在 Kubernetes 之后），<strong>2018-08-09 达到毕业标准</strong>（CNCF 项目页核对）。采用面：Docker Hub 官方 <code>prom/prometheus</code> 镜像累计拉取 <strong>20.1 亿次</strong>（Docker Hub API 当日查询）。注意采用数据为平台口径，选型前拿自己的负载实测。</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>版本线</th><th>当前（2026-09）</th><th>定位</th></tr></thead>
+    <tbody>
+      <tr><td>3.14（当前稳定）</td><td><strong>3.14.0</strong>（2026-08-17，GitHub Latest）</td><td>本系列基准</td></tr>
+      <tr><td>3.13</td><td>3.13.3（2026-09-07 补丁）</td><td>并行维护的稳定线，收安全与时序库修复</td></tr>
+      <tr><td>3.15</td><td>3.15.0-rc.0（2026-09-09）</td><td>下一版预发布</td></tr>
+      <tr><td>3.0</td><td>2024-11-14 发布</td><td>六年磨一剑的大版本，当前 3.x 时代的起点</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">数据来源：GitHub 仓库页与 Releases（3.14.0 标记 Latest，2026-08-17 发布，UTC）、prometheus.cncf.io 项目页、Docker Hub API，均为 2026-09-19 核对。3.x 时代多线并行维护，生产环境跟紧所在版本的补丁线。</p>
+</section>
+
+<!-- ================= 06 演进史 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>钩子二：从 SoundCloud 的内部工具到云原生标准</h2>
+  <div class="card">
+    <ul>
+      <li><strong>2012-05 · 诞生于 SoundCloud：</strong>首次提交于 2012-05-19（CNCF 项目页核对）。这家音乐平台彼时正被微服务监控折磨，工程师为自家业务造工具，设计思路公认可追溯至谷歌内部监控系统 Borgmon；</li>
+      <li><strong>2016-05 · 捐给 CNCF：</strong>2016-05-09 被收纳为第二个托管项目，官方文档原话是"after Kubernetes"——监控与编排从一开始就是云原生的一体两面；</li>
+      <li><strong>2018-08 · 毕业：</strong>2018-08-09 达到 CNCF 毕业标准，进入成熟治理阶段，成为各大厂自建监控的首选底座；</li>
+      <li><strong>2024-11 · 3.0 大版本：</strong>2024-11-14 发布，ROM 格式、Exemplars、远程写入二期等多年演进收拢成 3.x 时代（发布记录见 GitHub Releases v3.0.0）。</li>
+    </ul>
+  </div>
+  <p>一个公司内部工具，走完"开源 → 基金会中立托管 → 毕业"的全流程，这条路径本身就是开源项目的教科书。而它长成的位置——云原生监控事实标准——也决定了第二期的安装、第三期的服务发现，都会和 Kubernetes 缠绕在一起讲。</p>
+</section>
+
+<!-- ================= 07 对比 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>与同类对比：一个主角，四个对手</h2>
+  <p>监控这条赛道上的玩家各有立场（数据为各仓库/官网公开口径，2026-09-19 核对）：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>方案</th><th>定位与技术路线</th><th>数据模型</th><th>成本与自主性</th><th>热度（2026-09）</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Prometheus 3.14</strong></td><td>指标监控告警一体机：采集、存储、查询、规则告警一件套</td><td>多维（指标名 + 标签集）+ PromQL</td><td>开源自建，Apache-2.0，只付机器成本</td><td>66.1k Stars</td></tr>
+      <tr><td>Zabbix</td><td>老牌企业级监控，Agent 上报为主 + 监控模板生态全，网络设备 SNMP 友好</td><td>主机 + 监控项，维度弱</td><td>开源自建，传统机房存量巨大</td><td>老将，企业存量高</td></tr>
+      <tr><td>InfluxDB / OpenTSDB</td><td>纯时序数据库：只管存储与查询，采集/告警/面板要自己拼装</td><td>measurement + tag</td><td>开源自建，组件拼装人力成本高</td><td>与 Prometheus 同场竞技的存储路线</td></tr>
+      <tr><td>Datadog（SaaS）</td><td>托管可观测全家桶，开箱即用，集成度最高</td><td>多维，产品化封装</td><td>按主机计费，规模上去成本陡增；数据在第三方</td><td>SaaS 市场头部</td></tr>
+      <tr><td>云厂商监控</td><td>CloudWatch / 阿里云监控等，云内资源零配置接入</td><td>各云自有模型</td><td>与云绑定，跨云与自建机房覆盖弱</td><td>上云企业默认项</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>怎么选？<strong>云原生业务、要指标-告警-面板全链路且数据自主，Prometheus 是默认答案；传统机房与网络设备为主的存量环境，Zabbix 依然称职；只差一个时序存储、采集告警自有体系，InfluxDB/OpenTSDB 是零件；不想养运维、要开箱即用，Datadog 花钱买省心；全部业务在一家云上，云监控零成本起步。</strong>没有全能冠军，只有场景匹配。</p>
+</section>
+
+<!-- ================= 08 场景 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>什么场景该选它（以及什么场景是错配）</h2>
+  <div class="card">
+    <p><strong>✅ 适合：</strong></p>
+    <ul>
+      <li><strong>微服务与 Kubernetes 集群监控：</strong>服务发现 + 拉取采集，K8s 各组件自带 /metrics 端点，云原生默认答案；</li>
+      <li><strong>指标曲线与阈值/规则告警：</strong>延迟、流量、错误率、容量，多维标签下钻 + Alertmanager 告警链路；</li>
+      <li><strong>自建监控中台：</strong>Apache-2.0 + 单机自治 + 拉取模型，数据自主可控，私有化零门槛。</li>
+    </ul>
+    <p><strong>❌ 错配：</strong></p>
+    <ul>
+      <li><strong>事件日志与分布式链路追踪：</strong>文本日志归检索系统（ELK 一线），调用链归 APM——监控不越界，链路那一线后续 SkyWalking 系列再会；</li>
+      <li><strong>需要 100% 精确的计费统计：</strong>官方 Overview 原话"不适合要求完全准确度的场景（如按请求计费）"——抓取是采样，保趋势不保账本；</li>
+      <li><strong>海量长周期历史数据的离线分析：</strong>本地时序库留存有限，长期归档要配 Thanos 类方案或专用时序库。</li>
+    </ul>
+  </div>
+  <p>一条判断捷径：<strong>问"现在/过去一段时间系统表现如何"的数值型问题，找 Prometheus；问"某次请求经历了什么"的明细型问题，去日志与链路系统。</strong>指标驱动自动化（比如按负载扩缩容）与它也天然互补，每日微课程线已有一期从消费端视角展开，见文末延伸阅读。</p>
+  <div class="note">
+    <p><strong>延伸阅读（每日微课程线）：</strong></p>
+    <ul>
+      <li><a href="../../daily-tech-course/lessons/0016-k8s-hpa.html">第 0016 期 · Kubernetes HPA 弹性伸缩</a>——指标数据的下游消费者：HPA 拿什么指标决定扩缩容。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= 09 quiz ================= -->
+<section>
+  <h2><span class="sec-num">09</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. 官方给 Prometheus 的定位，哪句最准确？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，那是纯时序数据库的定位，采集告警要自己拼。","不对，那是 Zabbix 一类传统 Agent 上报监控的描述。","对的：官方定义 an open-source systems monitoring and alerting toolkit——开源的系统监控与告警工具集，采集-存储-查询一体机。"]'>
+        <li class="quiz-option">它是一个纯时序数据库</li>
+        <li class="quiz-option">它是一个基于 Agent 主动上报的监控系统</li>
+        <li class="quiz-option">它是一套开源的系统监控与告警工具集</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 为什么说 Pull（拉取）比 Push（上报）更适合判断目标存活？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，拉取也要走网络，它不是靠「绝对不失败」，而是靠失败本身有含义。","对的：每次抓取自动生成 up 指标，成功为 1、失败为 0——「取不到」直接等于「目标有问题」，不依赖对方临死前发消息。","不对，恰恰相反，全量重试是 Push 模式的风暴隐患。"]'>
+        <li class="quiz-option">拉取走内网专线，网络绝对不失败</li>
+        <li class="quiz-option">抓取失败本身就是信号：up 指标归零即目标异常</li>
+        <li class="quiz-option">被监控端挂掉前会把最后的指标推送上来</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 官方明确说 Prometheus 不适合哪类场景？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：官方 Overview 原话——不适合要求完全准确度的场景，如按请求计费；抓取是采样数据。","不对，Kubernetes 各组件自带 /metrics 端点，它是云原生默认答案。","不对，拉取加服务发现正是为动态微服务环境设计的。"]'>
+        <li class="quiz-option">需要 100% 精确的按请求计费统计</li>
+        <li class="quiz-option">Kubernetes 集群的容器监控</li>
+        <li class="quiz-option">实例频繁扩缩容的微服务环境</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. 以下哪个需求，最不该选 Prometheus？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，指标阈值/规则告警加 Alertmanager 正是它的主场。","对的：排「某笔请求调用了哪些服务、哪一步慢」是明细型问题，归链路追踪（APM）管，Prometheus 是采样指标，回答不了。","不对，多维标签下钻加 Grafana 看板是它的强项。"]'>
+        <li class="quiz-option">核心接口错误率超过 1% 时自动告警</li>
+        <li class="quiz-option">排查某笔慢请求调用了哪些服务、哪一步最耗时</li>
+        <li class="quiz-option">大屏展示近 7 天各集群的流量曲线</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 10 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：Push 明明更符合直觉，为什么监控领域的后起之秀几乎都选了 Pull？如果目标在 NAT 后面或防火墙只出不进，怎么办？</summary>
+    <div class="details-body">
+      <p>先把两边的真实约束摆出来。<strong>Push 的直觉来自数据所有权：</strong>数据在被监控端，推过来顺理成章。但监控场景有三个特性把天平压向 Pull。<strong>第一，"取不到"和"收不到"含义不同：</strong>Pull 模式下监控端主动上门，取不到数据只有一种解释——目标或链路出了问题（up 归零）；Push 模式下收不到数据有两种解释——目标挂了，或网络抖了、对方还没来得及推。把"存活判断"从被监控端的"临死遗言"手里收回来，是可用性监测的地基。<strong>第二，拓扑发现权：</strong>微服务环境实例生灭是常态，Pull 配服务发现，新实例自动进抓取名单；Push 则要求每个实例被告知"往哪推"，配置漂移是常年 bug 源。<strong>第三，反压能力：</strong>抓取节奏由监控端统一控制，数百目标同时故障不会演变成"全员重试上报"的二次灾害；Push 系统要专门设计退避与丢弃策略才扛得住。<strong>那 NAT 后与短任务怎么办？</strong>Prometheus 的答案是承认 Pull 的边界并给出两个折中：Pushgateway 供短任务退出前推送、监控端再统一拉取；黑盒探测（blackbox exporter）从监控端主动发起探测。注意这两个折中都<strong>没有让被监控端变成常态化的数据推送方</strong>——Pull 的骨架没变。官方 FAQ 的态度也值得学：承认权衡（"拉取略好"），但提醒别把它当选型的主要依据——生态、数据模型与查询能力才是。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：官方明说"不适合需要 100% 准确度的场景（如按请求计费）"。采样数据天生不精确在哪？监控与计费的边界该怎么划？</summary>
+    <div class="details-body">
+      <p>先把"不精确"的来源拆成三层。<strong>第一层，采样间隔：</strong>默认每 15 秒抓一次，两次抓取之间发生的请求尖峰可能整个被跳过——以秒为单位的抖动在这套体系里根本不存在。<strong>第二层，聚合不可逆：</strong>指标在客户端就预聚合了（如请求计数器只报总数），到达监控端后无法再还原出"每一笔"的明细；明细一旦丢失，逐笔对账就成了无源之水。<strong>第三层，可靠性契约不同：</strong>监控数据允许丢点（网络抖动丢一两个样本，曲线照读），计费数据一条都不能丢——两者的传输保证、存储成本、审计要求完全不在一个量级。官方把这条边界写进文档，是把"监控是概率视角、交易是精确视角"这个立场挑明。所以边界怎么划？<strong>回答"系统表现如何"的数值型问题（成功率、分位延迟、容量水位），采样数据足够且最划算；回答"这一笔/这一单怎么了"的明细型问题（逐笔计费、对账、审计），必须由业务数据库与事务日志兜底，监控数据最多做交叉验证的旁证。</strong>工程上还要警惕一个反模式：有人拿监控指标的计数器当业务流水做日报，两个口径一对照差了几个点就开始怀疑人生——不是哪边算错了，是契约本来就不同。分清"看趋势的概率系统"和"记账本的精确系统"，两边都用在自己擅长的场景，这是监控选型里最值钱的一条纪律。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 11 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">11</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>Prometheus = 开源的系统监控与告警工具集——指标时序的"采集-存储-查询"一体机（官方口径）；</li>
+      <li>它解决故障三连问：什么时候坏、坏了多久、影响谁——先看曲线，再下钻日志；</li>
+      <li>Pull 反直觉却是对的：抓取失败即信号（up 0/1）、服务发现自动接入、节奏可控防风暴；短任务走 Pushgateway 折中；</li>
+      <li>数据面：66.1k Stars、Docker Hub 20.1 亿次拉取、CNCF 2016 收纳/2018 毕业（2026-09-19 核对）；日志与链路不是它的活，别让它越界；</li>
+      <li>版本基准 3.14.0（GitHub Latest，2026-08-17）；选型捷径：数值型问题找它，明细型问题去日志与链路。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 2 期《5 分钟跑起来》——照官方《First steps》下载解压、一条命令启动，打开表达式浏览器发出第一次查询，命令与预期输出逐条对照官方文档。</p>
+  <p><strong>Primary source：</strong><a href="https://prometheus.io/docs/introduction/overview/" target="_blank" rel="noopener">Prometheus 官方文档 · Overview</a>——本期定义、特性清单与架构图均出自该文档（与 3.x 匹配）；拉取模型详见 <a href="https://prometheus.io/docs/introduction/faq/" target="_blank" rel="noopener">FAQ</a>，up 指标定义见 <a href="https://prometheus.io/docs/concepts/jobs_instances/" target="_blank" rel="noopener">Jobs and instances</a>，版本与发布记录见 <a href="https://github.com/prometheus/prometheus/releases" target="_blank" rel="noopener">GitHub Releases</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0041-es-source-reading.html">← 上一期：Elasticsearch 架构与源码导读</a></span>
+  <a class="next" href="0043-prom-quickstart.html">下一期：5 分钟跑起来 Prometheus →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

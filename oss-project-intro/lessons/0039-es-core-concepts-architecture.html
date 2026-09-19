@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Elasticsearch 系列第 3 期：概念地图与整体架构 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0039</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0038-es-quickstart.html">上一期:0038</a> · Elasticsearch 系列第 3 期 / 共 5 期 · <a href="0040-es-in-action.html">下一期:0040</a> · <a href="https://www.elastic.co/docs" target="_blank" rel="noopener">elastic.co/docs ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · ELASTICSEARCH 系列第 3 期：核心概念与整体架构</p>
+  <h1>看懂 Elasticsearch：概念地图与整体架构</h1>
+  <p class="subtitle">上一期我们把 Elasticsearch 跑了起来，完成了第一次索引与搜索。但一条文档写进去之后经历了什么？一次搜索为什么能在亿级文档里毫秒返回？本期你带走一张<strong>概念地图</strong>：索引/文档/mapping 与倒排索引、segment 与 Lucene 的关系、主分片与副本、集群三种角色，再沿着<strong>写入路径</strong>把内存缓冲、translog、refresh、merge 一次讲透——搞明白为什么搜索叫"近实时"而不是"实时"。源码怎么读留给第 5 期，本期只建立"叫什么、管什么、为什么这么设计"。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🔍 搜索引擎 · Java · Elastic License 2.0 / SSPLv1 / AGPLv3 三许可</span>
+    <span class="tag">📦 基于 v9.5.4（GitHub Latest）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 3 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 系列地图 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>系列地图：概念承重墙期</h2>
+  <p>老规矩先看地图。第 1 期立住了心智模型——分布式搜索与分析引擎；第 2 期把 ES 跑起来完成了第一次索引与搜索；<strong>本期是五期里的承重墙</strong>：术语体系与整体架构一次铺完。第 4 期实战里每个名词都会变成实打实的一步，第 5 期源码导读沿着本期画好的模块地图往下读。本期结束时你应该能回答两个问题：<strong>一条文档写入后经历了什么？一次搜索是怎么变快的？</strong></p>
+</section>
+
+<!-- ================= 02 术语体系·数据面 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>术语体系·数据面：索引、文档、字段与 mapping</h2>
+  <p>ES 的术语先记三层递进的关系：<strong>索引（index）装文档（document），文档由字段（field）组成，mapping 决定字段怎么存</strong>。文档是你写入的一条 JSON 记录，类似数据库的一行；索引是同业务文档的集合，类似一张表。mapping 的官方定义只有一句："mapping 是定义文档及其包含的字段如何存储与索引的过程"——每个字段都有自己的数据类型（text、keyword、integer、date 等），不声明时 ES 会动态推断，生产环境建议显式声明。动手感受一下，两条请求建出本期要用的试验田：</p>
+  <div class="codeblock"><pre>PUT my-index-000001
+{
+  "settings": { "number_of_shards": 1 },
+  "mappings": {
+    "properties": {
+      "age":   { "type": "integer" },
+      "email": { "type": "keyword" },
+      "name":  { "type": "text" }
+    }
+  }
+}</pre></div>
+  <p class="note">请求体逐字取自官方《Explicit mapping》与《Create index》文档样例：mapping 定义 age（integer）、email（keyword）、name（text）三个字段。注意 text 与 keyword 的分工——<strong>text 会分词参与全文检索，keyword 整串精确匹配</strong>，这对组合是后面倒排索引的主角。<code>number_of_shards</code> 是主分片数，只能在建索引时设定，第 04 节讲为什么。</p>
+  <div class="codeblock"><pre>PUT my-index-000001/_create/1
+{
+  "@timestamp": "2099-11-15T13:12:00",
+  "message": "GET /search HTTP/1.1 200 1070000",
+  "user": { "id": "kimchy" }
+}</pre>
+  <pre>{
+  "_index": "my-index-000001",
+  "_id": "1",
+  "_version": 1,
+  "result": "created",
+  "_shards": { "total": 1, "successful": 1, "failed": 0 },
+  "_seq_no": 0,
+  "_primary_term": 1
+}</pre></div>
+  <p>请求与响应逐字取自官方 Index API 文档。回显里的 <code>_shards.total=1</code> 就是这份文档落进的主分片加副本总数（本例 1 主 0 副），文档还没讲到的分片概念已经在这里等你了。</p>
+</section>
+
+<!-- ================= 03 倒排索引 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>倒排索引：一本随时能反查的"书的术语表"</h2>
+  <p>搜索引擎的核心数据结构是<strong>倒排索引（inverted index）</strong>。类比一本书：正排是"第几页写了什么"，你要找"架构"出现在哪，只能一页页翻；书的最后有张<strong>术语表</strong>——"架构……第 12、58、201 页"，直接翻到。倒排索引就是把这张术语表做进了引擎：文档写入时先<strong>分词</strong>（text 字段被拆成一个个词项），再登记每个<strong>词项（term）→ 包含它的文档列表（posting list）</strong>。查询时不再扫描文档，而是查词项、拿列表：</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 250" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar39" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="14" y="30" width="180" height="190" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="104" y="58" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">文档集合</text>
+    <rect x="30" y="72" width="148" height="34" rx="6" fill="var(--bg)" stroke="var(--line)"/>
+    <text x="104" y="93" text-anchor="middle" fill="var(--muted)" font-size="9.5">doc 1：分布式搜索引擎</text>
+    <rect x="30" y="114" width="148" height="34" rx="6" fill="var(--bg)" stroke="var(--line)"/>
+    <text x="104" y="135" text-anchor="middle" fill="var(--muted)" font-size="9.5">doc 2：搜索引擎架构</text>
+    <rect x="30" y="156" width="148" height="34" rx="6" fill="var(--bg)" stroke="var(--line)"/>
+    <text x="104" y="177" text-anchor="middle" fill="var(--muted)" font-size="9.5">doc 3：分布式缓存</text>
+
+    <line x1="194" y1="125" x2="248" y2="125" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar39)"/>
+    <text x="221" y="110" text-anchor="middle" fill="var(--muted)" font-size="8.5">分词</text>
+
+    <rect x="252" y="30" width="220" height="190" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="362" y="58" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">词项字典（term dictionary）</text>
+    <rect x="268" y="72" width="188" height="30" rx="6" fill="var(--card)" stroke="var(--accent)" stroke-width="1.2"/>
+    <text x="362" y="92" text-anchor="middle" fill="var(--accent-3)" font-size="10" font-weight="700">搜索 →</text>
+    <rect x="268" y="110" width="188" height="30" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="362" y="130" text-anchor="middle" fill="var(--muted)" font-size="9.5">分布式 →</text>
+    <rect x="268" y="148" width="188" height="30" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="362" y="168" text-anchor="middle" fill="var(--muted)" font-size="9.5">缓存 →</text>
+    <text x="362" y="205" text-anchor="middle" fill="var(--muted)" font-size="8.5">排好序、可二分查找的词项表</text>
+
+    <line x1="472" y1="125" x2="526" y2="125" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar39)"/>
+    <text x="499" y="110" text-anchor="middle" fill="var(--muted)" font-size="8.5">查列表</text>
+
+    <rect x="530" y="30" width="216" height="190" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="638" y="58" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">倒排列表（posting list）</text>
+    <rect x="546" y="72" width="184" height="30" rx="6" fill="var(--bg)" stroke="var(--line)"/>
+    <text x="638" y="92" text-anchor="middle" fill="var(--muted)" font-size="9.5">搜索 → [1, 2]</text>
+    <rect x="546" y="110" width="184" height="30" rx="6" fill="var(--bg)" stroke="var(--line)"/>
+    <text x="638" y="130" text-anchor="middle" fill="var(--muted)" font-size="9.5">分布式 → [1, 3]</text>
+    <rect x="546" y="148" width="184" height="30" rx="6" fill="var(--bg)" stroke="var(--line)"/>
+    <text x="638" y="168" text-anchor="middle" fill="var(--muted)" font-size="9.5">缓存 → [3]</text>
+    <text x="638" y="205" text-anchor="middle" fill="var(--muted)" font-size="8.5">词项 → 文档编号列表</text>
+
+    <text x="14" y="240" fill="var(--muted)" font-size="9.5">查"搜索"不求人：词项字典里定位"搜索"，直接拿出文档列表 [1, 2]——书翻术语表，而不是逐页扫</text>
+  </svg>
+  </div>
+
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>钩子一：为什么 ES 搜索快</th><th>通用数据库（B+ 树 / LIKE 扫描）</th><th>Elasticsearch（倒排 + segment + 缓存）</th></tr></thead>
+    <tbody>
+      <tr><td>找"包含某词的文档"</td><td>LIKE 全表扫描或前缀匹配，文档越多越慢</td><td>词项字典定位词项，直接取文档列表，与数据总量近似无关</td></tr>
+      <tr><td>读时的并发</td><td>读写共享可变结构，需要锁或 MVCC</td><td>segment 不可变，读完全无锁，随便并发</td></tr>
+      <tr><td>磁盘访问</td><td>热数据外的访问落到磁盘</td><td>小文件成批读，长期驻留文件系统缓存，多数查询是纯内存操作</td></tr>
+      <tr><td>存储体积</td><td>通用行存为主</td><td>不可变文件压缩率高，列存 doc values 让排序聚合也快</td></tr>
+    </tbody>
+  </table></div>
+  <p>四行账合起来就是那句行业直觉：<strong>ES 的快是"用写入时的预处理，换查询时的直查"</strong>。B+ 树一侧的原理（什么时候走索引、什么时候失效）daily 线已详细讲过，延伸阅读见：<a href="../../daily-tech-course/lessons/0003-mysql-index-explain.html">MySQL 索引与 EXPLAIN</a>。</p>
+</section>
+
+<!-- ================= 04 从索引到分片 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>从索引到分片：index → shard → Lucene index → segment</h2>
+  <p>倒排索引存在哪里？官方《Clusters, nodes, and shards》的口径一句话："每个索引是一个或多个物理分片（shard）的分组，每个分片是一个<strong>自包含的 Lucene 索引</strong>，装着该索引文档的一个子集"。所以层级是这样：你叫的"索引"是逻辑名，它的每个<strong>主分片（primary shard）</strong>是一个独立运转的 Lucene 实例，Lucene 索引内部由一段段<strong>segment</strong>组成——倒排索引就住在 segment 里：</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 210" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <rect x="14" y="20" width="732" height="170" rx="12" fill="var(--card)" stroke="var(--line)"/>
+    <text x="30" y="46" fill="var(--ink)" font-size="12" font-weight="700">index：my-index-000001（逻辑索引 · 主分片数建索引时定死）</text>
+    <rect x="30" y="60" width="340" height="112" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="46" y="84" fill="var(--accent-3)" font-size="11" font-weight="700">shard 0（primary 主分片）</text>
+    <text x="46" y="102" fill="var(--muted)" font-size="9">= 一个自包含的 Lucene 索引</text>
+    <rect x="46" y="112" width="94" height="44" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="93" y="130" text-anchor="middle" fill="var(--ink)" font-size="9" font-weight="700">segment 1</text>
+    <text x="93" y="147" text-anchor="middle" fill="var(--muted)" font-size="8">倒排索引</text>
+    <rect x="150" y="112" width="94" height="44" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="197" y="130" text-anchor="middle" fill="var(--ink)" font-size="9" font-weight="700">segment 2</text>
+    <text x="197" y="147" text-anchor="middle" fill="var(--muted)" font-size="8">倒排索引</text>
+    <rect x="254" y="112" width="94" height="44" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="301" y="130" text-anchor="middle" fill="var(--ink)" font-size="9" font-weight="700">segment 3</text>
+    <text x="301" y="147" text-anchor="middle" fill="var(--muted)" font-size="8">倒排索引</text>
+    <rect x="390" y="60" width="340" height="112" rx="10" fill="var(--card)" stroke="var(--line)" stroke-dasharray="5 4"/>
+    <text x="406" y="84" fill="var(--ink)" font-size="11" font-weight="700">shard 0（replica 副本分片 · 另一节点）</text>
+    <text x="406" y="102" fill="var(--muted)" font-size="9">= 主分片的完整拷贝：容灾 + 分担读请求</text>
+    <rect x="406" y="112" width="94" height="44" rx="6" fill="var(--bg)" stroke="var(--line)"/>
+    <text x="453" y="130" text-anchor="middle" fill="var(--muted)" font-size="9" font-weight="700">segment 1'</text>
+    <text x="453" y="147" text-anchor="middle" fill="var(--muted)" font-size="8">同内容拷贝</text>
+    <rect x="510" y="112" width="94" height="44" rx="6" fill="var(--bg)" stroke="var(--line)"/>
+    <text x="557" y="130" text-anchor="middle" fill="var(--muted)" font-size="9" font-weight="700">segment 2'</text>
+    <text x="557" y="147" text-anchor="middle" fill="var(--muted)" font-size="8">同内容拷贝</text>
+    <rect x="614" y="112" width="94" height="44" rx="6" fill="var(--bg)" stroke="var(--line)"/>
+    <text x="661" y="130" text-anchor="middle" fill="var(--muted)" font-size="9" font-weight="700">segment 3'</text>
+    <text x="661" y="147" text-anchor="middle" fill="var(--muted)" font-size="8">同内容拷贝</text>
+    <text x="14" y="205" fill="var(--muted)" font-size="9.5">官方口径：每个文档属于恰好一个主分片；副本是主分片的拷贝，跨节点冗余防硬件故障，还能分担读请求</text>
+  </svg>
+  </div>
+
+  <p>官方还有两条硬规矩：<strong>"索引里每个文档属于一个主分片"</strong>——文档落谁家由路由公式决定（默认对文档 ID 取哈希再对主分片数取模，所以主分片数改不了：一改，所有文档的归属全乱，等于整库搬家）；<strong>"副本数可以随时改"</strong>——副本只是拷贝，加副本只影响容灾能力与读吞吐，不动数据分布。分片副本在集群里由 ES 自动均衡分布，这就是"扩容加节点、数据自动摊开"的由来。</p>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>节点角色</th><th>干什么</th><th>一句话记忆</th></tr></thead>
+    <tbody>
+      <tr><td>master 节点</td><td>管集群状态：建删索引、决定分片放哪个节点、故障时重新分配分片</td><td>集群的"管理员"，不扛数据流量</td></tr>
+      <tr><td>data 节点</td><td>存分片、执行索引与搜索的数据操作（CPU/内存/磁盘大户）</td><td>集群的"仓库名工人"</td></tr>
+      <tr><td>coordinating 协调节点</td><td>接客户端请求：写入转发给主分片、搜索扇出到各分片再归并结果</td><td>每个节点默认都是协调者，请求到谁谁协调</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note">角色是"职责"不是"机器"：小集群一个节点身兼三职，生产集群才把 master 候选与 data 拆开部署。9.x 的完整角色表（ingest、ml、transform 等）见官方 Node roles 文档。</p>
+</section>
+
+<!-- ================= 05 整体架构 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>整体架构：一张图看清集群</h2>
+  <p>把上面的术语拼成一张架构图——这是本期的主图，第 4 期实战和第 5 期源码都会回到它：</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 340" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar40" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="14" y="130" width="120" height="80" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="74" y="163" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">客户端</text>
+    <text x="74" y="183" text-anchor="middle" fill="var(--muted)" font-size="9">SDK / Kibana / curl</text>
+
+    <line x1="134" y1="170" x2="188" y2="170" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar40)"/>
+    <text x="161" y="156" text-anchor="middle" fill="var(--muted)" font-size="8.5">REST 请求</text>
+
+    <rect x="192" y="96" width="130" height="148" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="257" y="122" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">协调节点</text>
+    <text x="257" y="140" text-anchor="middle" fill="var(--muted)" font-size="8.5">coordinating</text>
+    <rect x="202" y="150" width="110" height="30" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="257" y="169" text-anchor="middle" fill="var(--muted)" font-size="8.5">写：路由转发主分片</text>
+    <rect x="202" y="186" width="110" height="44" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="257" y="203" text-anchor="middle" fill="var(--muted)" font-size="8.5">读：扇出到各分片</text>
+    <text x="257" y="219" text-anchor="middle" fill="var(--muted)" font-size="8.5">归并结果回客户端</text>
+
+    <line x1="322" y1="145" x2="376" y2="128" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar40)"/>
+    <text x="349" y="122" text-anchor="middle" fill="var(--muted)" font-size="8.5">写</text>
+    <line x1="322" y1="200" x2="376" y2="216" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar40)" stroke-dasharray="5 4"/>
+    <text x="349" y="224" text-anchor="middle" fill="var(--muted)" font-size="8.5">读（任一副本可答）</text>
+
+    <rect x="380" y="34" width="222" height="256" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="491" y="58" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">data 节点 1</text>
+    <rect x="396" y="70" width="190" height="88" rx="8" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.2"/>
+    <text x="491" y="90" text-anchor="middle" fill="var(--accent-3)" font-size="9.5" font-weight="700">主分片 P0（index A）</text>
+    <text x="491" y="108" text-anchor="middle" fill="var(--muted)" font-size="8.5">内存缓冲 + translog</text>
+    <text x="491" y="124" text-anchor="middle" fill="var(--muted)" font-size="8.5">refresh → 新 segment</text>
+    <text x="491" y="140" text-anchor="middle" fill="var(--muted)" font-size="8.5">Lucene：segment 1 · 2 · 3</text>
+    <rect x="396" y="166" width="190" height="60" rx="8" fill="var(--bg)" stroke="var(--line)"/>
+    <text x="491" y="186" text-anchor="middle" fill="var(--muted)" font-size="9">副本分片 R1（index B）</text>
+    <text x="491" y="204" text-anchor="middle" fill="var(--muted)" font-size="8.5">Lucene segments 拷贝</text>
+    <text x="491" y="274" text-anchor="middle" fill="var(--muted)" font-size="8.5">倒排索引住在 segment 里</text>
+
+    <rect x="380" y="34" width="222" height="256" rx="10" fill="none" stroke="none"/>
+    <rect x="618" y="34" width="128" height="256" rx="10" fill="var(--card)" stroke="var(--line)" stroke-dasharray="5 4"/>
+    <text x="682" y="58" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">data 节点 2</text>
+    <rect x="630" y="70" width="104" height="70" rx="8" fill="var(--bg)" stroke="var(--line)"/>
+    <text x="682" y="92" text-anchor="middle" fill="var(--muted)" font-size="9">副本 R0</text>
+    <text x="682" y="110" text-anchor="middle" fill="var(--muted)" font-size="8.5">（主分片拷贝）</text>
+    <text x="682" y="128" text-anchor="middle" fill="var(--muted)" font-size="8.5">segments</text>
+    <rect x="630" y="150" width="104" height="70" rx="8" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.2"/>
+    <text x="682" y="172" text-anchor="middle" fill="var(--accent-3)" font-size="9" font-weight="700">主分片 P1</text>
+    <text x="682" y="190" text-anchor="middle" fill="var(--muted)" font-size="8.5">（index B）</text>
+    <text x="682" y="206" text-anchor="middle" fill="var(--muted)" font-size="8.5">segments</text>
+    <text x="682" y="250" text-anchor="middle" fill="var(--muted)" font-size="8">主副本永不同节点</text>
+
+    <rect x="14" y="24" width="308" height="76" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="168" y="50" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">master 节点（可候选集群）</text>
+    <text x="168" y="70" text-anchor="middle" fill="var(--muted)" font-size="8.5">维护集群状态：索引元数据 · 分片分配</text>
+    <text x="168" y="86" text-anchor="middle" fill="var(--muted)" font-size="8.5">节点掉线时重新分配分片副本</text>
+    <line x1="168" y1="100" x2="168" y2="126" stroke="var(--muted)" stroke-width="1.2" stroke-dasharray="4 3"/>
+    <line x1="322" y1="90" x2="380" y2="70" stroke="var(--muted)" stroke-width="1" stroke-dasharray="4 3"/>
+    <text x="352" y="66" text-anchor="middle" fill="var(--muted)" font-size="8">管理</text>
+    <text x="14" y="322" fill="var(--muted)" font-size="9.5">写路径实线：协调节点按路由转发主分片，主分片再同步给所有 in-sync 副本；读路径虚线：主或任一副本都能应答，master 只管状态不扛流量</text>
+  </svg>
+  </div>
+  <p>三条读图要点：<strong>写入只进主分片，由主分片分发给副本</strong>；<strong>读取主副本都行</strong>，所以加副本能提升读吞吐；<strong>master 只管集群状态与分片分配</strong>，数据面流量完全不经过它——这是 ES 集群能横向扩的架构前提之一。</p>
+</section>
+
+<!-- ================= 06 写入路径 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>写入路径：为什么是"近实时"而不是"实时"</h2>
+  <p>把第 02 节那条 <code>_create</code> 请求放大，一条文档在主分片内部走四步：<strong>① 进内存缓冲（indexing buffer），同时追加一条 translog 操作日志；② 缓冲攒够（默认每 1 秒）执行 refresh，生成一个新 segment——文档从此可被搜索；③ 主分片把操作并行转发给所有 in-sync 副本，全部确认后才向客户端回"created"；④ 后台周期 merge 把小 segment 合并成大段</strong>。官方 refresh 文档原话："refresh 操作让近期的改动对搜索可见"（makes recent changes to the index visible to search），默认间隔 <code>refresh_interval=1s</code>。可见性卡在 refresh 这一步，这就是官方叫它<strong>近实时（near real-time）</strong>的原因——文档写完到能搜到，通常隔一秒：</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 250" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar41" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="14" y="36" width="150" height="120" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="89" y="64" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">① 内存缓冲</text>
+    <text x="89" y="84" text-anchor="middle" fill="var(--muted)" font-size="8.5">indexing buffer</text>
+    <text x="89" y="102" text-anchor="middle" fill="var(--muted)" font-size="8.5">此时不可搜索</text>
+    <rect x="24" y="114" width="130" height="30" rx="6" fill="var(--hot-bg)" stroke="var(--accent)"/>
+    <text x="89" y="134" text-anchor="middle" fill="var(--accent-3)" font-size="8.5" font-weight="700">同时追加 translog</text>
+
+    <line x1="164" y1="96" x2="218" y2="96" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar41)"/>
+    <text x="191" y="82" text-anchor="middle" fill="var(--muted)" font-size="8.5">默认每 1s</text>
+
+    <rect x="222" y="36" width="150" height="120" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="297" y="64" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">② refresh</text>
+    <text x="297" y="84" text-anchor="middle" fill="var(--muted)" font-size="8.5">缓冲内容生成新 segment</text>
+    <text x="297" y="102" text-anchor="middle" fill="var(--accent-3)" font-size="8.5" font-weight="700">文档从此可搜索</text>
+    <text x="297" y="120" text-anchor="middle" fill="var(--muted)" font-size="8.5">近实时的"近"就在这</text>
+    <text x="297" y="138" text-anchor="middle" fill="var(--muted)" font-size="8.5">可设 -1 批量导入时关掉</text>
+
+    <line x1="372" y1="96" x2="426" y2="96" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar41)"/>
+    <text x="399" y="82" text-anchor="middle" fill="var(--muted)" font-size="8.5">后台周期</text>
+
+    <rect x="430" y="36" width="150" height="120" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="505" y="64" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">④ merge 合并</text>
+    <text x="505" y="84" text-anchor="middle" fill="var(--muted)" font-size="8.5">小段合成大段</text>
+    <text x="505" y="102" text-anchor="middle" fill="var(--muted)" font-size="8.5">真正物理清除删除</text>
+    <text x="505" y="120" text-anchor="middle" fill="var(--muted)" font-size="8.5">控制段数量与体积</text>
+
+    <rect x="596" y="36" width="150" height="120" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="671" y="64" text-anchor="middle" fill="var(--accent-3)" font-size="11" font-weight="700">③ 副本复制</text>
+    <text x="671" y="84" text-anchor="middle" fill="var(--muted)" font-size="8.5">主分片并行转发操作</text>
+    <text x="671" y="102" text-anchor="middle" fill="var(--muted)" font-size="8.5">全部 in-sync 副本确认</text>
+    <text x="671" y="120" text-anchor="middle" fill="var(--muted)" font-size="8.5">才回 created 给客户端</text>
+    <line x1="297" y1="156" x2="640" y2="156" stroke="var(--muted)" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#ar41)"/>
+    <text x="452" y="172" text-anchor="middle" fill="var(--muted)" font-size="8.5">写主分片成功后同步副本</text>
+
+    <rect x="14" y="190" width="732" height="44" rx="8" fill="var(--hot-bg)" stroke="var(--accent)" stroke-dasharray="0"/>
+    <text x="380" y="209" text-anchor="middle" fill="var(--ink)" font-size="9.5" font-weight="700">translog 兜底：官方口径——每条索引与删除操作"经 Lucene 处理后、确认返回前"先写入 translog；</text>
+    <text x="380" y="226" text-anchor="middle" fill="var(--ink)" font-size="9.5" font-weight="700">进程崩溃或硬件故障时，"已确认但还没进 Lucene 提交点"的操作在分片恢复时从 translog 重放补回</text>
+  </svg>
+  </div>
+
+  <p>translog 兜的是什么底？refresh 只是把数据变成"可搜索"，还不是"可恢复"——Lucene 的提交（commit）很贵，不可能每条都做。于是每条操作"在返回确认之前"先追加进 translog，且默认 <code>durability=request</code>：落盘确认后才回客户端成功。断电重启时，"已确认但还没进 Lucene 提交点"的那一小段操作从 translog 重放补回。<strong>一句话分工：refresh 管"什么时候能搜到"，translog 管"确认过的绝不丢"</strong>——两个机制各管一头，合起来才是既快又可靠的写入。代价也有：默认每请求落盘一次，超高吞吐场景官方提供 async 模式（默认 5 秒刷一次），换成"崩溃时可能丢最后几秒"。想亲手触发可见性，一条命令：</p>
+  <div class="codeblock"><pre># 官方 Refresh API 文档样例：不等 1 秒，立刻让缓冲里的文档可搜
+POST my-index-000001/_refresh</pre>
+  <pre>{
+  "_shards": {
+    "total": 2,
+    "successful": 2,
+    "failed": 0
+  }
+}</pre></div>
+  <p>命令取自官方文档样例；响应体是官方记载的 <code>_shards</code> 结构——total 是该索引的分片副本总数（本例 1 主 1 副）。批量导入的黄金组合是：<code>refresh_interval=-1</code> 暂时关刷新 + 导完手动 refresh，避免一路生成一堆马上就要被合并的中间 segment。</p>
+</section>
+
+<!-- ================= 07 segment 不可变 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>segment 不可变设计：删除是标记，合并才清账</h2>
+  <p>第二个钩子：segment 一旦生成就<strong>永不修改</strong>（官方 merge 文档原话："segment 是不可变的"——immutable）。不可变听起来笨，其实是第 03 节那些快的根源：<strong>读无锁</strong>（不会读到改了一半的文件，任何线程随便并发读）；<strong>缓存友好</strong>（文件永不变化，文件系统缓存可以长期驻留，热数据等同内存操作）；<strong>压缩率高</strong>（数据静态可大胆编码，省磁盘省内存）。那删除和更新怎么办？全靠"标记 + 新写"：删除只是在提交点记录"文档 N 已删"（.del 标记），文档数据原封不动躺在旧 segment 里，查询时被过滤掉——<strong>你删了它，它还占着空间</strong>；更新 = 对同一文档 ID 标记删除 + 在新 segment 写入新版本（所以更新一条文档的实际成本接近"删一次加写一次"）。真正物理回收空间的是第 06 节的 merge：官方原话——"较小的 segment 周期性合并成较大的 segment，以控制索引体积并<strong>清除删除</strong>（expunge deletes）"。</p>
+  <ul>
+    <li><strong>查询为什么要打折：</strong>命中结果里凡带删除标记的要在返回前过滤掉，删除积压越多查询越亏——看得到"已删文档占比"这个指标（<code>docs.deleted</code>）就知道该不该治理；</li>
+    <li><strong>merge 不是免费的：</strong>合并要重写数据、吃 IO 与 CPU，所以它是后台限速进行的——写入流量暴增时 segment 堆积、merge 追不上，观测的就是这个水位；</li>
+    <li><strong>forcemerge 是把手术刀：</strong>批量导入结束后对只读索引强制合并成少数几个大段，一次性清掉全部删除标记，属于运维动作别在业务高峰做；</li>
+    <li><strong>事务不支持：</strong>没有回滚和部分更新——"改一行"的代价是重建整条文档，这决定了用 ES 的姿势：数据模型按查询优化，不按事务优化。</li>
+  </ul>
+  <p class="warn">反直觉点收一下：删得快≠删得掉。靠删数据腾空间的同学要记住——<strong>删除标记只是让文档不可见，磁盘空间要等 merge 走完才归还</strong>；急用空间走 forcemerge 或直接删索引。</p>
+</section>
+
+<!-- ================= 08 仓库模块地图 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>源码仓库顶层地图：目录逐个核对</h2>
+  <p>架构要落到代码才踏实。下面是 <code>github.com/elastic/elasticsearch</code> 在 tag <strong>v9.5.4</strong>（2026-09-15 发布的 GitHub Latest）仓库树上的顶层目录，每个一句话——目录名全部对照当页树实拍核对：</p>
+  <div class="codeblock"><pre>elasticsearch @ v9.5.4 · 顶层目录
+├─ server/         搜索引擎本体：索引/搜索/集群协调/transport/REST 层
+├─ libs/           可独立复用的基础库：geo、x-content、grok、插件 API 等
+├─ modules/        默认随发行版启用：ingest 管道、painless 脚本、analysis-common
+├─ plugins/        按需单独安装：analysis-icu、discovery-ec2、repository-hdfs…
+├─ distribution/   打包产物：tar / zip / deb / rpm / docker
+├─ x-pack/         内置安全/监控/ML/ES|QL 等能力（主体在其 plugin/ 子目录）
+├─ client/         REST 客户端与 sniffer 子项目、客户端基准
+├─ rest-api-spec/  全部 REST API 的请求/响应规范定义
+└─ qa/ · test/ · benchmarks/ · docs/ · gradle/…   QA/测试框架/基准/文档/构建</pre></div>
+  <p class="note">读码入口预告：server 模块的 Java 包 <code>org.elasticsearch</code> 下，cluster、index/shard、search、discovery 这些子包名和第 05 节架构图上的框一一对应——第 5 期源码导读就从这里进。modules 与 plugins 的分界记一句话：<strong>默认装的进 modules，要自己装的进 plugins</strong>。</p>
+</section>
+
+<!-- ================= 09 quiz ================= -->
+<section>
+  <h2><span class="sec-num">09</span>随堂一问</h2>
+  <div class="quiz">
+    <div class="quiz-q">
+      <p class="quiz-question">一条文档写入成功（客户端已收到 created）之后、refresh 发生之前，此时它的状态是？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，恰恰相反——没 refresh 就是搜不到，这正是\"近实时\"里那个\"近\"的含义。","不对，translog 是写入路径上必经的一步：默认 durability=request 下，translog 落盘确认后才回 created。","对：translog 里已留底、崩溃可恢复，但还没生成 segment，对搜索不可见——\"可靠\"与\"可搜\"是两条线。","不对，写入成功的文档一定已落在主分片并同步到副本；不可见的原因是缺 segment，不是缺副本。"]'>
+        <li class="quiz-option">A. 搜不到，而且此时断电数据就丢了</li>
+        <li class="quiz-option">B. 搜得到，因为 translog 已经落盘</li>
+        <li class="quiz-option">C. 搜不到，但断电也不丢——translog 已留底</li>
+        <li class="quiz-option">D. 搜得到，前提是它有副本分片</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 10 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>思考题</h2>
+  <details class="q-card">
+    <summary>思考一：为什么主分片数在建索引时定死、副本数却能随时改？这个限制对"一开始不知道数据量"的业务意味着什么？</summary>
+    <div class="details-body">
+      <p>先看机制：文档落在哪个主分片由路由公式决定——默认对文档 ID 取哈希、再对主分片数取模，官方原话是"每个文档属于一个主分片"。这个公式要求所有节点对"主分片数"达成一致答案，<strong>一旦改数字，每条文档算出的归属全变</strong>：已写进去的数据等于全部错位，所以 ES 干脆把主分片数锁在建索引那一刻（官方 Create index 文档明确 number_of_shards 只能建索引时设置）。副本则完全不同：它不是路由的目标，只是主分片的拷贝——增加副本只是多复制一份、分担读流量，减少副本只是少一份冗余，数据分布纹丝不动，官方原话"副本数可以随时改变而不中断操作"。对"不知道数据量"的业务，这个限制催生了几个工程姿势：宁可按"单分片 10~50 GB"的经验区间拆多一点的分片（分片数 = 预估总量 / 单片目标），因为分片只能多不能改；或者用数据流 + 按时间滚动的索引，让"分片数"变成按时间片可重估的参数；9.x 还提供了 shrink/split 等运维工具在事后搬正——但那是要重刷数据的重操作。本质上是<strong>用路由公式的简洁性（O(1) 定位）换掉了在线弹性</strong>，这是分布式系统里"算得快"和"搬得动"之间的经典取舍。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：把 refresh_interval 设成 -1 之后，"近实时"还成立吗？写入的数据什么时候可搜、什么时候会丢？批量导入该怎么组合这几个开关？</summary>
+    <div class="details-body">
+      <p>先拆开两件容易被混为一谈的事：<strong>可见性归 refresh 管，可靠性归 translog 管</strong>，设 -1 只动了前者。关掉自动刷新后，文档写进去照样进内存缓冲、照样追加 translog（默认 durability=request 下逐请求落盘确认），所以"断电不丢"的性质一点没变；变的只是"什么时候生成新 segment"——不再每秒自动做，要等到你手动触发 <code>POST 索引名/_refresh</code>、或该分片触发 flush（Lucene 提交，官方文档：translog 最大不超过磁盘的 1%，到阈值会自动 flush）时才可见。也就是说"近实时"的"近"从 1 秒被拉长到"你愿意等多久"。批量导入的黄金组合因此是三件套：<code>refresh_interval=-1</code> 暂关刷新（避免生成一堆中间 segment 等着 merge，白费 IO）、副本数临时降为 0（少复制一倍数据）、导完恢复副本数并手动 refresh——官方 bulk 导入指引就是这个思路。反过来说，如果你的场景要求"写入后立刻可搜"（比如监控告警的秒级延迟），别把 refresh 调长，反过来按需把个别索引调小甚至写入后主动 refresh——它的粒度是索引级设置，完全可以按业务分而治之。这道题的通用结论：看到任何"近实时"，先问一句<strong>"可见性延迟和持久性保证分别是哪个机制给的"</strong>，两个变量分开调，才不会调出一个又慢又丢的配置。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 11 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">11</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>术语三层：索引装文档、文档由字段组成、mapping 定义字段如何存储与索引（text 分词检索，keyword 精确匹配）；</li>
+      <li>倒排索引是"书的术语表"：分词 → 词项字典 → 文档列表，查询直查不扫描，快在用写入时的预处理换查询时的直查；</li>
+      <li>索引 = 主分片 + 副本的分组，每个分片是一个自包含的 Lucene 索引；主分片数建索引时定死，副本数随时可改；</li>
+      <li>写入路径：内存缓冲 + translog 兜底 → refresh 生成新 segment 才可搜（近实时的由来，默认 1 秒）→ merge 合并清删除；</li>
+      <li>segment 不可变：读无锁、缓存友好、压缩率高；删除只是标记，merge 才真正回收空间。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>概念地图有了。下一期我们用它做一个真实场景的端到端实战——把一份真实数据从建索引、定义 mapping 到搜索、聚合完整跑一遍，看看今天每个名词怎么变成实打实的命令与配置。</p>
+  <p><strong>Primary source：</strong><a href="https://www.elastic.co/docs/deploy-manage/distributed-architecture/clusters-nodes-shards" target="_blank" rel="noopener">Elastic 官方文档 · Cluster, nodes, and shards</a>——本期核心概念（索引/分片/副本/节点）的官方定义都在这页；配套页面：<a href="https://www.elastic.co/docs/manage-data/data-store/mapping" target="_blank" rel="noopener">Mapping</a> · <a href="https://www.elastic.co/docs/reference/elasticsearch/index-settings/index-modules" target="_blank" rel="noopener">refresh 设置（默认 1s）</a> · <a href="https://www.elastic.co/docs/reference/elasticsearch/index-settings/translog" target="_blank" rel="noopener">translog 设置</a> · <a href="https://www.elastic.co/docs/reference/elasticsearch/index-settings/merge" target="_blank" rel="noopener">merge 设置（segment 不可变与 expunge deletes）</a>；模块地图核对于 <a href="https://github.com/elastic/elasticsearch/tree/v9.5.4" target="_blank" rel="noopener">elasticsearch tag v9.5.4 仓库树</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0038-es-quickstart.html">← 上一期：5 分钟跑起来 Elasticsearch</a></span>
+  <a class="next" href="0040-es-in-action.html">下一期：Elasticsearch 实战：端到端小场景 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

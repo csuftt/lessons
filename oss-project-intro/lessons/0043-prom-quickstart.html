@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Prometheus 系列第 2 期:5 分钟跑起来 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0043</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0042-prom-what-and-why.html">上一期:0042</a> · Prometheus 系列第 2 期 / 共 5 期 · <a href="https://prometheus.io" target="_blank" rel="noopener">prometheus.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · PROMETHEUS 系列第 2 期:5 分钟跑起来</p>
+  <h1>5 分钟跑起来 Prometheus:解压即用起服务,亲手查出第一条曲线</h1>
+  <p class="subtitle">上一期我们认识了 Prometheus——Pull 模型的指标监控一体机,公司监控大屏和 K8s 告警链路背后的那双眼睛。这一期把认识变成动手:把它在你机器上跑起来,让第一个抓取目标变成绿色,亲手用 PromQL 查出第一条曲线,并说清楚什么状态才算真的跑通。全文基于 v3.14.0(2026-08-17 发布,GitHub Releases Latest 标记,官方下载页口径,2026-09-19 复核;官方同时维护 3.13 LTS 线,最新补丁 3.13.3),下载解压、最小配置、启动验证与示例表达式逐字对照 prometheus.io 官方 First steps 与 Installation 文档,高频报错一并给全——Prometheus 是单二进制、零外部依赖,这可能是全系列最轻松的一期上手。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">📈 监控与告警 · Go · Apache-2.0(CNCF 毕业项目)</span>
+    <span class="tag">📦 基于 v3.14.0(2026-08-17)</span>
+    <span class="tag-date">📅 2026-09-19 · 第 2 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 路线 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>本期路线与跑通判定</h2>
+  <p>四步路线:<strong>解压 → 配置 → 启动 → 查询</strong>。全程一条演示链走到底,三条判定全绿才算跑通:</p>
+  <div class="card">
+    <ul class="steps">
+      <li>① <strong>Target Up:</strong>打开 9090 端口的 Web 界面,Status → Targets 页里第一个抓取目标 Prometheus 自己,State 是绿色的 Up;</li>
+      <li>② <strong>指标查得出:</strong>表达式浏览器的 Table 页,输入官方示例表达式,能返回一批带标签的时间序列和最新值;</li>
+      <li>③ <strong>曲线画得出:</strong>Graph 页用 <code>rate(...)</code> 查出一条随时间变化的曲线——数据进得来、查得出、画得动,才是"跑起来"。</li>
+    </ul>
+  </div>
+  <p>先给一个心理预期:上期说过 Prometheus 是 <strong>Pull 模型</strong>——它主动去拉每个目标的指标。本期第一个被拉的目标,就是 Prometheus 自己:它启动后会抓取自己的 <code>/metrics</code> 端点,所以你不用再部署任何业务应用,就能完整体验"抓取、存储、查询"整条链路。这也是官方 First steps 的教学习惯:先用自己当靶子,把流程跑通。</p>
+</section>
+
+<!-- ================= 02 版本与选型 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>动手前:钉版本、选路线、看环境</h2>
+  <p>先钉版本。GitHub 发布页上,v3.14.0 挂着 Latest 标记(2026-08-17,官方下载页口径);官方同时在维护 <strong>3.13 LTS 长期支持线</strong>,最新补丁 3.13.3(2026-09-07);而 3.15 还停在 rc 预发布(3.15.0-rc.0,2026-09-09)——尝鲜可以,生产别追 rc。本系列统一以 3.14 线为基准,所有命令当日逐字对照过官方文档。</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>安装路线</th><th>怎么装</th><th>适合谁</th></tr></thead>
+    <tbody>
+      <tr><td><strong>解压单二进制(本期主线)</strong></td><td>官方下载页拿压缩包,<code>tar</code> 解压即用,解压出来就是可执行文件</td><td>最快跑通、最贴官方 First steps 口径</td></tr>
+      <tr><td>Docker 官方镜像</td><td><code>docker run -p 9090:9090 prom/prometheus</code> 一条命令</td><td>机器上已有 Docker、想环境隔离</td></tr>
+      <tr><td>配置管理包 / 源码编译</td><td>Debian/Ubuntu、RHEL 系仓库包,或自行编译</td><td>长期挂在服务器、有配置管理习惯</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>本期主线选 <strong>解压单二进制</strong>:它是官方 First steps 的原生口径,每一步都能逐字对照文档,而且最能体现这个项目的性格——<strong>单二进制、零外部依赖</strong>(官方原话 no external dependencies)。对比一下:上一期 Elasticsearch 起一个容器要配密码、拷证书、留 4GB 内存;Prometheus 解压完就能跑,上手成本低一个量级。</p>
+  <div class="note">
+    <p><strong>环境要求一句话:</strong>一台普通机器就行。官方文档没有给"最低内存"这种硬指标,给的口径是:平均每个样本只占 <strong>1 到 2 字节</strong>磁盘,容量公式 <code>needed_disk_space = retention_time_seconds × ingested_samples_per_second × bytes_per_sample</code>;官方 FAQ 说单实例可靠承载<strong>千万级活跃序列</strong>。像本期这样只抓自己一个 job 的实例,几百 MB 内存绰绰有余(实践口径)。Windows 用户也有对应的 <code>prometheus.exe</code>,不装 Linux 一样跟完本期。</p>
+  </div>
+</section>
+
+<!-- ================= 03 下载解压 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>第一步:下载解压,拿到两个可执行文件</h2>
+  <p>去官方下载页 <a href="https://prometheus.io/download/" target="_blank" rel="noopener">prometheus.io/download</a> 找到 3.14.0 对应平台的压缩包(Linux amd64 的包名形如 <code>prometheus-3.14.0.linux-amd64.tar.gz</code>,约 102 MiB,页面附 SHA256 校验值),然后按官方 First steps 原样两条命令:</p>
+  <pre><code>tar xvfz prometheus-*.tar.gz
+cd prometheus-*</code></pre>
+  <p>解压出来的目录里有两个可执行文件:<code>prometheus</code> 本体,和 <code>promtool</code>——官方配套的检查工具,校验配置、校验规则文件都用它,高频报错一节会请它出场。Windows 用户下载 zip 包解压,对应的是 <code>prometheus.exe</code>。可以先跑 <code>./prometheus --help</code> 看一眼帮助,官方 First steps 也是这么建议的——确认二进制能执行,再往下走。</p>
+  <p>顺带说 Docker 路线:官方 Installation 页原话是 <code>docker run -p 9090:9090 prom/prometheus</code>,"用一份样例配置启动 Prometheus 并暴露 9090 端口";想挂自己的配置文件,加 <code>-v /path/to/prometheus.yml:/etc/prometheus/prometheus.yml</code>。注意官方提醒:容器里数据写在 <code>/prometheus</code> 目录,容器一删数据就没了,要留数据就挂一个 volume。两条路线殊途同归,后面的界面操作完全一致。</p>
+</section>
+
+<!-- ================= 04 最小配置 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>第二步:最小配置,让它先抓自己</h2>
+  <p>Prometheus 的所有配置都在一个 YAML 文件里,默认就叫 <code>prometheus.yml</code>(压缩包里带一份带完整注释的样例)。官方 First steps 给的精简版长这样:</p>
+  <pre><code>global:
+  scrape_interval:     15s
+  evaluation_interval: 15s
+
+rule_files:
+  # - "first.rules"
+  # - "second.rules"
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']</code></pre>
+  <p>三块结构逐个说。<strong><code>global</code></strong>:全局默认——抓取间隔 15 秒、规则评估间隔 15 秒(不写的话官方默认都是 1 分钟,样例显式改小,是为了界面上的数据变化肉眼可见)。<strong><code>rule_files</code></strong>:告警与记录规则文件列表,本期先注释着,告警规则是后面期数的剧情。<strong><code>scrape_configs</code></strong>:抓取目标清单——这里定义了一个叫 <code>prometheus</code> 的 job,目标是 <code>localhost:9090</code>。还记得上期说的 Pull 模型吗?这十几行就是那个"拉"字的落地:Prometheus 会每 15 秒请求一次 <code>http://localhost:9090/metrics</code>,把返回的指标文本存进自带的时序数据库。</p>
+  <p><strong>缩进就是语法</strong>:YAML 靠两个空格的层级表达从属关系,Tab 和空格混用会直接报错——这是新手第一大坑,报错清单里给解法。</p>
+</section>
+
+<!-- ================= 05 启动 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>第三步:启动,打开 9090 状态页</h2>
+  <p>官方 First steps 原样命令,在解压目录里执行:</p>
+  <pre><code>./prometheus --config.file=prometheus.yml</code></pre>
+  <p>终端会滚动打印启动日志:加载配置、启动 TSDB、监听 9090 端口。看到不再刷屏,就可以按官方文档说的做——<strong>打开 <code>http://localhost:9090</code></strong>,这是 Prometheus 自带的 Web 界面;官方提醒给它大约 <strong>30 秒</strong>去采集自身数据。想验证指标端点,直接浏览器或 curl 访问 <code>http://localhost:9090/metrics</code>:能刷出一大屏文本,每行一条"指标名{标签} 值",这就是 Pull 模型拉回来的原料,也是第 3 期要拆的数据模型的样子。</p>
+  <p>此刻它已经在存数据了:抓回来的每个样本都写进本地 TSDB(时序数据库),不需要装 MySQL 也不需要装 Redis——零外部依赖不是口号,是启动那一刻就成立的事实。</p>
+</section>
+
+<!-- ================= 06 Targets ================= -->
+<section>
+  <h2><span class="sec-num">06</span>第四步:Status → Targets,看第一个目标变绿</h2>
+  <p>Web 界面菜单里点 <strong>Status → Targets</strong>:这个页面列出所有抓取目标的健康状态。你应该看到 <code>prometheus</code> 这个 job 下有一个 <code>http://localhost:9090/metrics</code> 端点,<strong>State 一栏是绿色的 Up</strong>,旁边还有 Last scrape(上次抓取时刻)和抓取耗时。跑通判定第一条达成。</p>
+  <p>页面上的 Up/Down 不是摆设,它对应一条官方合成的指标 <code>up</code>:官方 Concepts 文档口径——每次抓取成功,<code>up</code> 记 1;抓取失败,记 0。所以"目标活着"本身就是一条可以查询的时序,后面排查"为什么没数据"时,第一个要查的就是它。</p>
+  <p>顺便把同一菜单里的 <strong>Status → Runtime &amp; Build Information</strong> 留个印象:版本号、启动时长、存储统计都在那里——以后怀疑"跑的是哪个版本"时,来这里对答案。</p>
+</section>
+
+<!-- ================= 07 查询 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>第五步:查第一条指标,画第一条曲线</h2>
+  <p>点菜单 <strong>Query</strong> 进表达式浏览器(或直接访问 <code>http://localhost:9090/query</code>)。官方 First steps 给的第一条表达式,是 Prometheus 暴露的自身请求计数:</p>
+  <pre><code>promhttp_metric_handler_requests_total</code></pre>
+  <p>Table 页回车,官方文档描述的结果是:返回<strong>若干条时间序列</strong>,指标名相同、标签不同,每条带一个最新值——标签里的 <code>code</code> 区分了 HTTP 状态码。想只看成功的 200,加标签过滤 <code>{code="200"}</code>;想知道一共几条,套一层 <code>count(...)</code>。这就是 PromQL 的味道:指标名加花括号标签做筛选,函数做聚合,一行顶别家一段配置。</p>
+  <p>然后切到 <strong>Graph</strong> 页,画本期第一条曲线。官方给的示例表达式:</p>
+  <pre><code>rate(promhttp_metric_handler_requests_total{code="200"}[1m])</code></pre>
+  <p><code>rate(...[1m])</code> 是"最近 1 分钟的每秒增长速率"——计数器只会涨,直接看数值意义不大,增长率才有剧情。曲线虽然此刻还比较平(毕竟只有你自己访问),但<strong>数据从抓取、存储到查询、画图的整条链路,你已经亲手走通了</strong>。跑通判定第二、三条达成。</p>
+</section>
+
+<!-- ================= 08 高频翻车 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>高频翻车与解法(对号入座)</h2>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>症状</th><th>原因与官方口径解法</th></tr></thead>
+    <tbody>
+      <tr><td><strong>启动即退</strong>,日志报 <code>Error loading config ... parsing YAML file ... line N</code></td><td>配置文件语法错误,日志会给出行号,去第 N 行找缩进问题(Tab 混入、冒号后缺空格是常客)。更稳的做法:用官方配套工具 <code>./promtool check config prometheus.yml</code> 先校验再启动</td></tr>
+      <tr><td><strong>9090 端口被占</strong>,启动报监听失败或页面打开是别的服务</td><td>查占用(<code>lsof -i :9090</code> 或 <code>netstat -ano</code>);或者换端口启动:<code>./prometheus --config.file=prometheus.yml --web.listen-address=:9091</code>,之后访问 9091</td></tr>
+      <tr><td><strong>Targets 页目标 Down</strong>,Error 里写 <code>connection refused</code></td><td>Pull 模型下,"抓不到"本身就是信号:目标进程没起、端口没听、地址写错或防火墙拦截。上期说过监控靠拉——现在你亲身体会到拉失败的报错长什么样了,先确认目标活着,再看地址对不对</td></tr>
+      <tr><td><strong>Docker 路线:容器重启后数据没了</strong></td><td>官方 Installation 页提醒:数据写在容器内 <code>/prometheus</code> 目录,容器删除即清空;要持久化就 <code>docker volume create prometheus-data</code> 并以 <code>-v prometheus-data:/prometheus</code> 挂载</td></tr>
+      <tr><td><strong>改了配置不生效</strong></td><td>配置在启动时加载。向进程发 <code>kill -s SIGHUP</code> 可触发热加载(官方 Getting started 口径),或者干脆 Ctrl-C 重启——上手期重启最快</td></tr>
+      <tr><td><strong>Graph 页查不到曲线 / 数据点很稀</strong></td><td>先看 Targets 是不是 Up(判定第一条);确认全局 <code>scrape_interval</code>——官方默认 1 分钟,样例里的 15 秒是显式配置;<code>rate</code> 的窗口至少要覆盖两个样本点,窗口太小会算不出</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ================= 09 quiz ================= -->
+<section>
+  <h2><span class="sec-num">09</span>随堂小测</h2>
+  <div class="quiz">
+    <div class="quiz-q">
+      <p class="quiz-question">1. 官方最小配置里,job_name 为 prometheus 的抓取目标是谁?</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对,Node Exporter 是采集机器指标的组件,官方入门没让它出场。","不对,Grafana 是画图面板,不是被抓目标。","对的:targets 是 localhost:9090——Prometheus 启动后第一个抓取的目标就是它自己,体验抓存查整条链路。"]'>
+        <li class="quiz-option">本机的 Node Exporter</li>
+        <li class="quiz-option">Grafana 的数据源端点</li>
+        <li class="quiz-option">它自己的 localhost:9090</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. Status → Targets 页里 State=Up 对应哪条官方合成指标?</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对,scrape_duration_seconds 记录的是每次抓取耗时,不是存活状态。","对的:抓取成功 up 记 1,失败记 0——目标活没活,本身就是一条可查询的时序。","不对,prometheus_build_info 记录的是构建版本信息。"]'>
+        <li class="quiz-option">scrape_duration_seconds</li>
+        <li class="quiz-option">up(成功为 1,失败为 0)</li>
+        <li class="quiz-option">prometheus_build_info</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 启动报 parsing YAML file line N,最快的官方校验方式是?</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的:官方配套的 promtool 就在解压目录里,check config 会指出配置文件的语法问题,比肉眼逐行靠谱。","不对,重启只会再次报同样的错,配置错误不是重启能解决的。","不对,--web.listen-address 只换监听端口,和配置文件语法无关。"]'>
+        <li class="quiz-option">./promtool check config prometheus.yml</li>
+        <li class="quiz-option">多重启几次就好了</li>
+        <li class="quiz-option">加 --web.listen-address 换端口</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 10 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>思考题(点击展开解析)</h2>
+  <details class="q-card">
+    <summary>思考一:官方反复强调"单二进制、零外部依赖"。对比上一期 Elasticsearch 的安装体验,这个设计到底换来了什么、又付出了什么?</summary>
+    <div class="details-body">
+      <p>先看换来了什么。监控基础设施有个特殊要求:<strong>哪里都能落,而且落地越快越好</strong>——你要监控的机器越"边缘",环境越不可控,越装不动一堆依赖。Prometheus 把存储(TSDB)、抓取、查询、规则评估全部塞进一个 Go 编译的可执行文件,解压即用,启动只吃一个配置文件;对比上期 ES:JVM 之上,首次启动生成密码证书、还要留意内核参数,上手成本高一个量级。零外部依赖还有一层含义:数据存本地,不依赖 MySQL、不依赖分布式存储(官方特性清单原话 single server nodes are autonomous),坏一家不影响另一家,排障时也只有一个进程要看。<strong>代价同样明确</strong>:单机自治意味着它天生不横向扩展,容量顶到头只能加机器分片或者换长期存储;本地存储不复制,机器一坏数据全没。所以生产上 Prometheus 的高可用方案,官方建议很"笨":跑两个一模一样的实例各抓各的——为什么这个笨办法反而被认为是对的,第 3 期架构篇展开。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二:配置里 scrape_interval 写 15 秒,官方默认却是 1 分钟。抓取间隔的取舍,到底在权衡什么?</summary>
+    <div class="details-body">
+      <p>抓取间隔决定数据的<strong>时间分辨率</strong>:15 秒一个点,异常从发生到被看见平均慢不到 8 秒;1 分钟一个点,同样的故障可能要等半分钟才进库。监控的本质是"用今天的钱买明天的知情权",间隔越密,看见得越快——但成本有三笔:第一,存储,虽然官方口径平均每样本只有 1 到 2 字节,序列数一多,样本量是"序列数 × 每分钟点数"的乘法,密一倍、磁盘和内存翻一倍;第二,被监控端的压力,每次抓取都要序列化全部指标,几万个目标把间隔调到 5 秒,抓取本身就成了压垮目标的最后一根稻草;第三,查询时的计算量,点密一倍,区间函数要多算一倍样本。官方默认 1 分钟,是给"大多数指标大多数时候"的稳健值;样例改成 15 秒,是教学场景让界面数据动起来。实际落地的心法:<strong>不是所有指标都值得密抓</strong>——全局默认放宽,关键 job 单独调密,再配合 <code>rate</code> 这类区间函数的窗口要至少覆盖两个样本点的约束去选窗口。抓取间隔的选择没有标准答案,只有"告警时效、成本、目标承受力"的三方谈判,这份权衡感从第一天就该建立。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 11 要点 ================= -->
+<section>
+  <h2><span class="sec-num">11</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这四条:</strong></p>
+    <ul>
+      <li>版本钉在 v3.14.0(2026-08-17,GitHub Latest;3.13 LTS 线最新补丁 3.13.3;3.15 还在 rc,生产别追);单二进制零外部依赖,解压即用,Windows 有 prometheus.exe;</li>
+      <li>最小配置就三块:<code>global</code> 定全局间隔(默认 1 分钟,样例 15 秒)、<code>rule_files</code> 挂规则、<code>scrape_configs</code> 定义抓取目标——第一个目标就是它自己的 <code>localhost:9090</code>,Pull 模型从这里落地;</li>
+      <li>启动 <code>./prometheus --config.file=prometheus.yml</code>,打开 <code>http://localhost:9090</code>:Status → Targets 看 State=Up(对应 <code>up</code> 指标,成功 1 失败 0),Query 页跑官方示例表达式,Graph 页 <code>rate(...[1m])</code> 画出第一条曲线——三条判定全绿才算跑通;</li>
+      <li>翻车三件事:YAML 缩进报错先用 <code>./promtool check config</code> 校验;9090 被占换 <code>--web.listen-address</code>;目标 connection refused 先想"目标活没活"——Pull 模型下抓不到本身就是信号。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告:</strong>第 3 期《核心概念与整体架构》——Prometheus 已经在你机器上跑起来了,下一期我们拆开看它的数据模型与整体架构:指标名、标签、样本到底怎么组织,TSDB 的 head/block 两级存储是什么,PromQL 向量模型为什么独树一帜,今天敲的每一条表达式都会在那里找到原理注脚。Primary source:<a href="https://prometheus.io/docs/introduction/first_steps/" target="_blank" rel="noopener">Prometheus 官方文档 · First steps</a>——本期下载、配置、启动与示例表达式的出处;版本与安装包见 <a href="https://prometheus.io/download/" target="_blank" rel="noopener">官方 Download 页</a>,Docker 用法见 <a href="https://prometheus.io/docs/prometheus/latest/installation/" target="_blank" rel="noopener">Installation 文档</a>,<code>up</code> 指标口径见 <a href="https://prometheus.io/docs/concepts/jobs_instances/" target="_blank" rel="noopener">Concepts · Jobs and Instances</a>,版本发布记录见 <a href="https://github.com/prometheus/prometheus/releases" target="_blank" rel="noopener">GitHub Releases</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0042-prom-what-and-why.html">← 上一期:认识 Prometheus</a>
+  <a class="next" href="0044-prom-core-concepts-architecture.html">下一期:核心概念与整体架构 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对,再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

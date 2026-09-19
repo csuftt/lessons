@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Elasticsearch 系列第 5 期：架构与源码导读 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0041</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0040-es-in-action.html">上一期:0040</a> · Elasticsearch 系列第 5 期 / 共 5 期 · <a href="https://www.elastic.co/docs" target="_blank" rel="noopener">elastic.co/docs ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · ELASTICSEARCH 系列第 5 期：架构与源码导读（收官）</p>
+  <h1>读进 Elasticsearch 源码：一条写请求的旅程</h1>
+  <p class="subtitle">上一期我们端到端做了一个商品搜索。本期是系列收官，也是本线的灵魂期：先把一个常见误读拆掉——<strong>倒排索引和 segment 的底层实现不在 ES 仓库里，而在独立的 Lucene 项目中</strong>，ES 仓库读的是"怎么把检索库包装成分布式系统"；然后讲透两个设计决策——<strong>Engine 写入闭环与 translog 恢复</strong>、<strong>内置协调 Coordinator（为什么不把选主外包给 ZooKeeper/etcd）</strong>；再看 refresh 与 merge 的调度面，最后合成一张<strong>读码路线图</strong>。本期引用的每个类与文件路径，均逐条核对自源码 tag v9.5.4。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🔍 搜索引擎 · Java · Elastic License 2.0 / SSPLv1 / AGPLv3 三许可</span>
+    <span class="tag tech">📦 基于 v9.5.4 · 源码 tag（GitHub Latest，2026-09-15）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 5 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 本期要点 ================= -->
+<section>
+  <h2><span class="sec-num">00</span>本期要点</h2>
+  <div class="key-points">
+    <ul>
+      <li>分层先分仓库：倒排索引与 segment 的实现在 <strong>Lucene</strong>（独立 Apache 项目，以库嵌入 ES）；ES 仓库读的是分布式那一半；</li>
+      <li>写入闭环：源码里是"先写内存 Lucene、再追加 translog、后推进检查点"三步；重启恢复 = 从检查点+1 回放日志，先提交后裁日志；</li>
+      <li>选主内置：预投票、任期、发布在 <code>Coordinator</code> 一个类里闭环——零外部依赖是部署哲学，不是偷懒；</li>
+      <li>调度面各管一段：refresh 定时任务挂在 IndexService（默认 1 秒、空闲跳过），merge 执行归 Lucene、调度归 ES 节点线程池；</li>
+      <li>一条写请求的读码路线图：REST 层 → Transport 层 → 路由定位 → IndexShard/Engine → 副本广播与定时刷新。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= 01 上期回顾与本期的打开方式 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>从上期商品搜索到本期读码</h2>
+  <p>上一期我们把商品搜索端到端跑通了：建索引、灌商品、搜索加聚合，每一环都有真实回显。那些环节里点过名的词——translog、refresh、分片、选主——本期全部落到<strong>文件和类</strong>上。本期结束时你应该能回答三个问题：<strong>一条写请求在源码里走多远？ES 凭什么保证"确认过的不丢"？为什么它不把选主外包出去？</strong></p>
+  <p>老规矩先钉版本：本期所有路径与代码逐条核对自源码 tag <strong>v9.5.4</strong>（GitHub Latest，2026-09-15）。主干演进很快，跟读前先把仓库切到这个标签——类会搬家，决策不会。</p>
+</section>
+
+<!-- ================= 02 分层：哪部分代码不在 ES 仓库里 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>动笔前先分清：哪部分代码不在 ES 仓库里</h2>
+  <p>网上流行一种说法："读 ES 源码就是读倒排索引的实现。"这话说错了一半。倒排索引、segment 的写入与合并执行、分词与打分，这些核心能力住在 <strong>Lucene</strong> 里——一个独立的 Apache 项目，ES 以库的方式嵌入它。ES 仓库真正沉淀的是<strong>分布式那一半</strong>：分片包装、写引擎、事务日志、集群协调。这不是短板，而是分层设计的活教材：</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 240" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar41" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+    <rect x="14" y="26" width="360" height="180" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="194" y="52" text-anchor="middle" fill="var(--ink)" font-size="13" font-weight="700">ES 仓库 elastic/elasticsearch</text>
+    <rect x="32" y="66" width="324" height="126" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="194" y="90" text-anchor="middle" fill="var(--muted)" font-size="10.5">server 模块 · 分布式的那一半</text>
+    <text x="194" y="114" text-anchor="middle" fill="var(--ink)" font-size="10.5">分片包装 IndexShard · 写引擎 InternalEngine</text>
+    <text x="194" y="136" text-anchor="middle" fill="var(--ink)" font-size="10.5">事务日志 translog · 集群协调 Coordinator</text>
+    <text x="194" y="158" text-anchor="middle" fill="var(--ink)" font-size="10.5">REST 层 / Transport 层 / 复制与恢复</text>
+    <text x="194" y="182" text-anchor="middle" fill="var(--accent-3)" font-size="9.5">本期读码全部在这半个</text>
+
+    <rect x="386" y="26" width="360" height="180" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="566" y="52" text-anchor="middle" fill="var(--ink)" font-size="13" font-weight="700">Lucene · 独立 Apache 项目</text>
+    <rect x="404" y="66" width="324" height="126" rx="8" fill="var(--bg)" stroke="var(--line)"/>
+    <text x="566" y="90" text-anchor="middle" fill="var(--muted)" font-size="10.5">以库的方式嵌进 ES · 检索的那一半</text>
+    <text x="566" y="114" text-anchor="middle" fill="var(--ink)" font-size="10.5">倒排索引 · segment 的写入与合并执行</text>
+    <text x="566" y="136" text-anchor="middle" fill="var(--ink)" font-size="10.5">分词 · 打分 · doc values 列存</text>
+    <text x="566" y="158" text-anchor="middle" fill="var(--ink)" font-size="10.5">要读懂它们，去 Lucene 仓库读</text>
+    <text x="566" y="182" text-anchor="middle" fill="var(--accent-3)" font-size="9.5">第三期的概念地图住在这里</text>
+
+    <line x1="374" y1="116" x2="386" y2="116" stroke="var(--accent)" stroke-width="2" marker-end="url(#ar41)"/>
+    <text x="380" y="104" text-anchor="middle" fill="var(--muted)" font-size="9">调用</text>
+    <text x="380" y="226" text-anchor="middle" fill="var(--muted)" font-size="10">误读警告：在 ES 仓库里找倒排索引的实现——方向从一开始就错了</text>
+  </svg>
+  </div>
+
+  <p>所以本期的读法只有一条主线：<strong>读 ES 怎么"用"Lucene，不读 Lucene 怎么"做"检索</strong>。遇到 segment、merge、打分的边界，切去 Lucene 仓库对应类，两个仓库分开钉 tag。</p>
+</section>
+
+<!-- ================= 03 仓库顶层模块地图 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>仓库顶层模块地图：读码从 server 进</h2>
+  <div class="codeblock"><pre>elasticsearch @ v9.5.4 · 顶层目录
+├─ server/         引擎本体：本期全部读码入口都在这
+├─ libs/           可复用基础库：geo、x-content、插件 API
+├─ modules/        默认随发行版启用：ingest、painless 等
+├─ plugins/        按需单独安装：analysis-icu、discovery-ec2
+├─ distribution/   打包产物：tar / zip / deb / rpm / docker
+├─ x-pack/         内置安全/监控/ML/ES|QL
+└─ client/         REST 客户端与 sniffer 子项目</pre></div>
+  <p class="note">目录名逐个核对于 tag v9.5.4（路径核对自 tag v9.5.4）。读码主入口是 <code>server/src/main/java/org/elasticsearch/</code> 下的三个包：<code>index</code>（分片与引擎）、<code>cluster</code>（集群协调）、<code>rest</code>（接入层）。modules 与 plugins 的分界记一句话：<strong>默认装的进 modules，自己装的进 plugins</strong>。</p>
+</section>
+
+<!-- ================= 04 读码路线图 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>本期主成果：一条写请求的读码路线图</h2>
+  <p>顺着一条批量写请求（<code>POST /_bulk</code>）走，源码的主线自己浮出来：</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar42" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+    <rect x="14" y="30" width="160" height="86" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="94" y="54" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">① REST 层</text>
+    <text x="94" y="76" text-anchor="middle" fill="var(--muted)" font-size="9.5">rest/action/document</text>
+    <text x="94" y="96" text-anchor="middle" fill="var(--muted)" font-size="9.5">RestBulkAction 接请求</text>
+
+    <line x1="174" y1="73" x2="206" y2="73" stroke="var(--accent)" stroke-width="2" marker-end="url(#ar42)"/>
+
+    <rect x="208" y="30" width="160" height="86" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="288" y="54" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">② Transport 层</text>
+    <text x="288" y="76" text-anchor="middle" fill="var(--muted)" font-size="9.5">action/bulk</text>
+    <text x="288" y="96" text-anchor="middle" fill="var(--muted)" font-size="9.5">TransportBulkAction 拆分</text>
+
+    <line x1="368" y1="73" x2="400" y2="73" stroke="var(--accent)" stroke-width="2" marker-end="url(#ar42)"/>
+
+    <rect x="402" y="30" width="160" height="86" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="482" y="54" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">③ 路由定位</text>
+    <text x="482" y="76" text-anchor="middle" fill="var(--muted)" font-size="9.5">cluster/routing</text>
+    <text x="482" y="96" text-anchor="middle" fill="var(--muted)" font-size="9.5">OperationRouting 算主分片</text>
+
+    <line x1="562" y1="73" x2="594" y2="73" stroke="var(--accent)" stroke-width="2" marker-end="url(#ar42)"/>
+
+    <rect x="596" y="30" width="150" height="86" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="671" y="54" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">④ 主分片执行</text>
+    <text x="671" y="76" text-anchor="middle" fill="var(--muted)" font-size="9.5">action/support/replication</text>
+    <text x="671" y="96" text-anchor="middle" fill="var(--muted)" font-size="9.5">TransportShardBulkAction</text>
+
+    <line x1="671" y1="116" x2="671" y2="148" stroke="var(--accent)" stroke-width="2" marker-end="url(#ar42)"/>
+
+    <rect x="470" y="150" width="276" height="150" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="608" y="176" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">⑤ 分片内部：index/shard · index/engine</text>
+    <text x="608" y="200" text-anchor="middle" fill="var(--ink)" font-size="10">IndexShard.applyIndexOperationOnPrimary</text>
+    <text x="608" y="222" text-anchor="middle" fill="var(--ink)" font-size="10">→ InternalEngine：indexIntoLucene + translog.add</text>
+    <text x="608" y="244" text-anchor="middle" fill="var(--accent-3)" font-size="10">决策一 · 写入闭环（下一节）</text>
+    <text x="608" y="272" text-anchor="middle" fill="var(--muted)" font-size="9.5">主分片先落 → 复制动作同步副本组 → 全部确认才回执</text>
+
+    <line x1="470" y1="225" x2="438" y2="225" stroke="var(--accent)" stroke-width="2" marker-end="url(#ar42)"/>
+
+    <rect x="130" y="160" width="308" height="130" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="284" y="186" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">⑥ 可见性：index/IndexService</text>
+    <text x="284" y="210" text-anchor="middle" fill="var(--ink)" font-size="10">AsyncRefreshTask 按 refresh_interval 定时</text>
+    <text x="284" y="232" text-anchor="middle" fill="var(--ink)" font-size="10">→ IndexShard.scheduledRefresh（空闲分片跳过）</text>
+    <text x="284" y="254" text-anchor="middle" fill="var(--ink)" font-size="10">→ engine.maybeRefresh：缓冲 → 新 segment</text>
+    <text x="284" y="278" text-anchor="middle" fill="var(--accent-3)" font-size="9.5">决策三 · 默认 1s 可搜（第 07 节）</text>
+
+    <text x="14" y="322" fill="var(--muted)" font-size="10">照这条线打断点，调用栈自己展开——全部类路径核对自 tag v9.5.4</text>
+  </svg>
+  </div>
+
+  <p class="note">读法建议：第 ①②③④ 站各认一个类就够，别贪多；把时间花在第 ⑤ 站——分片内部的写入闭环才是 ES 的灵魂，也是下一节的主题。</p>
+</section>
+
+<!-- ================= 05 决策一：写入闭环与 translog 恢复 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>决策一 · Engine 写入闭环与 translog 恢复</h2>
+  <p><strong>为什么这么设计？</strong>Lucene 的提交（把内存改动固化成完整可恢复状态）很贵，不能每条写入都做一次；但"客户端已确认"的写入又绝不能丢。ES 的解法是给每个分片配一个<strong>写引擎（Engine）</strong>：写操作先落内存 Lucene，再追加一份顺序写的日志 <code>translog</code>；昂贵的 Lucene 提交低频做。次序就写在这一段真实源码里：</p>
+  <div class="codeblock"><pre>/* 摘自 server/src/main/java/org/elasticsearch/index/engine/
+   InternalEngine.java 的 index()（tag v9.5.4），节选 */
+indexResult = indexIntoLucene(index, plan);          // ① 先写内存 Lucene
+...
+if (index.origin().isFromTranslog() == false) {      // 回放来的不再记，防循环
+    location = translog.add(new Translog.Index(index, indexResult));  // ② 追加 translog
+}
+...
+localCheckpointTracker.markSeqNoAsProcessed(indexResult.getSeqNo());  // ③ 推进检查点</pre></div>
+  <p class="note">三步的次序是关键：内存负责快，日志负责不丢，检查点负责记账。"确认前不丢"由 translog 的落盘策略兜住——默认 <code>durability=request</code>，每个请求同步一次磁盘后才回执。</p>
+
+  <p><strong>重启恢复怎么走？</strong>引擎从"本地检查点 + 1"取日志快照，逐条回放到目标序号；回放完先做一次 Lucene 提交，再裁掉不再被引用的旧日志——次序不能反：</p>
+  <div class="codeblock"><pre>/* 摘自 server/src/main/java/org/elasticsearch/index/engine/
+   InternalEngine.java 的 recoverFromTranslogInternal()（tag v9.5.4），节选 */
+try (Translog.Snapshot snapshot = newTranslogSnapshot(localCheckpoint + 1, recoverUpToSeqNo)) {
+    opsRecovered = translogRecoveryRunner.run(this, snapshot);   // 从检查点+1 逐条回放
+}
+...
+flush(false, true, flushListener);          // 回放完先做 Lucene 提交
+translog.trimUnreferencedReaders();         // 再裁掉不再被引用的旧日志</pre></div>
+
+  <p>translog 自己的契约，类注释写得最直白（截图核对于 tag v9.5.4）：每个分片一个实例、持久记录所有未提交操作；检查点文件 <code>translog.ckp</code> 刻意做成单磁盘块大小，写入原子；每个 Lucene 提交点绑定日志 UUID，防止拿错日志恢复到别的分片。</p>
+  <p class="note">Translog.java @ tag v9.5.4 类注释：A Translog is a per index shard component that records all non-committed index operations in a durable manner（来源：github.com/elastic/elasticsearch，2026-09-19 实拍）</p>
+
+  <p><strong>换种做法会怎样？</strong>每条写入都做 Lucene 提交：segment 一条一个，延迟被磁盘开销吃掉，近实时无从谈起；只写内存不记日志：断电全丢，承诺兑不了。ES 的账是"内存 + 顺序日志 + 低频提交"——重启只回放增量，代价可控。这套"以日志兜底内存状态"的模式，与 MySQL 的 redo log、Redis 的 AOF 同族，是可以直接搬走的。</p>
+</section>
+
+<!-- ================= 06 决策二：内置协调 Coordinator ================= -->
+<section>
+  <h2><span class="sec-num">06</span>决策二 · 自研选主：为什么不外包给 ZooKeeper/etcd</h2>
+  <p>很多分布式系统把选主外包给 ZooKeeper 或 etcd，ES 的选择是把协调<strong>内置</strong>：<code>server</code> 模块的 <code>cluster/coordination</code> 包（7.0 起的 Zen2），选举、健康检查、发布全部在一个仓库闭环。<code>Coordinator</code> 这个类约两千三百行，预投票（PreVote）、任期（term）、发布（publish）一应俱全——读到"赢得选举要过几道关"，就看 <code>startElectionScheduler()</code>：</p>
+  <div class="codeblock"><pre>/* 摘自 server/src/main/java/org/elasticsearch/cluster/coordination/
+   Coordinator.java 的 startElectionScheduler()（tag v9.5.4），节选 */
+if (mode == Mode.CANDIDATE) {
+    final var nodeEligibility = localNodeMayWinElection(lastAcceptedState, electionStrategy);
+    if (nodeEligibility.mayWin() == false) { return; }   // 赢不了就不参选
+    if (statusInfo.getStatus() == UNHEALTHY) { return; } // 本节点不健康不参选
+    prevotingRound = preVoteCollector.start(lastAcceptedState, getDiscoveredNodes()); // 预投票</pre></div>
+  <p class="note">预投票是"先问大家愿不愿意投我，再正式拉票"——避免无人可赢时反复冲击选举。发布入口 <code>publish()</code> 则先校验：节点仍是 LEADER 且任期一致才发布，否则抛 <code>NotMasterException</code>。周边类各管一段：<code>LeaderChecker</code> 盯现任主、<code>FollowersChecker</code> 盯从节点、<code>PublicationTransportHandler</code> 管集群状态广播。</p>
+
+  <p class="note">Coordinator.java @ tag v9.5.4 字段区实拍：preVoteCollector、electionSchedulerFactory、publicationHandler、leaderChecker、followersChecker——一张依赖清单就是一张职责分工表（来源：github.com/elastic/elasticsearch，2026-09-19 实拍）</p>
+
+  <p>这个决策的取舍在哪？外包的代价是<strong>部署面翻倍</strong>：多一套要部署、升级、监控的组件，故障排查跨系统，小集群起步门槛抬高。内置的代价是<strong>协调代码长在自己家</strong>，写对它责任自负——7.0 之前老一代选主的脑裂教训就是学费，Zen2 用预投票和投票配置把它修成了同类里的上乘之作。与 etcd 系列（第 20 期）呼应一句：同样是多数派加任期加日志复制的思路，区别只在 etcd 把 Raft 做成产品，ES 把它做成地基。</p>
+</section>
+
+<!-- ================= 07 决策三：refresh 与 merge 的调度面 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>决策三 · refresh 与 merge 的调度面</h2>
+  <p>第三期讲过的"写入后默认 1 秒可搜"，落到代码上是两处开关。<strong>refresh 的节奏在 ES 手里</strong>：<code>IndexService</code> 按索引的 <code>refresh_interval</code> 起定时任务，调到分片的 <code>scheduledRefresh()</code>——最近没人搜的分片直接跳过（search-idle 优化），真正要刷才进引擎把缓冲写成新 segment。<strong>merge 的执行在 Lucene 手里，调度权又在 ES 手里</strong>：</p>
+  <div class="codeblock"><pre>/* 摘自 server/src/main/java/org/elasticsearch/index/engine/
+   InternalEngine.java 的 getIndexWriterConfig()（tag v9.5.4），节选 */
+final IndexWriterConfig iwc = new IndexWriterConfig(engineConfig.getAnalyzer());
+iwc.setMergeScheduler(mergeScheduler.getMergeScheduler());  /* 合并调度器交给 ES 自己的实现 */</pre></div>
+  <p class="note">Lucene 的 IndexWriter 只判断"哪些 segment 该合并"，在哪个线程池跑由 ES 决定：v9.5.4 默认 <code>ThreadPoolMergeScheduler</code>，把合并交给<strong>节点级共享线程池</strong> <code>ThreadPoolMergeExecutorService</code>，合并不再挤占索引与检索线程（源码注释原话：switched ON by default）。谁该干活和谁有资源干活，是两个问题——调度权与执行权分离的教科书示范。批量导入时把 <code>refresh_interval</code> 设成 -1 全关、导完手动刷，官方批量导入指引正是这么用的。</p>
+  <p class="note">官方《Near real-time search》开篇实拍：文档写入后即被索引、near real-time——within 1 second 内可搜；Lucene 的 per-segment search，segment 即"段集合加提交点"，新文档从内存缓冲写成新段、先落文件系统缓存（refresh 的定义与默认 1s 在同页下文；来源：elastic.co 官方文档，2026-09-19 截图）</p>
+</section>
+
+<!-- ================= 08 钩子小结与可借鉴 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>读错仓库，是读大项目最常见的迷路</h2>
+  <p>把两个钩子合到一起说：想在 ES 仓库里找倒排索引和打分的实现，方向先错——它们在 Lucene；想找一个"最核心的类"逐行读完，主线先错——ES 的价值在分布式那一半。正确的姿势是<strong>先分仓库，再读主线</strong>：认下 Engine、Translog、IndexShard 这条写入链，遇到 segment 与打分的边界就切去 Lucene 对应类，两个仓库分开钉 tag。第 04 节那张路线图，就是你的主线地图。</p>
+  <div class="card card-tip">
+    <p><strong>四个能搬回自己项目的模式：</strong></p>
+    <ul>
+      <li><strong>把复杂第三方包成有限接口</strong>——Engine 抽象把整个 Lucene 包在后面，NoOpEngine、ReadOnlyEngine 共用同一接口，换实现不动上层；</li>
+      <li><strong>以日志兜底内存状态</strong>——translog 就是 WAL 通用模式，MySQL redo、Redis AOF 同族：内存负责快，日志负责不丢；</li>
+      <li><strong>调度权与执行权分离</strong>——merge 由 Lucene 执行、节奏归节点线程池：谁该干活和谁有资源干活是两个问题；</li>
+      <li><strong>零外部依赖的自洽</strong>——协调内置换来"部署面等于集群面"，能内置的依赖就内置，装得越少越稳。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= 09 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>随堂小测</h2>
+  <div class="quiz">
+    <div class="quiz-q">
+      <p class="quiz-question">一条写入已返回 created，但还没到下一个 refresh 周期。此刻节点断电重启，这条文档会怎样？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，恰恰相反：translog 正是为这一刻准备的，回放后文档原样回来。","对：它在 translog 里有底，重启恢复时从检查点之后回放补回；等 refresh 过了才对搜索可见。","不对，Lucene 提交（flush）是低频动作，此时大概率还没提交，但文档依然不丢。","不对，副本是否同步与本地恢复是两件事；写入既已确认，恢复靠 translog 而不是重新写副本。"]'>
+        <li class="quiz-option">A. 丢了——它还没进 Lucene 提交点</li>
+        <li class="quiz-option">B. 不丢——重启后从 translog 回放补回</li>
+        <li class="quiz-option">C. 不丢——它必然已随上一次 flush 落盘</li>
+        <li class="quiz-option">D. 看副本——副本同步了就没事，没同步就丢</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 10 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>思考题</h2>
+  <details class="q-card">
+    <summary>思考一：把 translog 从 ES 里拿掉，靠"每条写入都做一次 Lucene 提交"来保证不丢，会发生什么？反过来，只留内存不记日志呢？</summary>
+    <div class="details-body">
+      <p>先看 Lucene 提交的成本构成：一次提交要把内存里的改动固化成完整、自恢复的段结构，生成提交点、fsync 多个文件——它是为"批量、低频"设计的。<strong>逐条提交</strong>意味着每个 segment 只装一条文档，segment 数量爆炸后 merge 追着写跑，磁盘 IO 被提交放大，"近实时"退化成"远实时"，这就是为什么 ES 用 translog 把"不丢"和"提交"解耦：确认只需顺序追加日志（durability=request 下一次 fsync），昂贵提交攒到 flush 再做。<strong>反过来只留内存</strong>，则每次断电都丢掉"已确认"的写入——对客户端来说这是最恶劣的违约：返回了 created 却查无此文档。两个反事实合起来正是本期的核心结论：<strong>内存负责快，日志负责不丢，提交负责清账，三者各司其职</strong>。检查自己系统的时候可以套同一个问题：你承诺过的数据，崩溃后靠什么回来？答案若不是"一份顺序日志"，就要小心了。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：假如 ES 当年真的把选主外包给 ZooKeeper/etcd，架构上会多出什么麻烦？反过来，内置协调的代价又由谁承担？</summary>
+    <div class="details-body">
+      <p>外包的第一笔账是<strong>部署面</strong>：用户装 ES 变成装两套系统，容量规划、升级窗口、监控告警、安全加固全部乘以二；对"一个容器起一个集群"的轻量心智模型是致命伤——ES 的主流用户是数据工程师而不是分布式系统专家。第二笔账是<strong>故障域</strong>：集群状态要经过外部系统的数据模型翻译一遍，"ES 看到的主"与"协调组件看到的主"可能不一致，排障时两个系统互相甩锅；心跳与会话还额外吃一跳网络。第三笔账是<strong>语义贴合度</strong>：ES 要的不只是"选出主"，还有分片分配、投票配置、节点失联判定这一整套与集群状态联动的逻辑，放外部系统里每一条都要跨系统协商。内置的代价则是<strong>复杂度留在自己家</strong>：协调代码与业务同仓演进，错了没有外部社区背书——7.0 之前老一代选主在脑裂场景下的教训就是这笔代价的真实账单，Zen2 用预投票（先探意愿再拉票）和投票配置把修复做进了架构。通用的启发：<strong>依赖外包省的是开发成本，付的是运维成本与故障复杂度；核心协调逻辑这类"错一次就丢整个系统"的部件，值得自己养。</strong></p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 11 收官与延伸 ================= -->
+<section>
+  <h2><span class="sec-num">11</span>系列收官</h2>
+  <p><strong>Elasticsearch 的入门系列就聊到这里</strong>：五期一条线——认识它、跑起来、看懂架构、端到端实战、读进源码。留个作业：切到 tag v9.5.4，顺着第 04 节的路线图，亲手把一条写请求从 REST 层走到 translog。下期开启新项目 <strong>Prometheus</strong>，监控告警的事实标准，还是这套从设计决策读起的老路数。</p>
+  <p><strong>Primary source：</strong><a href="https://www.elastic.co/docs/manage-data/data-store/near-real-time-search" target="_blank" rel="noopener">Elastic 官方文档 · Near real-time search</a>——近实时与 refresh 的官方口径都在这页；源码入口：<a href="https://github.com/elastic/elasticsearch/tree/v9.5.4" target="_blank" rel="noopener">elasticsearch tag v9.5.4 仓库树</a>（本期引用类：<code>index/shard/IndexShard</code> · <code>index/engine/InternalEngine</code> · <code>index/translog/Translog</code> · <code>cluster/coordination/Coordinator</code>，路径核对自 tag v9.5.4）。前情回看：<a href="0039-es-core-concepts-architecture.html">第 3 期 · 核心概念与架构</a> · <a href="0040-es-in-action.html">第 4 期 · 端到端实战</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0040-es-in-action.html">← 上一期：Elasticsearch 实战：端到端小场景</a></span>
+  <a class="next" href="../index.html">课程目录 · Elasticsearch 系列完 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>
