@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Spring Cloud Gateway 系列第 1 期：微服务世界的代码级网关 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0056</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0055-harbor-in-action-source-reading.html">上一期:0055</a> · Spring Cloud Gateway 系列第 1 期 / 共 5 期 · <a href="0057-scg-quickstart.html">下一期:0057</a> · <a href="https://spring.io/projects/spring-cloud-gateway" target="_blank" rel="noopener">spring.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · SPRING CLOUD GATEWAY 系列第 1 期：认识项目</p>
+  <h1>Spring Cloud Gateway 是什么：微服务世界的代码级网关</h1>
+  <p class="subtitle">上一个项目我们聊完了 Harbor，今天开启新项目 Spring Cloud Gateway。所有微服务请求都要从某个"大门"进来：路由转发、认证鉴权、限流、灰度发布，这些事总得有个统一的门卫来管。Spring Cloud Gateway（下文按社区习惯简称 SCG）就是 Spring 交出的答案。官方定义一句话：<strong>a library for building an API Gateway on top of Spring…aims to provide a simple, yet effective way to route to APIs and provide cross-cutting concerns to them such as: security, monitoring/metrics, and resiliency</strong>——在 Spring 之上构建 API 网关，把安全、监控、韧性这些横切关注点统一接到 API 前面。一句话心智模型：<strong>响应式网关——请求进来先匹配路由（Predicate 断言），再过过滤器链（Filter），然后转发到下游服务</strong>。本期结束，你能答上四个问题：SCG 是什么、网关要解决什么、和 Nginx/Kong 怎么分工、什么场景该选它。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🚪 API 网关 · Java · Apache-2.0（Spring 官方）</span>
+    <span class="tag">📦 基于 5.0.3（Spring Cloud 2025.1 · Boot 4.x）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 1 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 痛点 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>痛点：微服务门口缺一个"门卫"</h2>
+  <p>服务一拆成几十个微服务，第一件事不是服务本身出问题，而是<strong>门口先乱</strong>。没有统一网关的日子，通常是这样的：</p>
+  <ul>
+    <li><strong>横切逻辑到处复制：</strong>认证鉴权、限流、审计日志，每个服务各写一份、各养一版——改一次 token 规则要发几十个服务，安全策略永远在"对齐中"；</li>
+    <li><strong>客户端直连服务爆炸：</strong>前端要记住 N 个服务地址，服务一拆二、一合并，调用方全要跟着改——入口不收敛，重构就动弹不得；</li>
+    <li><strong>灰度发布没有抓手：</strong>新版本只想先放 5% 的流量、或只给内部账号试用，没有统一入口时只能靠改 DNS、改负载均衡配置，切一次流要跨团队走流程；</li>
+    <li><strong>故障没有总闸：</strong>下游服务被打爆时，没有一处地方能统一限流、熔断、降级，雪崩只能眼看着扩散。</li>
+  </ul>
+  <p>有人说"这些 Nginx 不都干了吗？"——这正是选型里最经典的取舍。Nginx 是<strong>静态高性能</strong>的反向代理：配置写死在文件里，改路由要重载配置；扩展要写 C 模块或上 OpenResty 写 Lua，与 Java 技术栈是两张皮。而"按请求头里的用户标签灰度""按接口维度限流""从注册中心自动发现新服务"这类<strong>业务语义的路由</strong>，恰恰需要代码级扩展——这就是 SCG 的位置：<strong>网关长在 Spring 生态里，路由和过滤器都是 Java 代码或配置，跟你的微服务同一种语言、同一套治理体系</strong>。</p>
+</section>
+
+<!-- ================= 02 是什么 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>是什么：官方定义与一句话心智模型</h2>
+  <p>spring.io 项目页的官方定义值得逐词读（2026-09-19 核对）：<strong>"This project provides a library for building an API Gateway on top of Spring. Spring Cloud Gateway aims to provide a simple, yet effective way to route to APIs and provide cross-cutting concerns to them such as: security, monitoring/metrics, and resiliency."</strong>注意定位词是 library（类库）而不是独立中间件——它跟着你的 Spring Boot 应用一起启动、一起部署，这是它跟 Nginx/Kong 这类独立网关最大的形态差异。同页特性清单里，官方点名了这些本事：构建在 Spring Framework 和 Spring Boot 之上、同时兼容 Spring WebFlux 与 Spring Web MVC 两种形态、能按任意请求属性匹配路由、断言与过滤器按路由生效、集成熔断（CircuitBreaker）与服务发现（DiscoveryClient）、限流、路径重写。</p>
+  <p>一句话心智模型：<strong>响应式网关——请求进来先匹配路由（Predicate 决定"这条请求走哪条路"），再过过滤器链（Filter 决定"路上要做什么加工"），然后转发到下游服务，响应原路返回时还能再加工一次。</strong>官方文档《How it works》的原话：客户端请求进入 SCG，若 Handler Mapping 判定匹配某条路由，就交给 Web Handler，把请求穿过一条为该请求定制的过滤器链——过滤器分虚线两侧，转发前的逻辑（pre）与转发后的逻辑（post）各跑一遍。</p>
+  <p class="note"><img src="../output/0056-scg-what-and-why/images/scg-github-repo.png" alt="GitHub spring-cloud/spring-cloud-gateway 仓库主页" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">GitHub spring-cloud/spring-cloud-gateway 仓库主页：About 自述 An API Gateway built on Spring Framework and Spring Boot providing routing and more · Java · Apache-2.0 · Star 4.9k · Fork 3.5k（2026-09-19 截图）。</p>
+</section>
+
+<!-- ================= 03 心智模型图 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>心智模型：一条请求的网关之旅</h2>
+  <div class="diagram">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar56" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="16" y="118" width="130" height="64" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="81" y="145" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">客户端</text>
+    <text x="81" y="165" text-anchor="middle" fill="var(--muted)" font-size="9.5">浏览器 / App</text>
+    <rect x="230" y="42" width="250" height="216" rx="12" fill="var(--card)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="355" y="72" text-anchor="middle" fill="var(--ink)" font-size="13" font-weight="700">Spring Cloud Gateway</text>
+    <rect x="252" y="92" width="206" height="40" rx="8" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="355" y="110" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">① 路由匹配 Predicate</text>
+    <text x="355" y="126" text-anchor="middle" fill="var(--muted)" font-size="9">路径/请求头/Cookie/时间…</text>
+    <rect x="252" y="142" width="206" height="40" rx="8" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="355" y="160" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">② 过滤器链 Filter（pre）</text>
+    <text x="355" y="176" text-anchor="middle" fill="var(--muted)" font-size="9">改头/鉴权/限流/审计</text>
+    <rect x="252" y="192" width="206" height="40" rx="8" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="355" y="210" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">④ 过滤器链 Filter（post）</text>
+    <text x="355" y="226" text-anchor="middle" fill="var(--muted)" font-size="9">改响应头/记录指标</text>
+    <rect x="560" y="118" width="185" height="64" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="652" y="145" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">下游微服务</text>
+    <text x="652" y="165" text-anchor="middle" fill="var(--muted)" font-size="9.5">订单 / 库存 / 用户…</text>
+    <line x1="146" y1="150" x2="224" y2="150" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar56)"/>
+    <line x1="480" y1="162" x2="554" y2="150" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar56)"/>
+    <text x="517" y="138" text-anchor="middle" fill="var(--muted)" font-size="9.5">③ 转发</text>
+    <line x1="554" y1="168" x2="480" y2="200" stroke="var(--accent-3)" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#ar56)"/>
+    <text x="16" y="290" fill="var(--muted)" font-size="9.5">图例：断言定"走哪条路"，过滤器定"路上做什么"——pre 加工请求，post 加工响应（概念图，第 3 期逐组件拆解）</text>
+  </svg>
+  </div>
+  <p>整个网关的心智就三步：<strong>① 断言筛路 → ② 前置过滤器加工请求 → ③ 转发下游，响应回来再走 ④ 后置过滤器</strong>。断言是"门槛"，过滤器是"关卡"——记住这组比喻，第 3 期拆 Handler Mapping、RouteLocator 这些组件时，你会发现它们全是这句话的展开。</p>
+</section>
+
+<!-- ================= 04 上手的样子 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>上手的样子：一条路由长这样</h2>
+  <p>网关的第一能力是"把请求转给谁"。下面是官方文档（v5.0.3）的路由配置样例，一眼能读懂（出处：<a href="https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux/configuring-route-predicate-factories-and-filter-factories.html" target="_blank" rel="noopener">Configuring Route Predicate Factories and Gateway Filter Factories</a>）：</p>
+  <pre class="codeblock"><code>spring:
+  cloud:
+    gateway:
+      server:
+        webflux:
+          routes:
+          - id: after_route
+            uri: https://example.org
+            predicates:
+            - Cookie=mycookie,mycookievalue</code></pre>
+  <p>一条路由四要素：<code>id</code> 是名字，<code>uri</code> 是目的地，<code>predicates</code> 是断言（这里这条的含义：请求带了名为 mycookie、值为 mycookievalue 的 Cookie 才放行）。断言写起来像口头禅——<code>Path=/api/**</code> 按路径、<code>Header=X-Request-Id, \d+</code> 按请求头、<code>After=2026-01-20T00:00:00+08:00[Asia/Shanghai]</code> 按时间做定时开闸。官方术语表（Glossary）给三个核心词的权威定义：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>概念</th><th>官方定义（Glossary，v5.0.3）</th><th>一句话翻译</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Route 路由</strong></td><td>"The basic building block of the gateway. It is defined by an ID, a destination URI, a collection of predicates, and a collection of filters. A route is matched if the aggregate predicate is true."</td><td>网关的基本积木：ID + 目的地 + 断言集 + 过滤器集，断言全真才命中</td></tr>
+      <tr><td><strong>Predicate 断言</strong></td><td>"…The input type is a Spring Framework ServerWebExchange. This lets you match on anything from the HTTP request, such as headers or parameters."</td><td>匹配条件：请求里任何东西都能当匹配依据</td></tr>
+      <tr><td><strong>Filter 过滤器</strong></td><td>"…instances of GatewayFilter…you can modify requests and responses before or after sending the downstream request."</td><td>加工环节：转发前后都能改请求改响应</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note"><img src="../output/0056-scg-what-and-why/images/scg-docs-glossary.png" alt="官方文档 Glossary 页" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档 Glossary 页：Route / Predicate / Filter 三个词的权威定义，本表逐条对照（docs.spring.io，v5.0.3，2026-09-19 截图）。</p>
+</section>
+
+<!-- ================= 05 关键数据 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>关键数据与版本基准</h2>
+  <p class="note"><img src="../output/0056-scg-what-and-why/images/scg-maven-central.png" alt="Maven Central spring-cloud-starter-gateway-server-webflux 页面" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">Maven Central 的 spring-cloud-starter-gateway-server-webflux 坐标页：当前版本 5.0.3、"Used in: 336 components"（被 336 个组件依赖）；Description 区的"End-of-Life Security Fix Available"徽章是 Sonatype 面向停维旧版本线的商业支持提示，与 5.0.3 现行版本无关（2026-09-19 截图）。</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>指标</th><th>数值</th><th>来源与口径</th></tr></thead>
+    <tbody>
+      <tr><td>GitHub Stars</td><td><strong>4.9k</strong>（4,908）</td><td>spring-cloud/spring-cloud-gateway 仓库页，2026-09-19 核对</td></tr>
+      <tr><td>Maven Central 被依赖</td><td><strong>336</strong> 个组件</td><td>central.sonatype.com 坐标页 "Used in"，2026-09-19 核对（Spring 项目走 BOM 管理依赖，此数低估真实采用）</td></tr>
+      <tr><td>首发时间</td><td><strong>2017-11</strong></td><td>Maven Central 首个 1.0.0.RELEASE 制品记录（2017-11-22）</td></tr>
+      <tr><td>Spring Initializr</td><td>双选项内置</td><td>start.spring.io 的 Spring Cloud Routing 分组同时提供 Gateway（Servlet）与 Reactive Gateway（WebFlux），2026-09-19 核对</td></tr>
+      <tr><td>开源许可</td><td><strong>Apache-2.0</strong></td><td>仓库 license 栏，商用友好</td></tr>
+      <tr><td>最新稳定版</td><td><strong>5.0.3</strong></td><td>GitHub Releases Latest，2026-08-20 发布（UTC）</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>两处提醒。其一，SCG 的 star 数（4.9k）在 Spring 系项目里不算显眼——因为 Spring 用户的依赖管理走 BOM 而不是追仓库，看采用要看 Maven Central 的依赖数与 Initializr 的"第一方选项"地位。其二，版本线口径：<strong>5.0.x 对应 Spring Cloud 2025.1（代号 Oakwood）列车，搭配 Spring Boot 4.x；旧 starter <code>spring-cloud-starter-gateway</code> 停在 4.3.x（对应 Boot 3.5 的 2025.0 列车，仍在维护）</strong>。5.0 起新坐标拆成 <code>spring-cloud-starter-gateway-server-webflux</code>（响应式，经典形态）与 <code>spring-cloud-starter-gateway-server-webmvc</code>（Servlet 形态）两个，第 2 期动手时用哪个别拿错。</p>
+  <p class="note"><img src="../output/0056-scg-what-and-why/images/scg-github-releases.png" alt="GitHub Releases 页 5.0.3 Latest" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">GitHub Releases：5.0.3 标记 Latest（spring-builds released this Aug 21，UTC 2026-08-20 19:14），首要条目是一条 SSRF 安全修复（CVE-2026-47879）；左侧列表可见 5.0.2 与 4.3.5 同日（2026-06-11）发布——5.0.x 与 4.3.x 双版本线并行维护（2026-09-19 截图）。本系列全部口径锚定 5.0.3。</p>
+</section>
+
+<!-- ================= 06 演进史 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>钩子：Zuul 跳票，Spring 自己下场</h2>
+  <div class="card">
+    <ul>
+      <li><strong>2013-06 · Zuul 1 当家：</strong>Netflix 技术博客发布《Announcing Zuul: Edge Service in the Cloud》——基于 Servlet 的<strong>阻塞模型</strong>网关，一个请求占一个线程；随 Netflix OSS 与 Spring Cloud Netflix 进入千万微服务；</li>
+      <li><strong>2016-09 · Zuul 2 宣而不发：</strong>Netflix 博客宣布 Zuul 2：改用 Netty 的异步非阻塞架构，并预告开源——但代码迟迟不放出，社区只能干等；</li>
+      <li><strong>2017-11 · Spring 自己下场：</strong>Spring Cloud Gateway 1.0.0.RELEASE 登上 Maven Central——借 Project Reactor 的响应式模型换代，非阻塞转发，线程数与连接数解耦；</li>
+      <li><strong>2018 · 生态换血：</strong>Zuul 2 终于开源，但 Spring 生态已不等它；6 月 Finchley 列车首发 <code>spring-cloud-starter-gateway</code> 2.0.0，12 月 Spring 官方宣布 Spring Cloud Netflix 进入维护模式，原话建议 Zuul 用户<strong>"consider moving over to Spring Cloud Gateway"</strong>；</li>
+      <li><strong>2026 · 5.0 世代：</strong>SCG 5.0.x 随 Spring Cloud 2025.1 列车配 Boot 4，双形态并行（WebFlux 响应式 + WebMVC Servlet），8 月现行稳定版 5.0.3。</li>
+    </ul>
+  </div>
+  <p>这段演进故事读下来，比任何选型文章都直白：<strong>社区等一个上游的响应式网关等了两年没等到，Spring 就自己造了一个</strong>。Zuul 1 的阻塞模型在高并发转发场景线程开销大，Zuul 2 的技术方向（Netty 异步）是对的，但"跳票"把生态位让了出来——SCG 用 Reactor 把同样的非阻塞思路装进了 Spring 的编程模型，这才是它坐上 Spring 生态默认网关位置的根本原因。</p>
+</section>
+
+<!-- ================= 07 对比 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>与同类对比：一个主角，三个对手</h2>
+  <p>网关赛道玩家不少，各就各位（定位为各项目官方公开口径，2026-09 核对）：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>方案</th><th>定位</th><th>扩展方式</th><th>技术栈与形态</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Spring Cloud Gateway 5.0</strong></td><td>Spring 生态的代码级 API 网关：路由 + 过滤器即代码</td><td>Java 写 Predicate/Filter，跟业务同栈</td><td>Java · Spring Boot 应用内嵌；WebFlux（响应式）/WebMVC（Servlet）双形态</td></tr>
+      <tr><td>Nginx</td><td>静态高性能反向代理与负载均衡</td><td>C 模块、OpenResty（Lua）</td><td>C · 独立进程，配置文件驱动</td></tr>
+      <tr><td>Kong</td><td>API 网关平台，插件生态丰富</td><td>插件机制（Lua/Go 等），管理面完善</td><td>OpenResty/Lua · 独立部署 + 数据库</td></tr>
+      <tr><td>Zuul 1</td><td>上一代 Java 网关老将（Netflix OSS）</td><td>Java Filter，阻塞 Servlet 模型</td><td>Java · 已随 Spring Cloud Netflix 进维护模式</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>分工怎么定？<strong>Nginx/Kong 管接入层的"静态流量"：TLS 卸载、静态资源、粗粒度路径转发，性能是第一诉求；SCG 管业务语义层：要读请求内容做认证、按用户标签灰度、按接口限流时，代码级扩展才是刚需。</strong>生产里常见的组合是 Nginx 在前、SCG 在后——接入层归 Nginx，业务网关归 SCG，两层各干各的，并不重复。如果你的主栈是 Spring Cloud Alibaba，SCG 与 Nacos 的组合是常见搭配：服务清单从注册中心自动来，路由跟着服务走——这条动态路由的线，本系列第 5 期展开，Nacos 本身的入门见<a href="0001-nacos-what-and-why.html">本系列第 0001~0005 期</a>。</p>
+</section>
+
+<!-- ================= 08 场景 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>什么场景该选它（以及什么场景是错配）</h2>
+  <div class="card">
+    <p><strong>✅ 适合：</strong></p>
+    <ul>
+      <li><strong>Java/Spring 技术栈微服务要统一入口：</strong>认证、限流、审计这些横切逻辑收进网关的 Filter，业务服务不再各写一份；</li>
+      <li><strong>要业务语义的路由与灰度：</strong>按请求头、Cookie、用户标签、时间窗做切流——静态配置写不出来的规则，Java 代码随手写；</li>
+      <li><strong>要跟注册中心联动的动态路由：</strong>DiscoveryClient 集成是官方特性，服务扩缩容网关自动感知，Nacos/Eureka/Consul 都有现成集成。</li>
+    </ul>
+    <p><strong>❌ 错配：</strong></p>
+    <ul>
+      <li><strong>纯静态反向代理：</strong>TLS 卸载、静态资源、简单负载均衡——Nginx 几行配置的事，引入一个 JVM 应用纯属负担；</li>
+      <li><strong>非 JVM 团队要深度扩展：</strong>Filter 是 Java 写的，Go/Python 团队养不起这个技能栈——看 Kong 或 APISIX 这类多语言插件网关；</li>
+      <li><strong>只想要 L4 极致转发：</strong>四层流量入口交给云 LB 或 LVS 这类专职选手，网关的价值在七层语义，别用错层。</li>
+    </ul>
+  </div>
+  <p>一条判断捷径：<strong>当路由规则需要"读懂请求"（认证、灰度、限流、按内容转发）的那一天，就是需要代码级网关的一天；规则如果永远写不满一页 Nginx 配置，就别急着上。</strong></p>
+  <p class="note">延伸阅读两则：K8s 集群入口层（Ingress 与 Gateway API）怎么把流量从公网送进集群，属于基础设施视角，原理深入见 <a href="../daily-tech-course/lessons/0024-k8s-ingress-service-traffic.html">daily 系列 0024 期</a>；网关后面的服务注册与发现，见本系列 <a href="0001-nacos-what-and-why.html">Nacos 系列第 0001 期</a>起的五连讲。</p>
+</section>
+
+<!-- ================= 09 quiz ================= -->
+<section>
+  <h2><span class="sec-num">09</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. SCG 处理一条请求的顺序，哪个是对的？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，过滤器在转发之后还有 post 一段，且断言在过滤器之前。","对的：先由断言判定命中哪条路由，再过过滤器链加工，最后转发下游，响应回来再走 post 过滤器。","不对，转发是过滤器链中段完成的，之后还有 post 逻辑。"]'>
+        <li class="quiz-option">先过过滤器链 → 匹配路由 → 转发后即结束</li>
+        <li class="quiz-option">匹配路由（Predicate）→ 过滤器链（Filter）→ 转发下游 → 响应再走 post 过滤器</li>
+        <li class="quiz-option">先转发下游 → 拿到响应后再决定匹配哪条路由</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 只需要"TLS 卸载 + 静态资源 + 简单路径转发"，该选谁？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，这是业务网关，能力过剩还要养 JVM 进程。","不对，插件平台同样偏重，静态需求用不上。","对的：纯静态接入是 Nginx 的主场，几行配置的事。"]'>
+        <li class="quiz-option">Spring Cloud Gateway</li>
+        <li class="quiz-option">Kong</li>
+        <li class="quiz-option">Nginx</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 相比 Zuul 1，SCG 最根本的变化是什么？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：Zuul 1 是 Servlet 阻塞模型，SCG 基于 Reactor/WebFlux 非阻塞，线程与连接解耦。","不对，两者都能做路径转发，这不是根本差异。","不对，两者都是 Java 技术栈，差别在执行模型而非语言。"]'>
+        <li class="quiz-option">从阻塞模型换成响应式非阻塞模型</li>
+        <li class="quiz-option">多了路径转发功能</li>
+        <li class="quiz-option">从 Java 换成了 Go 实现</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. 哪种情况说明"该上代码级网关了"？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，静态转发一页 Nginx 配置就够。","对的：规则要读懂请求内容时，静态配置写不出来，需要代码级扩展。","不对，TLS 卸载是接入层职责，交给 Nginx/云 LB。"]'>
+        <li class="quiz-option">路由规则只有十几条路径转发</li>
+        <li class="quiz-option">要按用户标签灰度、按接口限流，规则得读懂请求</li>
+        <li class="quiz-option">想把 HTTPS 证书卸载到入口层</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 10 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：已经有 Nginx 了，再上 SCG 是不是重复建设？两层网关各自该管什么、边界划在哪？</summary>
+    <div class="details-body">
+      <p>先说结论：<strong>不重复，前提是两层各司其职</strong>。判断边界的方法是看"规则需不需要读懂业务"。Nginx 这一层管的是<strong>与业务无关的接入面</strong>：TLS 终止（证书只有一份，别让 Java 进程碰）、HTTP/2 与压缩、静态资源、机房级别的粗粒度分流、DDoS 防护的第一道闸——这些规则几年不变一次，配置文件是最可靠的载体，重载即生效、性能天花板高。SCG 这一层管的是<strong>随业务演进的路由语义</strong>：请求头里的灰度标签、按用户分群的切流、按接口的限流配额、从注册中心自动发现的新服务——这些规则月月在变，甚至天天在变，用 Java 代码管理才有测试、有版本、有发布流水线。<strong>什么时候真的重复？</strong>三种情况：一是团队只有几个单体服务、路由规则写不满一页，Nginx 足够；二是把 SCG 当 Nginx 用（只配 Path 转发），那是花了 JVM 的成本买了 Nginx 已有的能力——上 SCG 就要把认证限流灰度这些真活交过去；三是把业务逻辑写进 Nginx 的 Lua 脚本里，用接入层的高性能承载业务语义——改一次逻辑要碰全公司流量入口，发布风险和排障难度都会失控。记住分工口诀：<strong>接入层管"快"，业务网关管"变"</strong>——两层都用在自己擅长的属性上，架构才清爽。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：Zuul 2 从 2016 年宣布到 2018 年才开源，Spring 生态等不及自己造了 SCG。这段"跳票史"对技术选型有什么可借鉴的？</summary>
+    <div class="details-body">
+      <p>这段历史至少给三条选型判断依据。<strong>第一，看"路线图主导权"，不只看"功能清单"。</strong>2016 年时 Zuul 1 功能完全够用，Netflix 也画了 Zuul 2 的饼——但饼的兑现节奏掌握在一家公司手里，它内部优先级一变，整个依赖它的生态就得跟着等。选基础组件时，问一句"下一代的路线谁说了算、到期不交付我有什么办法"，比看现有功能清单重要得多。Spring 的选择是用开源协作把主导权收回来：SCG 由社区共建、按 Spring 的发布列车走，节奏可预期。<strong>第二，"技术方向正确"救不了"交付节奏失控"。</strong>Zuul 2 的 Netty 异步方向本身是对的，最后却丢了生态位——说明生态竞争里"什么时候能用"和"好不好用"同等重要，第二个交卷的先发者往往只能吃存量。<strong>第三，替代窗口出现时要敢于自研，但要押在自己最有掌控力的层。</strong>Spring 没有 OS 层、没有代理层自研，偏偏在"Spring 编程模型"这一层造网关——把 Reactor 的响应式能力包装成 Spring 开发者熟悉的样子，学习成本最低、迁移路径最短。对应到自己的工作：造轮子不可怕，可怕的是造在别人地盘上；<strong>在"离自己用户最近的那一层"自研，成功率最高</strong>。最后留个现实注脚：今天 SCG 自己也面对开源商业化时代的节奏问题（Broadcom 主导 Spring），这也是它推出商业版网关产品的背景——主导权问题永远值得定期重问。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 11 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">11</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>SCG = Spring 官方的代码级 API 网关，官方定位：在 Spring 之上构建网关，把安全、监控、韧性等横切关注点统一接到 API 前面（spring.io，5.0.3 口径）；</li>
+      <li>心智模型：响应式网关——请求先匹配路由（Predicate 定门槛），再过过滤器链（Filter 定规矩），转发下游，响应回来还能再加工；</li>
+      <li>痛点与分工：横切逻辑复制、入口不收敛、灰度没抓手——Nginx 管接入层"快"，SCG 管业务语义"变"，两层不重复；</li>
+      <li>数据面：4.9k Stars、Maven Central 被 336 个组件依赖、2017-11 首发 1.0、start.spring.io 双形态内置（2026-09-19 核对）；</li>
+      <li>版本基准 5.0.3（GitHub Latest，2026-08-20；Spring Cloud 2025.1 · Boot 4.x）；选型捷径：规则要"读懂请求"才上代码级网关。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 2 期《5 分钟跑起来》——从 start.spring.io 生成一个网关应用，写两条路由把它跑起来，命令与预期输出逐条对照官方文档，顺便认清 WebFlux 与 WebMVC 两个 starter 该拿哪个。</p>
+  <p><strong>Primary source：</strong><a href="https://docs.spring.io/spring-cloud-gateway/reference/" target="_blank" rel="noopener">Spring Cloud Gateway 官方文档 · 5.0.3</a>——本期定义、Glossary 术语与路由样例均出自该文档（与 5.0.3 版本匹配）；项目定位与特性清单见 <a href="https://spring.io/projects/spring-cloud-gateway" target="_blank" rel="noopener">spring.io 项目页</a>，版本与发布记录见 <a href="https://github.com/spring-cloud/spring-cloud-gateway/releases" target="_blank" rel="noopener">GitHub Releases</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0055-harbor-in-action-source-reading.html">← 上一期：Harbor 实战与源码导读</a></span>
+  <a class="next" href="0057-scg-quickstart.html">下一期：5 分钟跑起来 Spring Cloud Gateway →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

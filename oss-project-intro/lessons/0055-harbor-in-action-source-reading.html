@@ -15,7 +15,7 @@
 
 <div class="hero">
   <p class="issue">OSS PROJECT INTRO · HARBOR 系列第 4 期：实战与源码导读（收官）</p>
-  <h1>Harbor 实战与源码导读：跨实例复制 + 扫描拦截一次跑通</h1>
+  <h1>Harbor 实战与源码导读：复制 + 拦截一次跑通</h1>
   <p class="subtitle">系列收官期，实战为主、源码为辅（约七三开）。上期我们铺开了概念地图——镜像推入之后 core、jobservice、registry 这些组件如何接力；今天把地图通电：做一次企业里最常见的端到端实战——<strong>把 Docker Hub 的官方基础镜像定时同步进私有 Harbor，再让带高危漏洞的镜像挡在拉取门外</strong>。复制规则怎么建、任务列表怎么看、拦截策略怎么配，每一步都对照官方文档（v2.15 口径，2026-09-19 核对）；最后轻读一眼源码，看看 UI 上一次点击背后的异步任务长什么样。你带走三样东西：一条能照着配的复制链、一套能照着开的安全卡点、一张 jobservice 读码地图。</p>
   <div class="lesson-meta">
     <span class="tag cat">📦 镜像仓库与交付 · Go</span>
@@ -47,16 +47,16 @@
 <section>
   <h2><span class="sec-num">02</span>演示①：一条复制规则，三个要素</h2>
   <p>先钩子后操作。<strong>钩子一：Harbor 的复制不是 cp 命令。</strong>它是一条<strong>声明式规则</strong>——你不搬镜像，你描述"什么镜像、到哪去、什么时候搬"，剩下的事仓库自己安排。对照官方文档《Creating a Replication Rule》（2.15，2026-09 核对），一条规则由三要素组成：<strong>源</strong>（Source resource filter：Name / Tag / Label / Resource 四类过滤器，支持 <code>**</code>、<code>{a,b}</code> 通配）、<strong>目标</strong>（目的仓库 + 目标命名空间，不填则沿用源命名空间）、<strong>触发器</strong>（Trigger Mode）。<strong>特别提醒</strong>：要同步 Docker Hub 官方镜像，名字过滤器必须带上 <code>library</code> 前缀，官方文档原话是 "You must add <code>library</code> if you want to replicate the official artifacts of Docker Hub"——这是新手第一个坑。</p>
-  <p class="note"><img src="../output/0055-harbor-in-action-source-reading/images/harbor-docs-replication-filter.png" alt="官方文档 Source resource filter 段" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档《Creating a Replication Rule》：Source resource filter 四类过滤器与通配模式表（library/* 只匹配一层，library/** 跨层匹配）（goharbor.io，2026-09-19 截图）。</p>
+  <p class="note">官方文档《Creating a Replication Rule》：Source resource filter 四类过滤器与通配模式表（library/* 只匹配一层，library/** 跨层匹配）（goharbor.io，2026-09-19 截图）。</p>
   <p>本期的场景参数照抄即可：Pull-based 模式（Harbor 从上游拉）、源仓库选 Docker Hub 端点、Name 填 <code>library/**</code>、Resource 选 Images、目标命名空间填 <code>base</code>——以后 CI 一律从 <code>harbor.example.com/base/ubuntu:24.04</code> 取基础镜像。触发模式是三选一（官方口径）：<strong>Manual</strong>，需要时手动执行；<strong>Scheduled</strong>，按 cron 定时规则周期执行；<strong>Event Based</strong>，新制品推入或重新打标签时立即复制。三者的口径是删除操作默认不会被复制（Event Based 勾选 "Delete remote resources when locally deleted" 才会联动删除）。</p>
-  <p class="note"><img src="../output/0055-harbor-in-action-source-reading/images/harbor-docs-replication-trigger.png" alt="官方文档 Trigger Mode 段" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档同页 Trigger Mode 段：Manual 按需手动、Scheduled 按 cron 定时规则周期执行、Event Based 推入或重新打标签立即复制（goharbor.io，2026-09-19 截图）。</p>
+  <p class="note">官方文档同页 Trigger Mode 段：Manual 按需手动、Scheduled 按 cron 定时规则周期执行、Event Based 推入或重新打标签立即复制（goharbor.io，2026-09-19 截图）。</p>
 </section>
 
 <!-- ================= 03 演示② 执行复制 ================= -->
 <section>
   <h2><span class="sec-num">03</span>演示②：执行一次复制，盯着任务列表看它跑完</h2>
   <p>规则保存后先别等定时，手动执行一遍验证链路。官方文档《Running Replication Manually》的步骤（2026-09 核对）：系统管理员登录 → 展开 <strong>Administration → Replications</strong> → 选中规则点 <strong>Replicate</strong>，规则命中的资源立即开始从源仓库向目标复制；点规则看执行状态，点执行的 <strong>ID</strong> 进入详情与<strong>任务列表</strong>。两个阅读任务列表的细节值得记住：汇总里的 <code>IN PROGRESS</code> 计数同时包含 <code>Pending</code> 与 <code>In Progress</code> 两种状态；某条任务失败不必慌，官方口径是失败任务几分钟后自动重新调度、重试若干次。每条任务旁边有日志图标，点开能看到这张镜像逐层的复制明细。</p>
-  <p class="note"><img src="../output/0055-harbor-in-action-source-reading/images/harbor-docs-replication-tasks.png" alt="官方文档手动执行复制与任务列表步骤" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档《Running Replication Manually》：Replicate 按钮触发 → 点规则看执行 → 点 ID 看任务列表 → 日志图标看单任务明细（goharbor.io，2026-09-19 截图）。</p>
+  <p class="note">官方文档《Running Replication Manually》：Replicate 按钮触发 → 点规则看执行 → 点 ID 看任务列表 → 日志图标看单任务明细（goharbor.io，2026-09-19 截图）。</p>
   <p>任务列表全部变成成功状态后，验收拉取。从新地址拉同一张镜像，Docker CLI 的动作和第 1 期完全一样——这正是协议兼容的福利：</p>
   <pre class="codeblock"><code>docker pull harbor.example.com/base/ubuntu:24.04</code></pre>
   <pre class="codeblock"><code>24.04: Pulling from base/ubuntu
@@ -68,7 +68,7 @@ Digest: sha256:9c0b0a…  Status: Downloaded newer image</code></pre>
 <section>
   <h2><span class="sec-num">04</span>演示③：把高危镜像挡在拉取门外</h2>
   <p>同步进来的基础镜像不等于安全，还差一道体检和一道门禁。两步都在<strong>项目的 Configuration 标签页</strong>里完成（需要项目管理员权限，官方文档《Project Configuration》，2026-09 核对）：<strong>第一步</strong>，勾选 <code>Automatically scan images on push</code>——官方原话，激活"新镜像推入项目即触发一次漏洞扫描"；<strong>第二步</strong>，勾选 <code>Prevent vulnerable images from running</code> 并在下拉里选严重级别。拦截的判定口径是这句："Images cannot be pulled if their level is equal to or higher than the selected level of severity"——<strong>等于或高于所选级别的镜像无法被拉取</strong>；同时文档明确：<code>negligible</code> 级别的漏洞不会被拦截，给运维留了余地。</p>
-  <p class="note"><img src="../output/0055-harbor-in-action-source-reading/images/harbor-docs-vuln-prevent.png" alt="官方文档项目配置：Prevent vulnerable images 与自动扫描" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档《Project Configuration》：Configuration 标签页里 Prevent vulnerable images from running 勾选框、严重级别选择与 Automatically scan images on push（goharbor.io，2026-09-19 截图）。</p>
+  <p class="note">官方文档《Project Configuration》：Configuration 标签页里 Prevent vulnerable images from running 勾选框、严重级别选择与 Automatically scan images on push（goharbor.io，2026-09-19 截图）。</p>
   <p>扫描引擎是系列老朋友 <strong>Trivy</strong>（第 2 期安装时用 <code>--with-trivy</code> 带上的那个），对镜像做静态漏洞分析，报告按 Critical、High、Medium、Low、Negligible 分级列出 CVE 清单。策略生效后再 <code>docker pull</code> 一张命中级别的镜像，拉取请求会被 Harbor 直接拒绝——<strong>钩子二：扫描结果为什么能挡住 docker pull？</strong>因为这道策略钩在<strong>拉取链</strong>上而不是推送链上：Harbor 的仓库服务在响应拉取请求时先查该制品的扫描结论，命中策略就回绝。放在拉取侧有三个好处：推送不受影响，CI 产出照常入库；消费端把关，谁要上生产谁被拦；未扫描的镜像按保守原则同样不放行。真机上你会看到拉取报错被拒——这是策略命中的信号，而不是仓库故障。</p>
 </section>
 
@@ -126,7 +126,7 @@ type Interface interface {
     Run(ctx Context, params Parameters) error  // 业务逻辑本体
 }</code></pre>
   <p>五个方法读出三层设计：<strong>可靠性写死在接口里</strong>（失败次数、重试意愿），新任务类型不用自己发明重试；<strong>并发是任务自己的属性</strong>（MaxCurrency），复制这种重活可以限速不让扫描饿死；<strong>参数是键值对</strong>（Parameters），接口只管约定形状，不关心业务语义。再看登记表 <code>known_jobs.go</code>，能一次认全 Harbor 的所有重活：REPLICATION（复制）、IMAGE_SCAN（扫描）、GARBAGE_COLLECTION（垃圾回收）、RETENTION（保留策略）、P2P_PREHEAT（分发预热）……全注册到同一个框架上跑。</p>
-  <p class="note"><img src="../output/0055-harbor-in-action-source-reading/images/harbor-jobservice-interface-blob.png" alt="GitHub blob：v2.15.2 jobservice job 接口" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">GitHub goharbor/harbor @ v2.15.2：src/jobservice/job/interface.go 第 17~54 行实拍——Interface 五方法与官方注释（2026-09-19 截图）。</p>
+  <p class="note">GitHub goharbor/harbor @ v2.15.2：src/jobservice/job/interface.go 第 18~54 行实拍——Interface 五方法与官方注释（2026-09-19 截图）。</p>
 </section>
 
 <!-- ================= 07 源码导读③ 周期任务与复制接线 ================= -->
@@ -137,7 +137,7 @@ type Interface interface {
 
 <!-- ================= 08 可借鉴点 ================= -->
 <section>
-  <h2><span class="sec-num">08</span>可借鉴点：把这两手带回去</h2>
+  <h2><span class="sec-num">08</span>可借鉴点：把这三手带回去</h2>
   <div class="card card-tip">
     <ul>
       <li><strong>异步任务框架的通用形态：</strong>登记（接口约定 + 任务注册表）→ 投递（队列 + 到点投递）→ 执行（runner 领取）→ 回写（状态 + 日志）→ 重试（失败次数与重试意愿进接口）→ 通知（状态钩子回调）。你自研系统里要做"后台重活"——对账、补偿、批量迁移——照这个骨架搭，能少踩一大片坑；</li>
