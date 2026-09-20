@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Ollama 系列第 1 期：一条命令，把开源大模型请进自己电脑 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0066</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0065-kafka-source-reading.html">上一期:0065</a> · Ollama 系列第 1 期 / 共 4 期 · <a href="0067-ollama-quickstart.html">下一期:0067</a> · <a href="https://ollama.com/" target="_blank" rel="noopener">ollama.com ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · OLLAMA 系列第 1 期：认识项目</p>
+  <h1>Ollama 是什么：一条命令，把开源大模型请进自己电脑</h1>
+  <p class="subtitle">Kafka 主线告一段落，今天开启新项目 Ollama——在本地跑大模型的最低门槛工具。想在自家电脑上和开源模型对话，你多半听说过它：GitHub 十八万星的现象级项目，官方一句话自述——<strong>Get up and running with Kimi, GLM, MiniMax, DeepSeek, Qwen, Gemma and other models</strong>，把这一串开源模型一口气跑起来。一句话心智模型：<strong>Ollama 是本地大模型的管家——下载、加载、接口全包，推理交给内置引擎，门槛归零</strong>。本期结束，你能答上四个问题：Ollama 是什么、它把门槛降到了什么程度、本地与云端的选型边界在哪、开源模型生态长什么样。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🦙 本地大模型运行 · Go · MIT license</span>
+    <span class="tag">📦 基于 v0.34.2（GitHub Latest，2026-09-15 发布）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 1 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 痛点 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>痛点：在自己电脑跑大模型，要过三道坎</h2>
+  <p>大模型能力的门票曾经很贵：要么调用云端接口，要么自己攒一台深度学习工作站。可很多场景偏偏想把模型留在手边——隐私敏感的文本不想出门、内网环境连不上外网、开发调试不想每次都烧调用费。于是"本地跑开源模型"成了刚需，而这条路传统上有三道坎：</p>
+  <ul>
+    <li><strong>环境坎：</strong>推理框架编译依赖一大堆，显卡驱动和运行库版本对不上，很多人配到一半就放弃；</li>
+    <li><strong>格式坎：</strong>模型权重动辄几十 GB，各种格式互不通用，转换脚本直接劝退新手；</li>
+    <li><strong>资源坎：</strong>多大的显存跑多大的模型，量化压缩还得自己动手，算力账没人替你算。</li>
+  </ul>
+  <p>Ollama 的答案，是把这三件事<strong>全部藏进一条命令</strong>：装好它一条命令，拉模型一条命令，开始对话再一条命令。门槛从"配一天环境"降到"三分钟出结果"。</p>
+</section>
+
+<!-- ================= 02 是什么 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>是什么：官方定位与一句话心智模型</h2>
+  <p>Ollama 是一个开源的本地大模型运行工具：Go 语言编写，MIT 许可证，macOS、Windows、Linux 全平台支持，还有官方 Docker 镜像。它本身<strong>不是一个模型，也不是一套推理框架</strong>，而是夹在中间的"管家层"：对外给你统一的命令行、桌面应用和本地接口，对内把模型下载、版本管理、显存加载这些杂活全部接管。</p>
+  <p>一句话心智模型：<strong>一个管家，带一个引擎</strong>。你只跟管家说话——<code>ollama pull</code> 拉模型、<code>ollama run</code> 开对话；管家负责把模型从模型库取回本地、按需加载进显存、闲置后自动卸载；真正一个字一个字算出回答的，是它内置的 <strong>llama.cpp</strong> 推理引擎，读的是 <strong>GGUF</strong> 格式的量化模型。分层的好处很实在：引擎升级你无感，模型更换零成本。</p>
+  <p class="note">来源注记——GitHub 仓库页（github.com/ollama/ollama，2026-09-19 截图）：Star 181.3k · Fork 17.9k · 主语言 Go · MIT license · About 原文 "Get up and running with Kimi, GLM, MiniMax, DeepSeek, gpt-oss, Qwen, Gemma and other models" · Releases 254，侧栏 Latest 标记为 v0.34.2。</p>
+</section>
+
+<!-- ================= 03 心智模型图 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>心智模型：请求怎么一层层走</h2>
+  <div class="diagram">
+  <svg viewBox="0 0 760 260" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar66" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="16" y="90" width="130" height="80" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="81" y="120" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">你与应用</text>
+    <text x="81" y="142" text-anchor="middle" fill="var(--muted)" font-size="9.5">命令行 · 聊天框 · 代码</text>
+    <rect x="230" y="66" width="200" height="128" rx="12" fill="var(--card)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="330" y="94" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">Ollama 管家层（Go）</text>
+    <text x="330" y="120" text-anchor="middle" fill="var(--muted)" font-size="10">模型管理 · 加载调度</text>
+    <text x="330" y="142" text-anchor="middle" fill="var(--muted)" font-size="10">对外统一接口</text>
+    <text x="330" y="172" text-anchor="middle" fill="var(--muted)" font-size="9.5">默认端口 11434 · 只绑本机</text>
+    <rect x="514" y="30" width="150" height="66" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="589" y="56" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">llama.cpp 引擎</text>
+    <text x="589" y="78" text-anchor="middle" fill="var(--muted)" font-size="9.5">矩阵运算 · 逐字生成</text>
+    <rect x="514" y="128" width="150" height="52" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="589" y="150" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">GGUF 模型文件</text>
+    <text x="589" y="168" text-anchor="middle" fill="var(--muted)" font-size="9.5">几百 MB 到几十 GB</text>
+    <rect x="514" y="200" width="150" height="46" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="589" y="228" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">你的硬件：CPU/GPU</text>
+    <line x1="146" y1="130" x2="224" y2="130" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar66)"/>
+    <text x="185" y="118" text-anchor="middle" fill="var(--muted)" font-size="9.5">run / pull</text>
+    <line x1="430" y1="130" x2="508" y2="72" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar66)"/>
+    <text x="462" y="90" text-anchor="middle" fill="var(--muted)" font-size="9.5">调用</text>
+    <line x1="589" y1="96" x2="589" y2="122" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar66)"/>
+    <text x="612" y="114" fill="var(--muted)" font-size="9.5">读取</text>
+    <line x1="589" y1="180" x2="589" y2="194" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar66)"/>
+    <text x="612" y="192" fill="var(--muted)" font-size="9.5">跑在</text>
+    <text x="16" y="250" fill="var(--muted)" font-size="9.5">图例：管家包办工程杂活，引擎只管算——两层解耦，换模型、升引擎互不影响（概念图，第 3 期逐层拆解）</text>
+  </svg>
+  </div>
+  <p>把这张图记住，Ollama 的所有功能都能挂上去：<strong>向下</strong>，它把各家开源模型收进统一的 GGUF 格式，管下载、管加载、管闲置卸载；<strong>向上</strong>，它给你三种说话方式——终端命令行、桌面应用聊天框、本地 REST 接口。至于中间最难的"怎么把模型算快"，它不做，交给 llama.cpp。边界清晰，是它能把门槛压到零的根本原因。</p>
+</section>
+
+<!-- ================= 04 尝鲜链 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>用起来的样子：四条命令的尝鲜链</h2>
+  <p>不装环境也能看清它的形状。下面四步逐字对照官方 README 与官方 Quickstart（docs.ollama.com，v0.34.2 文档，2026-09-19 核对），第 2 期会亲手跑一遍。</p>
+  <p><strong>第一步，安装</strong>——三大平台各一行，装完没有"配显卡"环节：</p>
+  <pre class="codeblock"><code># macOS / Linux（官方安装脚本）
+curl -fsSL https://ollama.com/install.sh | sh
+# Windows（PowerShell）
+irm https://ollama.com/install.ps1 | iex</code></pre>
+  <p><strong>第二步，拉模型</strong>——模型名两段式：家族名 + 规格标签。官方示例 gemma4:e2b 下载约 7.2 GB，官方建议 8 GB 可用显存（Mac 看统一内存）：</p>
+  <pre class="codeblock"><code>ollama pull gemma4:e2b
+# 输出：pulling manifest → 逐层进度条 → verifying sha256
+# digest → writing manifest → success</code></pre>
+  <p><strong>第三步，对话</strong>——官方原话：Ollama downloads the model and starts a chat on your computer. Type <code>/bye</code> to leave：</p>
+  <pre class="codeblock"><code>ollama run gemma4:e2b
+&gt;&gt;&gt; 用一句话介绍什么是大模型
+（回答逐字流式输出，计算全部在本机）</code></pre>
+  <p><strong>第四步，停下来看一眼</strong>——模型存在哪？<code>ollama ls</code> 列出本地模型（NAME / ID / SIZE / MODIFIED 四列）；文件本体默认在用户主目录的 <code>.ollama/models</code>（Linux 标准安装在 <code>/usr/share/ollama/.ollama/models</code>），环境变量 <code>OLLAMA_MODELS</code> 可改存放位置，删除模型一条 <code>ollama rm</code> 搞定。</p>
+  <p class="note">来源注记——官方 Quickstart "Run a model locally" 一节（docs.ollama.com/quickstart，2026-09-19 截图）原文：Download Ollama, then run: ollama run gemma4:e2b · Ollama downloads the model and starts a chat on your computer. Type /bye to leave.——本节尝鲜链与官方文档逐条对应。</p>
+</section>
+
+<!-- ================= 05 钩子一 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>钩子一：云端随手能用，为什么还把模型搬回本地？</h2>
+  <p>这是每个第一次见 Ollama 的人都会问的问题。四个理由，个个都能单独成立：</p>
+  <ul>
+    <li><strong>隐私：</strong>官方 FAQ 原话——本地运行时不收集你的提示和数据，敏感内容不出本机；</li>
+    <li><strong>离线：</strong>模型装在硬盘里，断网照常对话，飞机上、内网里都能干活；</li>
+    <li><strong>成本：</strong>本地推理不按量计费，练手、做实验没有账单焦虑；</li>
+    <li><strong>自由：</strong>模型文件在自己手里，换模型、改配置、自定义提示词全凭自己安排。</li>
+  </ul>
+  <p>当然，本地不是万能的：模型能力上限受硬件约束，这是它与云端各占一侧的根本原因——第 09 节正面回答这条边界线。</p>
+</section>
+
+<!-- ================= 06 模型库 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>模型库一瞥：开源家族全在列</h2>
+  <p>模型去哪找？<strong>ollama.com/library</strong>，几百个开源模型一页点名，每张卡片标着参数规模、能力标签（tools / vision / thinking / embedding）和更新时间。热门家族大致如下（拉取量为 2026-09-19 页面口径）：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>家族</th><th>代表模型</th><th>规模档位</th><th>累计拉取</th></tr></thead>
+    <tbody>
+      <tr><td>Meta Llama</td><td>llama3.1 / llama3.2</td><td>1B 到 405B</td><td>119.7M（llama3.1）</td></tr>
+      <tr><td>DeepSeek</td><td>deepseek-r1</td><td>1.5B 到 671B</td><td>93M</td></tr>
+      <tr><td>阿里 Qwen</td><td>qwen2.5 / qwen3</td><td>0.5B 到 235B</td><td>40.5M（qwen2.5）</td></tr>
+      <tr><td>Google Gemma</td><td>gemma3 / gemma4</td><td>0.27B 到 31B</td><td>40.6M（gemma3）</td></tr>
+      <tr><td>OpenAI 开放权重</td><td>gpt-oss</td><td>20B 与 120B</td><td>13M</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>封面之外，Mistral、GLM、Kimi、MiniMax、微软 Phi、IBM Granite、NVIDIA Nemotron 等家族也全都在列——从手机能跑的小模型到数据中心级的 MoE 巨兽，开源生态已经足够挑花眼。<strong>选型方法第 3 期给</strong>，今天先记住入口。</p>
+  <p class="note">来源注记——ollama.com/library 模型库页（2026-09-19 截图）：按 Popular 排序前三为 llama3.1（119.7M Pulls · 8b/70b/405b）、deepseek-r1（93M Pulls · 1.5b 到 671b · thinking）、nomic-embed-text（86.4M Pulls · embedding）。</p>
+</section>
+
+<!-- ================= 07 钩子二 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>钩子二：一条命令的背后，推理是谁在做？</h2>
+  <p>第二个反直觉的事实：<strong>Ollama 自己几乎不做推理</strong>。官方 README 的 Supported backends 一节写得明白——引擎就是 <strong>llama.cpp</strong>，Georgi Gerganov 的社区开源项目。Ollama 干的是工程活：把模型收进统一的 GGUF 单文件格式、按需加载、调度显存、对外给稳定接口。可以把它类比成容器界的 Docker：底座是别人的，体验是自己的。</p>
+  <p>GGUF 是这个体系的通用语：量化后的单文件模型，几百 MB 到几十 GB。想用自己的模型也不难——官方 Import 文档给出的路径是一个 Modelfile 两行搞定：</p>
+  <pre class="codeblock"><code># Modelfile：FROM 指向 GGUF 文件（或 Safetensors 目录）
+FROM /path/to/model.gguf</code></pre>
+  <pre class="codeblock"><code>ollama create my-model
+ollama run my-model   # 导入即用；量化需先用 llama-quantize 完成</code></pre>
+  <p>至于量化怎么让几百亿参数塞进消费级硬件、上下文长度、KV 缓存这些内存账，第 3 期细讲。</p>
+</section>
+
+<!-- ================= 08 API ================= -->
+<section>
+  <h2><span class="sec-num">08</span>对程序说话：本地 REST 接口与兼容层</h2>
+  <p>命令行之外，Ollama 起服务后默认在 <code>localhost:11434</code> 开着本地接口（只绑本机回环地址，环境变量 <code>OLLAMA_HOST</code> 可改）。官方 README 原样命令：</p>
+  <pre class="codeblock"><code>curl http://localhost:11434/api/chat -d '{
+  "model": "gemma4",
+  "messages": [{"role": "user", "content": "Why is the sky blue?"}],
+  "stream": false
+}'</code></pre>
+  <p>答案从返回 JSON 的 <code>message.content</code> 字段读取。更贴心的是兼容层：同一端口还提供 <code>/v1/chat/completions</code> 等 OpenAI 兼容端点，甚至 Anthropic Messages 端点——现成的 OpenAI / Anthropic 客户端把地址改成本地就能用；官方同时提醒，兼容各自只覆盖原接口的一个子集。官方 Python、JavaScript 库也都齐了（<code>pip install ollama</code> / <code>npm i ollama</code>）。这层接口封装是第 3 期架构篇的主角之一。</p>
+</section>
+
+<!-- ================= 09 选型边界 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>本地还是云端：一条选型边界线</h2>
+  <p>正面回答选型问题。两条路线的各自账本（均为官方公开口径）：</p>
+  <ul>
+    <li><strong>本地 Ollama：</strong>数据不出本机、离线可用、一次下载反复用不按量计费；代价是速度上限由你的硬件决定，超大模型（几百 B 级）与高并发不是它的主场；</li>
+    <li><strong>云端接口：</strong>旗舰大模型随取随用、高并发与弹性扩容由服务端扛；代价是按 token 计费、数据要出本机、断网即停。</li>
+  </ul>
+  <p>一句话捷径：<strong>原型、隐私、离线、练手选本地；生产重负载与旗舰能力看云端</strong>。顺带一提，Ollama 官网如今也是两条路都给——本地免费，云端模型按量，一套工具通吃。场景清单：<code>✓</code> 本地原型与离线环境、隐私敏感的文本处理、给应用配开发模型；<code>✗</code> 高并发生产推理服务（那是专用推理栈与集群方案的主场）、非旗舰大模型不可的场景。</p>
+</section>
+
+<!-- ================= 10 关键数据 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>关键数据与版本基准</h2>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>指标</th><th>数值</th><th>来源与口径</th></tr></thead>
+    <tbody>
+      <tr><td>GitHub Stars</td><td><strong>181.3k</strong>（Fork 17.9k）</td><td>github.com/ollama/ollama 仓库页，2026-09-19 核对</td></tr>
+      <tr><td>本地服务默认端口</td><td><strong>11434</strong></td><td>默认只绑定本机回环地址（官方 FAQ）</td></tr>
+      <tr><td>默认上下文长度</td><td><strong>4096</strong> tokens</td><td>OLLAMA_CONTEXT_LENGTH 或 num_ctx 可改（官方 FAQ）</td></tr>
+      <tr><td>模型闲置卸载</td><td><strong>5 分钟</strong></td><td>keep_alive 可调时长，省显存的默认策略（官方 FAQ）</td></tr>
+      <tr><td>最新稳定版</td><td><strong>v0.34.2</strong></td><td>GitHub Latest，2026-09-15 发布</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p><strong>版本真源看仔细：</strong>2026-09-19 当天，Releases 列表顶部是 v0.34.3，但挂着 <strong>Pre-release</strong> 标签（09-18 发布）；真正的稳定版 Latest 是 <strong>v0.34.2</strong>（09-15 发布，仓库侧栏口径）。看开源项目要分清这两个标记：预发布尝鲜可以，生产跟稳定版。本系列四期全部口径锚定 v0.34.2——这一版加入了首次运行设置向导，并修复了长回答场景下苹果 MLX 引擎的内存增长问题。</p>
+  <p class="note">来源注记——github.com/ollama/ollama/releases（2026-09-19 截图）：列表顶部 v0.34.3 挂 Pre-release 标签；Release list 同时可见 v0.34.2 及更早版本线；仓库侧栏 Latest 标记 v0.34.2。</p>
+</section>
+
+<!-- ================= 11 quiz ================= -->
+<section>
+  <h2><span class="sec-num">11</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. Ollama 在整个体系里扮演的角色，最准确的说法是？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，它自己几乎不做矩阵运算，推理交给内置引擎。","对的：它是管家层——管下载、加载、调度和接口，推理交给 llama.cpp 引擎。","不对，它不是模型，模型在模型库里按需拉取。"]'>
+        <li class="quiz-option">它是一个大语言模型</li>
+        <li class="quiz-option">它是本地大模型的管家：管下载、加载、接口，推理交给内置的 llama.cpp</li>
+        <li class="quiz-option">它是一个新的大模型训练框架</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 官方 Quickstart 里 ollama run gemma4:e2b 中的 e2b 是什么？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，模型名是两段式，e2b 不是家族名。","不对，它是模型规格标签，不是版本号。","对的：模型名两段式，gemma4 是 Google Gemma 家族，冒号后的 e2b 是规格标签。"]'>
+        <li class="quiz-option">模型家族名</li>
+        <li class="quiz-option">Ollama 的版本号</li>
+        <li class="quiz-option">模型的规格标签（家族名后面的那一串）</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 哪类场景最不该选本地 Ollama？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：高并发生产推理该看专用推理栈与集群方案，本地单机扛不住。","不对，隐私敏感恰恰是本地的强项，数据不出本机。","不对，离线环境正是本地的主场，断网照常干活。"]'>
+        <li class="quiz-option">高并发的生产级推理服务</li>
+        <li class="quiz-option">隐私敏感的文档处理</li>
+        <li class="quiz-option">断网环境下的原型验证</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 12 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">12</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：Ollama 把推理"外包"给 llama.cpp，自己只做工程封装。这种"底座是别人的，体验是自己的"策略，好处和风险各是什么？</summary>
+    <div class="details-body">
+      <p>好处至少三条。<strong>第一，专注。</strong>矩阵运算优化、新硬件适配这些深水区问题由 llama.cpp 社区攻坚，Ollama 把人力花在安装体验、模型管理和接口设计上——两边各自把最擅长的事做到极致。<strong>第二，跟随速度。</strong>引擎一升级，所有用户无感受益，Ollama 的发版日志里"Updated llama.cpp"是常客；同理，新模型只要社区能转成 GGUF，Ollama 几乎零成本接入。<strong>第三，生态位清晰。</strong>用户、模型作者、引擎开发者三方各取所需，这正是它能短时间攒起十几万星的原因。风险也有：<strong>关键能力掌握在别人手里</strong>——引擎的能力上限、缺陷修复节奏不受自己控制，底座一旦演进放缓或转向，上层的体验承诺就要打折。所以你会看到 Ollama 也在引擎之上补自己的调度与缓存策略（默认五分钟卸载、KV 缓存量化这些）。<strong>做产品和做内核的人分开，是开源世界里最常见也最微妙的分工</strong>——理解这层分工，看任何"XX 之上的封装型项目"都不会迷路。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：你们团队要给内部知识库加一个"问答机器人"，数据不能出内网。用本地 Ollama 方案，你会先验证哪几件事？</summary>
+    <div class="details-body">
+      <p>按"数据 → 硬件 → 能力 → 工程"四步验证。<strong>第一步，数据边界成立吗？</strong>模型文件、嵌入向量、问答日志全部落在内网，确认接口只绑内网地址、默认的 127.0.0.1 绑定要不要改成内网网段。<strong>第二步，硬件账算得平吗？</strong>目标模型的下载体积与官方建议显存对照你手头的显卡或 Mac 统一内存；上下文默认 4096 tokens 够不够放知识库检索片段，不够要改环境变量。<strong>第三步，能力够用吗？</strong>用真实业务问题抽样测试回答质量，嵌入模型（如模型库里的 embedding 系列）做本地向量检索的效果单独验证——通用能力过关不代表你的垂直语料过关。<strong>第四步，工程链路通吗？</strong>应用侧用 OpenAI 兼容端点接入最省事，但记得官方提醒：兼容只覆盖子集，流式、函数调用这些你用到的能力要逐个验。四步全绿再立项，这套验证清单学完本期你已经能亲手做——第 2 期跑起来之后尤其顺手。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 13 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">13</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>Ollama = 本地大模型的最低门槛工具：安装、拉模型、对话各一条命令（基准 v0.34.2，GitHub Latest，2026-09-15）；</li>
+      <li>心智模型：<strong>一个管家带一个引擎</strong>——它包办下载、加载、接口，推理交给内置的 llama.cpp，读 GGUF 量化模型；</li>
+      <li>解决到什么程度：<strong>单机体验做到极致</strong>，多机调度与重型推理栈不在射程；</li>
+      <li>选型边界：<strong>原型、隐私、离线、练手选本地；高并发生产与旗舰能力看云端</strong>，官网两条路都给；</li>
+      <li>模型库（ollama.com/library）按家族陈列：Llama、DeepSeek、Qwen、Gemma、gpt-oss、GLM、Kimi、MiniMax 等，卡片标规模与拉取量。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 2 期《5 分钟跑起来》——一条命令装好 Ollama，照官方 Quickstart 拉下第一个模型，亲手收到它的第一句回答，顺手收下安装与拉取的高频报错解法。</p>
+  <p><strong>Primary source：</strong><a href="https://docs.ollama.com/" target="_blank" rel="noopener">Ollama 官方文档（docs.ollama.com）</a>——本期命令、接口与 FAQ 口径均出自该文档（v0.34.2，2026-09-19 核对）；版本与发布记录见 <a href="https://github.com/ollama/ollama/releases" target="_blank" rel="noopener">GitHub Releases</a>，模型库见 <a href="https://ollama.com/library" target="_blank" rel="noopener">ollama.com/library</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0065-kafka-source-reading.html">← 上一期：Kafka 架构与源码导读</a></span>
+  <a class="next" href="0067-ollama-quickstart.html">下一期：5 分钟跑起来 Ollama →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Ollama 系列第 3 期：一条命令的背后——核心概念与整体架构 | 2026-09-20</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0068</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0067-ollama-quickstart.html">上一期:0067</a> · Ollama 系列第 3 期 / 共 4 期 · <a href="0069-ollama-in-action-source-reading.html">下一期:0069</a> · <a href="https://ollama.com/" target="_blank" rel="noopener">ollama.com ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · OLLAMA 系列第 3 期：核心概念与整体架构</p>
+  <h1>一条命令的背后：Ollama 核心概念与整体架构</h1>
+  <p class="subtitle">上一期我们五分钟把它跑了起来：装好软件，一条 <code>pull</code> 拉下模型，一条 <code>run</code> 开始对话。用是会用 了，但一条命令的背后究竟站着谁？本期把这条命令拆开：命令行与服务怎么分工、模型存放在哪、GGUF 量化档位怎么读、Modelfile 怎么写、本地接口和 OpenAI 兼容层什么关系、显存和上下文谁来管。本期结束，你能自己画出它的分层架构图，还能亲手做出一个带人设的自定义模型。版本口径：全部事实锚定 <strong>v0.34.2</strong>（GitHub Latest，2026-09-15 发布；2026-09-20 核对，更新的 v0.34.3 当时仍挂 pre-release）。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🦙 本地大模型运行器 · Go（轻源码）· MIT</span>
+    <span class="tag">📦 基于 v0.34.2（GitHub Latest）</span>
+    <span class="tag-date">📅 2026-09-20 · 第 3 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 回顾与转场 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>回顾与转场：四条命令背后的三个问号</h2>
+  <p>先接上期的进度：安装、<code>ollama pull</code> 拉模型、<code>ollama run</code> 开对话，再加 <code>ls</code>、<code>ps</code>、<code>rm</code> 做日常管理——四组命令，一个能跑大模型的本机环境就齐了。会用是会用了，但一条命令的背后究竟站着谁？上期结束时应该留下三个问号：<strong>模型拉下来放在哪、是什么格式？对话是谁在算，Ollama 自己吗？除了命令行，程序怎么调它？</strong>这三个问号，正好对应本期要拆的三层：模型管理层、推理引擎层、接口封装层。</p>
+  <p class="note">来源：github.com/ollama/ollama 仓库首页截图（2026-09-20）——顶层目录按职责切分：api、app、auth、cmd、create、discover、docs、envconfig、format、fs、llama 等；侧栏 Releases 254 · v0.34.2（Latest）· Star 181.3k · MIT license · About 自述 "Get up and running with Kimi, GLM, MiniMax, DeepSeek, gpt-oss, Qwen, Gemma and other models"。</p>
+</section>
+
+<!-- ================= 02 整体架构 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>整体架构：三层分工，谁也不越界</h2>
+  <p>Ollama 的架构可以画成三层。<strong>第一层是命令行入口</strong>：你敲的 <code>run</code>、<code>pull</code>、<code>ls</code>，由这一层接收并转达，对应仓库里的 cmd 目录。<strong>第二层是本机服务</strong>，整个项目的管家：默认监听端口 11434、只绑本机回环地址，负责模型下载登记、加载调度、对外接口——模型管理的一切杂活都在这层。<strong>第三层是推理引擎</strong>：真正逐字算出回答的部位。官方 README 的 Supported backends 一节写得明白，引擎是 Georgi Gerganov 创立的 llama.cpp 项目；Apple Silicon 平台上另有 MLX 引擎可选（官方开发文档口径，macOS arm64 默认启用）。</p>
+  <p>这个分层的妙处在于<strong>各层可独立进化</strong>：引擎升级你无感，换个模型只是换文件，命令和接口一条不变。Ollama 自己几乎不做矩阵运算，它做的是工程封装——把"跑大模型"里脏活累活全包了，这和 Docker 之于容器是同一种角色。加速硬件的感知也在服务层完成：启动时探测 CPU 与 GPU，调度器读驱动上报的显存来决定模型放卡上还是内存里；NVIDIA 走 CUDA（算力 5.0+、驱动 550+）、AMD 走 ROCm 7、Mac 走 Metal，另有 Vulkan 兜底，环境变量可指定用哪张卡。</p>
+  <p>把三层串成一次真实的旅程：敲下 <code>ollama run mario</code>，命令行把请求交给本机服务；服务先查登记册，模型不在显存里就调度引擎把它加载进来，参数与提示模板一并就位；随后引擎逐字生成，回答流式吐回终端；五分钟没人说话，服务再把它请出显存。整条链路里<strong>命令行是嘴，服务是脑，引擎是手</strong>——本期剩下的篇幅，就是把这三件事各自拆开看。</p>
+</section>
+
+<!-- ================= 03 模型放在哪 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>模型放在哪：一个目录、两样东西</h2>
+  <p>官方 FAQ 给了默认路径：macOS 为 <code>~/.ollama/models</code>，Windows 为 <code>C:\Users\%username%\.ollama\models</code>，Linux 标准安装为 <code>/usr/share/ollama/.ollama/models</code>；想搬家，把环境变量 <code>OLLAMA_MODELS</code> 指到新目录即可（Linux 下注意给 ollama 用户读写权限）。目录内部是两样东西：<strong>manifests（清单）记录每个模型名字由哪些层组成，blobs 按内容摘要存实际数据</strong>——权重、模板、参数都各是一个分片。这与容器镜像 Registry 的分层思路同源：上期 <code>pull</code> 时第一行输出 pulling manifest，拉的就是这份清单；基座层已存在时直接复用，所以 <code>create</code> 自定义模型才可能秒级完成。</p>
+  <p>管家层的日常就围绕这些数据展开，可归纳为四本账：<strong>拉取与删除</strong>（pull/rm）、<strong>登记与查询</strong>（ls 列家底，show 看档案）、<strong>加载与调度</strong>（请求来了装进显存或内存）、<strong>卸载回收</strong>（默认驻留 5 分钟，<code>ollama stop</code> 立即请出）。</p>
+</section>
+
+<!-- ================= 04 GGUF 与量化 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>GGUF 与量化：55 GB 怎么塞进 8 GB 显存</h2>
+  <p>拉下来的模型为什么开箱即跑？因为它是 <strong>GGUF 格式</strong>——GGML 官方规范为推理设计的单文件格式：单文件分发、支持 mmap 内存映射加载、信息自包含，网络结构、分词器、权重全在一个文件里。但原始权重动辄几十 GB，消费级显卡装不下，接下来靠<strong>量化</strong>：把高精度权重压成低比特。档位信息就写在模型 tag 名里，形如 <code>12b-it-q4_K_M</code>——规格 12B、指令微调、Q4_K_M 量化，选型先读名字。</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>档位</th><th>什么做法</th><th>体积参照（gemma3 库页）</th><th>取舍</th></tr></thead>
+    <tbody>
+      <tr><td><strong>q4_K_M</strong></td><td>4 比特为主混合量化</td><td>12b 档 8.1 GB</td><td>默认甜点档，平衡之选</td></tr>
+      <tr><td>q8_0</td><td>8 比特量化</td><td>介于 q4 与 fp16 之间</td><td>更贴原精度，显存富余再上</td></tr>
+      <tr><td>fp16 / bf16</td><td>半精度不量化</td><td>27b 档 55 GB</td><td>上限档，消费级卡难装</td></tr>
+      <tr><td>qat</td><td>量化感知训练</td><td>1b 档 1.0 GB</td><td>官方压好的 Q4，质量更稳</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>规律一句话：<strong>比特数越低体积越小、损耗越高</strong>。体积均取自 ollama.com/library/gemma3/tags 页各 tag 标注（2026-09-20 核对）。导入自家权重也走 GGUF：Modelfile 里 <code>FROM /path/to/file.gguf</code>（分片文件用通配符 <code>model-*.gguf</code>），官方提醒导入时不做量化，先用 llama.cpp 的 llama-quantize 压好。为什么坚持单文件？本地场景没有集群镜像分发的问题，痛点是"别再让我配环境、装依赖"——一个文件拷过去就能跑，对普通用户才是真友好；这也是它和 PyTorch 生态 safetensors（只有权重、配置另配）定位的分岔。</p>
+  <p class="note">来源：github.com/ggml-org/ggml/blob/master/docs/gguf.md 截图（2026-09-20）——GGUF is a file format for storing models for inference with GGML；Specification 一节：Single-file deployment、mmap compatibility、Full information 等设计目标。</p>
+</section>
+
+<!-- ================= 05 Modelfile 与演示链 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>Modelfile：五步做出一个"马里奥模型"</h2>
+  <p>自定义模型不用训练。官方定义：Modelfile 是 <strong>"the blueprint to create and share customized models"</strong>，创建与分享自定义模型的蓝图。五条常用指令：<code>FROM</code> 指定基座（唯一必填，也支持 GGUF 与 Safetensors 目录）、<code>PARAMETER</code> 调运行参数、<code>SYSTEM</code> 一句话定人设、<code>TEMPLATE</code> 提示词模板（一般沿用基座）、<code>MESSAGE</code> 预置对话示范。下面五步全部对照官方文档与示例（2026-09-20 核对）。</p>
+  <p><strong>第一步，写配方</strong>——内容逐字取自官方 Modelfile 文档示例：</p>
+  <pre class="codeblock"><code># Modelfile
+FROM llama3.2
+PARAMETER temperature 1
+PARAMETER num_ctx 4096
+SYSTEM You are Mario from super mario bros, acting as an assistant.</code></pre>
+  <p><strong>第二步，create 建模</strong>——基座层已在本地直接复用，只写新清单，秒级完成：</p>
+  <pre class="codeblock"><code>$ ollama create mario -f ./Modelfile
+gathering model components
+using existing layer sha256:...
+writing manifest
+success</code></pre>
+  <p><strong>第三步，run 验证人设</strong>——权重还是那个基座，变的只是系统提示和两个参数：</p>
+  <pre class="codeblock"><code>$ ollama run mario
+&gt;&gt;&gt; 用一句话介绍你自己
+It's-a me, Mario! ...（回答带标志性口吻，示意转写）</code></pre>
+  <p><strong>第四步，/api/chat 看协议</strong>——往本机 11434 端口发对话请求，答案在 <code>message.content</code>，<code>done_reason</code>、<code>eval_count</code> 等字段是结束原因与计时报表；<code>stream</code> 缺省为 true，逐块流式返回：</p>
+  <pre class="codeblock"><code>$ curl http://localhost:11434/api/chat -d '{
+  "model": "mario",
+  "messages": [{"role": "user", "content": "Hi"}],
+  "stream": false}'</code></pre>
+  <p><strong>第五步，show 验收</strong>——量化 Q4_K_M 继承自基座，temperature 1 与 num_ctx 4096 来自配方，一次看全两层各自贡献了什么；<code>ollama show --modelfile</code> 还能导出任意模型的完整配方。</p>
+</section>
+
+<!-- ================= 06 API 双轨 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>API 双轨：原生全功能，兼容零改造</h2>
+  <p>README 原话：<strong>"Ollama has a REST API for running and managing models."</strong> 官方 Python、JavaScript 库一行安装直连同源接口。管理类操作（show、pull、ps、create）只在原生 <code>/api/*</code> 里有；同时服务还开着一个 <strong>OpenAI 兼容层</strong>，路径前缀 <code>/v1</code>，覆盖 chat completions、completions、embeddings、models、responses 等端点——官方明说这是 OpenAI API 的一个子集，个别字段（如 logprobs、tool_choice）不支持。</p>
+  <pre class="codeblock"><code>$ curl http://localhost:11434/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "mario",
+       "messages": [{"role": "user", "content": "Hi"}]}'</code></pre>
+  <p>返回直接就是 OpenAI 格式，答案在 <code>choices[0].message.content</code>；本地调用无需密钥，官方文档原话是 API key <strong>"required but ignored"</strong>（必填但被忽略）。一个高频坑：OpenAI 协议没地方设上下文长度，官方给的解法正是上一节的 Modelfile——用 <code>PARAMETER num_ctx</code> 建一个新模型名再调它。Anthropic 协议的客户端同样有兼容入口；云端侧，ollama.com 提供同形接口（需 API key），本地与云端两条路官方都铺好了。</p>
+  <p class="note">来源：github.com/ollama/ollama/blob/main/README.md 截图（2026-09-20）——REST API 一节含 /api/chat 的 curl 示例（model 为 gemma4）与 Python 库 pip install ollama 示例。</p>
+</section>
+
+<!-- ================= 07 运行参数 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>运行参数：四个数字管住服务</h2>
+  <ul>
+    <li><strong>11434</strong>：本地服务默认端口，只绑本机回环地址，<code>OLLAMA_HOST</code> 可改；</li>
+    <li><strong>4096</strong>：默认上下文长度（tokens），三种改法——环境变量 <code>OLLAMA_CONTEXT_LENGTH</code>、会话里 <code>/set parameter num_ctx</code>、请求 options 传 <code>num_ctx</code>；并行请求会按倍数放大显存占用，官方 FAQ 有明说；</li>
+    <li><strong>5 分钟</strong>：模型默认驻留时长，请求参数 <code>keep_alive</code> 可调（支持时长字符串、秒数、负数常驻、0 立即卸载），服务端 <code>OLLAMA_KEEP_ALIVE</code> 统一设默认值；</li>
+    <li><strong>5.0+</strong>：NVIDIA 最低算力档（驱动 550+），AMD 需 ROCm 7 驱动，Apple 经 Metal 加速，Vulkan 默认兜底。</li>
+  </ul>
+</section>
+
+<!-- ================= 08 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. 一条 ollama run 的背后，真正"逐字算出回答"的是谁？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，命令行只负责接收并转达命令。","不对，服务层管下载、加载、调度与接口，不做矩阵运算。","对的：推理由引擎层的 llama.cpp 项目完成（README Supported backends 口径），Apple 平台另有 MLX 可选。"]'>
+        <li class="quiz-option">命令行入口（cmd）</li>
+        <li class="quiz-option">本机服务层（Go server）</li>
+        <li class="quiz-option">llama.cpp 推理引擎</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. tag 名 gemma3:12b-it-q4_K_M 里的 q4_K_M 表示什么？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，12b 才是参数规格。","对的：Q4_K_M 是 4 比特为主的混合量化档，比特数越低体积越小、损耗越高。","不对，它不是上下文长度；该模型上下文在库页另标 128K。"]'>
+        <li class="quiz-option">模型有 4 千亿参数</li>
+        <li class="quiz-option">4 比特为主的混合量化档位</li>
+        <li class="quiz-option">上下文长度 4K</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 用 OpenAI SDK 直连本地 Ollama，想加大上下文长度，官方建议怎么做？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，OpenAI 协议里没有设置上下文的字段。","不对，兼容层与上下文设置无关。","对的：OpenAI API 无处设上下文，官方文档建议用 Modelfile 写 PARAMETER num_ctx，ollama create 一个新模型名再调用。"]'>
+        <li class="quiz-option">在请求体里加 max_tokens 即可</li>
+        <li class="quiz-option">兼容层不支持，只能放弃</li>
+        <li class="quiz-option">用 Modelfile 写 num_ctx 建新模型名再调</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 09 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：模型库用"清单 + 内容寻址分片"的布局，而不是每个模型一个大文件，换来了什么？</summary>
+    <div class="details-body">
+      <p>至少三笔账。<strong>第一，去重。</strong>同一个基座被多个自定义模型引用时，权重分片只有一份，清单各自指向它——所以 ollama create 才敢号称秒级：不下载、只写清单。<strong>第二，增量与校验。</strong>每个分片按 SHA256 摘要命名寻址，下载中断可续、内容天然防篡改，pull 时的 verifying sha256 digest 就是在做这件事。<strong>第三，组合自由。</strong>权重、模板、参数、许可各是一层，改提示模板不必动几百 GB 的权重，新版本模型很多时候只是换清单指向新分片。这套思路与容器镜像、Git 对象库同源：<strong>内容寻址 + 分层清单，是"可复用分发"的通用解</strong>。理解了它，再看 Docker 镜像、OCI 制品乃至 Nix，都是同一个味道。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：既然有 OpenAI 兼容层，什么时候还该用原生 /api？反过来呢？</summary>
+    <div class="details-body">
+      <p>两边的甜点位不同。<strong>选兼容层的场景：</strong>代码库已经压在 OpenAI SDK 上、要本地云端两套后端随时切换、或给第三方工具（多数只认 OpenAI 协议）接本地模型——零改造是它唯一的也是足够的理由。但记住官方口径它是子集：logprobs、tool_choice、部分响应语义不在覆盖内，重依赖这些的应用会踩空。<strong>选原生的场景：</strong>需要管理操作（pull、show、ps、create、delete 兼容层都没有）、要 keep_alive、num_ctx、think 这类 Ollama 特有参数的细粒度控制、或要结构化输出与工具调用的完整语义——官方 Python、JS 库走的就是这条路。<strong>一句话捷径：应用原型选兼容，深度集成选原生。</strong>顺带一提，Anthropic 客户端也有兼容入口，第 4 期实战会各接一遍。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 10 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>三层分工：CLI 收命令、本机服务管模型与调度、llama.cpp 引擎做推理（Apple 另有 MLX 可选）；</li>
+      <li>存储布局：manifests 加 blobs，清单指向内容寻址分片，OLLAMA_MODELS 一键搬家；</li>
+      <li>GGUF 单文件自包含；量化档位读 tag 名，q4_K_M 是默认甜点档，fp16 是上限档；</li>
+      <li>Modelfile 五条指令加 create 秒级建模；原生 API 全功能，v1 兼容层零改造；</li>
+      <li>版本基准 v0.34.2（GitHub Latest，2026-09-15 发布；2026-09-20 核对）。</li>
+    </ul>
+  </div>
+  <p><strong>下一站：</strong>系列第 4 期（0069）收官《实战与源码导读》——把本地模型接进应用（官方库与 OpenAI 兼容两种接法），再进 Go 轻源码，看命令入口、服务调度与引擎对接在仓库里的对应位置，把本期的三层分工落到目录与代码上。</p>
+  <p><strong>Primary source：</strong><a href="https://docs.ollama.com/" target="_blank" rel="noopener">Ollama 官方文档</a>（faq / modelfile / api / gpu / context-length）· <a href="https://github.com/ollama/ollama" target="_blank" rel="noopener">github.com/ollama/ollama</a>（README 与仓库树）· <a href="https://github.com/ggml-org/ggml/blob/master/docs/gguf.md" target="_blank" rel="noopener">GGUF 规范（ggml-org/ggml）</a>。本期命令、路径、字段与档位均出自以上官方来源，2026-09-20 核对。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0067-ollama-quickstart.html">← 上一期：5 分钟跑起来 Ollama</a></span>
+  <a class="next" href="0069-ollama-in-action-source-reading.html">下一期：Ollama 实战与源码导读 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

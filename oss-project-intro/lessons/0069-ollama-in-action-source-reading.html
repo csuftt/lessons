@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Ollama 系列第 4 期：实战与源码导读 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0069</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0068-ollama-core-concepts-architecture.html">上一期:0068</a> · Ollama 系列第 4 期 / 共 4 期 · 实战与源码导读（收官） · <a href="https://ollama.com/" target="_blank" rel="noopener">ollama.com ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · OLLAMA 系列第 4 期：实战与源码导读（收官）</p>
+  <h1>Ollama 实战与源码导读：把本地模型用起来</h1>
+  <p class="subtitle">Ollama 系列收官期，实战为主、源码为辅（约七三开）。上期我们拆了核心概念——命令行与服务分层、模型存储布局、GGUF 量化与接口兼容层；今天把地图通电：<strong>亲手写一个流式对话命令行小工具，验证换模型是不是真的只改一行，再用 OpenAI 兼容端点复刻同一调用</strong>。命令与字段逐字对照官方文档（v0.34.2 口径，2026-09-19 核对）；最后轻读 Go 源码，看两处最有味道的设计：模型存储的"清单 + 内容寻址"，以及推理为什么要单独住一个子进程。你带走三样东西：一条能照抄的实战链、一张存储设计图纸、一套拆解同类工具的眼光。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🦙 本地大模型运行 · Go</span>
+    <span class="tag">📦 基于 v0.34.2（GitHub Latest，2026-09-15 发布）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 4 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 任务单 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>任务单：四行验收表</h2>
+  <p>收官期不铺摊子，就干四件事，每件都能当场验收：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>任务</th><th>用到的能力</th><th>验收标准</th></tr></thead>
+    <tbody>
+      <tr><td>命令行流式对话小工具</td><td><code>/api/chat</code> 流式接口</td><td>回答逐字打印</td></tr>
+      <tr><td>多轮对话带记忆</td><td><code>messages</code> 消息历史</td><td>追问不丢上下文</td></tr>
+      <tr><td>换模型成本验证</td><td>模型名即接口，改一行</td><td>新模型一次拉取即用</td></tr>
+      <tr><td>同一调用换协议</td><td>OpenAI 兼容端点</td><td>客户端零改动指向本地</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>演示环境沿用第 2 期口径：本机服务默认端口 <code>11434</code>，示例模型为官方 Quickstart 的 <code>gemma4:e2b</code>（下载约 7.2 GB，官方建议 8 GB 可用显存或 Mac 统一内存）。Python 侧标准库以外只需要 <code>pip install requests</code> 与 <code>pip install openai</code>。</p>
+</section>
+
+<!-- ================= 02 实战①② ================= -->
+<section>
+  <h2><span class="sec-num">02</span>实战①②：十行写一个流式客户端，再接上记忆</h2>
+  <p>官方接口文档对 <code>/api/chat</code> 的原话是：<strong>"Generate the next message in a chat with a provided model"</strong>——默认流式返回，一行一个 JSON 对象，最后一个对象带统计信息。把它包成命令行工具，核心就是"边收边打印"：</p>
+  <pre class="codeblock"><code># chat.py：把 /api/chat 流式接口包成命令行小工具
+import json, requests
+
+MODEL = "gemma4:e2b"
+msgs = [{"role": "system", "content": "回答控制在两句话内"}]
+r = requests.post("http://localhost:11434/api/chat",
+    json={"model": MODEL, "messages": msgs}, stream=True)
+for line in r.iter_lines():
+    print(json.loads(line)["message"]["content"], end="", flush=True)</code></pre>
+  <pre class="codeblock"><code>$ python chat.py
+光在大气中被散射，短波长的蓝光散射最强，所以天空是蓝色的。（逐字蹦出，示意转写）</code></pre>
+  <p>第二步接记忆。这个接口<strong>不存会话</strong>：服务端记不住你上一句说了什么，记忆全靠客户端把历史随请求带回。把流式收到的回答拼成 <code>assistant</code> 消息接回 <code>messages</code>，多轮对话就成了；<code>role</code> 一共四种——<code>system</code>、<code>user</code>、<code>assistant</code>、<code>tool</code>，最后那个给做工具调用留了口子：</p>
+  <pre class="codeblock"><code># 把流式收到的回答拼起来，接回 messages，多轮记忆就成了
+reply = ""
+for line in r.iter_lines():
+    chunk = json.loads(line)["message"]["content"]
+    reply += chunk
+    print(chunk, end="", flush=True)
+msgs.append({"role": "assistant", "content": reply})</code></pre>
+  <pre class="codeblock"><code>你&gt; 刚才说了什么？
+我说天空呈蓝色，是因为短波长的蓝光被大气散射得最强。（引用了第一答：历史生效，示意转写）</code></pre>
+  <p class="note">来源注记——github.com/ollama/ollama/blob/v0.34.2/docs/api.md 第 487~516 行（2026-09-19 截图，docs.ollama.com/api 同口径）：POST /api/chat 一节原文 "Generate the next message in a chat with a provided model"，参数表含 model、messages、tools、think、options、stream、keep_alive（默认 5m）。</p>
+</section>
+
+<!-- ================= 03 实战③④ ================= -->
+<section>
+  <h2><span class="sec-num">03</span>实战③④：换模型改一行，换协议改个地址</h2>
+  <p><strong>换模型的真实成本</strong>：先把新模型拉到本地，再改一行字符串。模型名就是接口的一部分——这也是第 3 期讲过的"两段式命名"（家族 + 规格标签）在实战里的兑现：</p>
+  <pre class="codeblock"><code>ollama pull qwen3:4b
+# MODEL = "gemma4:e2b"  →  MODEL = "qwen3:4b"
+python chat.py</code></pre>
+  <pre class="codeblock"><code>pulling manifest → verifying sha256 digest → success
+你&gt; 用一句话介绍自己
+我是 Qwen……（首字偏慢：冷加载新模型；再问即秒回）</code></pre>
+  <p>首字偏慢不是错觉：模型闲置五分钟后按默认策略卸载（保活参数 <code>keep_alive</code> 可调），冷加载要从磁盘重新读入显存。第二个"只改一处"是<strong>换协议</strong>：装上 OpenAI 官方客户端，把地址指向本机、路径加上 <code>/v1</code>，密钥随便填一个占位串——原来写死云端的代码就跑在了本地：</p>
+  <pre class="codeblock"><code># 同一件事，OpenAI 兼容端点再来一遍
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:11434/v1", api_key="ollama")
+r = client.chat.completions.create(model="gemma4:e2b",
+    messages=[{"role": "user", "content": "一句话解释 GGUF"}])
+print(r.choices[0].message.content)</code></pre>
+  <p>读答案的方式换成 <code>choices[0].message.content</code>，其余照搬 OpenAI 写法。官方在文档里专门提醒：<strong>OpenAI 与 Anthropic 兼容各自只覆盖原接口的一个子集</strong>——换协议之前先对一眼能力表。顺手一提，同端口还有 <code>/v1/messages</code>（Anthropic 兼容）和 <code>/v1/responses</code>，三大生态的客户端都接得进来。</p>
+  <p>两个收尾小技巧。其一，想看现在谁占着显存，敲 <code>ollama ps</code>：在跑的模型、体积、装进显存的比例一目了然，冷加载还是热复用一眼可辨；其二，要模型"常驻不卸"或"用完即走"，不必改配置——请求里的 <code>keep_alive</code> 参数按次生效，填 <code>-1</code> 不卸载、填 <code>0</code> 立即卸载、填时长则到期再卸（官方 FAQ 口径）。另外，别把 <code>/api/chat</code> 和 <code>/api/generate</code> 混为一谈：前者按消息列表对话，后者按裸提示词补全，结构化输出、文本加工这类"不要角色扮演"的活更适合后者。</p>
+</section>
+
+<!-- ================= 04 钩子一 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>钩子一：一次 /api/chat，背后到底发生了什么？</h2>
+  <p>四步实战跑通了，停一秒问个好问题：敲下一次对话请求之后，这个请求在 Ollama 内部走了一条什么路？四个环节：</p>
+  <div class="diagram">
+  <svg viewBox="0 0 760 240" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar69" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="16" y="80" width="140" height="80" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="86" y="112" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">你的脚本</text>
+    <text x="86" y="134" text-anchor="middle" fill="var(--muted)" font-size="9.5">POST /api/chat</text>
+    <rect x="226" y="30" width="170" height="70" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="311" y="58" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">server/routes.go</text>
+    <text x="311" y="80" text-anchor="middle" fill="var(--muted)" font-size="9.5">路由层：接请求认模型</text>
+    <rect x="226" y="140" width="170" height="70" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="311" y="168" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">server/sched.go</text>
+    <text x="311" y="190" text-anchor="middle" fill="var(--muted)" font-size="9.5">调度器：加载或复用</text>
+    <rect x="480" y="85" width="180" height="80" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="570" y="117" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">llama-server 子进程</text>
+    <text x="570" y="139" text-anchor="middle" fill="var(--muted)" font-size="9.5">读 GGUF · 逐字生成</text>
+    <line x1="156" y1="106" x2="220" y2="72" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar69)"/>
+    <line x1="311" y1="100" x2="311" y2="134" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar69)"/>
+    <line x1="396" y1="170" x2="474" y2="140" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar69)"/>
+    <text x="440" y="146" text-anchor="middle" fill="var(--muted)" font-size="9">派活</text>
+    <line x1="570" y1="165" x2="570" y2="228" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar69)"/>
+    <line x1="570" y1="228" x2="86" y2="228" stroke="var(--accent-3)" stroke-width="2"/>
+    <line x1="86" y1="228" x2="86" y2="166" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar69)"/>
+    <text x="330" y="220" text-anchor="middle" fill="var(--muted)" font-size="9">流式回传：逐行 JSON（NDJSON）</text>
+    <text x="16" y="30" fill="var(--muted)" font-size="9.5">图例：路由 → 调度 → 子进程推理 → 原路流式返回（概念图，路径核对自 tag v0.34.2）</text>
+  </svg>
+  </div>
+  <p>这四站各对应一个源码位置：<code>server/routes.go</code> 的路由表、<code>server/sched.go</code> 的调度器、<code>llm</code> 包的引擎子进程管理，以及流式写回。下一节按图索骥，三站读完。</p>
+</section>
+
+<!-- ================= 05 源码①仓库地图 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>读码①：仓库顶层，一眼分清门面与引擎</h2>
+  <p>源码导读为轻读码：抓结构不抠逐行，所有路径核对自 <strong>tag v0.34.2</strong>（2026-09-19）。先看仓库顶层目录分工——门面薄、引擎厚，是本地工具该有的身材：</p>
+  <div class="card">
+    <ul>
+      <li><code>cmd/</code> —— 命令行入口与交互界面（<code>ollama run/pull/ls</code> 的老家）；</li>
+      <li><code>server/</code> —— 服务本体：路由（routes.go）、模型调度（sched.go）、模型管理；</li>
+      <li><code>fs/</code> 与 <code>manifest/</code> —— 模型文件解析（GGUF、safetensors）与清单管理；</li>
+      <li><code>llm/</code> —— 引擎子进程管理：找到引擎、拉起进程、转发请求；</li>
+      <li><code>llama/</code> 与 <code>ml/</code> —— 推理引擎底层源码与张量库，仓库里的大头；</li>
+      <li><code>openai/</code> 与 <code>anthropic/</code> —— 两家协议兼容层；<code>discover/</code> 盘点显卡与内存；</li>
+      <li>周边还有 <code>api/</code>（Go 客户端类型）、<code>template/</code>（聊天模板）、<code>envconfig/</code>（环境变量）——第 3 期讲过的概念都能在这三个目录里找到落点。</li>
+    </ul>
+  </div>
+  <p class="note">来源注记——github.com/ollama/ollama/tree/v0.34.2（2026-09-19 截图）：顶层约五十个目录与文件，上述八个目录构成从命令到推理的完整链路。</p>
+</section>
+
+<!-- ================= 06 源码②模型存储 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>读码②：模型存储——清单管名字，摘要管内容</h2>
+  <p>全项目最值得抄的设计在模型存储。每个模型一份<strong>清单</strong>文件，记着名字对应哪几层；真正的权重与配置躺在<strong>内容仓库</strong>里，文件名就是文件内容的 sha256 摘要：</p>
+  <pre class="codeblock"><code>models/
+├── manifests/registry.ollama.ai/library/gemma4/e2b
+│       清单文件：名字到各层的账本（结构同容器镜像清单）
+└── blobs/
+        sha256-…：文件名即内容的 sha256 摘要（manifest/paths.go
+        的 BlobsPath：冒号换连字符落盘，正则校验摘要格式）</code></pre>
+  <p>这个设计买一送三：<strong>同一份权重只存一份</strong>，共享的层各模型直接引用；<strong>摘要即校验</strong>，下载中断的坏文件对不上摘要、进不了库；<strong>删除按引用计数</strong>，其他清单还在引用的层不能删——三件事没有一件需要额外机制，全是"文件名即内容"这一个决定的自然结果。与容器镜像同款的设计不是巧合：清单媒体类型用的正是 Docker manifest v2 的那套结构。再对照一下第 2 期的体验：敲 <code>ollama ls</code> 时看到的 ID 列，就是清单文件的摘要；<code>ollama rm</code> 删掉的是清单，内容仓库里没人引用的层随后由引用计数回收——两条命令背后是同一套存储模型。</p>
+  <p class="note">来源注记——github.com/ollama/ollama/blob/v0.34.2/manifest/paths.go 第 52~72 行（2026-09-19 截图）：BlobsPath 函数以正则 <code>^sha256[:-][0-9a-fA-F]{64}$</code> 校验摘要，替换冒号为连字符后拼出 blobs 路径；manifest/manifest.go 中 Manifest 结构含 SchemaVersion 2、Config 与 Layers 字段，RemoveLayers 按其他清单的引用情况决定是否真删。</p>
+</section>
+
+<!-- ================= 07 源码③接口与进程 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>读码③：接口与进程——一个核心，三种脸</h2>
+  <p>第 3 期讲过"接口兼容层"，源码里它的实现比想象中轻。看 <code>server/routes.go</code> 的路由表（节选）：</p>
+  <pre class="codeblock"><code>/* server/routes.go @ v0.34.2，节选（gin 路由表） */
+r.POST("/api/chat",  s.ChatHandler)          // 原生接口
+r.POST("/v1/chat/completions", ..., s.ChatHandler)  // OpenAI 兼容
+r.POST("/v1/messages", ..., s.ChatHandler)          // Anthropic 兼容</code></pre>
+  <p>三种协议共用同一个处理函数：兼容端点靠<strong>中间件</strong>把外来格式翻译成内部结构，翻译完进门的就是同一个 <code>ChatHandler</code>。加一张协议脸，核心一行不改——这是"适配器"模式的教科书现场。进程模型上，<code>llm/server.go</code> 的官方注释把架构写成了白纸黑字：</p>
+  <pre class="codeblock"><code>/* llm/server.go @ v0.34.2，注释原文 */
+// NewLlamaServer creates a new llama-server runner
+// for the given model. All GGUF models are served
+// via the upstream llama-server subprocess.</code></pre>
+  <p>翻译过来：<strong>所有模型都由上游的 llama-server 子进程服务</strong>。配套的 <code>llm/llama_server.go</code> 负责在 <code>lib/ollama</code> 目录找到引擎可执行文件，用 <code>exec.Command</code> 拉起子进程，走本地端口通信；同文件的细节还有一处暖心的护栏——请求的上下文长度超过模型训练上限时，自动收敛到训练值再继续。</p>
+</section>
+
+<!-- ================= 08 钩子二 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>钩子二：推理为什么单独住一个子进程？</h2>
+  <p>看完实现，反问一句为什么。假如推理直接长在主进程里：引擎一崩，整个服务陪葬；换引擎要重新编译整个程序；显存是一笔糊涂账，调度无从谈起。拆到子进程后，四个问题同时消失：</p>
+  <ul>
+    <li><strong>崩溃隔离：</strong>子进程退出，主服务能接住重建，正在排队的请求不至于全军覆没；</li>
+    <li><strong>独立升级：</strong>引擎升级只换 <code>lib/ollama</code> 目录下的文件，主程序原地不动；</li>
+    <li><strong>显存有账：</strong>调度器按进程盘点显存，多模型排队加载时算得清谁该让位；</li>
+    <li><strong>到期卸载：</strong>第 3 期讲过的"闲置五分钟自动卸载"，实现就在调度器的过期队列里。</li>
+  </ul>
+  <p>把重活下沉到独立进程、门面保持清爽——这套思路不限于 Ollama：浏览器把页面渲染拆进程、数据库把后台清理拆线程，都是同一笔账。</p>
+</section>
+
+<!-- ================= 09 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. 服务端明明不存会话，多轮对话的"记忆"是从哪来的？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，模型没有跨请求的隐藏状态。","对的：服务端不存会话，记忆是客户端把历史消息随下次请求一起带回去的。","不对，磁盘缓存不会替你拼接上下文。"]'>
+        <li class="quiz-option">模型自己在显存里记住了上下文</li>
+        <li class="quiz-option">客户端把历史 messages 随请求一起带回</li>
+        <li class="quiz-option">服务端的磁盘缓存自动拼接</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 模型存储里"文件名即内容的 sha256 摘要"，不能带来的好处是？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["这正是它的好处：相同内容只存一份，多模型共享。","这也是好处：摘要对不上，坏文件进不了库。","对的：可变更新与内容寻址相冲突——改一个字节就是新文件，需要可变语义得靠清单包一层。","这也是好处：删资源时按引用计数，被引用的层不删。"]'>
+        <li class="quiz-option">相同权重只存一份，天然去重</li>
+        <li class="quiz-option">下载中断的坏文件进不了库</li>
+        <li class="quiz-option">支持直接原地修改模型文件</li>
+        <li class="quiz-option">删除资源时可以按引用计数回收</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. OpenAI 兼容端点 <code>/v1/chat/completions</code> 收到请求后，实际由谁处理？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，兼容层并不是一个独立的推理服务。","对的：兼容层是中间件，翻译完参数进的是同一个 ChatHandler，加协议脸不改核心。","不对，推理在子进程，但那不是受理请求的第一站。"]'>
+        <li class="quiz-option">openai 目录里的一个专用推理服务</li>
+        <li class="quiz-option">中间件翻译成内部结构，进同一个 ChatHandler</li>
+        <li class="quiz-option">llama-server 子进程直接接收 HTTP 请求</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 10 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：把"文件名即内容摘要"用到你自己的系统里，能白拿哪些好处？要付什么代价？</summary>
+    <div class="details-body">
+      <p>好处至少三条。<strong>其一，天然去重：</strong>相同内容的文件在仓库里只有一份，多个模型共享同一份权重层，磁盘账直接省一笔；<strong>其二，天然校验：</strong>下载或拷贝后重算一遍摘要就能验真伪，坏文件连入库的资格都没有——Ollama 的做法更彻底，摘要格式不对连路径都拼不出来；<strong>其三，天然引用计数：</strong>删资源时搜一遍还有谁引用这个摘要，被引用就留着，误删从他名单上消失。代价也是三条：<strong>内容不可变</strong>，改一个字节就是新文件，需要"可变语义"时得在上面包一层（Ollama 的清单就扮演这个角色，名字到摘要的映射随时可换）；<strong>摘要要真算</strong>，写入时多一遍哈希，大文件有 CPU 成本；<strong>垃圾回收要有全局视角</strong>，得能枚举所有清单才能算清引用，Ollama 的 Manifests 函数干的就是这个活。一句话：内容寻址适合"写完不改、按名取用"的资产，不适合频繁更新的状态。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：给现有系统加一套"OpenAI 兼容接口"，照 Ollama 的抄法，中间件里该做什么、不该做什么？</summary>
+    <div class="details-body">
+      <p>先想清楚 Ollama 的边界画在哪：兼容层是<strong>翻译</strong>，不是<strong>实现</strong>。中间件里该做的三件事——<strong>格式映射：</strong>外来字段名到内部结构的双向翻译（choices 数组进、message 流出），连同默认值兜底；<strong>协议差异吸收：</strong>流式分帧方式、结束标记、错误码的形状，按对方生态的约定来；<strong>能力边界声明：</strong>子集里没有的能力要明确拒绝并说明，而不是假装支持——官方文档那句"兼容各自只覆盖原接口的一个子集"就是这条的公开承诺。不该做的两件事——<strong>不要绕开核心另起炉灶：</strong>翻译完必须进同一个处理函数，否则修一个 bug 要修三处，兼容层很快变成第二个产品；<strong>不要把业务逻辑写进中间件：</strong>鉴权、计费、限流归各自的横切层，翻译层只做无状态的格式转换。验收标准一句话：删掉兼容层，核心照常工作；换掉核心，兼容层一行不改。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 11 收官要点 ================= -->
+<section>
+  <h2><span class="sec-num">11</span>本期要点与系列收官</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>实战链四步：十行流式客户端 → 消息历史多轮记忆 → 换模型改一行 → OpenAI 兼容端点改个地址，全部对照官方文档可复现；</li>
+      <li><code>/api/chat</code> 默认流式、服务端不存会话，记忆是客户端把历史带回去的；</li>
+      <li>模型存储：清单管名字、摘要管内容——去重、校验、引用计数回收三件事一个决定全解决（v0.34.2）；</li>
+      <li>接口与进程：三种协议进同一个 ChatHandler；推理跑在上游 llama-server 子进程，换来崩溃隔离与独立升级；</li>
+      <li>版本基准 v0.34.2（GitHub Latest，2026-09-15 发布，2026-09-19 核对）。</li>
+    </ul>
+  </div>
+  <p><strong>系列收官：</strong>Ollama 的入门就聊到这里。四期走完一条线：认识它、跑起它、拆懂它、用上它。想继续深挖，官方文档（docs.ollama.com）与源码仓库是最可靠的两站；也别忘了回<a href="../index.html">课程目录</a>复习其他系列——下一个项目，我们换个赛道再从零开始。</p>
+  <p><strong>Primary source：</strong><a href="https://docs.ollama.com/api" target="_blank" rel="noopener">Ollama 官方 API 文档</a>（/api/chat 与兼容端点口径）· <a href="https://docs.ollama.com/quickstart" target="_blank" rel="noopener">官方 Quickstart</a>（模型与端点示例）· <a href="https://github.com/ollama/ollama/tree/v0.34.2" target="_blank" rel="noopener">github.com/ollama/ollama @ v0.34.2</a>（读码路径全部出自该 tag）。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0068-ollama-core-concepts-architecture.html">← 上一期：Ollama 核心概念与整体架构</a></span>
+  <a class="next" href="../index.html">回课程目录 ↗</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

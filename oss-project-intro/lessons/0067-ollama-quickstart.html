@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Ollama 系列第 2 期：5 分钟跑起来 Ollama，亲手跑通第一个模型 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0067</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0066-ollama-what-and-why.html">上一期:0066</a> · Ollama 系列第 2 期 / 共 4 期 · <a href="0068-ollama-core-concepts-architecture.html">下一期:0068</a> · <a href="https://ollama.com/" target="_blank" rel="noopener">ollama.com ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · OLLAMA 系列第 2 期：5 分钟跑起来</p>
+  <h1>5 分钟跑起来 Ollama：本地装好它，亲手跑通第一个模型</h1>
+  <p class="subtitle">上一期我们认识了 Ollama：一行命令就能在自己电脑上跑开源大模型的运行器，也划清了它与云端 API 的选型边界。今天动手验证。五分钟后你将亲手做出五样东西：<strong>装好的 Ollama、拉到本地的模型、两轮上下文连贯的对话、看得见的运行状态，以及一条命令收拾干净</strong>。全程不写代码，命令逐字对照官方 README 与 docs.ollama.com（基准 Ollama v0.34.2，2026-09-15 发布，2026-09-19 核对）。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🦙 本地大模型运行器 · Go · MIT</span>
+    <span class="tag">📦 基于 v0.34.2（GitHub Latest，2026-09-15 发布）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 2 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 回顾与目标 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>动手前的三个共识</h2>
+  <p>上一期立住了三件事，本期全部要用上。<strong>其一，Ollama 是什么：</strong>一个开源的本地大模型运行器，把"下载模型权重、启动推理服务、暴露对话接口"三件事打包成一条命令。<strong>其二，它解决什么：</strong>想试用一个模型，不用租 GPU、不用配环境、不用注册账号，成本压到一条命令。<strong>其三，选型边界：</strong>数据敏感、要离线、调用量大，选本地；能力优先、不想管硬件，选云端。本期结束时，这条边界会从"概念"变成你亲手验证过的事实。</p>
+  <p>本期五步演示链一气呵成：<strong>安装 → pull 拉模型 → run 连聊两轮 → ls / ps 看状态 → stop / rm 清理收尾</strong>。每一步的命令都能在官方文档里逐字对上，出任何问题先回文档。</p>
+</section>
+
+<!-- ================= 02 环境清点 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>环境清点：门槛比你想的低</h2>
+  <ul>
+    <li><strong>系统：</strong>Windows 10 22H2 及以上（Home/Pro 均可）、macOS Sonoma 14 及以上、Linux 一行脚本（官方 docs 各平台页口径）；</li>
+    <li><strong>磁盘：</strong>官方 Windows 页要求安装留足 4GB 空间，模型文件按需另算——本期主角 qwen3:4b 只要再加 2.5GB；</li>
+    <li><strong>硬件：</strong>NVIDIA 与 AMD Radeon 显卡自动 GPU 加速；没有独显，纯 CPU 跑小模型照样流畅；</li>
+    <li><strong>三不需要：</strong>不需要 Python、不需要 Docker、不需要 API Key——不注册、不登录也能跑本地模型。</li>
+  </ul>
+  <p class="note">来源：ollama.com/download（2026-09-19 截图）。官网下载页为 macOS / Linux / Windows 三个页签：Windows 页签给出一行 PowerShell 命令 irm https://ollama.com/install.ps1 | iex，或按钮下载 OllamaSetup.exe，页脚注 Requires Windows 10 or later。</p>
+  <p>版本钉子：本系列口径锚定 <strong>Ollama v0.34.2</strong>——GitHub Latest（github.com/ollama/ollama），2026-09-15 发布。Ollama 发版很勤，你看到这期时可能有更新版本，命令骨架不变，以官方文档当前页为准。</p>
+</section>
+
+<!-- ================= 03 安装 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>第一步：一条命令装好它</h2>
+  <p>官方 README「Download」段给三大系统各一行命令，Windows 用 PowerShell，macOS 与 Linux 用同一条 curl 脚本：</p>
+  <pre class="codeblock"><code>$ irm https://ollama.com/install.ps1 | iex        # Windows（PowerShell）
+$ curl -fsSL https://ollama.com/install.sh | sh   # macOS / Linux</code></pre>
+  <p>安装器<strong>不需要管理员权限</strong>，装进你的用户目录；Windows 版装完 Ollama 在后台常驻，<code>ollama</code> 命令直接进 cmd 与 PowerShell。怎么确认成功？<strong>新开一个终端</strong>（旧终端拿不到新写入的 PATH），敲：</p>
+  <pre class="codeblock"><code>$ ollama -v</code></pre>
+  <p>回显版本号即安装成功（<code>ollama -v</code> 出自官方 docs 的 Linux 手动安装页，用于验证服务在跑）。至此第一步完成，全程不到两分钟。</p>
+  <p class="note">来源：github.com/ollama/ollama README「Download」段（v0.34.2，2026-09-19 核对）。macOS 也可下载 Ollama.dmg 拖进 Applications；安装方式随版本可能更新，以官方 README 当前页为准。</p>
+</section>
+
+<!-- ================= 04 拉模型 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>第二步：把模型拉回家——名字、冒号、标签</h2>
+  <p>动手前先学会给模型起名。模型库（ollama.com/library）里的完整型号是<strong>「名字:标签」</strong>：模型名 qwen3，冒号后是标签。以通义千问 Qwen3 为例（模型库页 2026-09-19 口径）：<code>qwen3:4b</code> 下载体积 2.5GB、4B 参数、256K 上下文；<code>qwen3:8b</code> 挂 latest 是默认标签，5.2GB；往下还有 0.6b（523MB）、1.7b（1.4GB），往上 14b、32b 一路到 235b。标签越大数据越大、能力越强，选够用的就好，本期选 4b 这一档。</p>
+  <pre class="codeblock"><code>$ ollama pull qwen3:4b
+pulling manifest
+pulling 359d7dd4bcda... 100% ▕████████████████▏ 2.5 GB
+success</code></pre>
+  <p>回显为本地运行行为示例：先对清单，再出进度条，最后一句 success。中途断网、关机都不怕——<strong>重跑同一条 pull 会从断点续传</strong>，不必推倒重来。模型落在本地磁盘，从此它就是你电脑上的一个普通文件。</p>
+  <p class="note">来源：ollama.com/library/qwen3/tags（2026-09-19 截图）：qwen3 全系累计 37.4M 次下载，qwen3:4b 行显示 2.5GB / 256K / Text；<code>ollama pull 模型名:标签</code> 逐字对照官方 docs「CLI Reference · Download a model」（示例模型原文为 gemma4）。</p>
+</section>
+
+<!-- ================= 05 run 两轮 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>第三步：run 起来，连聊两轮</h2>
+  <pre class="codeblock"><code>$ ollama run qwen3:4b
+>>> 用一句话介绍你自己
+我是 Qwen3，来自通义千问系列的小型模型，随时帮你答疑解惑。
+>>> 把刚才那句话压缩成十个字
+四十亿参数的中文小助手。
+>>> /bye</code></pre>
+  <p>两条回答均为本地运行行为示例（qwen3 是思考型模型，回答前会先输出一段思考，官方 docs「Thinking」页口径，示例中省略）。关键在第二轮：让它压缩<strong>上一句</strong>，它答得出来——<strong>同一个会话内上下文是连续的</strong>，这就是"真的在对话"而不是一问一答的查询机。聊完敲 <code>/bye</code> 退出（官方 quickstart 原文提示），程序安静下来，模型文件还躺在本地。</p>
+</section>
+
+<!-- ================= 06 ls/ps ================= -->
+<section>
+  <h2><span class="sec-num">06</span>第四步：ls 看家底，ps 看运行</h2>
+  <pre class="codeblock"><code>$ ollama ls     # 已下载：名字 · ID · 体积 · 修改时间
+$ ollama ps     # 运行中：多出加载位置与驻留时间
+NAME       ID            SIZE     MODIFIED
+qwen3:4b   359d7dd4bcda  2.5 GB   4 minutes ago
+NAME       ID            SIZE     PROCESSOR    UNTIL
+qwen3:4b   359d7dd4bcda  2.5 GB   100% GPU     4 minutes from now</code></pre>
+  <p>两个查看命令各管一摊：<code>ls</code> 列本地已下载的模型；<code>ps</code> 列<strong>正在内存里运行</strong>的模型。官方 FAQ 原文口径：ps 的 Processor 列显示模型被加载进了哪块内存（GPU 还是 CPU/RAM），UNTIL 是驻留倒计时。为什么刚才 <code>/bye</code> 退出了对话，ps 里还在？<strong>模型默认在内存里多驻留几分钟</strong>，等你下次调用时免去重新加载——这是官方设计的行为，不是没退干净。</p>
+</section>
+
+<!-- ================= 07 stop/rm ================= -->
+<section>
+  <h2><span class="sec-num">07</span>第五步：stop 卸内存，rm 删文件</h2>
+  <pre class="codeblock"><code>$ ollama stop qwen3:4b   # 卸出内存，文件还在
+$ ollama rm qwen3:4b     # 连文件一起删，释放 2.5GB
+deleted 'qwen3:4b'</code></pre>
+  <p>两个清理命令分工明确：<code>stop</code> 让模型立即退出内存、释放算力，磁盘上的 2.5GB 还在；<code>rm</code> 才真正删除文件（回显 <code>deleted '模型名'</code>，本地运行行为示例）。本地模型的妙处就在这：<strong>删了随时能回</strong>，一条 pull 拉回来又是几分钟的事。试错的成本被压到可以忽略。</p>
+</section>
+
+<!-- ================= 08 系统长什么样 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>跑通之后：这台机器长什么样</h2>
+  <p>回看五步链路会发现：你敲的每条命令只是前台，<strong>真正干活的是常驻后台的一个服务进程</strong>——它从本地磁盘读模型文件，调度 GPU 或 CPU 推理。官方 FAQ：服务<strong>默认只绑定本机回环地址 127.0.0.1 的 11434 端口</strong>，外面够不着；设环境变量 <code>OLLAMA_HOST</code> 可改绑定。同一端口还挂着一整套接口：REST 原生接口 <code>/api/chat</code>，以及 OpenAI 兼容层 <code>/v1/chat/completions</code>——聊天窗口其实只是壳，改个地址就能让现成应用接上本地模型。</p>
+  <pre class="codeblock"><code>$ curl http://localhost:11434/api/chat -d '{
+  "model": "qwen3:4b",
+  "messages": [{"role": "user", "content": "Why is the sky blue?"}],
+  "stream": false
+}'</code></pre>
+  <p>命令结构逐字对照官方 README「REST API」段（README 示例模型为 gemma4，此处换成已拉取的 qwen3:4b）。返回是一段 JSON：<code>message.content</code> 装着回答，<code>done</code> 表示生成结束。你的程序调它跟调云端接口写法几乎一样，区别只有两点：<strong>地址是本机，账单是零</strong>。第 4 期实战篇就接这里。</p>
+  <p class="note">来源：docs.ollama.com/quickstart（2026-09-19 截图）：官方 Quickstart「Get started」原文 Download Ollama for macOS, Windows, or Linux. Open the app, or get started from your terminal: ollama；Follow the setup prompts. Sign in to use cloud models, or choose a local model.——注意官方现在也提供云模型（登录后调用），本期的 qwen3:4b 是纯本地模型，跑起来全程不联网。</p>
+</section>
+
+<!-- ================= 09 选型边界落地 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>钩子：断网之后再聊一轮，会怎样？</h2>
+  <p>本地模型照答不误——模型文件和推理都在你这台机器上，机场高铁不掉线；换云端 API，断网即停。把上期的选型边界落到实处：</p>
+  <ul>
+    <li><strong>选本地的三个信号：</strong>数据不能出本机（提问与回答都不经网络）、环境要离线、调用量大到按量计费肉疼——代价是参数量小、复杂推理有上限；</li>
+    <li><strong>选云端的三个信号：</strong>能力优先、突发流量大、不想管任何硬件——代价是数据出公网、按调用量付费；</li>
+    <li><strong>两者不是敌人：</strong>Ollama 一套命令既能跑本地模型也能接云模型，本地试、云端产，同一条命令骨架。</li>
+  </ul>
+</section>
+
+<!-- ================= 10 翻车速查 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>高频翻车速查（按出现概率）</h2>
+  <ul>
+    <li><strong><code>ollama: command not found</code>：</strong>刚装完当前终端没拿到新 PATH——关掉重开一个终端再试；</li>
+    <li><strong>pull 到一半失败或很慢：</strong>重跑同一条 pull 断点续传；2.5GB 按家庭宽带通常几分钟；</li>
+    <li><strong>Windows 终端进度条显示方块乱码：</strong>官方 docs Windows 页原文——进度指示用了 Unicode 字符，老终端字体可能显示为方框，换终端字体即可；</li>
+    <li><strong>run 报显存或内存不足：</strong>换更小的标签，<code>qwen3:0.6b</code> 只要 523MB（模型库页口径），纯 CPU 也能跑；</li>
+    <li><strong>端口冲突或想让局域网访问：</strong>默认绑定 127.0.0.1 的 11434；设 <code>OLLAMA_HOST</code> 可改绑定（官方 FAQ）——改绑定前先想清楚第 12 节那道题；</li>
+    <li><strong>照抄网上教程的 <code>ollama run llama3</code> 对不上：</strong>示例随版本更新，命令骨架不变、模型名可替换，以 docs.ollama.com 当前页与模型库为准。</li>
+  </ul>
+</section>
+
+<!-- ================= 11 quiz ================= -->
+<section>
+  <h2><span class="sec-num">11</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. pull 拉到一半断网了，最省事的做法是？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，重装 Ollama 跟下载中断没关系，模型文件才是要续传的对象。","对的：重跑同一条 ollama pull 会从断点续传，已下载的部分不浪费。","不对，0.6b 更小是真，但断点续传让 2.5GB 也不必推倒重来。"]'>
+        <li class="quiz-option">先卸载 Ollama 重装再拉</li>
+        <li class="quiz-option">重跑同一条 ollama pull，从断点续传</li>
+        <li class="quiz-option">立刻换 qwen3:0.6b 重新拉</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. /bye 退出对话后，ollama ps 里还能看到模型驻留，为什么？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，命令本身执行完毕了，这不是残留故障。","不对，驻留的模型还在内存里，随时能被调用。","对的：模型默认在内存驻留几分钟等下次调用免加载，是官方设计行为；想立即释放用 ollama stop。"]'>
+        <li class="quiz-option">命令没执行完，出了 bug</li>
+        <li class="quiz-option">模型已经删掉了，显示的是缓存</li>
+        <li class="quiz-option">官方设计的驻留等待：等下次调用免加载，stop 可立即卸出</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 你写好的程序想调用本地模型，正确姿势是？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：服务默认就挂在 127.0.0.1:11434，/api/chat 或 OpenAI 兼容的 /v1 接口都能调。","不对，聊天窗口只是壳，它背后就是这套 HTTP 接口。","不对，本地模型不需要也不应该先传到云端。"]'>
+        <li class="quiz-option">POST http://localhost:11434/api/chat，或走 /v1 兼容接口</li>
+        <li class="quiz-option">只能通过聊天窗口手动复制粘贴</li>
+        <li class="quiz-option">先把模型上传到云端再调用</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 12 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">12</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：stop 和 rm 都能让 ps 清空，它们的本质差别是什么？为什么 Ollama 把"清理"拆成两个命令？</summary>
+    <div class="details-body">
+      <p>两个命令操作的是模型生命周期里<strong>两个不同的阶段</strong>：run 之后，模型经历"磁盘文件 → 加载进内存 → 推理计算"，stop 只做第二段的逆操作（卸出内存、释放算力），文件不动，下次 run 免下载、秒级就绪；rm 直接删掉第一段的文件本体，释放磁盘，下次要重新 pull。拆成两个命令，对应的是两种真实诉求：<strong>"暂时不用了"和"确定不要了"</strong>。高频试用场景里，大多数"不用了"其实是暂时的——今天试 qwen3:4b，明天可能再回来对比 0.6b，如果清理只有"删除"一档，用户就得在"白占 2.5GB 磁盘"和"重新下载几分钟"之间二选一，试错成本立刻回弹。顺带回头看 ps 的 UNTIL 倒计时：驻留机制其实就是系统帮你自动做"软清理"——算力是稀缺的，磁盘是便宜的，所以内存自动卸、磁盘留给用户手动删。三层存储（磁盘、内存、算力）各有各的回收策略，一条命令对应一层，这就是 Ollama 命令面设计的逻辑。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：Ollama 默认只绑 127.0.0.1。什么时候才值得用 OLLAMA_HOST 改成对外绑定？改之前必须想清楚什么？</summary>
+    <div class="details-body">
+      <p>值得改的场景其实很窄：<strong>局域网里多台机器共享一块好显卡</strong>是最典型的一个——比如让笔记本调用台式机上的模型，省得每台机器各存一份权重。改之前必须想清楚的第一件事是：<strong>这个端口上没有任何鉴权</strong>。绑定一改成 0.0.0.0，局域网里任何人都能 POST 一条对话、消耗你的显存、读你的模型——接口本身不带用户体系，等于把你家插座接到了楼道里。所以官方默认值才敢写死 127.0.0.1：最安全的选择往往就是最方便的选择，两者在这里恰好重合。真要对外，正确顺序是：先收窄（绑具体内网 IP 而不是 0.0.0.0）、再叠加网络层防护（防火墙白名单、反代加认证，官方 FAQ 给了 Nginx 与隧道示例）、最后才开放。这个默认值本身就是一次架构表态：<strong>本地优先、安全默认，暴露是显式选择而不是隐式后果</strong>——第 3 期拆架构时你会看到，这个取向贯穿 Ollama 的整个设计。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 13 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">13</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>一条命令装好：Windows <code>irm install.ps1 | iex</code>，macOS/Linux <code>curl install.sh | sh</code>；<code>ollama -v</code> 回显版本号即成功；</li>
+      <li>模型命名 = 名字:标签：<code>qwen3:4b</code> = 2.5GB、4B 参数、256K 上下文；pull 中断可续传；</li>
+      <li>run 连聊两轮验证上下文；/bye 退出；思考型模型先想后答属正常；</li>
+      <li>ls 看家底，ps 看运行：Processor 列显示 GPU 还是内存，UNTIL 是驻留倒计时；</li>
+      <li>stop 卸内存、rm 删文件；断网可聊、数据不出机，天花板不够再按边界切云端。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 3 期《核心概念与整体架构》——拆开这个常驻服务：模型文件里装着什么（量化与分层）、11434 端口背后的一条请求旅程、以及"运行器"和"推理引擎"的分工。</p>
+  <p><strong>Primary source：</strong><a href="https://github.com/ollama/ollama" target="_blank" rel="noopener">github.com/ollama/ollama（README 与 Releases）</a>——本期安装命令、REST 示例与版本基准（v0.34.2，2026-09-15 发布）出自该仓库；命令面与平台要求见 <a href="https://docs.ollama.com/" target="_blank" rel="noopener">docs.ollama.com</a>（CLI Reference / Quickstart / FAQ），模型名与体积见 <a href="https://ollama.com/library/qwen3" target="_blank" rel="noopener">ollama.com/library/qwen3</a>（2026-09-19 核对）。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0066-ollama-what-and-why.html">← 上一期：认识 Ollama：本地跑大模型为什么值得学</a></span>
+  <a class="next" href="0068-ollama-core-concepts-architecture.html">下一期：Ollama 核心概念与整体架构 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>
