@@ -88,7 +88,7 @@ docs                                   参考文档源（docs.spring.io 的内�
   </svg>
   </div>
   <p>前三站（HttpWebHandlerAdapter、DispatcherHandler）是 Spring WebFlux 框架的地基，不属于网关代码——网关自己的第一个类是 <code>RoutePredicateHandlerMapping</code>。官方《How it works》的定义原话：<strong>"If the Gateway Handler Mapping determines that a request matches a route, it is sent to the Gateway Web Handler. This handler runs the request through a filter chain that is specific to the request."</strong>——Handler Mapping 判定匹配，交给 Web Handler，穿过一条"为这个请求定制"的过滤器链。这句话里的三个名词，就是下面三节的三个主角。</p>
-  <p class="note"><img src="../output/0060-scg-source-reading/images/scg-docs-howitworks.png" alt="官方文档 How it works 页实拍" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方参考文档《How it works》实拍：客户端请求 → Gateway Handler Matching（匹配路由）→ Gateway Web Handler → 过滤器链（虚线分隔 pre 与 post）→ 代理请求到目标服务（docs.spring.io，5.0.3，2026-09-19 截图）。</p>
+  <p class="note"><img src="../img/0060-scg-source-reading/scg-docs-howitworks.png" alt="官方文档 How it works 页实拍" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方参考文档《How it works》实拍：客户端请求 → Gateway Handler Matching（匹配路由）→ Gateway Web Handler → 过滤器链（虚线分隔 pre 与 post）→ 代理请求到目标服务（docs.spring.io，5.0.3，2026-09-19 截图）。</p>
 </section>
 
 <!-- ================= 03 决策一 ================= -->
@@ -112,7 +112,7 @@ docs                                   参考文档源（docs.spring.io 的内�
     return Route.async(routeDefinition).asyncPredicate(predicate)
                 .replaceFilters(gatewayFilters).build();
 }</code></pre>
-  <p class="note"><img src="../output/0060-scg-source-reading/images/scg-tree-route-dir.png" alt="GitHub 上 route 目录实拍" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">源码 <code>route/</code> 目录实拍（tag v5.0.3，2026-09-19 截图，github.com/spring-cloud/spring-cloud-gateway）：<code>RouteDefinition</code>（配置态）与 <code>Route</code>（运行态）分家，中间由 <code>RouteDefinitionRouteLocator</code> 转换；<code>CachingRouteLocator</code> 提供缓存，<code>RouteDefinitionWriter</code>/<code>InMemoryRouteDefinitionRepository</code> 支撑运行期动态增删路由。</p>
+  <p class="note"><img src="../img/0060-scg-source-reading/scg-tree-route-dir.png" alt="GitHub 上 route 目录实拍" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">源码 <code>route/</code> 目录实拍（tag v5.0.3，2026-09-19 截图，github.com/spring-cloud/spring-cloud-gateway）：<code>RouteDefinition</code>（配置态）与 <code>Route</code>（运行态）分家，中间由 <code>RouteDefinitionRouteLocator</code> 转换；<code>CachingRouteLocator</code> 提供缓存，<code>RouteDefinitionWriter</code>/<code>InMemoryRouteDefinitionRepository</code> 支撑运行期动态增删路由。</p>
   <p>现在回答钩子的问题：<strong>网关为什么敢把路由当数据？</strong>因为"路由的定义"（RouteDefinition：id、uri、断言参数、过滤器参数，全是字符串和数字）和"路由的运行时对象"（Route：编译好的断言、过滤器实例）被拆成两个世界，中间隔着 <code>convertToRoute</code> 这道转换工序。配置态是纯数据——所以它可以来自 yml、来自注册中心（DiscoveryClientRouteDefinitionLocator）、来自 actuator 端点的运行期写入，甚至来自数据库（仓库里有 RedisRouteDefinitionRepository 现成参考）。<strong>解决什么问题：</strong>路由增删改不需要重新编译、不需要重启，第 4 期"改一下 Nacos 配置路由就生效"的动态路由，源码依据就是这一层。<strong>换种做法会怎样：</strong>路由写成 Java 代码（第 2 期见过的 DSL），规则能写测试、有类型检查，但每次调整都要走"编译—打包—发布"流水线，动态路由无从谈起。SCG 的取舍是：<strong>运行态用代码（性能与灵活性兼得），定义态用数据（可配置、可推送、可热更）</strong>，两边各取所长。</p>
 </section>
 

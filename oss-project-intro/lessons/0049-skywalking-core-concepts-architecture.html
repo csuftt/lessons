@@ -54,7 +54,7 @@ message SegmentObject {
     <li><strong>Segment</strong>：官方原话"a unique concept in SkyWalking"——<strong>单个 OS 进程内、一次请求产生的全部 Span，装进一个 Segment</strong>。上期 demo-app 和 demo-api 两个服务，各报一个 Segment，靠同一个 traceId 归成一条链；</li>
     <li><strong>Span</strong>：一次具体的调用记录，分三类（下一节展开）。</li>
   </ul>
-  <p class="note"><img src="../output/0049-skywalking-core-concepts-architecture/images/skywalking-docs-trace-protocol.png" alt="官方 Trace Data Protocol 文档：Segment 与三类 Span 定义" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方《Trace Data Protocol v3.1》开篇：segment 是 SkyWalking 独有概念，应包含单个 OS 进程内一次请求的全部 span；Entry/Local/Exit 三类 Span 定义；跨线程/进程的父子信息叫 reference（2026-09-19 截图，正文主栏）。</p>
+  <p class="note"><img src="../img/0049-skywalking-core-concepts-architecture/skywalking-docs-trace-protocol.png" alt="官方 Trace Data Protocol 文档：Segment 与三类 Span 定义" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方《Trace Data Protocol v3.1》开篇：segment 是 SkyWalking 独有概念，应包含单个 OS 进程内一次请求的全部 span；Entry/Local/Exit 三类 Span 定义；跨线程/进程的父子信息叫 reference（2026-09-19 截图，正文主栏）。</p>
   <p><strong>三类 Span 各管一段路</strong>（同样出自该文档原文）：</p>
   <div class="tbl-wrap">
   <table>
@@ -118,7 +118,7 @@ webhook:                                         # 触发后 HTTP POST JSON 通�
 <section>
   <h2><span class="sec-num">06</span>整体架构：官方四段论与自绘数据流</h2>
   <p>架构的权威口径，官方《Overview · Architecture》一页说尽：<strong>"SkyWalking is logically split into four parts: Probes, Platform backend, Storage and UI."</strong>探针采集（Java agent 只是探针之一，Zipkin/OTel/Istio 数据也在收），后端聚合分析（可作 Receiver、Aggregator 或两者兼做），存储可插拔，UI 可视化。官方原图还画出后端的集群形态：数据经传输层进接收集群，聚合集群加工后分四路出去——查询、告警、导出、落存储。</p>
-  <p class="note"><img src="../output/0049-skywalking-core-concepts-architecture/images/skywalking-docs-architecture-parts.png" alt="官方 Overview 文档 Architecture 一节与四段论原文" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方《Concepts and Designs · Overview》Architecture 节：四段论原文 + 官方架构原图（数据源 → Transport layer → Receiver cluster → Aggregator cluster → GUI/CLI · Alarm · Exporter · Storage options）（2026-09-19 截图，正文主栏）。</p>
+  <p class="note"><img src="../img/0049-skywalking-core-concepts-architecture/skywalking-docs-architecture-parts.png" alt="官方 Overview 文档 Architecture 一节与四段论原文" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方《Concepts and Designs · Overview》Architecture 节：四段论原文 + 官方架构原图（数据源 → Transport layer → Receiver cluster → Aggregator cluster → GUI/CLI · Alarm · Exporter · Storage options）（2026-09-19 截图，正文主栏）。</p>
   <p>把本期全部概念拼成一条请求的旅程（自绘图，与官方四段论逐框对应）：</p>
   <div class="diagram">
   <svg viewBox="0 0 760 320" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
@@ -167,7 +167,7 @@ webhook:                                         # 触发后 HTTP POST JSON 通�
 <section>
   <h2><span class="sec-num">07</span>仓库顶层模块地图：两座仓库，各管一摊</h2>
   <p>架构要落到代码才踏实。SkyWalking 的源码分两座仓库：<strong>主仓库 apache/skywalking 放后端</strong>（下图为 tag v11.0.0 顶层实拍，标签选择器与最新提交 6f1fd78 可与 Releases 页互相印证）：</p>
-  <p class="note"><img src="../output/0049-skywalking-core-concepts-architecture/images/skywalking-github-tree-v1100.png" alt="apache/skywalking v11.0.0 顶层目录实拍" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">apache/skywalking @ v11.0.0 顶层：oap-server 是主角；右栏 25.0k stars · Releases 65 · 11.0.0（Latest）。注意顶层没有 UI 目录——UI 已独立出主仓库（2026-09-19 截图，UTC）。</p>
+  <p class="note"><img src="../img/0049-skywalking-core-concepts-architecture/skywalking-github-tree-v1100.png" alt="apache/skywalking v11.0.0 顶层目录实拍" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">apache/skywalking @ v11.0.0 顶层：oap-server 是主角；右栏 25.0k stars · Releases 65 · 11.0.0（Latest）。注意顶层没有 UI 目录——UI 已独立出主仓库（2026-09-19 截图，UTC）。</p>
   <pre class="codeblock"><code>oap-server/ @ v11.0.0 · OAP 后端全家
 ├─ server-core/             聚合内核：流式分析与指标生成
 ├─ server-receiver-plugin/  收数插件：trace/meter/log/otel/zipkin/mesh…
@@ -181,7 +181,7 @@ webhook:                                         # 触发后 HTTP POST JSON 通�
 └─ 顶层另有 apm-protocol/ apm-dist/ docs/ docker/  协议·打包·文档·compose</code></pre>
   <p>上一页自绘架构图的每个框，在这里都有对应目录：收数在 receiver、算账在 core 与 oal-rt、出门在 query 与 alarm。第 5 期读码，就从收数和聚合这两个目录进。</p>
   <p><strong>挂在你应用里的那个 agent，源码不在主仓库。</strong>它独立成 <strong>apache/skywalking-java</strong> 仓库、自己发版本——所以"OAP v11.0.0 + agent v9.7.0"两个号对不上是常态，第 2 期强调过别配对：</p>
-  <p class="note"><img src="../output/0049-skywalking-core-concepts-architecture/images/skywalking-java-tree-v970.png" alt="apache/skywalking-java v9.7.0 顶层目录实拍" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">apache/skywalking-java @ v9.7.0 顶层：apm-sniffer 装着字节码内核与 130+ 框架插件；最新提交 7a6c1e4 正是 v9.7.0 的发布准备；右栏 Releases 17 · 9.7.0（Latest）（2026-09-19 截图，UTC）。</p>
+  <p class="note"><img src="../img/0049-skywalking-core-concepts-architecture/skywalking-java-tree-v970.png" alt="apache/skywalking-java v9.7.0 顶层目录实拍" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">apache/skywalking-java @ v9.7.0 顶层：apm-sniffer 装着字节码内核与 130+ 框架插件；最新提交 7a6c1e4 正是 v9.7.0 的发布准备；右栏 Releases 17 · 9.7.0（Latest）（2026-09-19 截图，UTC）。</p>
   <pre class="codeblock"><code>skywalking-java @ v9.7.0 · agent 独立仓库
 ├─ apm-sniffer/              agent 本体（-javaagent 那个 jar 从这构建）
 │   ├─ apm-agent-core/         字节码增强内核（ByteBuddy 织入）

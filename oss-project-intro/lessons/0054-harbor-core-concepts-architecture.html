@@ -115,7 +115,7 @@ harbor.demo.com/demo/app@sha256:9c0b0a…</code></pre>
 <!-- ================= 03 复制链路 ================= -->
 <section>
   <h2><span class="sec-num">03</span>复制链路：Pull 与 Push 两种模式，跨实例分发</h2>
-  <p class="note"><img src="../output/0054-harbor-core-concepts-architecture/images/harbor-docs-replication.png" alt="Harbor 官方文档 Configuring Replication" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档《Configuring Replication》：Replication allows users to replicate resources, namely images and charts, between Harbor and non-Harbor registries, in both pull or push mode——每个匹配资源各起一个复制任务，失败隔几分钟重试；不同版本 Harbor 之间不支持复制（2026-09-19 截图，正文主栏）。</p>
+  <p class="note"><img src="../img/0054-harbor-core-concepts-architecture/harbor-docs-replication.png" alt="Harbor 官方文档 Configuring Replication" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档《Configuring Replication》：Replication allows users to replicate resources, namely images and charts, between Harbor and non-Harbor registries, in both pull or push mode——每个匹配资源各起一个复制任务，失败隔几分钟重试；不同版本 Harbor 之间不支持复制（2026-09-19 截图，正文主栏）。</p>
   <p>复制解决的是"一份镜像，多个机房/多云要用"的分发问题。官方口径：<strong>Harbor 与非 Harbor 仓库之间都能复制，拉取（pull）与推送（push）两种模式</strong>。一条复制规则三要素——<strong>过滤器 + 目标 + 触发方式</strong>：</p>
   <ul>
     <li><strong>Pull 模式（本地 ← 远端）：</strong>把上游镜像拉进来，代理缓存与灾备预热常用；</li>
@@ -175,13 +175,13 @@ harbor.demo.com/demo/app@sha256:9c0b0a…</code></pre>
   </svg>
   </div>
   <p>读三条线：<strong>入口线</strong>，所有流量先过 nginx 反向代理；<strong>主链</strong>，core 管接口、认证、策略，制品本体存在 registry 里——<strong>registry 就是上游 Distribution（组件表版本 2.8.3），Harbor 没有重写存储协议，这是"协议兼容零迁移成本"的根基</strong>；<strong>异步链</strong>，core 派任务，jobservice 驱动 trivy-adapter 完成扫描，核心不亲自扫。底下 PostgreSQL 与 Redis 托底，portal 出 Web 控制台，另配日志与 exporter。官方安装模板（v2.15.2 的 <code>docker-compose.yml.jinja</code>）里这 11 个容器一个不差：nginx、portal、core、jobservice、registry、registryctl、trivy-adapter、db、redis、log、exporter——注意里面<strong>没有 ChartMuseum</strong>，原因见第 6 节。</p>
-  <p class="note"><img src="../output/0054-harbor-core-concepts-architecture/images/harbor-docs-components.png" alt="Harbor 官方文档 Harbor Components 组件表" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档《Installation and Configuration》的 Harbor Components 组件表：Postgresql 15.10 · Redis 7.2.6 · Beego 2.3.4（core 的 Web 框架）· Distribution/Distribution 2.8.3（registry 本体）· Helm 2.9.1 · Swagger-ui 5.9.1（2026-09-19 截图）。</p>
+  <p class="note"><img src="../img/0054-harbor-core-concepts-architecture/harbor-docs-components.png" alt="Harbor 官方文档 Harbor Components 组件表" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档《Installation and Configuration》的 Harbor Components 组件表：Postgresql 15.10 · Redis 7.2.6 · Beego 2.3.4（core 的 Web 框架）· Distribution/Distribution 2.8.3（registry 本体）· Helm 2.9.1 · Swagger-ui 5.9.1（2026-09-19 截图）。</p>
 </section>
 
 <!-- ================= 05 源码模块地图 ================= -->
 <section>
   <h2><span class="sec-num">05</span>源码模块地图：tag v2.15.2 的 src 顶层</h2>
-  <p class="note"><img src="../output/0054-harbor-core-concepts-architecture/images/harbor-github-src-tree.png" alt="GitHub goharbor/harbor tag v2.15.2 src 目录" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">github.com/goharbor/harbor/tree/v2.15.2/src：core、jobservice、registryctl、server、pkg 等目录一屏可见；左侧文件树定位在 src，标签选择器 v2.15.2（UTC 时区，2026-09-19 截图）。读码前先锁定这个标签，主干演进很快。</p>
+  <p class="note"><img src="../img/0054-harbor-core-concepts-architecture/harbor-github-src-tree.png" alt="GitHub goharbor/harbor tag v2.15.2 src 目录" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">github.com/goharbor/harbor/tree/v2.15.2/src：core、jobservice、registryctl、server、pkg 等目录一屏可见；左侧文件树定位在 src，标签选择器 v2.15.2（UTC 时区，2026-09-19 截图）。读码前先锁定这个标签，主干演进很快。</p>
   <p>架构要落到代码才踏实。src 顶层每个目录一句话（目录名逐个核对于 tag v2.15.2 仓库树，2026-09-19）：</p>
   <pre class="codeblock"><code>harbor @ v2.15.2 · src/ 顶层
 ├─ core/        核心服务主程序：REST API、认证鉴权、事件
@@ -201,7 +201,7 @@ harbor.demo.com/demo/app@sha256:9c0b0a…</code></pre>
 <section>
   <h2><span class="sec-num">06</span>安全链路：扫描挡"带病"，签名挡"假货"</h2>
   <p><strong>钩子二的答案：扫描结果通过"部署安全"策略挡住拉取。</strong>项目配置里一个开关（官方 API 字段 <code>prevent_vul</code>）+ 一档阈值（<code>severity</code>，合法值 none/low/medium/high/critical），规则一句话：<strong>达到或超过阈值的漏洞，镜像一律拒拉</strong>——swagger 原文 "If the vulnerability is high than severity defined here, the images can't be pulled."。扫描时机有三种：推入自动扫（<code>auto_scan</code>）、按周期定时扫、手动扫。扫描器是适配器机制：内置 Trivy（<code>--with-trivy</code> 启用），也能接企业自有的扫描引擎，换引擎不动架构（官方文档《Vulnerability Scanning》《Deployment Security》，2026-09 核对）。</p>
-  <p class="note"><img src="../output/0054-harbor-core-concepts-architecture/images/harbor-docs-deployment-security.png" alt="Harbor 官方文档 Deployment Security" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档《Deployment Security》：Harbor has 'deployment security' which can prevent artifacts from being pulled if vulnerabilities are discovered——按制品逐个校验，多架构镜像只看所拉平台（2026-09-19 截图，正文主栏）。</p>
+  <p class="note"><img src="../img/0054-harbor-core-concepts-architecture/harbor-docs-deployment-security.png" alt="Harbor 官方文档 Deployment Security" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档《Deployment Security》：Harbor has 'deployment security' which can prevent artifacts from being pulled if vulnerabilities are discovered——按制品逐个校验，多架构镜像只看所拉平台（2026-09-19 截图，正文主栏）。</p>
   <p>四行项目配置就是两条安全防线的真身（字段与描述逐字取自 v2.15.2 的 <code>api/v2.0/swagger.yaml</code>，2026-09-19 核对）：</p>
   <pre class="codeblock"><code># 项目元数据（api/v2.0/swagger.yaml @ v2.15.2 原文字段）
 prevent_vul: "true"          # 启用部署安全拦截

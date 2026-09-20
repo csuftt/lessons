@@ -48,7 +48,7 @@ docker login harbor.demo.com
 docker tag ubuntu:24.04 harbor.demo.com/demo/ubuntu:24.04
 docker push harbor.demo.com/demo/ubuntu:24.04</code></pre>
   <p>推完回显 digest（摘要值），镜像就进了 demo 这个项目。Helm Chart 也不用另找仓库——Harbor 2.0 起支持 OCI 制品规范，一条 <code>helm push</code> 把 Chart 和镜像存进同一个仓库。对应用代码来说，迁移要改的东西是<strong>零行</strong>。</p>
-  <p class="note"><img src="../output/0052-harbor-what-and-why/images/harbor-goharbor-home.png" alt="goharbor.io 官网 What is Harbor 定义区块" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">goharbor.io 官网"What is Harbor?"区块：官方定义原文 + GitHub 按钮 + CNCF Status: Graduated 徽章（2026-09-19 截图，当日 Star 计数 29,415）。</p>
+  <p class="note"><img src="../img/0052-harbor-what-and-why/harbor-goharbor-home.png" alt="goharbor.io 官网 What is Harbor 定义区块" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">goharbor.io 官网"What is Harbor?"区块：官方定义原文 + GitHub 按钮 + CNCF Status: Graduated 徽章（2026-09-19 截图，当日 Star 计数 29,415）。</p>
 </section>
 
 <!-- ================= 03 心智模型图 ================= -->
@@ -111,13 +111,13 @@ docker push harbor.demo.com/demo/ubuntu:24.04</code></pre>
   </table>
   </div>
   <p>管理面上还有五件硬功夫，单拎出来都不起眼，拼起来正是企业选它的理由：<strong>RBAC 项目隔离</strong>（项目为界分开发者/维护者/管理员，CI 用机器人账号）；<strong>保留策略与 GC</strong>（自动清旧镜像救存储）；<strong>项目配额</strong>（每个项目设存储上限）；<strong>代理缓存</strong>（当公共仓库的本地代理，外层镜像拉一次存一份，内网拉取不卡）；<strong>审计日志</strong>（谁在何时推拉过什么，接口可查可导出）。</p>
-  <p class="note"><img src="../output/0052-harbor-what-and-why/images/harbor-docs-trivy.png" alt="Harbor 官方文档 Vulnerability Scanning 页" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档《Vulnerability Scanning》：Harbor provides static analysis of vulnerabilities in images through the open source project Trivy——安装时带 <code>--with-trivy</code> 启用；Clair 自 v2.2 起移出默认扫描器（2026-09-19 截图）。</p>
+  <p class="note"><img src="../img/0052-harbor-what-and-why/harbor-docs-trivy.png" alt="Harbor 官方文档 Vulnerability Scanning 页" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档《Vulnerability Scanning》：Harbor provides static analysis of vulnerabilities in images through the open source project Trivy——安装时带 <code>--with-trivy</code> 启用；Clair 自 v2.2 起移出默认扫描器（2026-09-19 截图）。</p>
 </section>
 
 <!-- ================= 05 关键数据 ================= -->
 <section>
   <h2><span class="sec-num">05</span>关键数据与版本基准</h2>
-  <p class="note"><img src="../output/0052-harbor-what-and-why/images/harbor-github-repo.png" alt="GitHub goharbor 组织仓库列表中的 harbor 卡片" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">GitHub goharbor 组织仓库列表中的 harbor 卡片：自述 An open source trusted cloud native registry project that stores, signs, and scans content · Go · Apache License 2.0 · Star 29k（精确值 29,415）· Fork 5.4k · cncf/helm/kubernetes 话题标签在列（2026-09-19 截图，github.com/orgs/goharbor/repositories）。</p>
+  <p class="note"><img src="../img/0052-harbor-what-and-why/harbor-github-repo.png" alt="GitHub goharbor 组织仓库列表中的 harbor 卡片" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">GitHub goharbor 组织仓库列表中的 harbor 卡片：自述 An open source trusted cloud native registry project that stores, signs, and scans content · Go · Apache License 2.0 · Star 29k（精确值 29,415）· Fork 5.4k · cncf/helm/kubernetes 话题标签在列（2026-09-19 截图，github.com/orgs/goharbor/repositories）。</p>
   <div class="tbl-wrap">
   <table>
     <thead><tr><th>指标</th><th>数值</th><th>来源与口径</th></tr></thead>
@@ -130,7 +130,7 @@ docker push harbor.demo.com/demo/ubuntu:24.04</code></pre>
     </tbody>
   </table>
   </div>
-  <p class="note"><img src="../output/0052-harbor-what-and-why/images/harbor-github-releases.png" alt="GitHub goharbor/harbor Releases 页 Latest 卡片" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">GitHub Releases：v2.15.2 标记 Latest（released Jul 2，即 2026-07-02 UTC）；左侧列表可见 2.15.3-rc1 预发布与 2.15.2-rc 系列滚动（2026-09-19 截图）。本系列全部口径锚定 v2.15.2。</p>
+  <p class="note"><img src="../img/0052-harbor-what-and-why/harbor-github-releases.png" alt="GitHub goharbor/harbor Releases 页 Latest 卡片" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">GitHub Releases：v2.15.2 标记 Latest（released Jul 2，即 2026-07-02 UTC）；左侧列表可见 2.15.3-rc1 预发布与 2.15.2-rc 系列滚动（2026-09-19 截图）。本系列全部口径锚定 v2.15.2。</p>
 </section>
 
 <!-- ================= 06 演进史 ================= -->
@@ -260,7 +260,7 @@ docker push harbor.demo.com/demo/ubuntu:24.04</code></pre>
       <li>版本基准 v2.15.2（GitHub Latest，2026-07-02）；选型捷径：个人项目公共仓库够用，自建+合规+跨环境分发找 Harbor。</li>
     </ul>
   </div>
-  <p class="note"><img src="../output/0052-harbor-what-and-why/images/harbor-docs-install.png" alt="官方文档 Run the Installer Script" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档《Run the Installer Script》：默认安装不含 Trivy，<code>./install.sh --with-trivy</code> 带扫描一起装；默认管理员账号 admin / Harbor12345（上生产前务必改掉）（2026-09-19 截图）。</p>
+  <p class="note"><img src="../img/0052-harbor-what-and-why/harbor-docs-install.png" alt="官方文档 Run the Installer Script" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档《Run the Installer Script》：默认安装不含 Trivy，<code>./install.sh --with-trivy</code> 带扫描一起装；默认管理员账号 admin / Harbor12345（上生产前务必改掉）（2026-09-19 截图）。</p>
   <p><strong>下期预告：</strong>第 2 期《5 分钟跑起来》——照官方安装文档改配置、跑安装脚本、登录控制台，把第一张镜像推进自己的仓库，命令与预期输出逐条对照，不用自己踩坑。</p>
   <p><strong>Primary source：</strong><a href="https://goharbor.io/docs/2.15.0/" target="_blank" rel="noopener">Harbor 官方文档 · v2.15.0</a>——本期定义、能力清单与安装说明均出自该文档（与 v2.15 匹配）；漏洞扫描见 <a href="https://goharbor.io/docs/2.15.0/administration/vulnerability-scanning/" target="_blank" rel="noopener">Vulnerability Scanning</a>，镜像拉推见 <a href="https://goharbor.io/docs/2.15.0/working-with-projects/working-with-images/pulling-pushing-images/" target="_blank" rel="noopener">Pulling and Pushing Images</a>，版本与发布记录见 <a href="https://github.com/goharbor/harbor/releases" target="_blank" rel="noopener">GitHub Releases</a>。</p>
 </section>

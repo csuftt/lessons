@@ -82,7 +82,7 @@ java -javaagent:/path/to/skywalking-agent/skywalking-agent.jar \
      -Dskywalking.collector.backend_service=oap-address:11800 \
      -jar your-app.jar</code></pre>
   <p>对，就这一行 JVM 参数。应用代码、框架配置、依赖版本全都不用动，启动后 Tomcat、Spring MVC、MySQL、Redis、Kafka 这些调用就自动被记录并上报。<strong>注意默认后端地址是 127.0.0.1:11800</strong>——agent 通过 gRPC 把数据发给 OAP 后端，11800 是它的接收端口。架构上官方把它拆成四个逻辑部分（同一份文档）：<strong>探针（Probes）负责采集，平台后端（OAP）负责聚合分析与流式处理，存储（Storage）可插拔——Elasticsearch、MySQL、自研 BanyanDB 等，UI 负责可视化</strong>。数据进来后，系统能自动画出服务拓扑图、算出各服务的吞吐与延迟、还能把日志和链路用同一枚 Trace ID 关联起来。第 3 期会逐个模块拆，今天先记分工。</p>
-  <p class="note"><img src="../output/0047-skywalking-what-and-why/images/skywalking-docs-overview.png" alt="SkyWalking 官方文档 Overview：定义与五类可观测数据" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档《Overview》：开源可观测平台 + 现代 APM 的定位，与 Tracing/Metrics/Logging/Profiling/Event 五类数据清单（2026-09-19 截图）。</p>
+  <p class="note"><img src="../img/0047-skywalking-what-and-why/skywalking-docs-overview.png" alt="SkyWalking 官方文档 Overview：定义与五类可观测数据" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档《Overview》：开源可观测平台 + 现代 APM 的定位，与 Tracing/Metrics/Logging/Profiling/Event 五类数据清单（2026-09-19 截图）。</p>
 </section>
 
 <!-- ================= 03 钩子一 ================= -->
@@ -115,14 +115,14 @@ java -javaagent:/path/to/skywalking-agent/skywalking-agent.jar \
     <li><strong>UI 与周边：</strong>v11 起新一代 Horizon UI 转正（1.0 GA）；还有轻量采集网关 Satellite、eBPF 探针 Rover、K8s 部署的 Helm chart 与 Operator；</li>
     <li><strong>兼容入口：</strong>Zipkin v1/v2 格式、OpenTelemetry OTLP、Prometheus、Telegraf 数据都能收——已有埋点的应用"换上报地址"即可迁入。</li>
   </ul>
-  <p class="note"><img src="../output/0047-skywalking-what-and-why/images/skywalking-java-supported.png" alt="SkyWalking Java agent 支持插件清单" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">Java agent 官方支持清单（节选）：仅 HTTP Server 一类就有 24 个条目，全清单 130+ 条目（2026-09-19 截图，v9.7.0 文档）。</p>
+  <p class="note"><img src="../img/0047-skywalking-what-and-why/skywalking-java-supported.png" alt="SkyWalking Java agent 支持插件清单" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">Java agent 官方支持清单（节选）：仅 HTTP Server 一类就有 24 个条目，全清单 130+ 条目（2026-09-19 截图，v9.7.0 文档）。</p>
   <p>跟上一期的 Prometheus 什么关系？<strong>互补，不是替代：</strong>指标告警链路（Prometheus + Alertmanager + Grafana）照常运转，SkyWalking 补上"调用路径"这一层——它甚至能直接接收 Prometheus 格式的指标数据，把两套系统收拢进同一张拓扑图。日志那一线也一样：检索归 Elasticsearch 一族，但 SkyWalking 会用 Trace ID 给日志打标，让"看路径"和"看细节"一键互通。</p>
 </section>
 
 <!-- ================= 05 关键数据 ================= -->
 <section>
   <h2><span class="sec-num">05</span>关键数据与版本基准</h2>
-  <p class="note"><img src="../output/0047-skywalking-what-and-why/images/skywalking-github-repo.png" alt="GitHub apache/skywalking 仓库主页" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">apache/skywalking 仓库主页：About 自述 APM, Application Performance Monitoring System · Apache-2.0 license · Star 25.0k · Fork 6.6k · Releases 65，最新 11.0.0（2026-09-19 截图）。</p>
+  <p class="note"><img src="../img/0047-skywalking-what-and-why/skywalking-github-repo.png" alt="GitHub apache/skywalking 仓库主页" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">apache/skywalking 仓库主页：About 自述 APM, Application Performance Monitoring System · Apache-2.0 license · Star 25.0k · Fork 6.6k · Releases 65，最新 11.0.0（2026-09-19 截图）。</p>
   <div class="tbl-wrap">
   <table>
     <thead><tr><th>指标</th><th>数值</th><th>来源与口径</th></tr></thead>

@@ -44,7 +44,7 @@
 <section>
   <h2><span class="sec-num">02</span>三件套：Route、Predicate、Filter</h2>
   <p>先认主角色。<strong>Route（路由）</strong>是官方口径下的"基本积木"（Glossary 原话：The basic building block of the gateway），由四要素构成：<code>id</code> 是这条路由的名字，<code>uri</code> 是转发目的地，<code>predicates</code> 是一组断言，<code>filters</code> 是一组过滤器——<strong>断言"全真"（aggregate predicate is true）这条路由才算命中</strong>。<strong>Predicate（断言）</strong>是匹配条件，本质是一个输入为 ServerWebExchange（Spring 对"请求 + 响应"上下文的封装）的 Java Predicate 函数，请求里任何东西——路径、方法、请求头、参数、Cookie、甚至时间点——都能拿来当匹配依据。<strong>Filter（过滤器）</strong>是加工环节：官方定义明确说，你可以在<strong>把请求发给下游之前或之后</strong>修改请求和响应。</p>
-  <p class="note"><img src="../output/0058-scg-core-concepts-architecture/images/scg-docs-glossary.png" alt="官方文档 Glossary 页：Route / Predicate / Filter 定义" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档 Glossary 页：Route / Predicate / Filter 三个核心词的权威定义，本节口径逐条对照（docs.spring.io，Spring Cloud Gateway Server WebFlux 5.0.3，2026-09-19 截图）。</p>
+  <p class="note"><img src="../img/0058-scg-core-concepts-architecture/scg-docs-glossary.png" alt="官方文档 Glossary 页：Route / Predicate / Filter 定义" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档 Glossary 页：Route / Predicate / Filter 三个核心词的权威定义，本节口径逐条对照（docs.spring.io，Spring Cloud Gateway Server WebFlux 5.0.3，2026-09-19 截图）。</p>
   <p>断言不是一个而是一族。官方内置的 Route Predicate Factory 按匹配维度各分一员，常用的有这些（全部可以在 yml 里用"名字=参数"的捷径写法组合，多个断言之间是逻辑与）：</p>
   <div class="tbl-wrap">
   <table>
@@ -61,7 +61,7 @@
   </table>
   </div>
   <p>v5.0.3 文档里这族工厂共 14 个，还有 Host、RemoteAddr、XForwardedRemoteAddr、Version、ReadBody 等，完整清单见官方《Route Predicate Factories》一节。断言家族是"门槛"，过滤器才是"关卡"——它分两层：<strong>GatewayFilter</strong> 挂在某条路由的 <code>filters</code> 键下，只对命中该路由的请求生效，官方内置工厂 v5.0.3 文档列出 38 个（AddRequestHeader、RewritePath、RequestRateLimiter、CircuitBreaker、Retry……治理动作基本不用自己写）；<strong>GlobalFilter</strong> 则是"签名的签名与 GatewayFilter 相同、条件化地应用于所有路由"的特殊过滤器（官方原话：The GlobalFilter interface has the same signature as GatewayFilter. These are special filters that are conditionally applied to all routes），转发动作本身（把请求真正发往下游的 NettyRoutingFilter 就是一个 GlobalFilter）都藏在这一层。无论哪层，每个过滤器都干两段活：<strong>转发前的 pre 逻辑</strong>（改请求头、鉴权、限流、打标）和<strong>转发后的 post 逻辑</strong>（改响应头、记录指标、收集耗时）。</p>
-  <p class="note"><img src="../output/0058-scg-core-concepts-architecture/images/scg-docs-predicates.png" alt="官方文档 Route Predicate Factories 页" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档《Route Predicate Factories》开篇与 After 工厂样例：断言匹配构建在 Spring WebFlux HandlerMapping 基础设施之上，多个断言用逻辑与组合（docs.spring.io，v5.0.3，2026-09-19 截图）。</p>
+  <p class="note"><img src="../img/0058-scg-core-concepts-architecture/scg-docs-predicates.png" alt="官方文档 Route Predicate Factories 页" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档《Route Predicate Factories》开篇与 After 工厂样例：断言匹配构建在 Spring WebFlux HandlerMapping 基础设施之上，多个断言用逻辑与组合（docs.spring.io，v5.0.3，2026-09-19 截图）。</p>
 </section>
 
 <!-- ================= 03 路由定义两途径 ================= -->
@@ -94,7 +94,7 @@ public RouteLocator customRouteLocator(RouteLocatorBuilder builder) {
 <section>
   <h2><span class="sec-num">04</span>处理流程：官方 how-it-works 图逐框拆</h2>
   <p>三件套认识了，现在把它们放回流水线。官方文档《How it works》给了一张总图，原话只有两句："如果 Gateway Handler Mapping 判定请求匹配某条路由，请求被送给 Gateway Web Handler；这个 handler 让请求穿过一条<strong>为该请求定制的</strong>过滤器链。"过滤器之所以被虚线分成两半，官方解释是：过滤器在代理请求发出前后各有一段逻辑——<strong>先全部执行 pre，然后发出代理请求，之后执行 post</strong>。</p>
-  <p class="note"><img src="../output/0058-scg-core-concepts-architecture/images/scg-docs-howitworks.png" alt="官方 how-it-works 架构图" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档《How it works》：Gateway Client → Gateway Handler Mapping → Gateway Web Handler → 过滤器链（虚线上 pre / 虚线下 post，Proxy Filter 负责转发）→ Proxied Service（docs.spring.io，v5.0.3，2026-09-19 截图）。</p>
+  <p class="note"><img src="../img/0058-scg-core-concepts-architecture/scg-docs-howitworks.png" alt="官方 how-it-works 架构图" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档《How it works》：Gateway Client → Gateway Handler Mapping → Gateway Web Handler → 过滤器链（虚线上 pre / 虚线下 post，Proxy Filter 负责转发）→ Proxied Service（docs.spring.io，v5.0.3，2026-09-19 截图）。</p>
   <p>把图上的方框落到类名（逐个在 v5.0.3 源码 tag 里核对过路径），一条请求的完整旅程是：请求先进 Spring WebFlux 的总调度 <code>DispatcherHandler</code>，它把请求交给路由专用的 Handler Mapping——<code>RoutePredicateHandlerMapping</code>，后者拿着全部断言逐条测试，找出命中的 Route；命中后请求交给 <code>FilteringWebHandler</code>（就是图里的 Gateway Web Handler），它把<strong>全局过滤器 + 该路由的路由级过滤器</strong>合并、按 order 排序，组成一条只属于这个请求的链；链上每个过滤器先跑 pre，走到链尾由 NettyRoutingFilter 用 Netty 客户端把请求真正发往下游，响应原路返回时再倒序跑一遍各过滤器的 post。</p>
   <div class="tbl-wrap">
   <table>

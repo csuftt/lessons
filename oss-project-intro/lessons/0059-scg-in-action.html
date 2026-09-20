@@ -56,7 +56,7 @@ class MeController {
     }
 }</code></pre>
   <p>让网关认识它们，官方有现成机制——<strong>DiscoveryClient 路由定位器</strong>，不是什么黑魔法。官方 5.0.3 文档原话：默认生成的路由用 <code>lb://service-name</code> 协议（负载均衡转发），默认谓词是 <code>/serviceId/**</code> 路径匹配，默认过滤器是一个 RewritePath——把服务名前缀剥掉再转发；因为要做负载均衡，classpath 上需要有 <code>spring-cloud-starter-loadbalancer</code>：</p>
-  <p class="note"><img src="../output/0059-scg-in-action/images/scg-docs-discovery.png" alt="官方文档：DiscoveryClient Route Definition Locator" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方 5.0.3《The DiscoveryClient Route Definition Locator》：lb:// 默认协议、Path=/serviceId/** 默认谓词、剥前缀的默认过滤器，以及 IMPORTANT 警告——自定义 filters 会整组替换默认列表，RewritePath 必须保留（docs.spring.io，2026-09-20 截图）。</p>
+  <p class="note"><img src="../img/0059-scg-in-action/scg-docs-discovery.png" alt="官方文档：DiscoveryClient Route Definition Locator" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方 5.0.3《The DiscoveryClient Route Definition Locator》：lb:// 默认协议、Path=/serviceId/** 默认谓词、剥前缀的默认过滤器，以及 IMPORTANT 警告——自定义 filters 会整组替换默认列表，RewritePath 必须保留（docs.spring.io，2026-09-20 截图）。</p>
   <p>演示为了"零注册中心先跑起来"，用官方 Spring Cloud Commons 的 <strong>SimpleDiscoveryClient</strong> 静态实例清单——文档原话：classpath 上没有注册中心实现时，它自动兜底，实例信息按属性格式传入。开关用官方属性表（appendix）里的完整路径，注意 5.0 起挂在 <code>server.webflux</code> 之下——discovery 文档页示例里还是 4.x 风格的短根，以官方属性表为准（与第 2 期讲的属性根变更一脉相承）：</p>
   <pre class="codeblock"><code>spring.cloud.discovery.client.simple.instances.user-service[0].uri=http://localhost:8081
 spring.cloud.discovery.client.simple.instances.order-service[0].uri=http://localhost:8082
@@ -70,7 +70,7 @@ spring.cloud.gateway.server.webflux.discovery.locator.enabled=true</code></pre>
 <section>
   <h2><span class="sec-num">03</span>第二步：限流——RequestRateLimiter + RedisRateLimiter</h2>
   <p><strong>官方前提先钉住：</strong>限流文档原话——Redis 实现"requires the use of the spring-boot-starter-data-redis-reactive Spring Boot starter"，算法是令牌桶（Token Bucket，源自 Stripe 的方案）。令牌桶的计数放在 Redis 里意味着这是<strong>全局限流</strong>：网关起多个实例，共享同一个桶。本机起一个 Redis、加这个 Boot 自家起步器（版本由依赖清单托管，不用手写）就位：</p>
-  <p class="note"><img src="../output/0059-scg-in-action/images/scg-maven-redis-reactive.png" alt="Maven Central：spring-boot-starter-data-redis-reactive" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">Maven Central 坐标页实拍：spring-boot-starter-data-redis-reactive，描述原文"Starter for using Redis key-value data store with Spring Data Redis reactive"。页面片段默认带出的 4.2.0-M1 是里程碑预发布——生产认准 GA 线，版本交给所用 Boot 的依赖清单托管（central.sonatype.com，2026-09-20 截图）。</p>
+  <p class="note"><img src="../img/0059-scg-in-action/scg-maven-redis-reactive.png" alt="Maven Central：spring-boot-starter-data-redis-reactive" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">Maven Central 坐标页实拍：spring-boot-starter-data-redis-reactive，描述原文"Starter for using Redis key-value data store with Spring Data Redis reactive"。页面片段默认带出的 4.2.0-M1 是里程碑预发布——生产认准 GA 线，版本交给所用 Boot 的依赖清单托管（central.sonatype.com，2026-09-20 截图）。</p>
   <p>给订单路由挂上 RequestRateLimiter。注意官方明示的坑：这个过滤器<strong>不支持 shortcut 一行式写法</strong>（原话：The RequestRateLimiter is not configurable with the 'shortcut' notation），必须展开成 name + args 的完整结构：</p>
   <pre class="codeblock"><code>routes:
   - id: order_route
@@ -84,7 +84,7 @@ spring.cloud.gateway.server.webflux.discovery.locator.enabled=true</code></pre>
           redis-rate-limiter.burstCapacity: 4    # 桶最多装 4 个
           redis-rate-limiter.requestedTokens: 1  # 每个请求花 1 个</code></pre>
   <p><strong>限流数字里的令牌桶，两个参数定节奏：</strong><code>replenishRate</code> 是注水速率——每秒往桶里放几个令牌，决定稳态下每秒放行几个（官方口径"without any dropped requests"的速率）；<code>burstCapacity</code> 是桶容量——允许的瞬时突发上限，官方明确<strong>设成零等于全拒</strong>。官方还给三档配方：要平稳，两值相等；要扛突发，桶容量调大；要低于每秒一次的限速，用 <code>requestedTokens</code> 凑——例如 1 / 60 / 60 折成每分钟一次。三段定义原文都在官方文档这一页：</p>
-  <p class="note"><img src="../output/0059-scg-in-action/images/scg-docs-tokenbucket.png" alt="官方文档：RedisRateLimiter 令牌桶三参数定义" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方 RequestRateLimiter 文档实拍：Redis 实现源自 Stripe、算法为 Token Bucket；replenishRate / burstCapacity / requestedTokens（默认 1）三段定义原文（docs.spring.io，2026-09-20 截图）。</p>
+  <p class="note"><img src="../img/0059-scg-in-action/scg-docs-tokenbucket.png" alt="官方文档：RedisRateLimiter 令牌桶三参数定义" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方 RequestRateLimiter 文档实拍：Redis 实现源自 Stripe、算法为 Token Bucket；replenishRate / burstCapacity / requestedTokens（默认 1）三段定义原文（docs.spring.io，2026-09-20 截图）。</p>
   <p><strong>还差一把钥匙：限流按谁算？</strong>官方的答案叫 KeyResolver，样例按 <code>user</code> 请求参数取值——同一个 user 打一百发，合用一个桶。这里藏着一个默认坑：默认实现是 PrincipalNameKeyResolver（从认证主体取名字），我们没接认证，官方口径是<strong>取不到 key 就默认拒绝</strong>（deny-empty-key 默认开启）——不配它，全站 429：</p>
   <pre class="codeblock"><code>@Bean
 KeyResolver userKeyResolver() {   // 官方文档样例

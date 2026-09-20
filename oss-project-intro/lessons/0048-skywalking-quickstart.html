@@ -54,7 +54,7 @@
     </tbody>
   </table>
   </div>
-  <p class="note"><img src="../output/0048-skywalking-quickstart/images/skywalking-github-releases.png" alt="apache/skywalking GitHub Releases：11.0.0 标记 Latest" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">apache/skywalking 的 GitHub Releases 页：11.0.0 挂 Latest（2026-09-20 截图，UTC）。注意页面 Notice 原文提示<strong>别从这里下源码包</strong>——二进制发布统一走 skywalking.apache.org/downloads/，agent 包也一样。</p>
+  <p class="note"><img src="../img/0048-skywalking-quickstart/skywalking-github-releases.png" alt="apache/skywalking GitHub Releases：11.0.0 标记 Latest" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">apache/skywalking 的 GitHub Releases 页：11.0.0 挂 Latest（2026-09-20 截图，UTC）。注意页面 Notice 原文提示<strong>别从这里下源码包</strong>——二进制发布统一走 skywalking.apache.org/downloads/，agent 包也一样。</p>
 </section>
 
 <!-- ================= 03 第一步 起全家 ================= -->
@@ -68,7 +68,7 @@ bash &lt;(curl -sSL https://skywalking.apache.org/quickstart-docker.sh)
 # Invoke-Expression ([System.Text.Encoding]::UTF8.GetString(
 #   (Invoke-WebRequest -Uri https://skywalking.apache.org/quickstart-docker.ps1 -UseBasicParsing).Content))</code></pre>
   <p>脚本会让你<strong>选存储：1 是 Elasticsearch，2 是 BanyanDB</strong>。上手期选 2（BanyanDB）——它是 SkyWalking 自研的可观测数据库，v10 起的默认推荐存储，单容器就跑起来，不像 ES 还要单独调堆内存。选完脚本拉起三个容器（镜像与版本为脚本内置默认值）：<code>apache/skywalking-oap-server:11.0.0</code>、<code>apache/skywalking-banyandb:0.11.0</code>、<code>apache/skywalking-ui:horizon-1.0.0</code>，项目名固定为 <code>skywalking-quickstart</code>——拆除时也要用这个名字。</p>
-  <p class="note"><img src="../output/0048-skywalking-quickstart/images/skywalking-docs-backend-docker.png" alt="官方 backend-docker 文档的快速启动一节" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方《Backend setup on Docker》"Start the storage, OAP and Booster UI with docker-compose"一节原文：一键脚本（Linux/macOS/WSL 与 PowerShell 两版）加拆除命令（2026-09-20 截图）。对我们这套 OAP 11 来说，容器里跑的是新一代 Horizon UI。</p>
+  <p class="note"><img src="../img/0048-skywalking-quickstart/skywalking-docs-backend-docker.png" alt="官方 backend-docker 文档的快速启动一节" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方《Backend setup on Docker》"Start the storage, OAP and Booster UI with docker-compose"一节原文：一键脚本（Linux/macOS/WSL 与 PowerShell 两版）加拆除命令（2026-09-20 截图）。对我们这套 OAP 11 来说，容器里跑的是新一代 Horizon UI。</p>
   <p>几十秒到几分钟后（首次拉镜像看网速），打开<strong>http://localhost:8080</strong>。v11 的 Horizon UI 带登录页，快速启动脚本配置的账号是<strong>用户名 skywalking / 密码 skywalking</strong>（脚本明确标注这是 quickstart 专用凭据，生产环境必须换掉）。把起之后"谁在哪个端口"列成一张表，后面排障全靠它：</p>
   <div class="tbl-wrap">
   <table>
@@ -98,7 +98,7 @@ bash &lt;(curl -sSL https://skywalking.apache.org/quickstart-docker.sh)
 +-- bootstrap-plugins/        # 引导类插件（如 jdk-http-plugin）
 +-- activations/  logs/       # 日志桥接激活器 / agent 运行日志</code></pre>
   <p>两个要点。第一，<strong>plugins 目录即生效清单</strong>：官方文档原话是"All plugins in /plugins folder are active. Remove the plugin jar, it disabled."——Tomcat、Spring、HttpClient、Dubbo 这些常用插件默认就在里面，你的应用大概率开箱即被覆盖；不想追踪某个组件，把对应 jar 挪走即可。第二，<strong>agent 支持 JDK 8 到 25</strong>（同页原文），老项目和新技术栈都能挂。排障时最先看的是 <code>logs/</code> 下的 <code>skywalking-api.log</code>——agent 有没有连上后端、有没有上报，日志全记得清清楚楚。</p>
-  <p class="note"><img src="../output/0048-skywalking-quickstart/images/skywalking-docs-agent-setup.png" alt="官方 Setup java agent 文档：接入步骤与目录结构" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方《Setup java agent》：五步接入清单（JDK 8-25、agent.service_name、collector.backend_service 默认 127.0.0.1:11800、-javaagent 要放在 -jar 之前）与新包目录结构（2026-09-20 截图）。</p>
+  <p class="note"><img src="../img/0048-skywalking-quickstart/skywalking-docs-agent-setup.png" alt="官方 Setup java agent 文档：接入步骤与目录结构" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方《Setup java agent》：五步接入清单（JDK 8-25、agent.service_name、collector.backend_service 默认 127.0.0.1:11800、-javaagent 要放在 -jar 之前）与新包目录结构（2026-09-20 截图）。</p>
 </section>
 
 <!-- ================= 05 第三步 挂 agent ================= -->
@@ -147,7 +147,7 @@ for i in 1 2 3 4 5; do curl -s http://localhost:8080/hello; done</code></pre>
     <li><strong>Trace 页：</strong>左侧菜单进 Trace（追踪）页，列表里出现刚才那 5 条 <code>/hello</code> 记录。<strong>点开任意一条</strong>：上半场是这次请求的 Span 瀑布图——<code>demo-app</code> 的 HTTP Span 在最上面，下面挂着它调用 <code>demo-api</code> 的子 Span，各自的耗时、网络开销一目了然。这条瀑布，就是上一期说的"完整调用链"第一次在你眼前成形；</li>
     <li><strong>Topology 拓扑页：</strong>画布上出现 <code>demo-app</code> 指向 <code>demo-api</code> 的一条有向边。Horizon UI 的节点带健康状态的圆环，边上有调用量的着色标注。你一行埋点代码没写，拓扑图自动长出来了。</li>
   </ol>
-  <p class="note"><img src="../output/0048-skywalking-quickstart/images/skywalking-dockerhub-ui.png" alt="Docker Hub apache/skywalking-ui 镜像页" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">Docker Hub 的 apache/skywalking-ui 镜像页（2026-09-20 截图）：一个镜像托管两代 UI——现役生产版 Booster UI（tag 9.x/10.x）与新一代 Horizon UI（tag horizon-X.Y.Z，dark-first 设计，功能覆盖分层面板、拓扑、Trace 瀑布、日志、告警）。镜像页同时注明这些镜像"not official ASF releases"，生产建议固定具体版本 tag。</p>
+  <p class="note"><img src="../img/0048-skywalking-quickstart/skywalking-dockerhub-ui.png" alt="Docker Hub apache/skywalking-ui 镜像页" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">Docker Hub 的 apache/skywalking-ui 镜像页（2026-09-20 截图）：一个镜像托管两代 UI——现役生产版 Booster UI（tag 9.x/10.x）与新一代 Horizon UI（tag horizon-X.Y.Z，dark-first 设计，功能覆盖分层面板、拓扑、Trace 瀑布、日志、告警）。镜像页同时注明这些镜像"not official ASF releases"，生产建议固定具体版本 tag。</p>
 </section>
 
 <!-- ================= 07 跑通判定 ================= -->

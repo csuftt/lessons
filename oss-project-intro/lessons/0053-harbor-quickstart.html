@@ -61,7 +61,7 @@
 <!-- ================= 02 钉版本 ================= -->
 <section>
   <h2><span class="sec-num">02</span>动手前先钉版本：v2.15.2（GitHub Latest）</h2>
-  <p class="note"><img src="../output/0053-harbor-quickstart/images/harbor-github-releases.png" alt="GitHub goharbor/harbor Releases 页 v2.15.2 Latest 卡片" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">GitHub Releases：v2.15.2 标记 Latest（released Jul 2，即 2026-07-02 UTC）；左侧列表可见 2.15.3-rc1 预发布与 2.15.2-rc 系列，上方 Upgrade Notice 提示 v2.15.2 内置数据库升级事项（2026-09-20 截图）。本系列全部口径锚定 v2.15.2。</p>
+  <p class="note"><img src="../img/0053-harbor-quickstart/harbor-github-releases.png" alt="GitHub goharbor/harbor Releases 页 v2.15.2 Latest 卡片" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">GitHub Releases：v2.15.2 标记 Latest（released Jul 2，即 2026-07-02 UTC）；左侧列表可见 2.15.3-rc1 预发布与 2.15.2-rc 系列，上方 Upgrade Notice 提示 v2.15.2 内置数据库升级事项（2026-09-20 截图）。本系列全部口径锚定 v2.15.2。</p>
   <p>安装包就挂在这个版本下面：<code>harbor-offline-installer-v2.15.2.tgz</code>（离线包）与 <code>harbor-online-installer-v2.15.2.tgz</code>（在线包），认准包名里的版本号下载就不会错。官方文档站（goharbor.io/docs/2.15.0/）按 2.15 线编写，命令口径一致。</p>
 </section>
 
@@ -81,7 +81,7 @@ tar xzvf harbor-offline-installer-v2.15.2.tgz
 cd harbor</code></pre>
   <p>解压出一个 <code>harbor</code> 目录，关键两样：<code>harbor.yml.tmpl</code>（配置<strong>模板</strong>）和 <code>install.sh</code>（官方安装脚本）。<strong>容易踩的点：v2.15.2 打包清单里配置文件是带 <code>.tmpl</code> 后缀的模板</strong>（已按该 tag 的 Makefile 核对），要先复制一份再改：</p>
   <pre class="codeblock"><code>cp harbor.yml.tmpl harbor.yml</code></pre>
-  <p class="note"><img src="../output/0053-harbor-quickstart/images/harbor-docs-install-config.png" alt="官方 Installation Process 六阶段列表" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方《Installation and Configuration》总览页：标准安装过程六阶段——环境前置条件、下载安装包、配置 HTTPS、配置 harbor.yml、启用内部 TLS、运行安装脚本（2026-09-20 截图，只裁正文主栏）。本期逐阶段走，HTTPS 两阶段从简。</p>
+  <p class="note"><img src="../img/0053-harbor-quickstart/harbor-docs-install-config.png" alt="官方 Installation Process 六阶段列表" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方《Installation and Configuration》总览页：标准安装过程六阶段——环境前置条件、下载安装包、配置 HTTPS、配置 harbor.yml、启用内部 TLS、运行安装脚本（2026-09-20 截图，只裁正文主栏）。本期逐阶段走，HTTPS 两阶段从简。</p>
 </section>
 
 <!-- ================= 05 第二步 改配置 ================= -->
@@ -96,7 +96,7 @@ http:
 harbor_admin_password: Harbor12345  # admin 初始密码，装完登录就改
 data_volume: /data                  # 数据目录，升级重建不丢</code></pre>
   <p>三点说明：<strong>HTTP 端口默认 80</strong>，被占用就换一个（官方页面对 http 端口的说明原文：Port number for HTTP, for both Harbor portal and Docker commands. The default is 80.）；<strong>https 段本期整段注释</strong>，走学习路线，生产口径见第 08 节；<strong>harbor_admin_password</strong> 是 admin 账号的初始密码，官方文档写明默认值 admin / Harbor12345——它只在首次启动生效，装完第一时间在界面改掉。</p>
-  <p class="note"><img src="../output/0053-harbor-quickstart/images/harbor-docs-configure-yml.png" alt="官方 Configure the Harbor YML File 必填参数一节" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方《Configure the Harbor YML File》Required Parameters 一节：At the very least, you must update the hostname parameter；IMPORTANT 段原文——HTTP 仅适用于隔离的测试或开发环境，生产环境始终用 HTTPS（2026-09-20 截图，只裁正文主栏）。</p>
+  <p class="note"><img src="../img/0053-harbor-quickstart/harbor-docs-configure-yml.png" alt="官方 Configure the Harbor YML File 必填参数一节" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方《Configure the Harbor YML File》Required Parameters 一节：At the very least, you must update the hostname parameter；IMPORTANT 段原文——HTTP 仅适用于隔离的测试或开发环境，生产环境始终用 HTTPS（2026-09-20 截图，只裁正文主栏）。</p>
 </section>
 
 <!-- ================= 06 第三步 安装 ================= -->
@@ -135,7 +135,7 @@ docker compose up -d</code></pre>
   <pre class="codeblock"><code>docker login 192.168.1.10 -u admin
 # Password: 输入你改过的新密码
 # Login Succeeded</code></pre>
-  <p class="note"><img src="../output/0053-harbor-quickstart/images/harbor-docs-http-insecure.png" alt="官方 Connecting to Harbor via HTTP 一节" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方《Run the Installer Script》Connecting to Harbor via HTTP 一节：HTTP 安装必须给客户端 Docker 守护进程加 --insecure-registry 选项，daemon.json 样例原文在图中；更新后重启 Docker Engine 并按官方三步重启 Harbor（2026-09-20 截图，正文主栏）。</p>
+  <p class="note"><img src="../img/0053-harbor-quickstart/harbor-docs-http-insecure.png" alt="官方 Connecting to Harbor via HTTP 一节" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方《Run the Installer Script》Connecting to Harbor via HTTP 一节：HTTP 安装必须给客户端 Docker 守护进程加 --insecure-registry 选项，daemon.json 样例原文在图中；更新后重启 Docker Engine 并按官方三步重启 Harbor（2026-09-20 截图，正文主栏）。</p>
 </section>
 
 <!-- ================= 09 第六步 push ================= -->

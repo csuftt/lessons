@@ -92,7 +92,7 @@ http_server_requests_seconds_max{method="GET",outcome="SUCCESS",status="200",uri
 <!-- ================= 04 Prometheus 侧 ================= -->
 <section>
   <h2><span class="sec-num">04</span>Prometheus 侧:一个 job,目标变绿</h2>
-  <img src="../output/0045-prom-in-action/images/spring-boot-docs-prometheus.png" alt="Spring Boot 官方文档 Prometheus 段" style="max-width:100%">
+  <img src="../img/0045-prom-in-action/spring-boot-docs-prometheus.png" alt="Spring Boot 官方文档 Prometheus 段" style="max-width:100%">
   <p class="note">Spring Boot 官方文档实拍:Prometheus 期望逐个抓取应用实例,所以 Boot 提供 <code>/actuator/prometheus</code> 端点;默认不可用,必须显式暴露。下方抓取示例同样是文档原文——job_name "spring"、metrics_path 指向 actuator 端点。来源:docs.spring.io/spring-boot/reference/actuator/metrics.html(2026-09-19 实拍)。</p>
   <p>照着官方示例改 <code>prometheus.yml</code>,在抓取配置里追加一个作业:</p>
   <pre><code>scrape_configs:
@@ -137,7 +137,7 @@ Checking prometheus.yml
   sum by (le) (rate(http_server_requests_seconds_bucket{job="spring"}[1m])))</code></pre>
   <pre><code>0.187</code></pre>
   <p class="note">Micrometer 官方文档原话:启用百分位直方图会新增 <code>${name}_seconds_bucket</code> 序列,"如果需要 histogram_quantile() 这类基于桶的查询,就启用百分位直方图"——不提前给桶,再好的分位数函数也算不出,这是本期第二个钩子。表达式形状对齐 Prometheus 官方函数文档:分位参数在前,桶序列先取 rate、按 le 标签聚合在后(官方示例 <code>histogram_quantile(0.9, sum by (le) (rate(http_request_duration_seconds_bucket[10m])))</code>);按接口下钻时把 uri 加进 by 列表即可。返回 0.187(演示值):最慢的 1% 请求等在这条线附近。</p>
-  <img src="../output/0045-prom-in-action/images/prom-docs-histogram-quantile.png" alt="Prometheus 官方 histogram_quantile() 函数文档" style="max-width:100%">
+  <img src="../img/0045-prom-in-action/prom-docs-histogram-quantile.png" alt="Prometheus 官方 histogram_quantile() 函数文档" style="max-width:100%">
   <p class="note">官方函数文档实拍:每个桶样本必须带 le 标签(桶上界),"Use the rate() function to specify the time window for the quantile calculation"——分位数的时间窗口由 rate 指定。来源:prometheus.io/docs/prometheus/latest/querying/functions(2026-09-19 实拍)。</p>
 </section>
 

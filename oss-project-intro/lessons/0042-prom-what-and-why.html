@@ -109,7 +109,7 @@ http_requests_total{method="post",code="400"}    3</code></pre>
 <section>
   <h2><span class="sec-num">04</span>生态盘点：主角能干，配角各司其职</h2>
   <p>官方架构原图（prometheus.io《Overview》附图，2026-09 截取）把分工画得清清楚楚：主服务内含抓取（Retrieval）、时序存储（TSDB）与 HTTP 服务三件套；服务发现在上方；左侧是被监控目标，短任务经 Pushgateway 折中；右上 Alertmanager 独立部署——它挂了也不影响采集存储；右下 Grafana 与各类 API 客户端走同一条 PromQL 查询通道。</p>
-  <p class="note"><img src="../output/0042-prom-what-and-why/images/prom-docs-architecture.png" alt="Prometheus 官方架构图" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px"></p>
+  <p class="note"><img src="../img/0042-prom-what-and-why/prom-docs-architecture.png" alt="Prometheus 官方架构图" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px"></p>
   <ul>
     <li><strong>Exporter 生态：</strong>数百个官方与社区适配器——节点、MySQL、Redis、Kafka、黑盒探测，一句配置接入现成指标，是它生态最厚的一层；</li>
     <li><strong>Alertmanager：</strong>独立告警组件，负责去重、静默、分组、路由到邮件/IM/值班系统，与采集存储解耦；</li>

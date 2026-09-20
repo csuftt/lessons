@@ -43,7 +43,7 @@
   <h2><span class="sec-num">02</span>是什么：官方定义与一句话心智模型</h2>
   <p>spring.io 项目页的官方定义值得逐词读（2026-09-19 核对）：<strong>"This project provides a library for building an API Gateway on top of Spring. Spring Cloud Gateway aims to provide a simple, yet effective way to route to APIs and provide cross-cutting concerns to them such as: security, monitoring/metrics, and resiliency."</strong>注意定位词是 library（类库）而不是独立中间件——它跟着你的 Spring Boot 应用一起启动、一起部署，这是它跟 Nginx/Kong 这类独立网关最大的形态差异。同页特性清单里，官方点名了这些本事：构建在 Spring Framework 和 Spring Boot 之上、同时兼容 Spring WebFlux 与 Spring Web MVC 两种形态、能按任意请求属性匹配路由、断言与过滤器按路由生效、集成熔断（CircuitBreaker）与服务发现（DiscoveryClient）、限流、路径重写。</p>
   <p>一句话心智模型：<strong>响应式网关——请求进来先匹配路由（Predicate 决定"这条请求走哪条路"），再过过滤器链（Filter 决定"路上要做什么加工"），然后转发到下游服务，响应原路返回时还能再加工一次。</strong>官方文档《How it works》的原话：客户端请求进入 SCG，若 Handler Mapping 判定匹配某条路由，就交给 Web Handler，把请求穿过一条为该请求定制的过滤器链——过滤器分虚线两侧，转发前的逻辑（pre）与转发后的逻辑（post）各跑一遍。</p>
-  <p class="note"><img src="../output/0056-scg-what-and-why/images/scg-github-org.png" alt="GitHub spring-cloud 组织仓库列表中的 spring-cloud-gateway 卡片" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">GitHub spring-cloud 组织仓库列表中的 spring-cloud-gateway 卡片：About 自述 An API Gateway built on Spring Framework and Spring Boot providing routing and more · Java · Apache License 2.0 · Star 4.9k · Fork 3.5k · 话题标签 java、microservices、reactor 在列（2026-09-19 截图，github.com/orgs/spring-cloud/repositories）。</p>
+  <p class="note"><img src="../img/0056-scg-what-and-why/scg-github-org.png" alt="GitHub spring-cloud 组织仓库列表中的 spring-cloud-gateway 卡片" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">GitHub spring-cloud 组织仓库列表中的 spring-cloud-gateway 卡片：About 自述 An API Gateway built on Spring Framework and Spring Boot providing routing and more · Java · Apache License 2.0 · Star 4.9k · Fork 3.5k · 话题标签 java、microservices、reactor 在列（2026-09-19 截图，github.com/orgs/spring-cloud/repositories）。</p>
 </section>
 
 <!-- ================= 03 心智模型图 ================= -->
@@ -108,13 +108,13 @@
     </tbody>
   </table>
   </div>
-  <p class="note"><img src="../output/0056-scg-what-and-why/images/scg-docs-glossary.png" alt="官方文档 Glossary 页" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档 Glossary 页：Route / Predicate / Filter 三个词的权威定义，本表逐条对照（docs.spring.io，v5.0.3，2026-09-19 截图）。</p>
+  <p class="note"><img src="../img/0056-scg-what-and-why/scg-docs-glossary.png" alt="官方文档 Glossary 页" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档 Glossary 页：Route / Predicate / Filter 三个词的权威定义，本表逐条对照（docs.spring.io，v5.0.3，2026-09-19 截图）。</p>
 </section>
 
 <!-- ================= 05 关键数据 ================= -->
 <section>
   <h2><span class="sec-num">05</span>关键数据与版本基准</h2>
-  <p class="note"><img src="../output/0056-scg-what-and-why/images/scg-maven-central.png" alt="Maven Central spring-cloud-starter-gateway-server-webflux 页面" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">Maven Central 的 spring-cloud-starter-gateway-server-webflux 坐标页：当前版本 5.0.3、"Used in: 336 components"（被 336 个组件依赖）；Description 区的"End-of-Life Security Fix Available"徽章是 Sonatype 面向停维旧版本线的商业支持提示，与 5.0.3 现行版本无关（2026-09-19 截图）。</p>
+  <p class="note"><img src="../img/0056-scg-what-and-why/scg-maven-central.png" alt="Maven Central spring-cloud-starter-gateway-server-webflux 页面" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">Maven Central 的 spring-cloud-starter-gateway-server-webflux 坐标页：当前版本 5.0.3、"Used in: 336 components"（被 336 个组件依赖）；Description 区的"End-of-Life Security Fix Available"徽章是 Sonatype 面向停维旧版本线的商业支持提示，与 5.0.3 现行版本无关（2026-09-19 截图）。</p>
   <div class="tbl-wrap">
   <table>
     <thead><tr><th>指标</th><th>数值</th><th>来源与口径</th></tr></thead>
@@ -129,7 +129,7 @@
   </table>
   </div>
   <p>两处提醒。其一，SCG 的 star 数（4.9k）在 Spring 系项目里不算显眼——因为 Spring 用户的依赖管理走 BOM 而不是追仓库，看采用要看 Maven Central 的依赖数与 Initializr 的"第一方选项"地位。其二，版本线口径：<strong>5.0.x 对应 Spring Cloud 2025.1（代号 Oakwood）列车，搭配 Spring Boot 4.x；旧 starter <code>spring-cloud-starter-gateway</code> 停在 4.3.x（对应 Boot 3.5 的 2025.0 列车，仍在维护）</strong>。5.0 起新坐标拆成 <code>spring-cloud-starter-gateway-server-webflux</code>（响应式，经典形态）与 <code>spring-cloud-starter-gateway-server-webmvc</code>（Servlet 形态）两个，第 2 期动手时用哪个别拿错。</p>
-  <p class="note"><img src="../output/0056-scg-what-and-why/images/scg-github-releases.png" alt="GitHub Releases 页 5.0.3 Latest" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">GitHub Releases：5.0.3 标记 Latest（spring-builds released this Aug 21，UTC 2026-08-20 19:14），首要条目是一条 SSRF 安全修复（CVE-2026-47879）；左侧列表可见 5.0.2 与 4.3.5 同日（2026-06-11）发布——5.0.x 与 4.3.x 双版本线并行维护（2026-09-19 截图）。本系列全部口径锚定 5.0.3。</p>
+  <p class="note"><img src="../img/0056-scg-what-and-why/scg-github-releases.png" alt="GitHub Releases 页 5.0.3 Latest" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">GitHub Releases：5.0.3 标记 Latest（spring-builds released this Aug 21，UTC 2026-08-20 19:14），首要条目是一条 SSRF 安全修复（CVE-2026-47879）；左侧列表可见 5.0.2 与 4.3.5 同日（2026-06-11）发布——5.0.x 与 4.3.x 双版本线并行维护（2026-09-19 截图）。本系列全部口径锚定 5.0.3。</p>
 </section>
 
 <!-- ================= 06 演进史 ================= -->

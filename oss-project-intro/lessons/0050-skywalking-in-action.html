@@ -77,7 +77,7 @@
 <section>
   <h2><span class="sec-num">04</span>两个极简服务：先钉版本，再写代码</h2>
   <p>动手前先钉版本。两个示例服务用 <strong>Spring Boot 4.1.1</strong>（Maven Central 当前最新 GA，2026-08-20 发布；4.2.0-M1 是里程碑预发布，生产不追）。注意一个 Boot 4 的新变化：<strong>Web 起步器改名 <code>spring-boot-starter-webmvc</code></strong>，经典的 <code>spring-boot-starter-web</code> 已标记弃用，新项目直接用新坐标：</p>
-  <p class="note"><img src="../output/0050-skywalking-in-action/images/spring-boot-maven-central.png" alt="Maven Central：spring-boot-starter-webmvc 4.1.1 依赖片段" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">Maven Central 实拍：spring-boot-starter-webmvc 4.1.1 依赖片段可直接抄；同页 Versions 列表显示 4.1.1（2026-08-20）为最新 GA、4.2.0-M1 为里程碑预发布（2026-09-19 截图）。</p>
+  <p class="note"><img src="../img/0050-skywalking-in-action/spring-boot-maven-central.png" alt="Maven Central：spring-boot-starter-webmvc 4.1.1 依赖片段" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">Maven Central 实拍：spring-boot-starter-webmvc 4.1.1 依赖片段可直接抄；同页 Versions 列表显示 4.1.1（2026-08-20）为最新 GA、4.2.0-M1 为里程碑预发布（2026-09-19 截图）。</p>
   <p>被调方 demo-api（8081），一个睡 800 毫秒的慢接口——它是本期唯一的"病灶"：</p>
   <pre class="codeblock"><code>// demo-api：被调方（8081），模拟慢查询
 @RestController
@@ -106,7 +106,7 @@ public class OrderController {
 <section>
   <h2><span class="sec-num">05</span>接入与启动：三参数挂上 agent</h2>
   <p>接入方式回到官方文档的五步，还是第 2 期那套：确认 JDK（8-25）、找到 agent 目录、设服务名、设后端地址、<code>-javaagent</code> 放在 <code>-jar</code> 之前：</p>
-  <p class="note"><img src="../output/0050-skywalking-in-action/images/skywalking-docs-agent-quickstart.png" alt="官方 Setup java agent 快速开始：五步与 agent 目录结构" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方《Setup java agent》快速开始原文：JDK 8-25、agent.service_name（任意英文字符串）、collector.backend_service（默认 127.0.0.1:11800）、-javaagent 放在 -jar 之前；下方是新包目录结构（2026-09-19 截图，正文主栏）。</p>
+  <p class="note"><img src="../img/0050-skywalking-in-action/skywalking-docs-agent-quickstart.png" alt="官方 Setup java agent 快速开始：五步与 agent 目录结构" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方《Setup java agent》快速开始原文：JDK 8-25、agent.service_name（任意英文字符串）、collector.backend_service（默认 127.0.0.1:11800）、-javaagent 放在 -jar 之前；下方是新包目录结构（2026-09-19 截图，正文主栏）。</p>
   <p>先起被调方 demo-api，挂上第一个 agent（<code>-Dskywalking.*</code> 系统属性覆盖 <code>agent.config</code> 是官方覆盖机制，路径换成你的解压路径）：</p>
   <pre class="codeblock"><code>java -javaagent:/path/to/agent/skywalking-agent.jar \
   -Dskywalking.agent.service_name=demo-api \
@@ -126,7 +126,7 @@ for i in 1 2 3 4 5; do curl -s http://localhost:8080/order; done</code></pre>
 <section>
   <h2><span class="sec-num">06</span>UI 验收：瀑布两段相连，拓扑长出一条边</h2>
   <p>打开 Horizon UI 的 Trace 页，按耗时排序，最慢的链置顶。点开任意一条，瀑布长这样（官方 Horizon UI 实拍，展示环境数据）：</p>
-  <p class="note"><img src="../output/0050-skywalking-in-action/images/horizon-ui-trace-waterfall.png" alt="Horizon UI Trace 瀑布实拍" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方 Horizon UI 的 Trace 详情实拍（官方博客素材）：顶部 traceId、总耗时、Span 数、服务数；瀑布逐行一个 Span，服务各自着色，条长即耗时。demo-app → demo-api 的链结构与画面同构（2026-09-19 取自官方站点原图）。</p>
+  <p class="note"><img src="../img/0050-skywalking-in-action/horizon-ui-trace-waterfall.png" alt="Horizon UI Trace 瀑布实拍" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方 Horizon UI 的 Trace 详情实拍（官方博客素材）：顶部 traceId、总耗时、Span 数、服务数；瀑布逐行一个 Span，服务各自着色，条长即耗时。demo-app → demo-api 的链结构与画面同构（2026-09-19 取自官方站点原图）。</p>
   <p>我们的链会比画面更简洁：两个 Segment、三行 Span。把瀑布解剖开，就是第 3 期那张概念图在两个真实进程里各走了一遍（自绘）：</p>
   <div class="diagram">
   <svg viewBox="0 0 760 250" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
@@ -175,7 +175,7 @@ for i in 1 2 3 4 5; do curl -s http://localhost:8080/order; done</code></pre>
   </table>
   </div>
   <p>再看拓扑页：压完请求几分钟内，画布上自动长出一条有向边，从入口服务指向被调服务，边上标着调用量。第 3 期说"拓扑是算出来的，不是画出来的"——出口 Span 加对面入口 Span 构成一次调用对，聚合内核把它折算成边，你从头到尾没有画过一行配置：</p>
-  <p class="note"><img src="../output/0050-skywalking-in-action/images/horizon-ui-topology.png" alt="Horizon UI 服务拓扑实拍" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方 Horizon UI 拓扑实拍（官方博客素材）：六边形节点带健康色环，边上标每分钟调用量。demo-app 会指向 demo-api 长出同款一条边，全程零配置（2026-09-19 取自官方站点原图）。</p>
+  <p class="note"><img src="../img/0050-skywalking-in-action/horizon-ui-topology.png" alt="Horizon UI 服务拓扑实拍" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方 Horizon UI 拓扑实拍（官方博客素材）：六边形节点带健康色环，边上标每分钟调用量。demo-app 会指向 demo-api 长出同款一条边，全程零配置（2026-09-19 取自官方站点原图）。</p>
 </section>
 
 <!-- ================= 07 定位与进阶 ================= -->

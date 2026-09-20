@@ -54,7 +54,7 @@
 ├─ apm-protocol/             agent 与 OAP 的 gRPC 协议定义
 └─ docs/ test/ tools/        文档源 / 插件兼容测试 / 工具</code></pre>
   <p>本期读码的常驻模块就是 <code>apm-sniffer</code>，点开构建脚本里的模块清单对一眼：</p>
-  <p class="note"><img src="../output/0051-skywalking-source-reading/images/skywalking-sniffer-pom-modules.png" alt="apm-sniffer pom modules 实拍 @ v9.7.0" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">apm-sniffer/pom.xml @ tag v9.7.0 第 28-42 行实拍：modules 清单十个子模块一眼列全——apm-agent（启动）、apm-agent-core（内核）、apm-sdk-plugin（插件）、apm-toolkit-activation、bootstrap-plugins、optional-plugins、bytebuddy-patch 等，pom 模块名与目录名一一对应（2026-09-19 截图）。</p>
+  <p class="note"><img src="../img/0051-skywalking-source-reading/skywalking-sniffer-pom-modules.png" alt="apm-sniffer pom modules 实拍 @ v9.7.0" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">apm-sniffer/pom.xml @ tag v9.7.0 第 28-42 行实拍：modules 清单十个子模块一眼列全——apm-agent（启动）、apm-agent-core（内核）、apm-sdk-plugin（插件）、apm-toolkit-activation、bootstrap-plugins、optional-plugins、bytebuddy-patch 等，pom 模块名与目录名一一对应（2026-09-19 截图）。</p>
   <p>记一句口诀：<strong>读码从内核进（apm-agent / apm-agent-core），往插件出（apm-sdk-plugin）</strong>。</p>
 </section>
 
@@ -70,7 +70,7 @@
         new Thread(ServiceManager.INSTANCE::shutdown));
 }</code></pre>
   <p>四步就是全部骨架：读配置初始化（省略段）→ 加载全部插件描述 → 注册 Transformer → 启动服务。对一眼源码实拍：</p>
-  <p class="note"><img src="../output/0051-skywalking-source-reading/images/skywalking-premain-blob.png" alt="SkyWalkingAgent.java premain 区间实拍 @ v9.7.0" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">SkyWalkingAgent.java @ tag v9.7.0 第 92-118 行实拍：插件加载、installClassTransformer、ServiceManager 启动与 shutdown 钩子，与上文摘录逐行对应（2026-09-19 截图）。</p>
+  <p class="note"><img src="../img/0051-skywalking-source-reading/skywalking-premain-blob.png" alt="SkyWalkingAgent.java premain 区间实拍 @ v9.7.0" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">SkyWalkingAgent.java @ tag v9.7.0 第 92-118 行实拍：插件加载、installClassTransformer、ServiceManager 启动与 shutdown 钩子，与上文摘录逐行对应（2026-09-19 截图）。</p>
   <p>增强的机制链画出来是这样的：</p>
   <div class="diagram">
   <svg viewBox="0 0 760 210" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
@@ -120,7 +120,7 @@
     }
     protected Class<?> findClass(String name) { /* 只在 agent 自己的 jar 里找 */ }
 }</code></pre>
-  <p class="note"><img src="../output/0051-skywalking-source-reading/images/skywalking-agentclassloader-blob.png" alt="AgentClassLoader.java 实拍 @ v9.7.0" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">AgentClassLoader.java @ tag v9.7.0 第 47-89 行实拍：static 块注册并行能力（注释原话 Try to solve the classloader dead lock）、initDefaultLoader 双检锁单例、构造器只登记 MOUNT 挂载目录（2026-09-19 截图）。</p>
+  <p class="note"><img src="../img/0051-skywalking-source-reading/skywalking-agentclassloader-blob.png" alt="AgentClassLoader.java 实拍 @ v9.7.0" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">AgentClassLoader.java @ tag v9.7.0 第 47-89 行实拍：static 块注册并行能力（注释原话 Try to solve the classloader dead lock）、initDefaultLoader 双检锁单例、构造器只登记 MOUNT 挂载目录（2026-09-19 截图）。</p>
   <p>为什么要多此一举？看一眼没隔离的世界就明白了。</p>
   <div class="tbl-wrap">
   <table>
@@ -139,7 +139,7 @@
 <section>
   <h2><span class="sec-num">05</span>决策三 · 插件模型：一框架一目录，声明式拦截点</h2>
   <p>打开 <code>apm-sdk-plugin</code> 的构建清单，一百一十四个插件目录一字排开（pom modules 清单核对 v9.7.0）：dubbo、grpc、kafka、mysql、redisson、lettuce、elasticsearch……每个目录就是一个框架的支持包：</p>
-  <p class="note"><img src="../output/0051-skywalking-source-reading/images/skywalking-sdk-plugin-pom-modules.png" alt="apm-sdk-plugin pom modules 实拍 @ v9.7.0" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">apm-sdk-plugin/pom.xml @ tag v9.7.0 第 29-50 行实拍（前 20 个模块）：dubbo-plugin、httpClient-4.x-plugin、redisson-3.x-plugin、tomcat-plugin、mongodb、okhttp、spring-plugins、jetty 等，框架名和版本号写进模块名；全部 114 个插件目录经 modules 清单核对（2026-09-19 截图）。</p>
+  <p class="note"><img src="../img/0051-skywalking-source-reading/skywalking-sdk-plugin-pom-modules.png" alt="apm-sdk-plugin pom modules 实拍 @ v9.7.0" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">apm-sdk-plugin/pom.xml @ tag v9.7.0 第 29-50 行实拍（前 20 个模块）：dubbo-plugin、httpClient-4.x-plugin、redisson-3.x-plugin、tomcat-plugin、mongodb、okhttp、spring-plugins、jetty 等，框架名和版本号写进模块名；全部 114 个插件目录经 modules 清单核对（2026-09-19 截图）。</p>
   <p>每个插件由两件东西组成。<strong>先是一份声明</strong>：增强哪个类、拦哪个方法、用哪个拦截器（摘自 apm-sdk-plugin/httpClient-4.x-plugin 的 AbstractHttpClientInstrumentation.java，tag v9.7.0，节选）：</p>
   <pre class="codeblock"><code>public ClassMatch enhanceClass() {
     return byName("org.apache.http.impl.client.AbstractHttpClient"); // 拦谁
@@ -213,7 +213,7 @@ core/remote/TraceSegmentServiceClient.java  gRPC 异步上报：
 <section>
   <h2><span class="sec-num">07</span>另一扇门与可借鉴的三件事</h2>
   <p>OAP 侧（流式聚合）只指个路不展开：聚合引擎在主仓库 apache/skywalking 的 <code>oap-server/</code> 下——<code>oal-rt</code> 与 <code>oal-grammar</code>（@ v11.0.0）是 OAL 分析语言的运行时与语法，agent 上报的 Segment 从 <code>server-receiver-plugin</code> 进去，被 OAL 脚本折算成第 3 期讲的指标与拓扑。agent 收、OAP 算，两个仓库各读各的。</p>
-  <p class="note"><img src="../output/0051-skywalking-source-reading/images/skywalking-docs-plugin-dev.png" alt="官方 Plugin Development Guide" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方《Plugin Development Guide》：给想给自家框架写插件的读者——声明 Instrumentation、写拦截器、打包进 plugins，正是本期读码路线的"动手版"（2026-09-19 截图，正文主栏）。</p>
+  <p class="note"><img src="../img/0051-skywalking-source-reading/skywalking-docs-plugin-dev.png" alt="官方 Plugin Development Guide" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方《Plugin Development Guide》：给想给自家框架写插件的读者——声明 Instrumentation、写拦截器、打包进 plugins，正是本期读码路线的"动手版"（2026-09-19 截图，正文主栏）。</p>
   <p>收口之前，把可借鉴的三件事说透：</p>
   <ul>
     <li><strong>字节码增强的工程边界：</strong>增强只发生在框架边界（Tomcat 的入口、JDBC 的出口），业务方法一个不碰；还配了 ignore 名单防递归增强自己——侵入性技术要靠"收窄作用面"换来生产可信；</li>
