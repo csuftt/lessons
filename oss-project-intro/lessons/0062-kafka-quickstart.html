@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Kafka 系列第 2 期：5 分钟跑起来 | 2026-09-20</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0062</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0061-kafka-what-and-why.html">上一期:0061</a> · Kafka 系列第 2 期 / 共 5 期 · <a href="0063-kafka-core-concepts-architecture.html">下一期:0063</a> · <a href="https://kafka.apache.org" target="_blank" rel="noopener">kafka.apache.org ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · APACHE KAFKA 系列第 2 期：5 分钟跑起来</p>
+  <h1>5 分钟跑起来 Kafka：KRaft 一条命令起单机，亲手收回头两条消息</h1>
+  <p class="subtitle">上一期我们认识了 Kafka——一本分布在多台机器上的<strong>提交日志</strong>。今天把认识变成动手：不装 ZooKeeper、不改一行配置，用官方 binary 包以 KRaft 模式把单机 broker 跑起来，然后建 topic、发两条消息、原样收回来。本期结束，你将亲手做出四样东西：<strong>一个跑在 9092 端口的 KRaft broker、一个名叫 quickstart-events 的 topic、两条发出去的事件、一个原样回显它们的消费者</strong>。全部命令逐字对照官方 quickstart（基于 4.3.1，2026-09-20 核对），跟着敲就能通；最后给一份"三条全绿才算跑通"的判定清单和六个高频翻车点的解法。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">💬 消息队列与流处理 · Java/Scala · Apache-2.0（Apache 顶级项目）</span>
+    <span class="tag">📦 基于 Kafka 4.3.1（官方最新稳定版，2026-06-25 发布，Scala 2.13 构建 · 2026-09-20 核对）</span>
+    <span class="tag-date">📅 2026-09-20 · 第 2 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 本期目标 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>本期目标：跑通长什么样，先说清楚</h2>
+  <p>上一期留了一个作业：亲眼看一条消息从生产到消费的全过程。今天兑现。官方 quickstart 总共八步，前五步就够跑通主线，这条端到端演示链每一环都有官方口径的预期结果：</p>
+  <div class="steps">
+    <div class="step"><strong>下载解压：</strong>官网拿 binary 包（tgz），解压进目录就能用，不编译不安装；</div>
+    <div class="step"><strong>格式化存储：</strong>生成集群 UUID，一条命令把空目录格式化成 Kafka 的元数据与日志存储；</div>
+    <div class="step"><strong>启动 broker：</strong>一条命令用默认 server.properties 拉起单机 KRaft，监听 9092；</div>
+    <div class="step"><strong>建 topic：</strong>官方脚本创建 quickstart-events，describe 能看到 1 个分区 1 个副本；</div>
+    <div class="step"><strong>发消息：</strong>console producer 敲两行字，每行回车就是一条事件；</div>
+    <div class="step"><strong>收消息：</strong>console consumer 带 --from-beginning，把两条事件原样吐回来。</div>
+  </div>
+  <p>判定标准也先立好：produce 端不报错、describe 有分区、consume 端原样回显，三条全绿才算跑通，第九节逐条验收。</p>
+</section>
+
+<!-- ================= 02 环境清点 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>动手前清点环境：只有一条硬要求</h2>
+  <p>官方 quickstart 的 NOTE 原文只有一句话："Your local environment must have Java 17+ installed."——除了 JDK 没有别的硬依赖：</p>
+  <ul>
+    <li><strong>JDK 17 及以上</strong>：Kafka 4.x 的官方口径。装好 JDK、配好 JAVA_HOME 即可，<code>java -version</code> 确认版本号 ≥ 17；</li>
+    <li><strong>操作系统</strong>：Linux / macOS 直接用；Windows 建议进 WSL2 跑——官方 quickstart 给的全是 bash 脚本（<code>bin/*.sh</code>），仓库里虽有 <code>bin/windows/*.bat</code>，但 quickstart 未覆盖、路径与行为容易踩坑，第 10 节细说；</li>
+    <li><strong>磁盘</strong>：binary 包约一百多 MB，解压后加运行日志，预留 1 GB 绰绰有余；</li>
+    <li><strong>没有 ZooKeeper</strong>：Kafka 4.0 起已彻底移除 ZooKeeper，KRaft 模式是唯一选项。如果你的老笔记里还写着"先装 ZK"，可以划掉了。</li>
+  </ul>
+</section>
+
+<!-- ================= 03 版本钉子 + 下载 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>第一步：拿对包，认准 4.3.1</h2>
+  <p>老规矩，版本钉子先钉死。官网 downloads 页的 Supported releases 一栏，当前最新是 <strong>4.3.1，2026 年 6 月 25 日发布</strong>，binary 包名 <code>kafka_2.13-4.3.1.tgz</code>（2.13 是 Scala 版本，只用客户端不用管）；注意别下成 src 源码包。GitHub 这边 Kafka 不发 Releases 页（打开是空的），发布证据在 tags 里：4.3.1 挂着 release 标记，下一个版本 4.4.0 还在 rc 预选阶段。</p>
+  <div class="codeblock"><pre>$ tar -xzf kafka_2.13-4.3.1.tgz
+$ cd kafka_2.13-4.3.1</pre></div>
+  <p>解压即用，目录里 <code>bin/</code> 是全部命令行工具，<code>config/server.properties</code> 是 broker 默认配置——快速上手全程不改它一个字。</p>
+  <div class="note">命令出处：官方 quickstart「Step 1: Get Kafka」，逐字对照（v4.3.1，2026-09-20 核对）。下载页见 <a href="https://kafka.apache.org/downloads" target="_blank" rel="noopener">kafka.apache.org/downloads ↗</a>。</div>
+</section>
+
+<!-- ================= 04 KRaft 格式化与启动 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>第二步：KRaft 三条命令，起一个单机 broker</h2>
+  <p>这一步是 Kafka 上手跟老教程差别最大的地方。KRaft 模式下 Kafka 自己管元数据（Raft 协议选主），ZooKeeper 整个岗位被裁掉，取而代之的是"先格式化存储、再启动"两步：</p>
+  <div class="codeblock"><pre><span class="tok-com"># 1. 生成集群 UUID（每次建新集群跑一次，记到变量里）</span>
+$ KAFKA_CLUSTER_ID="$(bin/kafka-storage.sh random-uuid)"
+
+<span class="tok-com"># 2. 用这个 UUID 格式化本地存储目录（--standalone=单机模式）</span>
+$ bin/kafka-storage.sh format --standalone -t $KAFKA_CLUSTER_ID -c config/server.properties
+
+<span class="tok-com"># 3. 启动 broker（前台运行，日志直接刷屏，Ctrl-C 即停止）</span>
+$ bin/kafka-server-start.sh config/server.properties</pre></div>
+  <p>三条命令都逐字出自官方 quickstart「Step 2: Start the Kafka environment」的 Using downloaded files 一节。几个参数的含义：<code>-t</code> 带上刚生成的集群 UUID，写进存储目录的 meta.properties，集群身份从此钉死；<code>-c</code> 指向配置文件，格式化哪个目录、启动用哪份配置，靠它对齐；<code>--standalone</code> 是单机 combined 模式——这一个进程同时当 broker 和元数据仲裁节点，演示环境够用。</p>
+  <p>启动成功的标志：日志刷过一串启动信息后归于安静，其中有 <code>Kafka Server started</code> 一行（进程类型是 KafkaRaftServer）。这个终端就别动了，后面每一步都开<strong>新终端</strong>、都进 kafka_2.13-4.3.1 目录再敲命令。</p>
+  <div class="warn">最高频的翻车点在这里：跳过格式化直接启动，broker 会因为存储目录里没有 meta.properties（或 Cluster ID 对不上）立即退出。解法就是把第 2 条命令补上；反复重跑时可以加 <code>--ignore-formatted</code> 跳过已格式化的目录。</div>
+</section>
+
+<!-- ================= 05 建 topic ================= -->
+<section>
+  <h2><span class="sec-num">05</span>第三步：建一个 topic，看懂 describe 输出</h2>
+  <p>topic 是 Kafka 归类事件的单位，类似文件系统里的文件夹。开一个新终端，进目录，官方一行命令：</p>
+  <div class="codeblock"><pre><span class="tok-com"># 创建（注意这条命令没有指定分区数和副本数）</span>
+$ bin/kafka-topics.sh --create --topic quickstart-events --bootstrap-server localhost:9092
+
+<span class="tok-com"># 查看（输出为官方文档原样样例，TopicId 以实际为准）</span>
+$ bin/kafka-topics.sh --describe --topic quickstart-events --bootstrap-server localhost:9092
+Topic: quickstart-events TopicId: NPmZHyhbR9y00wMglMH2sg PartitionCount: 1 ReplicationFactor: 1 Configs:
+Topic: quickstart-events Partition: 0 Leader: 0 Replicas: 0 Isr: 0</pre></div>
+  <p>describe 这两行就是单机跑通的样子，也顺便回答了"partitions 和 replication-factor 去哪了"：<code>--create</code> 不给这两个参数时，分区数取 broker 配置 <code>num.partitions</code> 的默认值 1，副本数取默认 1，所以输出里 <code>PartitionCount: 1</code>、<code>ReplicationFactor: 1</code>。第二行是这唯一分区（Partition: 0）的明细：Leader 在 0 号 broker，副本和同步副本（Isr）也只有 0 号自己——单机没有第二份拷贝，这正是演示与生产的本质差别：生产环境通常 <code>--partitions</code> 给 3 以上、<code>--replication-factor</code> 给 3，让数据在多台机器各有副本。另外 <code>--bootstrap-server localhost:9092</code> 是所有客户端脚本的固定起手式：告诉客户端 broker 在哪。</p>
+</section>
+
+<!-- ================= 06 两条启动路线 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>岔路口：官方其实给了两条启动路线</h2>
+  <p>同样在 Step 2，官方在解压路线之外还并列给了一条 Docker 路线：<code>docker run -p 9092:9092 apache/kafka:4.3.1</code>（另有体积更小的 native 镜像 apache/kafka-native）。怎么选：</p>
+  <ul>
+    <li><strong>解压 binary（本期主线）</strong>：所见即所得，bin/ 下每个脚本、config/ 每个文件都摊在你眼前，日志前台直出——学快速上手要的就是这种透明；</li>
+    <li><strong>Docker 镜像（一条命令党）</strong>：容器起来即自动完成格式化和启动，本机不用装 JDK，适合"我就想五分钟见着效果"；代价是进程藏在容器里，本期教你认的目录和脚本全被打包了。</li>
+  </ul>
+  <p>两条路线完全官方，效果等价，生产部署则都不算数——那是第 4 期实战的事。</p>
+</section>
+
+<!-- ================= 07 发消息 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>第四步：发两条消息，每行回车就是一条事件</h2>
+  <p>再开一个终端，console producer 是个交互式命令，回车后出现 <code>&gt;</code> 提示符，敲一行字回车即发送一条：</p>
+  <div class="codeblock"><pre>$ bin/kafka-console-producer.sh --topic quickstart-events --bootstrap-server localhost:9092
+&gt;This is my first event
+&gt;This is my second event</pre></div>
+  <p>两行就是官方文档原文的两条事件。没有报错、没有回执，<code>&gt;</code> 提示符再次出现就是发成功了——消息已经落在 broker 的日志文件里。别关这个终端，一会儿还能回来加发。</p>
+</section>
+
+<!-- ================= 08 收消息 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>第五步：收消息，看着它们原样回来</h2>
+  <p>第三个终端，console consumer 收消息，注意 <code>--from-beginning</code> 这个参数：</p>
+  <div class="codeblock"><pre>$ bin/kafka-console-consumer.sh --topic quickstart-events --from-beginning --bootstrap-server localhost:9092
+This is my first event
+This is my second event</pre></div>
+  <p>两条事件原样吐了回来。这个参数的含义是"从该 topic 最早的消息开始读"：consumer 启动时不带它，只会等新消息（第 10 节的翻车点之首）。此刻回到 producer 终端再发一条，consumer 终端会立刻多一行——发收的闭环就这么跑通了。官方还补了一句很有份量的话：事件被持久存储，可以被读任意多次、被任意多个消费者读——你可以再开第四个终端重复这条命令验证。</p>
+</section>
+
+<!-- ================= 09 跑通判定 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>跑通判定：三条全绿才算数</h2>
+  <div class="key-points">
+    <li><strong>broker 活着：</strong>启动终端里有 Kafka Server started，进程不退、日志无 ERROR 刷屏——存储格式化成功、9092 在监听；</li>
+    <li><strong>topic 结构在：</strong>describe 输出 PartitionCount: 1、ReplicationFactor: 1、Partition: 0 Leader: 0——建 topic 成功且元数据可查；</li>
+    <li><strong>消息成环：</strong>consumer 带 --from-beginning 原样回显两条事件；producer 加发一条，consumer 即时多一行——读写链路全通。</li>
+  </div>
+  <p>三条分别验收存储、元数据、读写。组件活着不算跑通，消息能成环才算。收工时到 broker 终端按 Ctrl-C 停进程即可；存储目录留着，下次启动（不重新格式化）消息还在——这就是"事件被持久存储"的直观体验。</p>
+</section>
+
+<!-- ================= 10 高频翻车 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>高频翻车速查：六个坑与解法</h2>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>症状</th><th>原因与解法</th></tr></thead>
+    <tbody>
+      <tr><td>启动即退，日志尾见 meta.properties / Cluster ID 相关报错</td><td>存储没格式化或 Cluster ID 不匹配（KRaft 特有）。补跑 format 命令；重跑加 --ignore-formatted，或换新存储目录</td></tr>
+      <tr><td>启动报 Port 9092 already in use</td><td>上一个 broker 没关。找到旧 kafka 进程结束它，或改 server.properties 的 listeners 换端口（客户端命令同步改）</td></tr>
+      <tr><td>Windows 上双击/运行 .sh 报错、路径乱</td><td>官方命令是 bash 脚本。进 WSL2 按本课步骤跑；不想装 WSL 就走 Docker 镜像路线（第 6 节）</td></tr>
+      <tr><td>consumer 起来了，一条消息都没有</td><td>默认只读"启动之后"的新消息。读历史加 --from-beginning；若显式指定过 --group 且该组已提交消费位移，同样不会重读，换个新组名或加 --from-beginning</td></tr>
+      <tr><td>producer 停在 &gt; 提示符，怀疑没发出去</td><td>每行回车即已发送，无回执是正常的。Ctrl-C 退出，用 consumer 验证</td></tr>
+      <tr><td>启动日志报版本/类找不到等诡异错误</td><td>JDK 版本低于 17。Kafka 4.x 官方要求 Java 17+，先升级 JDK 再来</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- ================= 11 钩子：KRaft 时间线 ================= -->
+<section>
+  <h2><span class="sec-num">11</span>为什么你的教程都在过时：ZooKeeper 下岗简史</h2>
+  <p>你在网上搜"Kafka 安装"，一半教程第一步是装 ZooKeeper——它们没有错，只是老了。这场架构更替走了五年：</p>
+  <ul>
+    <li><strong>2020 年，KIP-500 立项</strong>：社区提案用 Kafka 自管的元数据仲裁（Raft 协议）替换 ZooKeeper，理由很直接——双系统部署、配置难对齐、故障域割裂，扩展元数据要跟着 ZK 的约束走；</li>
+    <li><strong>2021 年，2.8 早期体验</strong>：KRaft 第一次随正式版发布，仅限试用，生产不敢碰；</li>
+    <li><strong>2022 年，3.3 转正</strong>：官方宣布 KRaft 可用于生产新集群，3.x 系列两套模式并存，新老教程开始"打架"；</li>
+    <li><strong>2025 年 3 月，4.0 拍板</strong>：首个完全移除 ZooKeeper 的大版本，KRaft 成为唯一模式——老教程里"先装 ZK"从此成了多余步骤；</li>
+    <li><strong>2026 年，本期 4.3.1</strong>：你今天跑的三条命令，就是这场更替的终点形态。</li>
+  </ul>
+  <p>给我们的启示：上手开源项目，永远以官方 quickstart 的当前版本为准，教程会过时，文档不会骗人。</p>
+</section>
+
+<!-- ================= 12 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">12</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：--create 时不指定 --partitions 和 --replication-factor，Kafka 默认给 1 和 1。这两个"1"分别由谁决定？生产环境为什么要改？改成大数字有代价吗？</summary>
+    <div class="details-body">
+      <p>先说归属。<strong>分区数的 1 来自 broker 配置 num.partitions</strong>（server.properties 默认值），自动建题/未显式指定的 topic 都按它来；<strong>副本数的 1 来自 default.replication.factor</strong>，同样在 broker 端。所以"默认值"不是客户端拍的，是连上的那台 broker 配置给的——同一个命令换个集群跑，默认值可能不同。再说生产为什么要改。<strong>分区是并行度和吞吐的单位</strong>：一个分区的读写要顺序走日志，消费组里每个分区同一时刻只归一个消费者，想多机并行消费就得有多分区；<strong>副本是可用性与持久性的单位</strong>：单副本机器一挂分区就不可用，日志盘坏了数据就真丢了，所以生产常见 3 副本，配合 min.insync.replicas=2 做"多数确认"。最后是代价。<strong>分区不是白给的</strong>：每个分区对应磁盘上独立的日志目录与文件句柄， broker 端元数据、复制与选举的开销都随分区数涨——上一期提过"Kafka topic 数多了会抖"，根源之一就在这里；副本则直接乘以存储成本和写放大（一条消息要写到 3 个副本才算稳）。所以 tuning 的方向是"按消费并行度定分区、按可用性预算定副本"，而不是无脑拉满。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：consumer 不加 --from-beginning 就收不到刚才那两条消息，加了就收得到。这背后 Kafka 记了什么账？这个机制跟"消息队列读过就删"的直觉差在哪？</summary>
+    <div class="details-body">
+      <p>这个参数背后是 Kafka 最核心的设计之一：<strong>消费位移（offset）</strong>。Kafka 的日志是追加写、按时间保留，消息读不读、读没读过，broker 一概不管——它只提供"按位置读"的能力。真正的账本在消费侧：消费者以"组"为单位消费，组内对每个分区记录"读到哪了"（已提交位移）。<strong>不带 --from-beginning 时，一个全新的组默认从"日志末尾"开始</strong>（auto.offset.reset=latest），只等新消息，所以那两条历史消息它一个字不说；带上参数则强制从"日志最开头"读起。<strong>跟"读过即删"的直觉差在所有权</strong>：传统 MQ 把"消费"实现成"取出并删除"，消息是交给 broker 保管的易耗品；Kafka 把消费实现成"按位置重读"，日志是事实，消费者只是各自维护进度条。这一设计直接推出上一期那句"事件可以被读任意多次、任意多个消费者读"——不同组各读各的、互不干扰，重放历史就是换个位置再读一遍。代价也来自这里：磁盘不因消费而释放，容量规划靠保留时间/大小策略。这条机制是第 3 期"消费者组与位移"的主角，今天先记住现象。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 13 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">13</span>随堂小测</h2>
+  <div class="quiz">
+    <div class="quiz-q">
+      <p class="quiz-question">1. Kafka 4.3.1 以 KRaft 模式启动前，跳过格式化存储直接 kafka-server-start.sh 会发生什么？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["格式化只管本地存储目录，9092 是启动阶段才监听的端口，两件事互不相干。","对：存储目录里没有 meta.properties（或 Cluster ID 对不上），broker 启动即退——补跑 kafka-storage.sh format 即可。","console producer 是普通客户端，broker 没起来它连不上，但最先退出的还是 broker 进程本身。"]'>
+        <li class="quiz-option">broker 正常启动，自动补一次格式化</li>
+        <li class="quiz-option">broker 启动即退，日志报存储/Cluster ID 相关错误</li>
+        <li class="quiz-option">broker 能起，但 producer 发消息时报错</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. describe 输出里的 PartitionCount: 1 和 ReplicationFactor: 1 是谁定的？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["quickstart-events 是普通 topic，不会自己变大，那是生产环境的常见配置而不是这里的默认。","客户端命令不给这两个参数时不会内置默认值，1 来自别处。","对：--create 未显式指定时，分区数取 broker 的 num.partitions（默认 1）、副本数取 default.replication.factor（默认 1）——默认值在 broker 配置里。"]'>
+        <li class="quiz-option">topic 建好后自动扩到了 1 个</li>
+        <li class="quiz-option">kafka-topics.sh 脚本里写死的默认值</li>
+        <li class="quiz-option">broker 端 num.partitions 与 default.replication.factor 的默认值</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 14 延伸与导航 ================= -->
+<section>
+  <h2><span class="sec-num">14</span>本期引用与下期预告</h2>
+  <div class="callout">
+    <div class="callout-title">📎 本期 Primary Source（与所用版本匹配的官方文档）</div>
+    <p>官方 Quickstart（Step 1-8 全流程，本课命令逐字出处）：<a href="https://kafka.apache.org/quickstart/" target="_blank" rel="noopener">kafka.apache.org/quickstart ↗</a>；配套下载页 <a href="https://kafka.apache.org/downloads" target="_blank" rel="noopener">kafka.apache.org/downloads ↗</a>（4.3.1 · 2026-06-25 发布）。</p>
+  </div>
+  <p>Kafka 已经跑起来、第一条消息也收回来了。但它为什么这么快？分区、副本、消费者组这些今天冒出来的词到底什么关系？<strong>下一期我们拆开看它的核心概念与整体架构</strong>——把今天敲过的每条命令映射到架构图上。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0061-kafka-what-and-why.html">← 上一期：认识 Kafka</a></span>
+  <a class="next" href="0063-kafka-core-concepts-architecture.html">下一期：核心概念与整体架构 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

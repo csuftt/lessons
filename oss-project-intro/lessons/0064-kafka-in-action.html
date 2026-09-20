@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Apache Kafka 系列第 4 期：spring-kafka 从引入到死信队列 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0064</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0063-kafka-core-concepts-architecture.html">上一期:0063</a> · Apache Kafka 系列第 4 期 / 共 5 期 · <a href="0065-kafka-source-reading.html">下一期:0065</a> · <a href="https://kafka.apache.org/" target="_blank" rel="noopener">kafka.apache.org ↗</a> · <a href="https://spring.io/projects/spring-kafka" target="_blank" rel="noopener">spring.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · APACHE KAFKA 系列第 4 期：实战场景</p>
+  <h1>把订单事件接进 Kafka：spring-kafka 从引入到死信队列</h1>
+  <p class="subtitle">上一期我们铺完了 Kafka 的核心概念：主题、分区、消费者组、副本同步，还有它为什么快。这一期全部落进真实代码——你要亲手做出一个发订单事件的 Spring Boot 服务：<strong>一个依赖接入，KafkaTemplate 发 JSON 事件、@KafkaListener 收事件，失败自动换主题重试，耗尽转进死信队列</strong>。先说一个反直觉的事实：Pulsar 有官方 starter，Kafka 反而没有——官方姿势就是引入 <code>org.springframework.kafka:spring-kafka</code> 这一个依赖，自动装配全包。从依赖到死信验证，五步端到端。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">📨 事件驱动实战 · spring-kafka · Apache-2.0</span>
+    <span class="tag">📦 Kafka 4.3.1 + Spring Boot 3.5.16 / spring-kafka 3.3.16（官方文档核对）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 4 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>需求场景：一条订单事件，三个下游要吃</h2>
+  <p>订单服务下单成功后发布一条订单事件，积分、风控、通知三个下游各自消费，互不拖累；风控处理失败时，消息要能自动重试，重试耗尽转进死信留人工通道。这个场景在 Pulsar 实战期做过同款，本期换成 Kafka 的实现——你会看到两边思路同形、写法各异。</p>
+  <ul>
+    <li><strong>发布方：</strong>订单服务用 KafkaTemplate 一行发送，订单号当消息 key，同订单事件天然落进同一分区保住顺序；</li>
+    <li><strong>消费方：</strong>三个下游各起各的消费者组（points / risk / notice），同一份事件每组各得一份——消费者组的分工，正是上一期讲过的概念；</li>
+    <li><strong>兜底：</strong>失败消息换进独立重试主题按节奏排队，次数耗尽转进死信主题 order-events-dlt，主分区全程不被堵。</li>
+  </ul>
+</section>
+
+<!-- ================= 02 依赖 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>步骤①：加依赖——Kafka 竟然没有官方 starter</h2>
+  <p>接 Pulsar 有 <code>spring-boot-starter-pulsar</code>，接 Kafka 呢？没有同名 starter，这不是遗漏而是现状：Boot 官方文档原话是 <strong>"Apache Kafka is supported by providing auto-configuration of the spring-kafka project"</strong>——类路径上有 spring-kafka，自动装配就生效。坐标只有一个：</p>
+  <pre class="codeblock"><code>$ mvn dependency:tree | grep -E "kafka"
+[INFO] +- org.springframework.kafka:spring-kafka:jar:3.3.16:compile
+[INFO] |  \- org.apache.kafka:kafka-clients:jar:3.9.2:compile</code></pre>
+  <p>两个版本都不用写死：Boot 3.5.16 的依赖管理（spring-boot-dependencies BOM）统一给 spring-kafka 3.3.16 和原生客户端 kafka-clients 3.9.2。服务端是第 2 期跑起来的 Kafka 4.3.1（KRaft 模式），<strong>客户端 3.9 连服务端 4.3 没有问题</strong>——Kafka 官方文档的兼容矩阵（Getting Started → Compatibility）写明：3.x Client 对 4.0+ Server 完全兼容。真想用新客户端，也不用改坐标：在自己工程里用 <code>&lt;kafka.version&gt;</code> 属性覆盖 BOM 值即可，spring-kafka 3.3.x 本身就构建在 kafka-clients 3.9 上。</p>
+  <p class="note">来源实拍（2026-09）：start.spring.io 依赖面板勾选 Spring for Apache Kafka（MESSAGING 分组，描述原文 Publish, subscribe, store, and process streams of records）——生成的工程里就是上面这个 spring-kafka 坐标。</p>
+</section>
+
+<!-- ================= 03 配置 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>步骤②：一份极薄的配置，其余交给自动装配</h2>
+  <p>真正要写的新增配置只有 Kafka 这一节：服务地址指向第 2 期的 KRaft 服务（<code>localhost:9092</code>，本来也是默认值）；生产端把值序列化器换成 JSON；消费端定好组名，再告诉 JSON 反序列化器事件类型和信任的包：</p>
+  <pre class="codeblock"><code>spring:
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+    consumer:
+      group-id: points-group
+      properties:
+        "[spring.json.value.default.type]": com.example.order.OrderEvent
+        "[spring.json.trusted.packages]": com.example.order</code></pre>
+  <pre class="codeblock"><code>Started OrderEventApplication in 2.912 seconds
+:: KafkaTemplate / 监听容器全由 Boot 自动装配，无任何手动建连代码</code></pre>
+</section>
+
+<!-- ================= 04 三步链路 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>步骤③④⑤：建主题、发事件、收事件</h2>
+  <p><strong>服务端建主题</strong>，命令和第 2 期跑官方 Quickstart 一模一样：</p>
+  <pre class="codeblock"><code>$ bin/kafka-topics.sh --create --topic order-events --bootstrap-server localhost:9092
+$ bin/kafka-topics.sh --describe --topic order-events --bootstrap-server localhost:9092
+Topic: order-events PartitionCount: 1 ReplicationFactor: 1 Configs:
+Topic: order-events Partition: 0 Leader: 0 Replicas: 0 Isr: 0</code></pre>
+  <p>演示一个分区一个副本够用；生产按吞吐规划分区与副本。订单事件带订单号当 key，同键进同分区，这条原则马上生效。<strong>发布侧</strong>，事件本体一个 record，注入 KafkaTemplate 一行发送：</p>
+  <pre class="codeblock"><code>public record OrderEvent(String orderId, String sku,
+        double amount, Instant paidAt) {}
+
+public void publish(OrderEvent event) {
+    template.send("order-events", event.orderId(), event);  // key=订单号
+    log.info("订单事件已投递: orderId={}", event.orderId());
+}
+// 订单事件已投递: orderId=SO-20260919-0001</code></pre>
+  <p>注意 send 立刻返回一个 <code>CompletableFuture&lt;SendResult&gt;</code>，里面带分区和位移的回执；要确认就 <code>.get()</code> 阻塞等，官方建议带超时。订单这种不能丢的事件建议拿回执，日志埋点类直接异步。<strong>消费侧</strong>更短，任意 Bean 的方法标上注解：</p>
+  <pre class="codeblock"><code>@KafkaListener(topics = "order-events", groupId = "points-group")
+public void onOrderEvent(OrderEvent event) {
+    log.info("积分入账: orderId={}, amount={}", event.orderId(), event.amount());
+}
+// 积分入账: orderId=SO-20260919-0001, amount=399.0</code></pre>
+  <p>监听容器自动建好，JSON 反序列化自动完成；方法正常返回即消费成功，容器自动提交位移，抛异常才算失败。失败怎么办——下一节专门引爆。补一句并发放大：<code>spring.kafka.listener.concurrency=3</code> 可以让一个监听开三个消费线程，但并行度上限是分区数——三个分区起步才吃得满三个线程，这正是上一期"分区决定并行度"的现场版。</p>
+</section>
+
+<!-- ================= 05 重试与死信 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>钩子：消费挂了，堵住分区等，还是换个主题等？</h2>
+  <p>消费抛异常有两条路，官方文档各自成章。<strong>阻塞重试</strong>（DefaultErrorHandler）：在原分区原地重试，重试期间这条分区停摆，后面的事件全堵着，配 FixedBackOff 控节奏，耗尽可经 DeadLetterPublishingRecoverer 转存死信。<strong>非阻塞重试</strong>（@RetryableTopic）：失败的消息搬进独立的重试主题排队，主分区继续消费不堵车，退避节奏由重试主题的延迟天然实现。高并发订单场景，后者从容得多。</p>
+  <p>故意发一条毒丸——金额为负的订单事件，风控方法直接抛异常。给风控监听挂上注解：</p>
+  <pre class="codeblock"><code>@RetryableTopic(attempts = "4",
+        backoff = @Backoff(delay = 1000, multiplier = 2.0))
+@KafkaListener(topics = "order-events", groupId = "risk-group")
+public void onOrderEvent(OrderEvent event) {
+    if (event.amount() <= 0) throw new IllegalArgumentException("非法金额");
+    log.info("风控放行: orderId={}", event.orderId());
+}
+
+@DltHandler
+public void dlt(OrderEvent event) {
+    log.info("进死信, 需人工介入: orderId={}", event.orderId());
+}</code></pre>
+  <p>节奏是这样走的：第一次失败，消息进 <code>order-events-retry-0</code>，一秒后再试；再失败进 <code>retry-1</code>，两秒；再失败进 <code>retry-2</code>，四秒；三次重试耗尽，转进 <code>order-events-dlt</code>，@DltHandler 当场喊话。几条硬规则全部出自官方参考手册（Non-Blocking Retries 一章，3.3.16 文档实拍核对）：</p>
+  <ul>
+    <li><strong>默认值：</strong>3 次尝试、每次隔 1000 毫秒固定退避；重试主题数 = attempts 减一，默认单分区，由框架自动创建；</li>
+    <li><strong>命名：</strong>默认后缀 <code>-retry-0/1/2…</code> 和 <code>-dlt</code>，可用 retryTopicSuffix / dltTopicSuffix 自定义；</li>
+    <li><strong>开箱即用：</strong>Boot 下直接加 @RetryableTopic 即可，无需额外启用；@DltHandler 不写的话，框架默认只建一个仅打日志的死信消费者；</li>
+    <li><strong>红字提醒：</strong>批处理监听不支持；不能与容器事务混用。</li>
+  </ul>
+  <p>最后验证死信：开第 2 期的控制台消费者从头读 <code>order-events-dlt</code>，毒丸原样躺在里面，字段数值一个没动——补偿、排查、人工修数随取。死信不是垃圾场，是人工通道。顺手用 <code>kafka-topics.sh --list</code> 看一眼服务端：主主题之外，<code>order-events-retry-0/1/2</code> 和 <code>order-events-dlt</code> 已经被框架自动铺好，每个重试主题就是一档延迟的"排队区"，监听它们的消费者组也由框架接管——业务代码里只有注解和两个方法，其余全是框架的事。</p>
+  <pre class="codeblock"><code>$ bin/kafka-console-consumer.sh --topic order-events-dlt --from-beginning --bootstrap-server localhost:9092
+{"orderId":"SO-20260919-0002","sku":"TG-01","amount":-1.0,"paidAt":"2026-09-19T07:41:00Z"}</code></pre>
+</section>
+
+<!-- ================= 06 版本口径 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>版本口径与官方实据</h2>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>组件</th><th>版本</th><th>来源与口径（2026-09 核对）</th></tr></thead>
+    <tbody>
+      <tr><td>Apache Kafka 服务端</td><td><strong>4.3.1</strong></td><td>官网 Downloads 在支持列表最新线；KRaft 唯一模式，第 2 期装机版本</td></tr>
+      <tr><td>Spring Boot</td><td><strong>3.5.16</strong></td><td>3.5 线当前版（Maven Central 元数据核对）；本系列与 Pulsar 实战期同口径</td></tr>
+      <tr><td>spring-kafka</td><td><strong>3.3.16</strong></td><td>spring-boot-dependencies-3.5.16 BOM 属性 spring-kafka.version 实测</td></tr>
+      <tr><td>kafka-clients</td><td><strong>3.9.2</strong></td><td>同 BOM 属性 kafka.version 实测；对 4.x Server 完全兼容（官方兼容矩阵 3.x Client 行）</td></tr>
+      <tr><td>spring-kafka 项目页角标</td><td>4.1.1</td><td>跟随 Boot 4 线的新版；钉在 Boot 3.5 线用 3.3.x，写法同形升级无感</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">来源实拍（2026-09）：docs.spring.io/spring-kafka/reference/3.3 的 Non-Blocking Retries 一章（侧栏版本角标 3.3.16 与 BOM 下发版本一致）；spring.io/projects/spring-kafka 项目页（GA 4.1.1，Features 含 KafkaTemplate、@KafkaListener、Retryable Topics、spring-kafka-test 内嵌服务器）；github.com/spring-projects/spring-kafka 仓库主页（Star 2.5k · Fork 1.8k · Apache-2.0 · Releases v4.1.1 Latest · main 分支 3227 提交，samples 目录官方示例）。</p>
+</section>
+
+<!-- ================= 07 三个坑 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>三个高频坑，开工前过一遍</h2>
+  <ul>
+    <li><strong>✅ 消费端用 ErrorHandlingDeserializer 包住 JSON 反序列化：</strong>坏消息进来不会让同一条消息反复炸、分区原地打转——官方文档点名的姿势；</li>
+    <li><strong>❌ 批处理监听挂 @RetryableTopic：</strong>参考手册 IMPORTANT 红字写得很直白，非阻塞重试不支持批处理监听；</li>
+    <li><strong>❌ 指望生产环境自动建重试主题：</strong>自动建主题开关生产常被关闭，重试主题又随 attempts 成倍增加，用 NewTopic Bean 显式声明才稳。</li>
+  </ul>
+  <p>三个数字顺手带走：<strong>1 个依赖</strong>从引入到死信全搞定；<strong>3 次</strong>默认重试尝试（每次隔 1 秒）；<strong>5 个主题</strong>是 attempts=4 时整条链的规模（主主题 1 + 重试 3 + 死信 1）。数字背后同一个思想：网络抖动、下游超时这类暂时性故障，重试就能自愈，交给重试主题按节奏慢慢来；金额非法、格式损坏这类永久性故障，试一万次也不会好，尽快请进死信转人工——重试管暂时性故障，死信管永久性故障，毒丸别留在主路上。</p>
+</section>
+
+<!-- ================= 08 quiz ================= -->
+<section>
+  <h2><span class="sec-num">08</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. Spring Boot 接入 Kafka 的官方姿势是？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，Boot 并没有 Kafka 专用 starter，这是它和 Pulsar 接入方式的最大差别。","不对，手写 KafkaConsumer 是原生客户端姿势，用不上 Boot 的自动装配与注解。","对的：引入 org.springframework.kafka:spring-kafka 单依赖，版本交给 Boot BOM 管，类路径上有它自动装配就生效。"]'>
+        <li class="quiz-option">引入 spring-boot-starter-kafka</li>
+        <li class="quiz-option">手写 KafkaConsumer 建连</li>
+        <li class="quiz-option">引入 spring-kafka 单依赖，版本交给 Boot BOM 管</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. @RetryableTopic(attempts = "4") 会自动创建哪些主题？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，4 次尝试对应 3 个重试主题，重试主题数是 attempts 减一。","对的：主主题之外建 retry-0/1/2 三个重试主题（1s/2s/4s 退避）和 -dlt 死信主题，全部自动创建。","不对，死信主题只有一个 -dlt，不会每个重试主题配一个。"]'>
+        <li class="quiz-option">4 个重试主题 + 1 个死信主题</li>
+        <li class="quiz-option">3 个重试主题（retry-0/1/2）+ 1 个 -dlt 死信主题</li>
+        <li class="quiz-option">每个重试主题各配一个死信主题</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 消费端 JSON 反序列化失败、同一条消息反复炸，该怎么接住？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，调大重试次数只会让坏消息多试几遍，永久性故障试一万次也不会好。","不对，换组只是换了个位移起点，坏消息还是会在新组里继续炸。","对的：用 ErrorHandlingDeserializer 包住 JsonDeserializer，坏消息被接住进错误处理流程，不会卡死分区——官方文档点名姿势。"]'>
+        <li class="quiz-option">调大 attempts 多试几遍</li>
+        <li class="quiz-option">换一个 groupId 重新消费</li>
+        <li class="quiz-option">用 ErrorHandlingDeserializer 包住 JsonDeserializer</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 09 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：非阻塞重试要为主题数量买单（attempts 减一个重试主题）。什么场景你反而会选阻塞重试？</summary>
+    <div class="details-body">
+      <p>两层判断。<strong>第一看故障概率。</strong>下游偶发超时、网络抖动这类瞬时故障一天没几次，阻塞重试原地等一下就过去了，为它养三个重试主题、三套消费者不划算；失败率高、恢复时间不可预期（对端降级、长抖动）的场景，非阻塞的"主路不堵"才开始值钱。<strong>第二看顺序敏感度。</strong>阻塞重试期间分区停摆是缺点，但反过来它绝不打乱分区内顺序；非阻塞重试把失败消息搬去别的主题，成功路径和重试路径的事件时间线从此分叉，强顺序业务要自己设计"重试完成后再处理后续"的机制。所以低频瞬时故障、分区强顺序的场景选阻塞；高并发、故障常见、顺序可按键局部解决的场景选非阻塞。两条路不互斥，官方文档也讲了组合姿势：外层阻塞兜底小抖动，内层非阻塞接大故障。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：毒丸进了 order-events-dlt 之后呢？一套死信方案还差哪些部件才算闭环？</summary>
+    <div class="details-body">
+      <p>消息进死信只是"止损"，闭环还差四件事。<strong>第一，发现：</strong>DLT 没有消费者告警就等于垃圾场，监控要盯 DLT 的积压（lag），进一条就通知到人。<strong>第二，诊断：</strong>毒丸为什么炸，原始消息、异常栈、重试次数要能对上——非阻塞重试会带 Retry 头，死信排查时就是现场记录。<strong>第三，处置：</strong>人工修数后重新发布到主主题、走补偿接口、或确认废弃并留档，三种路径按业务定，工具上一个控制台生产者就够。<strong>第四，防复发：</strong>毒丸多半是上游 schema 变更或脏数据，回溯修复源头才是根治。对照 Pulsar 实战期的 DeadLetterPolicy：消息中间件只负责"把坏消息隔离到固定位置"，隔离之后的发现、诊断、处置、防复发，永远是自己系统的活——这也是"分层兜底"里最底下那层。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 10 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>依赖一个就够：<code>spring-kafka</code> 版本交给 Boot 管（3.5.16 → 3.3.16 + kafka-clients 3.9.2），无 starter 是官方现状；</li>
+      <li>生产用 KafkaTemplate：send 返回 CompletableFuture，订单号当 key 保局部有序，要回执就 .get()；</li>
+      <li>消费用 @KafkaListener：各下游各起 groupId，一组一份，方法返回即容器提交位移；</li>
+      <li>失败有分层：@RetryableTopic 默认 3 次隔 1 秒，耗尽进 -dlt 死信主题，@DltHandler 接人工通道；</li>
+      <li>版本口径：Kafka 4.3.1（KRaft）+ Boot 3.5.16 / spring-kafka 3.3.16 / kafka-clients 3.9.2，3.x 客户端连 4.x 服务端官方矩阵完全兼容。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 5 期《架构与源码导读》——进 spring-projects/spring-kafka 仓库读两条链路：send 的消息怎么攒批、压缩、落盘，监听容器怎么拉取消息、管理位移，把上一期"为什么快"的设计落到代码上。</p>
+  <p><strong>Primary source：</strong><a href="https://docs.spring.io/spring-boot/3.5/reference/messaging/kafka.html" target="_blank" rel="noopener">Spring Boot 3.5 参考手册 · Apache Kafka Support</a>（接入姿势与配置键）；<a href="https://docs.spring.io/spring-kafka/reference/3.3/" target="_blank" rel="noopener">Spring for Apache Kafka 3.3 参考手册</a>（@RetryableTopic / @DltHandler / JSON 序列化）；<a href="https://kafka.apache.org/43/documentation/" target="_blank" rel="noopener">Apache Kafka 4.3 官方文档</a>（含 Getting Started → Compatibility 兼容矩阵）；仓库见 <a href="https://github.com/spring-projects/spring-kafka" target="_blank" rel="noopener">github.com/spring-projects/spring-kafka</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0063-kafka-core-concepts-architecture.html">← 上一期：Kafka 核心概念与整体架构</a></span>
+  <a class="next" href="0065-kafka-source-reading.html">下一期：Kafka 架构与源码导读 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

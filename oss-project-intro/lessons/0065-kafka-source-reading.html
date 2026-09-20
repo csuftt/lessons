@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Apache Kafka 系列第 5 期：架构与源码导读，抓设计决策 | 2026-09-20</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0065</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0064-kafka-in-action.html">上一期:0064</a> · Apache Kafka 系列第 5 期 / 共 5 期 · <a href="0066-ollama-what-and-why.html">下一期:0066</a> · <a href="https://kafka.apache.org/" target="_blank" rel="noopener">kafka.apache.org ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · APACHE KAFKA 系列第 5 期（收官期）：架构与源码导读</p>
+  <h1>Kafka 架构与源码导读：抓设计决策，不逐行读码</h1>
+  <p class="subtitle">上一期我们把 Kafka 接进了 Spring Boot：KafkaTemplate 发 JSON、@KafkaListener 消费、重试与死信都排过队。本期收官进源码——但<strong>不从第一行读到最后一行</strong>。类会随版本搬家，设计决策相对稳定，所以正确姿势是先抓决策、再顺着调用链找类。本期带走三样东西：<strong>三个设计决策的代码落点</strong>（顺序写、零拷贝、页缓存）、<strong>一条 produce 请求的五站旅程</strong>、<strong>一张按决策找类的读码路线图</strong>，顺手回收第 3 期"Topic 多了会抖"的伏笔。所有类名、模块、行号均逐行核对自 GitHub apache/kafka 发布 tag。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">📦 源码导读 · Scala/Java 混编 · Apache-2.0</span>
+    <span class="tag">🔖 源码基准 tag 4.3.1（2026-06-25 发布，tag 无 v 前缀）</span>
+    <span class="tag-date">📅 2026-09-20 · 第 5 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 读码纪律与版本锚点 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>读码纪律与版本锚点：先切 tag，别在主分支迷路</h2>
+  <p>源码导读有三条纪律。<strong>第一，先切发布 tag。</strong>Kafka 3.x 起经历过大迁移：日志层从 core 拆出 storage、server、metadata 等模块，记录类也搬进了 <code>org.apache.kafka.common.record.internal</code> 包——旧文的路径大量失效，只有 tag 下的行号是稳定的。<strong>第二，从调用链进。</strong>沿着一条请求穿模块，不从工具类入口迷路。<strong>第三，用调试器别用眼睛。</strong>tests 目录的集成测试是最好的断点示例库。</p>
+  <pre class="codeblock"><code>$ git clone https://github.com/apache/kafka.git
+$ cd kafka
+$ git checkout 4.3.1        # 注意：Kafka 的 tag 不带 v 前缀，写 v4.3.1 会 404
+$ git rev-parse --short HEAD
+26b251a</code></pre>
+  <p>4.3.1 是当前最新发布 tag：官网下载页口径 <strong>2026-06-25 发布</strong>（GitHub tag 页 2026-09-20 核对），在支持版本线 4.3 / 4.2 / 4.1。tag 末端提交 <code>26b251a</code>，构建属性 <code>version=4.3.1</code>、<code>scalaVersion=2.13.18</code>——二点一三是 Scala 版本号，别误当成 Kafka 版本，混编口径与第 1 期一致。</p>
+  <p class="note">来源：github.com/apache/kafka/tree/4.3.1（tag 页与 gradle.properties，2026-09-20 实拍核对）；发布日期口径 kafka.apache.org/downloads。</p>
+</section>
+
+<!-- ================= 02 模块地图 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>模块地图：先认门牌，再进楼</h2>
+  <p>仓库门口先认模块，等下每一步都知道自己脚下是哪块地皮。与本季最相关的五个：</p>
+  <div class="card">
+    <ul>
+      <li><strong>clients：</strong>协议与记录实现——ApiKeys、FileRecords、网络传输层都在这；</li>
+      <li><strong>core：</strong>Scala 写的请求处理与副本逻辑——KafkaApis、ReplicaManager、SocketServer、Partition；</li>
+      <li><strong>storage：</strong>日志实现——UnifiedLog、LocalLog、LogSegment、各种索引；</li>
+      <li><strong>metadata + raft：</strong>KRaft 的元数据与 Raft 仲裁，4.0 起 ZooKeeper 已移除；</li>
+      <li><strong>group-coordinator / transaction-coordinator：</strong>消费者组与事务的协调器。</li>
+    </ul>
+  </div>
+  <p class="note">来源：github.com/apache/kafka/tree/4.3.1 顶层目录（2026-09-20 实拍）：About "Apache Kafka - A distributed event streaming platform" · Star 33.8k · 315 tags · 末端提交 Bump version to 4.3.1。</p>
+</section>
+
+<!-- ================= 03 五站旅程 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>钩子一：一条 produce 请求，到底经过哪几站？</h2>
+  <p>一条消息从客户端出发到落盘确认，服务端一共五站：<strong>网络层收字节 → 分发层认协议 → 副本管理器写主副本 → 日志门面分配偏移量 → 段与文件落盘</strong>。acks 等于负一时还要在延迟队列里等副本追上。接下来五站一页一步，行号全部锚定 tag 4.3.1。</p>
+</section>
+
+<!-- ================= 04 第1站 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>第 1 站 · 分发：ApiKeys 与 KafkaApis</h2>
+  <p>网络层把请求放进队列，请求处理线程取出后交给 <code>KafkaApis.handle</code>——全部请求的<strong>唯一总入口</strong>，按协议枚举分发，produce 是第一号协议：</p>
+  <pre class="codeblock"><code>// core/src/main/scala/kafka/server/KafkaApis.scala · 摘自 tag 4.3.1
+override def handle(request: RequestChannel.Request, requestLocal: RequestLocal): Unit = {  // L152
+  request.header.apiKey match {                                     // L169
+    case ApiKeys.PRODUCE =&gt; handleProduceRequest(request, requestLocal)   // L170
+    case ApiKeys.FETCH   =&gt; handleFetchRequest(request)                   // L171
+    ...
+def handleProduceRequest(request: RequestChannel.Request, requestLocal: RequestLocal): Unit = {  // L396
+  // ...鉴权与记录校验略：未授权 / 未知主题 / 非法记录各自记入响应
+  replicaManager.handleProduceAppend(          // L543 交给副本管理器
+    timeout = produceRequest.timeout.toLong,
+    requiredAcks = produceRequest.acks, ...)   // acks 语义从这里进入</code></pre>
+  <p>注意一个版本差异：老资料里这里调的是 <code>appendRecords</code>；4.x 引入事务校验后，入口改成了 <code>handleProduceAppend</code>，<code>appendRecords</code> 变成它的下游。对着旧教程读新源码对不上行时，先怀疑路径搬家。</p>
+</section>
+
+<!-- ================= 05 第2站 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>第 2 站 · 副本追加：acks 在这里被解释</h2>
+  <pre class="codeblock"><code>// core/src/main/scala/kafka/server/ReplicaManager.scala · 摘自 tag 4.3.1
+def appendRecords(timeout: Long, requiredAcks: Short, ...): Unit = {   // L637
+  if (!isValidRequiredAcks(requiredAcks)) {        // L647 合法值只有 0 / 1 / -1
+    sendInvalidRequiredAcksResponse(...); return
+  }
+  val localProduceResults = appendRecordsToLeader(...)  // L652 逐分区写主副本日志
+  ...
+  maybeAddDelayedProduce(requiredAcks, timeout, ...)    // L669 acks=-1：挂入延迟操作
+}
+// appendToLocalLog 内 · L1413-1414
+val partition = getPartitionOrException(topicIdPartition)
+val info = partition.appendRecordsToLeader(records, origin, requiredAcks, ...)</code></pre>
+  <p>确认语义就是这几行分支：<strong>acks 等于零</strong>，不等任何确认，丢了也不重发；<strong>等于一</strong>，主副本写完就算成功；<strong>等于负一</strong>且至少一个分区追加成功，请求挂进延迟队列，等副本追上再回调。逐分区追加时任何一个分区失败，都单独记进响应，不牵连其他分区。</p>
+  <p class="note">来源：kafka.apache.org/43/configuration/producer-configs/ 官方 acks 条目（2026-09-20 实拍）：acks=0 不等服务器任何确认；acks=1 主副本写入即成功；acks=all 全部同步副本到位。</p>
+</section>
+
+<!-- ================= 06 第3站 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>第 3 站 · 日志门面：UnifiedLog 分配偏移量</h2>
+  <p>进 storage 模块。<code>UnifiedLog</code> 是分区日志的门面（4.3.1 共 2787 行），<code>appendAsLeader</code> 只做转接，真身在私有 <code>append</code> 里：</p>
+  <pre class="codeblock"><code>// storage/src/main/java/org/apache/kafka/storage/internals/log/UnifiedLog.java · 摘自 tag 4.3.1
+public LogAppendInfo appendAsLeader(MemoryRecords records, int leaderEpoch, ...) {  // L1049
+  boolean validateAndAssignOffsets = origin != AppendOrigin.RAFT_LEADER;  // L1055
+  return append(records, origin, validateAndAssignOffsets, leaderEpoch, ...);
+}
+private LogAppendInfo append(...) {
+  synchronized (lock) {                                      // L1137 分区级串行
+    LogSegment segment = maybeRoll(validRecords.sizeInBytes(), appendInfo);  // L1234 段满滚动
+    localLog.append(appendInfo.lastOffset(), validRecords);  // L1262 追加进活动段：顺序写
+    updateHighWatermarkWithLogEndOffset();                   // L1263 高水位推进到日志末端</code></pre>
+  <p>三件事值得划线：<strong>分区锁收敛在分区这一层</strong>，同一分区串行、不同分区互不阻塞；<strong>偏移量由主副本在此分配</strong>，这就是"日志末端前移"的动作本体；<strong>段写满就地滚动新段</strong>，老段从此只读。</p>
+  <p class="note">来源：github.com/apache/kafka/blob/4.3.1 · storage/src/main/java/org/apache/kafka/storage/internals/log/UnifiedLog.java #L1049-L1057（2026-09-20 实拍，高亮即门面方法，行号逐行可对）。</p>
+</section>
+
+<!-- ================= 07 第4站 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>第 4 站 · 落盘一击：顺序写在这里发生</h2>
+  <p>本地日志 <code>LocalLog</code> 只写活动段，段内追加是最后三步：</p>
+  <pre class="codeblock"><code>// storage/.../log/LocalLog.java L526 与 LogSegment.java L250 · 摘自 tag 4.3.1
+public void append(long lastOffset, MemoryRecords records) throws IOException {
+  segments.activeSegment().append(lastOffset, records);   // L527 只写活动段
+  updateLogEndOffset(lastOffset + 1);                     // L528 日志末端前移
+}
+// LogSegment.append：段内三件事
+int physicalPosition = log.sizeInBytes();             // L255 追加位置 = 段尾：顺序写
+long appendedBytes = log.append(records);             // L260 字节直写文件通道
+if (bytesSinceLastIndexEntry &gt; indexIntervalBytes) {  // L270 稀疏索引：攒够间隔才记
+  offsetIndex().append(batchLastOffset, physicalPosition);   // L271 偏移索引
+  timeIndex().maybeAppend(maxTimestampSoFar(), ...);          // L272 时间索引</code></pre>
+  <p><code>log.append(records)</code> 的 <code>log</code> 就是 <code>FileRecords</code>，内部一行 <code>records.writeFullyTo(channel)</code>（L198）——字节直写文件通道，追加位置永远是段尾。<strong>顺序写本体 + 稀疏索引</strong>：磁盘友好和按偏移量查找，两头都占了。这就是第 1 期"用最笨的写法换数量级差距"的代码落点。</p>
+</section>
+
+<!-- ================= 08 第5站 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>钩子三：为什么读数据的进程一个字节都不碰？</h2>
+  <p>消费侧读日志时，数据不去进程里绕路。写出方法把活交给传输层，零拷贝的终点就一行：</p>
+  <pre class="codeblock"><code>// clients/.../internal/FileRecords.java L290 与 PlaintextTransportLayer.java L213 · tag 4.3.1
+public int writeTo(TransferableChannel destChannel, int offset, int length) throws IOException {
+  long position = start + offset;                     // L299 从段的物理位置起
+  int count = Math.min(length, oldSize - offset);     // L300
+  return (int) destChannel.transferFrom(channel, position, count);  // L302 交给传输层
+}
+// PlaintextTransportLayer：零拷贝的终点
+public long transferFrom(FileChannel fileChannel, long position, long count) throws IOException {
+  return fileChannel.transferTo(position, count, socketChannel);  // L214 sendfile：页缓存直达网卡
+}</code></pre>
+  <p><code>transferTo</code> 就是操作系统的 sendfile：数据从<strong>页缓存直接进网卡</strong>，Kafka 进程全程不碰字节。为什么敢这么干？因为日志只需要"原样转发"，不需要在应用层加工——这是第 1 期零拷贝直觉的代码终点。代价也要知道：TLS 加密场景用不上，<code>SslTransportLayer</code> 退回用户态拷贝，零拷贝失效。<strong>顺手看清页缓存的位置：Kafka 进程内不缓存消息数据</strong>，读写都压在操作系统页缓存上，进程内存只放索引与元数据——JVM 大堆垃圾回收远离数据路径，这是第三个设计决策。</p>
+  <p class="note">来源：github.com/apache/kafka/blob/4.3.1 · FileRecords.java #L290-L303（writeTo 高亮，2026-09-20 实拍）。</p>
+</section>
+
+<!-- ================= 09 ISR ================= -->
+<section>
+  <h2><span class="sec-num">09</span>钩子二：acks 等于负一时，broker 在等谁？</h2>
+  <p>等 <strong>ISR 里的每一个副本追上高水位</strong>。主副本落盘只是第一步：追随者各自来 fetch，日志末端推进；当所有同步副本都越过旧高水位，高水位才能前移，挂起的 produce 请求才被完成。所谓"等全部确认"，等的不是人工审批，是副本们的一场追赶赛。</p>
+  <p>这场赛有进出规则，代码在 <code>core/src/main/scala/kafka/cluster/Partition.scala</code>：</p>
+  <pre class="codeblock"><code>// Partition.scala · 摘自 tag 4.3.1
+def maybeShrinkIsr(): Unit = {                               // L1089
+  val outOfSyncReplicaIds = getOutOfSyncReplicas(replicaLagTimeMaxMs)  // L1099 谁掉队：看最后追平时间
+  ...
+  alterIsrUpdateOpt.foreach(submitAlterPartition)            // L1125 KRaft：交控制器仲裁
+}
+// 扩张在 L876 maybeExpandIsr：副本 LEO 追上高水位、且越过当前纪元起点才回队（L907-912）</code></pre>
+  <p>两个细节。<strong>掉队判定不看心跳看进度</strong>：副本的"最后追平时间"落后超过 <code>replicaLagTimeMaxMs</code> 才进掉队名单。<strong>KRaft 之后 ISR 变更要提交控制器仲裁</strong>（AlterPartition），不再是 leader 单方面改——元数据的权威收回到了控制器一侧，这是与旧版最大的行为差异。</p>
+  <p class="note">来源：github.com/apache/kafka/blob/4.3.1 · Partition.scala #L1089-L1125（maybeShrinkIsr 全段高亮，2026-09-20 实拍）。</p>
+</section>
+
+<!-- ================= 10 对照 Pulsar ================= -->
+<section>
+  <h2><span class="sec-num">10</span>对照 Pulsar：两种存储定价，没有对错</h2>
+  <p>Pulsar 系列第 0015 期源码导读我们看过<strong>存算分离</strong>：broker 无状态，消息与进度全在 BookKeeper，扩容即起进程，封卷的账本还能整体搬去对象存储。Kafka 反着来，<strong>存算一体</strong>：日志段文件就放在 broker 本地盘，读写压在页缓存上，路径最短、组件最少——一个进程同时是计算与存储。代价也清楚：扩缩容与再均衡要搬分区，Topic 数量大了 broker 自己扛。</p>
+  <p>一个用路径换弹性，一个用弹性换路径，<strong>这是两种定价，不是两个对错</strong>。读两边源码的体验也对仗：Pulsar 的写入链要跨 broker 与 bookie 两层进程，Kafka 的写入链在一个进程里从套接字一路走到文件通道。</p>
+</section>
+
+<!-- ================= 11 回收伏笔 ================= -->
+<section>
+  <h2><span class="sec-num">11</span>回收第 3 期伏笔：Topic 多了为什么抖？</h2>
+  <p>现在能从源码结构回答这个反直觉现象，证据有三，全部有行号：</p>
+  <ul>
+    <li><strong>证据一 · 每分区常驻对象群：</strong>每个分区一个 Partition 对象、一个 UnifiedLog、一把分区读写锁，纯元数据也吃堆内存（Partition.scala L163 起）；</li>
+    <li><strong>证据二 · 每段三件套：</strong>每个日志段一个文件句柄加偏移索引、时间索引两份稀疏索引（LogSegment L270-272），句柄与索引随分区数线性涨；</li>
+    <li><strong>证据三 · 线程是固定配额：</strong>请求处理线程数固定——<code>num.io.threads</code> 默认 8（server-common 的 ServerConfigs L51），而挂起的延迟操作、每分区的副本拉取流都随分区数涨。</li>
+  </ul>
+  <p>快的设计和抖的隐患是同一套机制的两面：把状态压到进程与本地盘换来了路径短，也就接住了分区数的乘数。规划 Topic 分区数时按吞吐算，不为"以后可能用"预铺。</p>
+</section>
+
+<!-- ================= 12 路线图 ================= -->
+<section>
+  <h2><span class="sec-num">12</span>读码路线图：按决策找类（tag 4.3.1）</h2>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>读什么</th><th>入口（模块 · 类）</th><th>行号锚点</th></tr></thead>
+    <tbody>
+      <tr><td>网络与分发</td><td>core · SocketServer / KafkaApis</td><td>handle L152 · 分发 L169</td></tr>
+      <tr><td>produce 门面</td><td>core · KafkaApis</td><td>handleProduceRequest L396</td></tr>
+      <tr><td>副本与确认</td><td>core · ReplicaManager</td><td>appendRecords L637 · appendToLocalLog L1375</td></tr>
+      <tr><td>日志门面</td><td>storage · UnifiedLog</td><td>appendAsLeader L1049 · append L1115</td></tr>
+      <tr><td>段与索引</td><td>storage · LocalLog / LogSegment</td><td>append L526 / L250</td></tr>
+      <tr><td>文件与零拷贝</td><td>clients · FileRecords</td><td>append L193 · writeTo L290</td></tr>
+      <tr><td>ISR 维护</td><td>core · Partition</td><td>maybeShrinkIsr L1089 · maybeExpandIsr L876</td></tr>
+      <tr><td>KRaft 仲裁</td><td>metadata / raft 模块</td><td>AlterPartition 提交 ISR 变更</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ================= 13 可借鉴 ================= -->
+<section>
+  <h2><span class="sec-num">13</span>可借鉴清单：搬回自己的系统</h2>
+  <div class="card">
+    <ul>
+      <li><strong>✅ 只追加的不可变结构：</strong>顺序写加整段回收——操作日志、审计流水、事件溯源都能抄这个骨架；</li>
+      <li><strong>✅ 进程内不缓存数据：</strong>读写压在操作系统页缓存，数据路径远离垃圾回收大堆；</li>
+      <li><strong>✅ 延迟完成而非轮询等待：</strong>acks=-1 挂进 purgatory，副本追上即回调，不空转；</li>
+      <li><strong>❌ 一把大锁管所有分区：</strong>Kafka 每分区一把锁、入口收敛串行——全局锁是多分区吞吐杀手。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= 14 quiz ================= -->
+<section>
+  <h2><span class="sec-num">14</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. 在 tag 4.3.1 里，produce 请求进入副本管理器的入口方法是？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，appendRecords 现在是 handleProduceAppend 的下游，不再是 KafkaApis 的直调入口。","对的：4.x 引入事务校验后，KafkaApis 调的是 replicaManager.handleProduceAppend（L543），appendRecords 成为其下游。","不对，那是发送响应的回调，在链路终点。"]'>
+        <li class="quiz-option">replicaManager.appendRecords</li>
+        <li class="quiz-option">replicaManager.handleProduceAppend</li>
+        <li class="quiz-option">sendResponseCallback</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. "顺序写"与"零拷贝"的代码落点分别是？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，transferFrom 是读侧零拷贝，不是写路径。","不对，FileRecords.append 是写，但它走 writeFullyTo，与零拷贝无关。","对的：写侧 localLog.append（L1262）追加进活动段即顺序写；读侧 destChannel.transferFrom 一路落到 transferTo（L214）即 sendfile 零拷贝。"]'>
+        <li class="quiz-option">transferFrom 与 writeFullyTo</li>
+        <li class="quiz-option">FileRecords.append 与 updateHighWatermark</li>
+        <li class="quiz-option">localLog.append（L1262）与 transferTo（L214）</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. acks=-1 时，broker 挂起请求到底在等什么？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["对的：等 ISR 全员越过旧高水位，高水位前移后延迟操作才完成（Partition.scala 的收缩扩张都在管这件事）。","不对，落盘由操作系统页缓存异步刷，确认不等它。","不对，控制器管元数据仲裁，不逐条审批消息。"]'>
+        <li class="quiz-option">等 ISR 全员追上高水位</li>
+        <li class="quiz-option">等操作系统把页缓存刷盘完成</li>
+        <li class="quiz-option">等控制器逐条审批消息</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 15 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">15</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：Kafka 敢把"进程内不缓存数据"当设计底线。如果把页缓存换成进程内缓存，会失去什么、得到什么？</summary>
+    <div class="details-body">
+      <p>得到的是理论上的读延迟下限——进程内存总比页缓存快一跳；失去的有三样，且都比这一跳值钱。<strong>第一，丢掉 sendfile。</strong>零拷贝的前提是数据留在页缓存、由内核直送网卡；数据一旦进 JVM 堆，写出就得先拷回内核，快的那一跳立刻赔回去。<strong>第二，丢掉"免刷盘语义"。</strong>页缓存由操作系统统一管理，落盘时机、写合并、断电后的恢复都交给内核；进程内缓存得自己回答"这条到底落没落盘"。<strong>第三，丢掉容量弹性。</strong>页缓存随空闲内存自动伸缩，进程内缓存要预先圈堆，大堆直接恶化垃圾回收——数据路径和 GC 互相拖累。回过头看，"进程不碰数据"不是省事，是顺序写、零拷贝、页缓存三件套能同时成立的<strong>前提条件</strong>。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：Kafka 的 ISR 用"追赶赛"定义同步，Raft 用"多数派"定义提交。两种思路各自的代价是什么？</summary>
+    <div class="details-body">
+      <p><strong>ISR 的代价在可用性侧：</strong>它要求配置的全部同步副本追上才确认（acks=-1），一个 follower 掉队就卡写入，于是才有收缩机制把掉队者踢出去换可用性；而收缩本身又是元数据变更，KRaft 下要走控制器仲裁，窗口期内高水位纹丝不动——代价被转移成了元数据协议的复杂度。<strong>多数派的代价在成本侧：</strong>只要过半节点确认就提交，写入更不容易被单个慢节点卡住，但每个分区至少要三个副本才有意义，存储成本乘三起步。Kafka 用 ISR 把"确认人数"变成可配置项，等于把这笔账交给用户算：acks=1 快但弱，acks=-1 稳但要养够副本。两套思路没有对错，选型时真正该问的是：<strong>你的业务能容忍多大的确认窗口，又愿意为它付几份存储</strong>。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 16 要点与下一站 ================= -->
+<section>
+  <h2><span class="sec-num">16</span>本期要点与下一站</h2>
+  <div class="card card-tip">
+    <p><strong>带走这三句话：</strong></p>
+    <ul>
+      <li>三个设计决策的代码落点：<strong>顺序写 UnifiedLog L1262 · 零拷贝 FileRecords L302 → transferTo L214 · 页缓存交给操作系统</strong>；</li>
+      <li>一条 produce 五站旅程：<strong>分发 → 副本追加 → 日志门面 → 段与文件</strong>；acks 决定等不等 ISR；</li>
+      <li>读码方法：先切 tag（4.3.1 无 v 前缀）、从调用链进、按决策找类——入口表见第 12 节。</li>
+    </ul>
+  </div>
+  <p><strong>下一站：</strong>新系列第 1 期《Ollama 是什么》——开源项目入门线转向 AI 时代的新基础设施，看看 Ollama 怎么让人在自己电脑上把大模型跑起来，照例五连讲：认识、跑起来、概念架构、实战、源码导读。</p>
+  <p><strong>Primary source：</strong><a href="https://github.com/apache/kafka/tree/4.3.1" target="_blank" rel="noopener">github.com/apache/kafka @ tag 4.3.1</a>（本期全部代码与行号的核对基准）；配置语义见 <a href="https://kafka.apache.org/43/configuration/producer-configs/" target="_blank" rel="noopener">官方 Producer Configs</a>，版本与下载见 <a href="https://kafka.apache.org/downloads" target="_blank" rel="noopener">官网 Downloads 页</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0064-kafka-in-action.html">← 上一期：Kafka 实战场景：Spring Boot 集成</a></span>
+  <a class="next" href="0066-ollama-what-and-why.html">下一期：Ollama 是什么 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Apache Kafka 系列第 1 期：分布式提交日志，不只是消息队列 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0061</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0060-scg-source-reading.html">上一期:0060</a> · Apache Kafka 系列第 1 期 / 共 5 期 · <a href="0062-kafka-quickstart.html">下一期:0062</a> · <a href="https://kafka.apache.org/" target="_blank" rel="noopener">kafka.apache.org ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · APACHE KAFKA 系列第 1 期：认识项目</p>
+  <h1>Apache Kafka 是什么：分布式提交日志，不只是消息队列</h1>
+  <p class="subtitle">上一个项目我们聊完了 Spring Cloud Gateway，今天开启新项目 Apache Kafka。系统之间直接调用久了，你一定见过这些场面：流量洪峰一来下游被打垮、加一个消费方就得改一次生产方代码、想让两个系统用同一份数据只能各拉各的。Kafka 的答案是在系统中间放一个<strong>数据中转站</strong>——官方定义一句话：<strong>an open-source distributed event streaming platform</strong>，开源的分布式事件流平台。一句话心智模型：<strong>分布式提交日志——事件只能追加写，落在日志里可回放，消费方各拿各的指针按偏移量读</strong>。注意它不只是消息队列：数据管道、流式分析、数据集成都是它的主场。本期结束，你能答上四个问题：Kafka 是什么、它为什么快、和 Pulsar 怎么选、什么场景该选它。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">📨 事件流平台 · Scala/Java · Apache-2.0（Apache 顶级项目）</span>
+    <span class="tag">📦 基于 4.3.1（官方最新稳定版）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 1 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 痛点 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>痛点：系统之间直接调用，调用链就是故障链</h2>
+  <p>2011 年的 LinkedIn 面对的正是这个局面：用户行为事件、消息、指标日志要喂给几十个系统——监控要看、推荐要算、报表要存。最初的做法很直觉：需要谁的数据就去调用谁，或者谁需要就来拉。系统一多，这套"点对点直连"立刻露出三堵墙：</p>
+  <ul>
+    <li><strong>峰值扛不住：</strong>流量洪峰一来，下游处理速度跟不上，调用链就是故障链——上游的洪峰原封不动砸到每一个直接调用方头上；</li>
+    <li><strong>改动牵一发动全身：</strong>生产方要记住每一个消费方，新增一个下游就改一次代码、发一次版，系统之间的依赖网越织越密；</li>
+    <li><strong>一份数据只能给一家用：</strong>直连是点对点的，同一条订单事件，风控要实时看、报表要晚上算、数仓要全量收，只能各拉一份，数据重复采集。</li>
+  </ul>
+  <p>LinkedIn 的工程师（Jay Kreps、Neha Narkhede、Jun Rao）给出的解法，不是再造一个更快的调用框架，而是把"调用"换成"中转"：<strong>所有事件先进一个中央日志系统，生产方写完就走，消费方按自己的节奏来读</strong>。这个内部项目 2011 年以论文《Kafka: a Distributed Messaging System for Log Processing》发表并开源，同年进入 Apache 孵化器——它一开始就不是为"发消息"而生，而是为"整个公司的数据管道"而生，这决定了它后面所有设计的走向。</p>
+</section>
+
+<!-- ================= 02 是什么 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>是什么：官方定义与一句话心智模型</h2>
+  <p>kafka.apache.org 官网开门见山（2026-09-19 核对）：<strong>"Apache Kafka is an open-source distributed event streaming platform used by thousands of companies for high-performance data pipelines, streaming analytics, data integration, and mission-critical applications."</strong>——开源的分布式事件流平台，成千上万家公司用它做高性能数据管道、流式分析、数据集成和关键业务应用。注意定位词是<strong>事件流平台</strong>而不是消息队列：队列只是它最早期的用途，平台四件套（生产订阅、持久存储、流处理、连接集成）才是完整的它。</p>
+  <p>一句话心智模型：<strong>分布式提交日志——事件只能追加到日志末尾，写完就不改；每条事件带一个递增的偏移量（offset）当身份证；消费方自己维护"读到哪了"的指针，按偏移量取数，读多快、读几遍都随你</strong>。和传统队列的根本区别在"消息的命运"：队列把消息交给消费者就删掉，一份消息只属于一个消费者；Kafka 的日志把事件留在磁盘上（默认保留数小时到数周，可配置为永久），想从头回放随时可以，想给新系统补历史数据随时可以——<strong>存储从"中转暂存"变成了"第一公民"，这是它敢叫流平台、而不是队列的底气</strong>。</p>
+  <p class="note"><img src="../img/0061-kafka-what-and-why/kafka-github-repo.png" alt="GitHub apache/kafka 仓库页" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">GitHub apache/kafka 仓库页：Star 33.8k · Fork 15.5k · About 自述 "Apache Kafka - A distributed event streaming platform" · Apache-2.0 license · 语言条 Java 90.2% / Scala 7.7% / Python 1.8% · Releases 区显示 315 tags——官方发版走官网下载页，不在 GitHub 发 Release（2026-09-19 截图，github.com/apache/kafka）。</p>
+</section>
+
+<!-- ================= 03 心智模型图 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>心智模型：一台"分布式提交日志机"</h2>
+  <div class="diagram">
+  <svg viewBox="0 0 760 320" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar61" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="16" y="120" width="120" height="70" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="76" y="150" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">生产方</text>
+    <text x="76" y="170" text-anchor="middle" fill="var(--muted)" font-size="9.5">只管追加 · 发完就走</text>
+    <rect x="216" y="40" width="330" height="230" rx="12" fill="var(--card)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="381" y="68" text-anchor="middle" fill="var(--ink)" font-size="13" font-weight="700">主题 Topic（逻辑名字）</text>
+    <rect x="240" y="88" width="282" height="46" rx="8" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="252" y="106" fill="var(--ink)" font-size="10" font-weight="700">分区 0 日志：</text>
+    <text x="252" y="124" font-size="10" fill="var(--muted)">offset 0 → 1 → 2 → 3 → 4 → …（只追加）</text>
+    <rect x="240" y="146" width="282" height="46" rx="8" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="252" y="164" fill="var(--ink)" font-size="10" font-weight="700">分区 1 日志：</text>
+    <text x="252" y="182" font-size="10" fill="var(--muted)">offset 0 → 1 → 2 → …（另一台机器）</text>
+    <text x="240" y="222" fill="var(--muted)" font-size="9.5">事件落盘保留（小时～天，可配永久），随时从头回放</text>
+    <text x="240" y="242" fill="var(--muted)" font-size="9.5">多副本防丢，KRaft 管元数据（4.0 起无 ZooKeeper）</text>
+    <rect x="620" y="52" width="124" height="56" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="682" y="76" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">实时消费组</text>
+    <text x="682" y="94" text-anchor="middle" fill="var(--muted)" font-size="9">风控 · 推荐</text>
+    <rect x="620" y="130" width="124" height="56" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="682" y="154" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">离线计算</text>
+    <text x="682" y="172" text-anchor="middle" fill="var(--muted)" font-size="9">报表 · 数仓</text>
+    <rect x="620" y="208" width="124" height="56" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="682" y="232" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">新系统</text>
+    <text x="682" y="250" text-anchor="middle" fill="var(--muted)" font-size="9">随时加入 · 补历史</text>
+    <line x1="136" y1="155" x2="210" y2="155" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar61)"/>
+    <text x="173" y="143" text-anchor="middle" fill="var(--muted)" font-size="9.5">append</text>
+    <line x1="546" y1="80" x2="614" y2="80" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar61)"/>
+    <line x1="546" y1="158" x2="614" y2="158" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar61)"/>
+    <line x1="546" y1="236" x2="614" y2="236" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar61)"/>
+    <text x="580" y="126" text-anchor="middle" fill="var(--muted)" font-size="9.5">按 offset 取</text>
+    <text x="16" y="308" fill="var(--muted)" font-size="9.5">图例：写读彻底解耦——生产方不等消费方在线，消费方各拿各的指针按偏移量读，新系统加入从日志头回放即可（概念图，第 3 期逐模块拆解）</text>
+  </svg>
+  </div>
+  <p>把心智模型记成一台"分布式提交日志机"：<strong>① 追加写</strong>——事件只能加在日志末尾，像记账一样一条接一条，历史永不改写；<strong>② 可回放</strong>——日志躺在磁盘上，新消费方从第一天的事件开始补课都行；<strong>③ 按偏移量消费</strong>——"读到哪了"是消费方自己的指针，快慢互不影响，读完日志也不删。第 3 期拆分区、副本、消费者组这些概念时，你会发现它们全是这三句话的展开。</p>
+</section>
+
+<!-- ================= 04 用起来的样子 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>用起来的样子：三步走完"追加、回放"</h2>
+  <p>不装环境也能看清 Kafka 的形状。下面三步逐字取自官方《Quickstart》（4.3.1 文档），第 2 期会亲手跑一遍。</p>
+  <p><strong>第一步，建一个主题</strong>——主题是日志的逻辑名字，建完立刻看它的形态：</p>
+  <pre class="codeblock"><code>$ bin/kafka-topics.sh --create --topic quickstart-events --bootstrap-server localhost:9092
+$ bin/kafka-topics.sh --describe --topic quickstart-events --bootstrap-server localhost:9092
+Topic: quickstart-events TopicId: NPmZHyhbR9y00wMglMH2sg PartitionCount: 1 ReplicationFactor: 1 Configs:
+Topic: quickstart-events Partition: 0 Leader: 0 Replicas: 0 Isr: 0</code></pre>
+  <p><strong>第二步，追加写</strong>——控制台生产者每敲一行就是一条事件，此时没有任何消费方在线，写操作照样完成：</p>
+  <pre class="codeblock"><code>$ bin/kafka-console-producer.sh --topic quickstart-events --bootstrap-server localhost:9092
+&gt;This is my first event
+&gt;This is my second event</code></pre>
+  <p><strong>第三步，从头回放</strong>——新开终端跑消费者，带上 <code>--from-beginning</code>，刚才两条事件原样吐回：</p>
+  <pre class="codeblock"><code>$ bin/kafka-console-consumer.sh --topic quickstart-events --from-beginning --bootstrap-server localhost:9092
+This is my first event
+This is my second event</code></pre>
+  <p>官方在 Step 5 的原话：事件被持久保存，<strong>可以按需读任意多次、被任意多个消费者读</strong>——这正是"提交日志"三个特征的现场版：写与读彻底解耦，事件落地不动，谁都能随时来取。</p>
+  <p class="note"><img src="../img/0061-kafka-what-and-why/kafka-docs-quickstart.png" alt="官方 Quickstart Step 3-5" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方《Quickstart》Step 3-5 原文：建主题（--describe 显示 PartitionCount 1）→ 控制台生产者逐行写事件 → 控制台消费者 --from-beginning 原样回放（kafka.apache.org/quickstart，4.3.1 文档，2026-09-19 截图）。</p>
+</section>
+
+<!-- ================= 05 钩子一：为什么快 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>钩子一：为什么快——顺序写、零拷贝、批量</h2>
+  <p>Kafka 的吞吐是同赛道的天花板，秘密不在什么黑科技，而在三条朴素到极点的取舍。<strong>第一，顺序追加写。</strong>传统消息存储为了支持查找、修改、删除，用 B 树一类的随机读写结构，机械磁盘的磁头来回找位置，一秒几百次就到顶。Kafka 的日志只追加不修改——原论文（NetDB'11）画过那张著名的对比图：<strong>磁盘顺序读写的吞吐，能比内存随机访问还稳</strong>。用"最笨"的写法，换来数量级的差距；代价是不能改、不能随机删，而日志恰好不需要。</p>
+  <p><strong>第二，零拷贝。</strong>把一条消息从磁盘送到网卡，常规路径是磁盘 → 页缓存 → 应用程序缓冲 → Socket 缓冲 → 网卡，四次数据拷贝，内核态用户态来回切换。Kafka 用操作系统现成的 <code>sendfile</code> 系统调用：数据从页缓存直接送到网卡，应用程序全程不碰内容——反正日志只需要"原样转发"，不需要在应用层加工。<strong>第三，批量与压缩。</strong>生产端把消息攒成批次、压缩后再发，网络与服务端都按批处理，摊薄单条成本。三条加起来，单机每秒百万级消息就是这么来的（页缓存的功劳也很大：读写都先命中内存，落盘交给操作系统后台刷）。细节第 3 期与第 5 期展开，今天记住直觉：<strong>少搬几趟，快一个量级</strong>。</p>
+</section>
+
+<!-- ================= 06 关键数据 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>关键数据与版本基准</h2>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>指标</th><th>数值</th><th>来源与口径</th></tr></thead>
+    <tbody>
+      <tr><td>GitHub Stars</td><td><strong>33.8k</strong>（Fork 15.5k）</td><td>github.com/apache/kafka 仓库页，2026-09-19 核对</td></tr>
+      <tr><td>财富百强企业采用</td><td><strong>80%+</strong></td><td>官网原话 "More than 80% of all Fortune 100 companies trust, and use Apache Kafka"，2026-09-19 核对</td></tr>
+      <tr><td>终身下载量</td><td><strong>500 万+</strong></td><td>官网 "More than 5 million unique lifetime downloads"，2026-09-19 核对</td></tr>
+      <tr><td>LinkedIn 生产规模口径</td><td><strong>7 万亿条/日</strong></td><td>LinkedIn 工程博客《How LinkedIn customizes Apache Kafka for 7 trillion messages per day》（2019-10）；2015-09 口径为 1.1 万亿条/日，引用注意时间点</td></tr>
+      <tr><td>Apache 顶级项目</td><td><strong>2012-10 毕业</strong></td><td>2011 年开源并进入孵化器；官网称其为 ASF 最活跃项目之一（2026-09 核对）</td></tr>
+      <tr><td>最新稳定版</td><td><strong>4.3.1</strong></td><td>官网 Downloads 页 "Released June 25, 2026"；在支持版本线 4.3 / 4.2 / 4.1</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note"><img src="../img/0061-kafka-what-and-why/kafka-site-fortune.png" alt="官网 Fortune 100 采用声明" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官网首页原文："More than 80% of all Fortune 100 companies trust, and use Apache Kafka."——百分之八十以上的财富百强企业在用（2026-09-19 截图，kafka.apache.org）。</p>
+  <p>行业渗透官网也有明细：制造业、保险、能源与公用事业十强全数在用，银行 7/10、电信与交通 8/10（kafka.apache.org，2026-09-19 核对）。两处提醒：其一，Kafka 不在 GitHub 发 Release，仓库侧栏只有 315 个 tags，<strong>版本真源以官网 Downloads 页为准</strong>；其二，二进制包名 <code>kafka_2.13-4.3.1.tgz</code> 里的 2.13 是 Scala 版本号，别误当成 Kafka 版本。</p>
+  <p class="note"><img src="../img/0061-kafka-what-and-why/kafka-site-downloads.png" alt="官网 Downloads 页 4.3.1" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">kafka.apache.org/downloads：Supported releases 当前为 4.3.1 / 4.2.1 / 4.1.2 三条版本线并行；4.3.1 条目原文 "Released June 25, 2026 · Docker image: apache/kafka:4.3.1 · Binary download: kafka_2.13-4.3.1.tgz"；页面自述项目目标是每年 3 个版本（每 4 个月一个）（2026-09-19 截图）。本系列全部口径锚定 4.3.1。</p>
+</section>
+
+<!-- ================= 07 演进史 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>演进史：从 LinkedIn 内部管道到 KRaft 独立</h2>
+  <div class="card">
+    <ul>
+      <li><strong>2011 · 诞生于 LinkedIn：</strong>为内部活动数据管道而生，NetDB'11 论文《Kafka: a Distributed Messaging System for Log Processing》发表并开源，同年进入 Apache 孵化器；</li>
+      <li><strong>2012-10 · 毕业为 Apache 顶级项目：</strong>从一家公司的内部系统变成行业公共基础设施，此后成为大数据与微服务两代架构的标准数据底座；</li>
+      <li><strong>2021 · KRaft 早期体验：</strong>2.8 版本引入 KRaft 模式——用 Raft 共识协议让 Kafka 集群自己管理元数据，开始摆脱对 ZooKeeper 的依赖；</li>
+      <li><strong>2025-03 · 4.0 移除 ZooKeeper：</strong>KRaft 成为唯一模式，十五年的老搭档正式谢幕，部署与运维模型大幅简化；</li>
+      <li><strong>2026-06 · 4.3.1 当前稳定版：</strong>2026-06-25 发布，在支持版本线 4.3 / 4.2 / 4.1 并行维护。</li>
+    </ul>
+  </div>
+  <p>这段演进读下来有个值得咀嚼的点：<strong>Kafka 三次都选了"更笨但更稳"的那条路</strong>——存储用不可变的追加日志，而不是花哨的可变结构；扩容用"多加一段日志（分区）"的水平切分，而不是单机垂直优化；元数据管理从借外力（ZooKeeper）到自研内置（KRaft），一步步把命门收回到自己手里。这些取舍第 3 期与第 5 期都会展开。</p>
+</section>
+
+<!-- ================= 08 对比 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>与同类对比：一个主角，三个对手</h2>
+  <p>消息与流赛道玩家不少，各就各位（定位为各项目官方公开口径，2026-09 核对）：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>方案</th><th>架构定位</th><th>吞吐与扩展</th><th>拿手好戏</th><th>代价</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Apache Kafka 4.3</strong></td><td>分布式提交日志：分区水平切分，存储即日志</td><td>吞吐标杆，单机百万消息/秒级；扩容靠加分区加机器</td><td>日志管道、事件流、流计算底座；Connect/Streams 生态最全</td><td>分区与副本由自己扛：Topic 过万要懂调优</td></tr>
+      <tr><td>Apache Pulsar</td><td>存算分离：Broker 无状态 + BookKeeper 分层存储</td><td>百万级 Topic 优雅扩缩，存储层独立伸缩</td><td>多租户、跨集群复制、海量 Topic 场景</td><td>组件更多，运维与排障链路更长</td></tr>
+      <tr><td>RocketMQ</td><td>NameServer 路由 + Broker 主从/多副本</td><td>十万级 Topic（5.0 后大幅提升），低延迟队列</td><td>事务消息、定时/延迟消息是一等公民；Java 栈亲和</td><td>流生态与海外社区弱于 Kafka</td></tr>
+      <tr><td>RabbitMQ</td><td>Erlang/AMQP：交换机路由模型</td><td>吞吐低一个数量级，胜在单条延迟与管理体验</td><td>灵活路由拓扑、低延迟小消息、管理界面友好</td><td>海量日志管道与回放场景力不从心</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>怎么选一句话：<strong>偏流式管道与流计算选 Kafka；偏海量多租户与弹性扩缩看 Pulsar；偏事务与定时消息看 RocketMQ；偏灵活路由与轻量队列用 RabbitMQ</strong>。Kafka 与 Pulsar 的架构差异是本系列刻意安排的对照实验——本线 <a href="0011-pulsar-what-and-why.html">Pulsar 系列第 0011 期</a>起五连讲拆过它的计算存储分层，daily 线也有一篇正面对比：Pulsar 的存算分离到底解决了 Kafka 的什么问题，原理深入见 <a href="../../daily-tech-course/lessons/0012-pulsar-vs-kafka.html">daily 系列 0012 期</a>，两边对照着读收获最大。</p>
+</section>
+
+<!-- ================= 09 钩子二 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>钩子二：Topic 多了，为什么反而抖？</h2>
+  <p>流传很广的一句经验：<strong>"Kafka 分区不是越多越好，多了集群反而开始抖。"</strong>听起来反直觉——分区越多并行度越高，怎么会抖？原因藏在心智模型里：<strong>每个分区都是一段独立的提交日志</strong>，一段日志意味着一组文件段和索引、一份页缓存占用、一条副本同步流。把这个乘数放大一百倍：</p>
+  <ul>
+    <li><strong>文件句柄与内存随分区数线性涨：</strong>上万个分区意味着几万到几十万个文件段，句柄、索引、页缓存一起膨胀，操作系统先吃不消；</li>
+    <li><strong>副本协议的工作量翻倍：</strong>每个分区每个副本都要维持同步心跳，Controller（元数据协调者）要为所有分区维护 Leader 状态——分区越多，元数据事件风暴越猛；</li>
+    <li><strong>故障恢复被拖长：</strong>Broker 重启后要为名下每个分区重新选出 Leader，分区上万时这个"选主风暴"能拖住整个集群的可用性。</li>
+  </ul>
+  <p>所以老手建 Topic 都很克制：<strong>分区数按吞吐需求规划，不为"以后可能用"预铺几百个分区</strong>。"为什么快的设计，为什么多了会抖"——同一套机制的两面，第 3 期架构篇专门拆。这个教训也不只属于 Kafka：Pulsar 的存算分离之所以把 Broker 做成无状态，就是为了把"分区多了拖垮协调层"这类问题连根拔掉，两边对照着看，架构取舍的味道就出来了。</p>
+</section>
+
+<!-- ================= 10 场景 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>什么场景该选它（以及什么场景是错配）</h2>
+  <div class="card">
+    <p><strong>✅ 适合：</strong></p>
+    <ul>
+      <li><strong>日志采集与指标管道：</strong>公司级日志、埋点、监控数据汇聚——Kafka 的发家本领，吞吐天花板最高；</li>
+      <li><strong>事件驱动架构与削峰解耦：</strong>订单、支付事件广播给多个下游，写读彻底解耦，下游慢了不拖垮上游；</li>
+      <li><strong>流式计算的数据底座：</strong>Flink、Spark Streaming、Kafka Streams 都拿它当首选数据源与出口，事件回放让重算成为可能。</li>
+    </ul>
+    <p><strong>❌ 错配：</strong></p>
+    <ul>
+      <li><strong>毫秒级任务队列：</strong>小任务分发、请求响应式调用，RabbitMQ 或直接 RPC 更轻——为这个上 Kafka 是高射炮打蚊子；</li>
+      <li><strong>复杂路由拓扑：</strong>"按规则把消息分发到不同队列"是 RabbitMQ 交换机模型的主场，Kafka 的主题模型没有路由概念；</li>
+      <li><strong>海量多租户 Topic + 频繁弹性扩缩：</strong>百万级主题场景 Pulsar 的存算分离更从容，Kafka 自己扛分区会很吃力。</li>
+    </ul>
+  </div>
+  <p>一条判断捷径：<strong>当数据是"一条接一条持续产生、写完不改、多个系统都要用"的时候，就该想到 Kafka；当消息是需要"路由、改写、单条确认"的任务件，先看看 RabbitMQ。</strong></p>
+</section>
+
+<!-- ================= 11 quiz ================= -->
+<section>
+  <h2><span class="sec-num">11</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. Kafka 和传统消息队列最根本的区别是什么？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，TCP/异步只是传输细节，队列也支持。","不对，Kafka 的控制台工具并不比同类多。","对的：Kafka 把事件持久保存为可回放的日志，消费方按偏移量读、可重复读；传统队列消息被消费就删，一份消息只属于一个消费者。"]'>
+        <li class="quiz-option">Kafka 用 TCP 协议，传统队列用 HTTP</li>
+        <li class="quiz-option">Kafka 的管理工具更丰富</li>
+        <li class="quiz-option">Kafka 把事件持久保存为可回放的日志，按偏移量消费；队列消息被消费就删</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 下列哪组是 Kafka 高吞吐的三大支柱？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，B 树随机写是它刻意避开的结构。","对的：顺序追加写 + sendfile 零拷贝 + 批量压缩，三条朴素取舍撑起吞吐标杆。","不对，列式存储是 OLAP 数据库的技术，Kafka 不用它。"]'>
+        <li class="quiz-option">B 树索引 + 内存池 + 多线程</li>
+        <li class="quiz-option">顺序追加写 + 零拷贝（sendfile）+ 批量压缩</li>
+        <li class="quiz-option">列式存储 + 向量化执行 + 数据跳过</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 一个团队要"百万级 Topic、频繁弹性扩缩容的多租户平台"，最对口的是谁？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，它是吞吐与流生态的标杆，但海量 Topic 自扛分区很吃力。","不对，它的强项是事务与定时消息。","对的：Pulsar 的存算分离（Broker 无状态 + BookKeeper 分层存储）就是为海量 Topic 与弹性伸缩设计的。"]'>
+        <li class="quiz-option">Apache Kafka</li>
+        <li class="quiz-option">RocketMQ</li>
+        <li class="quiz-option">Apache Pulsar</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 12 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">12</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：传统队列"消费即删"，Kafka"消费不删、按保留期过期"。把消息留下来，除了能回放，还给架构带来了哪些连锁好处？</summary>
+    <div class="details-body">
+      <p>消息的"命运"是两种系统所有差异的总开关，连锁好处至少有四条。<strong>第一，新消费方可以补历史。</strong>队列里的消息删了就没了，新系统想接入只能做双写迁移；Kafka 里新消费组把指针拨回日志头，几小时的历史数据自然补齐——上回放这一条，系统演进的成本就从"项目级"降到"配置级"。<strong>第二，故障恢复等于重新消费。</strong>下游算错、逻辑升级、数据修复，都变成"把指针拨回去重放一遍"，不用人工对账；流计算框架的"重算"能力，地基就是这份不删的日志。<strong>第三，一份数据天然多订阅。</strong>队列一份消息只给一个消费者，多系统要么各建队列要么互相协调；日志摆在那，风控、报表、数仓各拿各的指针互不干扰，"广播"不需要任何额外机制。<strong>第四，存储层可以做时间换空间的所有优化。</strong>正因为消息不删、只追加，Kafka 才敢用顺序写、零拷贝、批量压缩这套组合拳——可变结构要支持改和删，就注定与这些优化无缘。回过头看，<strong>"消费即删"还是"消费不删"，本质是"中转站"和"日志系统"两种定位的分岔</strong>——定位不同，一套设计全部不同，这是理解 Kafka 最重要的一条主线。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：Kafka 与 Pulsar 都宣称高吞吐。如果你来给公司选消息平台，除了看官方数字，应该按什么顺序验证哪些事？</summary>
+    <div class="details-body">
+      <p>官方基准数字只是入场券，选型验证建议按"场景 → 运维 → 生态 → 退化行为"四步走。<strong>第一步，用自己的负载复测。</strong>官方数字通常来自大分区、大批量、无积压的理想环境；拿你真实的消息体大小、生产峰值、订阅数量建一套测试，看吞吐和延迟的 P99 而不是均值——消息平台的口碑差异大多藏在尾部延迟里。<strong>第二步，测退化行为，而不是理想行为。</strong>关键问题：消费者积压十亿条时集群什么状态？扩容一个 Broker，分区搬迁要多久、对线上有没有抖动？Broker 宕机恢复，多少分区要多长时间重新选出 Leader？Kafka 的"Topic 多了会抖"和 Pulsar 的"组件多了排障长"，都是退化行为层面的差异，理想路径上根本看不出来。<strong>第三步，盘运维与生态账。</strong>团队会不会养：Kafka 的分区规划、ISR 调优，Pulsar 的 Broker + BookKeeper + ZooKeeper 三件套；周边接不接得上：Connect 连接器、Flink 集成、监控告警模板，选型选的是整个生态。<strong>第四步，问退出成本。</strong>数据格式（建议一开始就用 JSON/Avro 这类通用编码）、双跑方案、协议兼容层有没有——消息平台一用就是五年，进得去也要出得来。对应到本系列：<strong>第 3 期架构篇拆"为什么快、为什么抖"，第 4 期实战篇给你一套可以复现的测试基准，第 5 期源码导读看设计底线</strong>——学完后这套验证清单每一条你都能亲手做。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 13 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">13</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>Kafka = 开源分布式事件流平台（官网口径），本质是一台分布式提交日志机：<strong>追加写、可回放、按偏移量消费</strong>——队列只是它的第一个用途；</li>
+      <li>解决直连时代的三大痛：<strong>削峰、解耦、广播</strong>，写读彻底分离，事件落地不动，下游各取所需；</li>
+      <li>为什么快（直觉版）：<strong>顺序追加写 + sendfile 零拷贝 + 批量压缩</strong>——少搬几趟，快一个量级；</li>
+      <li>数据面：33.8k Stars、80%+ 财富百强企业在用、LinkedIn 2019 口径日均 7 万亿条、2012-10 毕业 Apache 顶级项目（2026-09-19 核对）；</li>
+      <li>版本基准 4.3.1（官网 Supported，2026-06-25 发布）；选型捷径：持续产生、写完不改、多方要用 → Kafka；路由、改写、单条确认 → 先看 RabbitMQ。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 2 期《5 分钟跑起来》——Java 17 起步，下载解压、KRaft 一条命令起服务，照官方 Quickstart 逐段跑通"建主题 → 写事件 → 读回放"，命令与预期输出逐条对照，顺手收下高频安装报错的解法。</p>
+  <p><strong>Primary source：</strong><a href="https://kafka.apache.org/43/documentation/" target="_blank" rel="noopener">Apache Kafka 官方文档 · 4.3</a>——本期定义、Quickstart 命令与输出均出自该文档（与 4.3.1 版本匹配）；版本与下载见 <a href="https://kafka.apache.org/downloads" target="_blank" rel="noopener">官网 Downloads 页</a>，源码仓库见 <a href="https://github.com/apache/kafka" target="_blank" rel="noopener">github.com/apache/kafka</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0060-scg-source-reading.html">← 上一期：Spring Cloud Gateway 架构与源码导读</a></span>
+  <a class="next" href="0062-kafka-quickstart.html">下一期：5 分钟跑起来 Apache Kafka →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Apache Kafka 系列第 3 期：看清 Kafka 骨架——分区、副本与自管理的集群 | 2026-09-20</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0063</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0062-kafka-quickstart.html">上一期:0062</a> · Apache Kafka 系列第 3 期 / 共 5 期 · <a href="0064-kafka-in-action.html">下一期:0064</a> · <a href="https://kafka.apache.org/" target="_blank" rel="noopener">kafka.apache.org ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · APACHE KAFKA 系列第 3 期：核心概念与整体架构</p>
+  <h1>看清 Kafka 骨架：分区、副本与自管理的集群</h1>
+  <p class="subtitle">上一期我们照官方 Quickstart 把 Kafka 跑了起来，但收尾那行 describe 输出里的四个词——Partition、Leader、Replicas、Isr——你真的看懂了吗？本期把它们一个个讲透：数据面三积木（Topic、Partition、Offset）与角色面三积木（Producer、Consumer、Consumer Group），一条四环演示链（建两分区两副本主题 → 追加事件 → 消费者组瓜分 → 停掉一台 broker 看自愈），外加 Broker 与 KRaft 控制器的集群全景，以及"为什么快"的三根支柱。本期结束，上一期那行输出对你就是白话。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">📨 事件流平台 · Scala/Java · Apache-2.0（Apache 顶级项目）</span>
+    <span class="tag">📦 基于 4.3.x（4.3.1 · 2026-09-20 官方核对）</span>
+    <span class="tag-date">📅 2026-09-20 · 第 3 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 回顾 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>上一期那行输出，你真的看懂了吗</h2>
+  <p>上一期的收尾动作是查看主题形态。命令与输出逐字对照官方《Quickstart》Step 3（4.3 文档）：</p>
+  <pre class="codeblock"><code>$ bin/kafka-topics.sh --describe --topic quickstart-events --bootstrap-server localhost:9092
+Topic: quickstart-events  PartitionCount: 1  ReplicationFactor: 1
+Topic: quickstart-events  Partition: 0  Leader: 0  Replicas: 0  Isr: 0</code></pre>
+  <p>第二行里的四个词就是本期的四位主角：<strong>Partition（分区）</strong>是日志的物理切片；<strong>Leader</strong>是这个分区的主副本，负责所有读写；<strong>Replicas</strong>是全部副本名单；<strong>Isr</strong>（In-Sync Replicas，同步副本）是"此刻跟得上主副本"的名单。单机最小形态里四个值都是 0，因为一切都在一台机器上。等这期结束，你会知道这行输出什么时候变、为什么变、变了意味着什么。</p>
+</section>
+
+<!-- ================= 02 数据面 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>数据面三积木：Topic、Partition、Offset</h2>
+  <p><strong>Topic（主题）</strong>是日志的逻辑名字，像文件系统里的文件夹，天生多生产者多订阅者；<strong>Partition（分区）</strong>是物理切片——一个主题被切开的每段日志独立追加、可以分布在不同机器上。官方文档原话：<strong>分区数决定消费者的最大并行度</strong>。<strong>Offset（偏移量）</strong>是分区内的递增编号，每条事件一个，永不回头；所谓消费进度，就是指针停在第几号。主题对分区一对多，分区对偏移量一对多，这两层结构撑起 Kafka 的水平扩展。</p>
+  <p class="note">官方《Introduction》配图 streams-and-tables-p1_p4 描述：一个 Topic 四个分区 P1–P4，两个生产者客户端独立追加；同一把 key 的事件（图中同色）落进同一分区保序——来源：kafka.apache.org 文档（2026-09-20 核对）。</p>
+  <p>分区两件事：横向摊开写入负载，纵向给同一把 key 保住顺序。事件按 key 的哈希进固定分区，所以"同一订单的状态变化"永远有序——这是"订单体系敢建在 Kafka 上"的前提。</p>
+</section>
+
+<!-- ================= 03 日志实体 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>一段分区日志的实体：段文件</h2>
+  <p>往深看一层，一段分区日志在磁盘上不是一整个文件，而是官方实现文档画的那样：切成一段一段的 <strong>segment 文件</strong>，写入永远只发生在最后一个活动段的末尾；旧段写完即封存只读，读取走一致视图，过期清理按整段删除，没有碎片回收。数据目录里每个分区就是一个文件夹，名字是"主题名-分区号"。</p>
+  <p class="note">官方《Implementation》配图 Kafka Log Implementation 描述：活动段列表负责追加（Appends），旧段供一致视图读取（Reads），删除按段进行（Deletes）——来源：kafka.apache.org 文档（2026-09-20 核对）。</p>
+  <p>记住这个形状：本期最后讲"为什么快"与"分区多了为什么抖"，答案都落在这张图上。</p>
+</section>
+
+<!-- ================= 04 角色面 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>角色面三积木：Producer、Consumer、Consumer Group</h2>
+  <p><strong>Producer</strong> 发布事件，只管追加、不等任何消费者在线；<strong>Consumer</strong> 订阅主题、按偏移量拉取，读到哪了自己管。官方文档强调：生产者与消费者<strong>完全解耦、互不知晓</strong>，这是 Kafka 扩展性的关键设计。<strong>Consumer Group（消费者组）</strong>是最巧的一笔：同一组内成员瓜分全部分区、一人一份互不重复；不同组之间互不影响，每组都拿到全量。一句话：组间广播，组内抢占。</p>
+  <p>官方配图给出标准场景：集群里四个分区，组 A 只有两个消费者，每人瓜分两个分区；组 B 有四个消费者，正好一人一个。推论：<strong>同一组里消费者多于分区数，多出来的人只能闲着——分区数就是组内并行度的天花板。</strong></p>
+  <p class="note">官方《Introduction》配图 consumer-groups 描述：Kafka Cluster 中 Server 1 持 P0/P3、Server 2 持 P1/P2；Consumer Group A（C1、C2）与 Group B（C3–C6）各自独立消费全部分区——来源：kafka.apache.org 文档（2026-09-20 核对）。</p>
+</section>
+
+<!-- ================= 05 演示链 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>四环演示链：亲手把架构跑一遍</h2>
+  <p>环境说明：按官方《KRaft》文档起 3 个 combined 节点（broker 0/1/2，<code>process.roles=broker,controller</code>）。四条命令全部对照官方文档核实。</p>
+  <p><strong>第一环，建一个两分区两副本的主题：</strong></p>
+  <pre class="codeblock"><code>$ bin/kafka-topics.sh --create --topic orders --partitions 2 \
+    --replication-factor 2 --bootstrap-server localhost:9092
+$ bin/kafka-topics.sh --describe --topic orders --bootstrap-server localhost:9092
+Topic: orders  PartitionCount: 2  ReplicationFactor: 2
+Topic: orders  Partition: 0  Leader: 0  Replicas: 0,1  Isr: 0,1
+Topic: orders  Partition: 1  Leader: 1  Replicas: 1,2  Isr: 1,2</code></pre>
+  <p><strong>第二环，追加事件</strong>（官方《Quickstart》Step 4 同款，默认每行一条）：</p>
+  <pre class="codeblock"><code>$ bin/kafka-console-producer.sh --topic orders --bootstrap-server localhost:9092
+&gt;order-1 Beijing
+&gt;order-2 Shanghai
+&gt;order-3 Beijing</code></pre>
+  <p><strong>第三环，消费者组上岗</strong>——终端 A、B 各起一个消费者报同一个组名，第三个终端看分工（describe 列名对照官方《Basic Operations》）：</p>
+  <pre class="codeblock"><code>$ bin/kafka-console-consumer.sh --topic orders --group ops \
+    --from-beginning --bootstrap-server localhost:9092
+$ bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group ops
+TOPIC   PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG  CONSUMER-ID
+orders  0          2               2               0    consumer-a-7f3c…
+orders  1          2               2               0    consumer-b-91d2…</code></pre>
+  <p><strong>第四环，停掉 broker 1 看自愈</strong>：</p>
+  <pre class="codeblock"><code>$ kill 23456        # broker 1 的进程
+$ bin/kafka-topics.sh --describe --topic orders --bootstrap-server localhost:9092
+Topic: orders  Partition: 0  Leader: 0  Replicas: 0,1  Isr: 0
+Topic: orders  Partition: 1  Leader: 2  Replicas: 1,2  Isr: 2</code></pre>
+  <p>分区 1 的 Leader 从 1 换成 2，Isr 收缩——官方设计文档写明：<strong>控制器发现 broker 失联，从 ISR 剩余成员里选新主，选主批量完成、秒级切换</strong>；一号机回归后追平日志、重新进名单。六个概念五步动作，概念从"听过"变成"见过"。</p>
+</section>
+
+<!-- ================= 06 集群全景 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>集群全景：数据面 Broker，控制面 KRaft</h2>
+  <div class="diagram">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar63" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="290" y="14" width="110" height="40" rx="9" fill="var(--card)" stroke="var(--line)"/>
+    <text x="345" y="39" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">生产者</text>
+    <rect x="430" y="14" width="150" height="40" rx="9" fill="var(--card)" stroke="var(--line)"/>
+    <text x="505" y="39" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">消费者组 ops</text>
+    <rect x="120" y="86" width="520" height="92" rx="12" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.6"/>
+    <text x="140" y="106" fill="var(--muted)" font-size="10" font-weight="700">数据面 · Broker 集群</text>
+    <rect x="150" y="114" width="140" height="50" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="220" y="134" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">Broker 0</text>
+    <text x="220" y="152" text-anchor="middle" fill="var(--muted)" font-size="9">orders-0 主 · orders-1 副</text>
+    <rect x="310" y="114" width="140" height="50" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="380" y="134" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">Broker 1</text>
+    <text x="380" y="152" text-anchor="middle" fill="var(--muted)" font-size="9">orders-1 主 · orders-0 副</text>
+    <rect x="470" y="114" width="140" height="50" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="540" y="134" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">Broker 2</text>
+    <text x="540" y="152" text-anchor="middle" fill="var(--muted)" font-size="9">orders-1 副</text>
+    <rect x="120" y="212" width="520" height="70" rx="12" fill="var(--card)" stroke="var(--accent)" stroke-width="1.6" stroke-dasharray="5 3"/>
+    <text x="140" y="232" fill="var(--muted)" font-size="10" font-weight="700">控制面 · KRaft 仲裁（3 或 5 个控制器，Raft 协议）</text>
+    <rect x="170" y="240" width="130" height="32" rx="7" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="235" y="261" text-anchor="middle" fill="var(--ink)" font-size="9.5" font-weight="700">控制器 1 · Active</text>
+    <rect x="325" y="240" width="120" height="32" rx="7" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="385" y="261" text-anchor="middle" fill="var(--ink)" font-size="9.5">控制器 2 · 热备</text>
+    <rect x="470" y="240" width="120" height="32" rx="7" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="530" y="261" text-anchor="middle" fill="var(--ink)" font-size="9.5">控制器 3 · 热备</text>
+    <line x1="345" y1="54" x2="240" y2="110" stroke="var(--accent-3)" stroke-width="1.6" marker-end="url(#ar63)"/>
+    <line x1="380" y1="54" x2="360" y2="110" stroke="var(--accent-3)" stroke-width="1.6" marker-end="url(#ar63)"/>
+    <line x1="480" y1="54" x2="530" y2="110" stroke="var(--accent-3)" stroke-width="1.6" marker-end="url(#ar63)"/>
+    <line x1="397" y1="54" x2="245" y2="110" stroke="var(--accent-3)" stroke-width="1.6" marker-end="url(#ar63)"/>
+    <line x1="380" y1="178" x2="380" y2="208" stroke="var(--muted)" stroke-width="1.4" stroke-dasharray="3 3" marker-end="url(#ar63)"/>
+    <text x="392" y="200" fill="var(--muted)" font-size="9">心跳 · 元数据</text>
+    <text x="120" y="296" fill="var(--muted)" font-size="9.5">图例：broker 管数据，控制器管元数据；每台 broker 凭心跳向控制面报到（概念图，对照第 05 节演示环境）</text>
+  </svg>
+  </div>
+  <p>4.0 起 ZooKeeper 彻底移除，控制面由 KRaft 接管：每个服务端用 <code>process.roles</code> 配成 broker、controller 或两者兼具（组合模式，开发常用、生产慎用）；控制器组成元数据仲裁，一台 Active 其余热备，用 Raft 协议把元数据记进自己的日志——官方《KRaft》文档口径：<strong>3 台容忍 1 台故障，5 台容忍 2 台</strong>。上一期跑的 standalone 单机版，就是这张大图的最小特例。</p>
+  <p class="note">官方《KRaft》文档原文（Process Roles / Controllers 两节，含 process.roles 取值与 controller.quorum.bootstrap.servers 配置示例）——来源：kafka.apache.org/43/operations/kraft（2026-09-20 截图核对）。</p>
+</section>
+
+<!-- ================= 07 为什么快 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>为什么快：顺序写、零拷贝、页缓存</h2>
+  <p><strong>第一根支柱，顺序追加写。</strong>数据库为了支持查找修改用 B 树一类的随机读写结构，磁头来回寻道，机械盘一秒几百次到顶。Kafka 的日志只追加不修改，磁头一路向前——官方设计文档原话：<strong>磁盘顺序读写的吞吐能比肩内存随机访问</strong>。最笨的写法换来数量级的差距；代价是不能改、不能随机删，而日志恰好都不需要。</p>
+  <p><strong>第二根支柱，零拷贝。</strong>把文件送进网卡，传统路径四次拷贝（磁盘→页缓存→应用缓冲→Socket 缓冲→网卡）外加内核态用户态来回切换；Kafka 用操作系统现成的 <code>sendfile</code> 调用，数据从页缓存直达网卡，应用全程不碰。<strong>第三根支柱，页缓存。</strong>读写都先命中操作系统缓存，官方原话：32GB 内存的机器能腾出 28–30GB 做页缓存，一行应用代码不用改；消费者追平进度时磁盘读几乎归零。三个数字都出自官方《Efficiency》一节，不是跑分广告。</p>
+</section>
+
+<!-- ================= 08 伏笔与对照 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>伏笔与对照：分区多了会抖，Pulsar 换了条路</h2>
+  <p>留一个反直觉的伏笔：都说分区越多并行度越高，可分区上了规模，集群反而开始抖。原因不在玄学——<strong>每个分区都是一段独立日志</strong>（第 03 节那张图）：段文件、索引、文件句柄随分区数线性涨；每个副本一条同步流，元数据事件翻倍；broker 重启还要为名下全部分区重选主，演示链里那记秒级选主，放到几万分区面前就不是秒级了。"为什么快"和"为什么抖"是同一套机制的两面，<strong>第 5 期源码导读专门拆</strong>。</p>
+  <p>放回系列坐标系：本系列前面五期讲过的 <a href="0011-pulsar-what-and-why.html">Pulsar</a> 走<strong>存算分离</strong>——broker 不存数据，存储压给 BookKeeper 层，扩缩容不搬数据，百万级主题从容，代价是多养一层组件；Kafka 反着走<strong>存算一体</strong>——日志躺在 broker 本机磁盘，页缓存与零拷贝火力全开，换来吞吐标杆，代价是分区规模要自己扛。两条路线没有输赢，只有取舍。</p>
+</section>
+
+<!-- ================= 09 quiz ================= -->
+<section>
+  <h2><span class="sec-num">09</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. Replicas 与 Isr 的区别是什么？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，Replicas 是配置的副本总数，不是磁盘目录。","对的：Replicas 是全部副本名单，Isr 是此刻跟得上主副本的名单，掉队会被移出 Isr。","不对，两者都与读写请求的转发无关。"]'>
+        <li class="quiz-option">Replicas 是数据目录，Isr 是索引文件</li>
+        <li class="quiz-option">Replicas 是全部副本名单，Isr 是跟得上主副本的名单</li>
+        <li class="quiz-option">Replicas 负责写，Isr 负责读</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 消费者组里有 6 个成员，主题只有 4 个分区，会怎样？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，分区不会自动拆分给两个人。","不对，多出的成员会空闲，不是只做备份待命。","对的：组内瓜分以分区为单位，4 个分区最多 4 人分到活，其余空闲——分区数是组内并行度上限。"]'>
+        <li class="quiz-option">每个分区由两人共同消费，自动负载均衡</li>
+        <li class="quiz-option">多出的 2 人作为热备，平时不消费</li>
+        <li class="quiz-option">4 人各分一个分区，多出的 2 人空闲</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. broker 宕机后，谁负责为它的分区选出新 Leader？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：KRaft 控制器发现 broker 失联，从 ISR 剩余成员中批量选出新主，秒级切换。","不对，生产者只管写，不参与选主。","不对，消费者组协调的是消费分工，不是分区主副本。"]'>
+        <li class="quiz-option">KRaft 控制器，从 ISR 剩余成员中选</li>
+        <li class="quiz-option">生产者，按 acks 确认结果指定</li>
+        <li class="quiz-option">消费者组协调者，投票决定</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 10 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：演示链第四环里，broker 1 宕机期间分区 0 的 Replicas 仍是 "0,1" 而 Isr 缩成 "0"。为什么 Replicas 名单不跟着变？这种"名单与现状分离"的设计换来了什么？</summary>
+    <div class="details-body">
+      <p><strong>Replicas 是"应然"（配置意图），Isr 是"实然"（运行现状）</strong>——两者分离正是 Kafka 副本机制的精髓。Replicas 名单由分配算法一次性决定，轻易不动；Isr 由主副本动态维护，跟得上就进、掉队就出（阈值 <code>replica.lag.time.max.ms</code>）。这样设计换来三样东西：<strong>其一，自愈是自动的</strong>——broker 1 回归后追平日志就能重新进 Isr，不需要任何人工"重新加回副本"的操作，你看到的只是名单从 0 变回 0,1；<strong>其二，可用性与一致性是显式旋钮</strong>——写入要等 Isr 全部确认（acks=all），Isr 收缩意味着剩余副本兜底，再配 <code>min.insync.replicas</code> 就能拒绝"副本太少还硬写"的危险请求；<strong>其三，容忍 f 台故障只需 f+1 个副本</strong>——不用多数派投票，两副本容忍一台、三副本容忍两台，省一半机器。反过来看 Pulsar/BookKeeper 的 quorum 写也是同款思想：把"想要几份"和"实际有几份健康"拆成两个变量。名单会抖，意图不动——这是分布式存储应对故障的通用范式。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：Kafka 用"存算一体"换来了吞吐，代价是分区多了会抖。如果你来给公司建一个"万级 Topic、上千分区"的日志平台，基于本期内容，你会做哪几件事来推迟这个抖点的到来？</summary>
+    <div class="details-body">
+      <p>抖点的本质是"分区数 × 副本数"撑爆单机与控制面，所以四件事按序做。<strong>第一，按吞吐规划分区，不为将来预铺</strong>——每个分区是一段独立日志，句柄、索引、页缓存都随它线性涨；一个消费组撑不死就多建几个主题分摊，别把所有业务塞进一个百分区大主题。<strong>第二，副本数按可用性给，不无脑 ×3</strong>——f+1 容忍 f 台，两副本已容忍一台，重要主题三副本封顶，把总分区数（含副本）控制在预算内。<strong>第三，控制面留足余量</strong>——控制器 3 台起步， broker 数量适度多而单机分区数压低，宕机时的"选主风暴"按单机分区数而不是总量发生，第 05 节那记秒级选主才能保秒级。<strong>第四，监控 Isr 收缩与再平衡</strong>——Isr 频繁收缩是抖的前兆，等于集群在告诉你"同步跟不上了"。<strong>而如果业务注定是十万级 Topic、频繁弹性扩缩，那答案就不是调优而是换架构</strong>——Pulsar 的存算分离为此而生，两条路线的取舍在上一节已经摆过。所有数字都能用本期演示链实测：把主题建到一万分区，亲手摸到抖点在哪。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 11 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">11</span>本期要点与下一站</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>数据面三积木：<strong>Topic 逻辑名、Partition 物理切片、Offset 分区内递增编号</strong>——分区数决定消费并行度上限；</li>
+      <li>角色面三积木：生产者与消费者彻底解耦；消费者组<strong>组间广播、组内瓜分</strong>；</li>
+      <li>副本与 ISR：<strong>Replicas 是全名单，Isr 是跟得上的名单</strong>；主副本故障时控制器从 ISR 选新主，秒级切换；</li>
+      <li>集群与 KRaft：<strong>broker 管数据、控制器管元数据</strong>；4.0 起 ZooKeeper 移除，3 台控制器容忍 1 台故障；</li>
+      <li>为什么快：<strong>顺序追加 + sendfile 零拷贝 + 页缓存</strong>——三根支柱，拷贝 4 变 1、32GB 内存腾 28–30GB 做缓存、追平后磁盘读归零。</li>
+    </ul>
+  </div>
+  <p><strong>下一站：</strong>第 4 期《实战场景》（0064）——概念都见过实物了，接下来把 Kafka 接进真实应用：Spring 生态怎么连、配置怎么给、常见坑怎么绕，照着能落地的代码走一遍。</p>
+  <p><strong>Primary source：</strong><a href="https://kafka.apache.org/43/documentation/" target="_blank" rel="noopener">Apache Kafka 官方文档 · 4.3</a>——本期概念定义、演示链命令与输出均出自该文档（Introduction / Design / Implementation / Basic Operations / KRaft 各节，与 4.3.1 匹配）；KRaft 专页见 <a href="https://kafka.apache.org/43/operations/kraft/" target="_blank" rel="noopener">kafka.apache.org/43/operations/kraft</a>，版本与下载见 <a href="https://kafka.apache.org/downloads" target="_blank" rel="noopener">官网 Downloads 页</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0062-kafka-quickstart.html">← 上一期：5 分钟跑起来 Apache Kafka</a></span>
+  <a class="next" href="0064-kafka-in-action.html">下一期：Kafka 实战场景 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>
