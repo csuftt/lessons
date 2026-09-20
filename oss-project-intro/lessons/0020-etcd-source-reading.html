@@ -286,7 +286,7 @@ v3rpc  key.go kvServer.Txn                 # gRPC 入口（api/v3rpc/key.go）
       <li>lease 心跳不进共识（leader 内存记账），checkpoint 默认每 5 分钟把剩余 TTL 写进日志（v3.6 起默认持久化），切换不再"满血复活"。</li>
     </ul>
   </div>
-  <p><strong>系列收尾：</strong>etcd 的入门就聊到这里——五期走完"认识、跑起来、概念与架构、实战、读源码"一条龙，Kubernetes 的元数据心脏你能拆开看了。下期开启新项目 <strong>Kubernetes</strong>：项目池里的大项目，用 6 期从声明式 API 与控制器模式讲起——它的 API Server 底下，正是这五期读过的 etcd。</p>
+  <p><strong>系列收尾：</strong>etcd 的入门就聊到这里——五期走完"认识、跑起来、概念与架构、实战、读源码"一条龙。最新版本和完整文档认准官方文档 <a href="https://etcd.io" target="_blank" rel="noopener">etcd.io</a>；课程目录里还有其他开源项目的入门系列，感兴趣可以按需点开。</p>
   <p><strong>延伸阅读：</strong>Primary source 官方源码与文档：<a href="https://github.com/etcd-io/raft/blob/v3.7.0/README.md" target="_blank" rel="noopener">etcd-io/raft README（v3.7.0）</a>（最小化设计与用户列表的一手出处）、<a href="https://github.com/etcd-io/etcd/blob/v3.7.1/server/etcdserver/read/read.go" target="_blank" rel="noopener">read.go（tag v3.7.1）</a>（ReadIndex 协商本体）、<a href="https://etcd.io/docs/v3.7/learning/api_guarantees/" target="_blank" rel="noopener">etcd API guarantees（v3.7）</a>（线性一致的权威定义）、<a href="https://github.com/etcd-io/etcd/blob/v3.7.1/server/storage/mvcc/kvstore_txn.go" target="_blank" rel="noopener">kvstore_txn.go（tag v3.7.1）</a>（MVCC 写路径）。</p>
 </section>
 

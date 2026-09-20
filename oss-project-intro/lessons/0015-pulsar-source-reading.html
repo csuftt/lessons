@@ -282,7 +282,7 @@ prepareLedgerInfoForOffloaded(ledgerId, uuid, driverName, driverMetadata)
       <li>读码路线一条：getTopic → publishMessage → internalAsyncAddEntry → OpAddEntry → readMoreEntries → offloadLoop，每步只回答一个问题；</li>
       <li>版本感：源码基准 tag <code>v4.2.4</code>（Latest，2026-08-03），4.0 LTS 并行，5.0 尚在里程碑。</li>
     </ul>
-    <p>Pulsar 入门系列就聊到这里。下一个项目我们开启 <strong>etcd</strong>——Kubernetes 的元数据心脏，工业级 Raft 实现，同样从"是什么、凭什么活下来"讲起。</p>
+    <p>Pulsar 入门系列就聊到这里，最新版本和完整文档认准官方文档 <a href="https://pulsar.apache.org" target="_blank" rel="noopener">pulsar.apache.org</a>；课程目录里还有其他开源项目的入门系列，感兴趣可以按需点开。</p>
   </div>
   <p><strong>Primary source：</strong><a href="https://pulsar.apache.org/docs/4.2.x/concepts-architecture-overview/" target="_blank" rel="noopener">Pulsar 4.2.x · Architecture Overview</a>（broker 无状态、BookKeeper WAL 定位的一手出处）与 <a href="https://github.com/apache/pulsar/tree/v4.2.4" target="_blank" rel="noopener">github.com/apache/pulsar @ v4.2.4 源码</a>（本期所有类路径与行号的核对基准，2026-09-19）。分层存储细节见 <a href="https://pulsar.apache.org/docs/4.2.x/concepts-tiered-storage/" target="_blank" rel="noopener">Tiered storage 概念页</a>。</p>
   <p class="note"><span class="h">延伸阅读（daily 线原理专题）</span>存算分离与 Kafka 对比：<a href="../../daily-tech-course/lessons/0012-pulsar-vs-kafka.html">《Apache Pulsar 存算分离架构与 Kafka 对比》</a>；订阅模型与游标原理：<a href="../../daily-tech-course/lessons/0013-pulsar-subscription-models.html">《Apache Pulsar 订阅模型深入》</a>；可靠性全链路：<a href="../../daily-tech-course/lessons/0021-pulsar-message-reliability.html">《消息到底丢在哪：消息可靠性全链路》</a>。</p>
@@ -290,7 +290,7 @@ prepareLedgerInfoForOffloaded(ledgerId, uuid, driverName, driverMetadata)
 
 <nav class="lesson-nav">
   <a class="prev" href="0014-pulsar-spring-in-action.html">← 上一期：实战场景</a>
-  <span class="next">Pulsar 系列完 · 回课程目录</span>
+  <span class="next">Pulsar 系列完 · 回<a href="../index.html">课程目录</a></span>
 </nav>
 
 <script>

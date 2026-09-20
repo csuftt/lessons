@@ -240,7 +240,7 @@ for ts := ev.startTimestamp; ts <= ev.endTimestamp; ts += ev.interval { // 按 s
 <!-- ================= 12 收官与延伸 ================= -->
 <section>
   <h2><span class="sec-num">12</span>系列收官</h2>
-  <p><strong>Prometheus 的入门系列就聊到这里</strong>：五期一条线——认识它、跑起来、看懂架构、接上实战、读进源码。留个作业：切到 tag v3.14.0，顺着第 04 节的路线图，亲手把一条指标从 syncCh 走到 PromQL 求值。下期开启新项目 <strong>SkyWalking</strong>，APM 与链路追踪，还是这套从设计决策读起的老路数。</p>
+  <p><strong>Prometheus 的入门系列就聊到这里</strong>：五期一条线——认识它、跑起来、看懂架构、接上实战、读进源码。留个作业：切到 tag v3.14.0，顺着第 04 节的路线图，亲手把一条指标从 syncCh 走到 PromQL 求值。最新版本与完整文档认准<a href="https://prometheus.io/docs/" target="_blank" rel="noopener">官方文档 prometheus.io</a>；<a href="../index.html">课程目录</a>里还有其他开源项目的入门系列，感兴趣可以按需点开。</p>
   <p><strong>Primary source：</strong><a href="https://prometheus.io/docs/prometheus/latest/storage/" target="_blank" rel="noopener">Prometheus 官方文档 · Storage（On-disk layout 与 compaction 的官方口径）</a>；源码入口：<a href="https://github.com/prometheus/prometheus/tree/v3.14.0" target="_blank" rel="noopener">prometheus/prometheus tag v3.14.0 仓库树</a>（本期引用目录：<code>tsdb/</code>（含 <code>wlog/</code>）· <code>scrape/</code> · <code>discovery/</code> · <code>promql/</code> · <code>cmd/prometheus/</code>，路径核对自 tag v3.14.0）。前情回看：<a href="0044-prom-core-concepts-architecture.html">第 3 期 · 核心概念与架构</a> · <a href="0045-prom-in-action.html">第 4 期 · 实战场景</a>。</p>
 </section>
 
