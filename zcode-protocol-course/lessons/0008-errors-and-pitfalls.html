@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 8 课 · 错误码与避坑清单 — zcode.cjs 协议课</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+
+<header class="lesson-head">
+  <a href="../index.html">← 课程索引</a>
+  <span>第 8 课 / 8</span>
+  <a href="0007-history-and-advanced.html">← 第 7 课</a>
+</header>
+
+<h1>第 8 课：错误码与避坑清单</h1>
+<p class="lead">最后一课不学新东西，把前 7 课的教训浓缩成<strong>一页防呆手册</strong>：
+一张错误码表、十条避坑军规、一份"此路不通"负面结论清单。出问题时按图索骥。</p>
+
+<h2>一、错误码速查表</h2>
+<table>
+<thead><tr><th>code</th><th>含义</th><th>标准处置</th></tr></thead>
+<tbody>
+<tr><td><code>-32600</code></td><td>帧格式非法（典型：带了 jsonrpc 字段）</td><td>检查信封</td></tr>
+<tr><td><code>-32601</code></td><td>方法不存在 / 未注册 handler</td><td>查方法名拼写；反向请求未实现要主动回它；v2 删掉的老方法（upsertModelProvider）也报这个</td></tr>
+<tr><td><code>-32602</code></td><td>参数非法（v2 strict：Unrecognized key）</td><td>双代形状自适应降级重发（被拒不生效，重发无副作用）</td></tr>
+<tr><td><code>-32603</code></td><td>内部错误（语义五花八门）</td><td>看 message：渠道不在注册表 / 退订缺三件套 / setModel 与并发校验竞态…</td></tr>
+<tr><td><code>-32004</code></td><td>会话未激活（close/read 等撞冷会话）</td><td>先 resume；槽位满（16 LRU）才考虑挤槽</td></tr>
+<tr><td><code>-32031</code></td><td>restoreWarning：会话缺模型上下文，send 被拒</td><td>send 带上当前模型原路重试</td></tr>
+<tr><td>stale（业务态）</td><td>CAS 基准过期</td><td>用 revisionAtDecision 重试（fork/edit/deleteQueueItem）</td></tr>
+</tbody>
+</table>
+<div class="note"><span class="h">超时的两种面孔</span>
+<strong>全量超时</strong>（所有请求都超时）= 进程级卡死：先查 stderr 排空、reader 线程死没死；
+<strong>单会话超时</strong>（其他会话正常）= resume 中断回合后的"忙窗口"（1.5~2 分钟指数退避），延迟重试即可，别判死。</div>
+
+<h2>二、十条避坑军规</h2>
+<ul>
+<li><strong>1. stderr 永远排空</strong>——4KB 管道堵死=全线超时（第 1 课）；</li>
+<li><strong>2. 单帧失败不外溢</strong>——读循环 try-catch 兜底丢帧，形状不可控字段一律安全转换（遥测数组帧杀 reader 实踩）；</li>
+<li><strong>3. 先 subscribe 再 send</strong>，白名单先登记再发订阅请求（首帧不等 ack）（第 3 课）；</li>
+<li><strong>4. 写操作禁重试</strong>，只有幂等读允许超时重试（send 重发=两条消息）（第 1 课）；</li>
+<li><strong>5. 冷会话先 resume</strong>，-32004 先想冷会话再想槽位满（第 2 课）；</li>
+<li><strong>6. stop 走 v4</strong>，流式期停后自己合成收尾帧；后台任务用 cancelBackgroundTask 单独停（第 4 课）；</li>
+<li><strong>7. -32602 是 strict 拒绝的唯一可靠信号</strong>，按双代形状降级重发（第 5 课）；</li>
+<li><strong>8. 思考级别候选值只认服务端 available</strong>，setModel → read → setThoughtLevel 严格串行（第 5 课）；</li>
+<li><strong>9. 反向请求必应答</strong>：未知方法回 -32601，无人值守回 decline，handler 异步（第 6 课）；</li>
+<li><strong>10. v4 写命令走 CAS 三步舞</strong>：首发 0 必 stale，revisionAtDecision 重试（第 7 课）。</li>
+</ul>
+
+<h2>三、负面结论清单：此路不通，别再试了</h2>
+<p>这些都是实测过的死路（探索成本很高，务必记住）：</p>
+<table>
+<thead><tr><th>想做的事</th><th>为什么不行</th><th>替代方案</th></tr></thead>
+<tbody>
+<tr><td>legacy <code>session/stop</code> 停回合</td><td>新版 CLI 处理器未接新原语，发了没反应</td><td>v4/command stop</td></tr>
+<tr><td>对子会话用 legacy subscribe 收事件</td><td>订阅成功但恒 0 投递</td><td>v4/conversation/subscribe</td></tr>
+<tr><td>RPC 注册渠道图持久（upsert 等）</td><td>纯运行时态，重启即丢；v2 已删除该方法</td><td>写 config.json / provider_config.json</td></tr>
+<tr><td>guide 插队带附件</td><td>服务端强制降级 queue（attachmentsUnsupported）</td><td>UI 预拦截或降级提示</td></tr>
+<tr><td>闲时（off-peak）任务的 CRUD</td><td>定义在官方 Electron 宿主私有存储，无 RPC</td><td>自建调度器（automation/* 只管 Cron 任务）</td></tr>
+<tr><td>不注凭证 env 裸启动</td><td>create 报 Model config is missing；注入不能取消</td><td>启动时注入三件套</td></tr>
+<tr><td>legacy fork 通道</td><td>行为怪（事件乱序、无 target 全量 fork 报错）、已弃用</td><td>v4 forkAssistant + CAS</td></tr>
+<tr><td>goal 的 tokenBudget 设置</td><td>没有设置入口，只能读</td><td>UI 只读展示</td></tr>
+<tr><td>信 <code>--version</code> 判 CLI 代际</td><td>版本号长期不 bump</td><td>读 zcode.cjs 找标记串</td></tr>
+</tbody>
+</table>
+
+<h2>四、诊断三板斧（排查协议问题的顺序）</h2>
+<ul>
+<li><strong>录帧</strong>：宿主侧把 stdin/stdout 全量落盘（行式 JSON），一切争议以帧为准；</li>
+<li><strong>最小复现</strong>：用 20 行 Python 骨架（第 1 课）剥离宿主复杂度，单帧复现；</li>
+<li><strong>对表</strong>：错误码表 → 军规 → 负面结论，80% 的问题能在表里直接命中。</li>
+</ul>
+
+<h2>五、结课练习</h2>
+<div class="quiz" data-title="第 8 课练习">
+  <div class="quiz-q" data-answer="1">
+    <p class="q-text">1. 全部请求同时超时 vs 单个会话超时，分别先查什么？</p>
+    <button class="quiz-opt">都是重试</button>
+    <button class="quiz-opt">进程卡死（stderr/reader）；忙窗口（延迟重试）</button>
+    <button class="quiz-opt">都是换模型</button>
+    <button class="quiz-opt">都是重启 IDE</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="2">
+    <p class="q-text">2. 想让自定义渠道重启后仍生效，走 RPC 注册？</p>
+    <button class="quiz-opt">可以，upsertModelProvider 会落盘</button>
+    <button class="quiz-opt">可以，updateProviderRegistry 会落盘</button>
+    <button class="quiz-opt">不行，写配置文件才是唯一持久途径</button>
+    <button class="quiz-opt">不行，渠道无法持久</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="0">
+    <p class="q-text">3. 判断 CLI 是 v1 还是 v2 代的可靠方法？</p>
+    <button class="quiz-opt">读 zcode.cjs 找标记串（版本号不可信）</button>
+    <button class="quiz-opt">--version</button>
+    <button class="quiz-opt">问服务端</button>
+    <button class="quiz-opt">看文件大小</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="3">
+    <p class="q-text">4. 课程的"以帧为准"诊断法指？</p>
+    <button class="quiz-opt">看 IDE 日志</button>
+    <button class="quiz-opt">猜协议行为</button>
+    <button class="quiz-opt">只信官方文档</button>
+    <button class="quiz-opt">全量录 stdin/stdout 帧，争议以录帧为准</button>
+    <p class="quiz-feedback"></p>
+  </div>
+</div>
+
+<div class="next">
+<p><strong>结课</strong>：你现在手里有一套完整的、被真实插件项目验证过的 app-server 对接知识。
+课后最好的复习方式：用 Python 骨架把 8 课的每个方法亲手打一遍帧。</p>
+</div>
+
+</body>
+</html>

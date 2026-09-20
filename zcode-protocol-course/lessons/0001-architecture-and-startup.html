@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 1 课 · 整体架构与进程启动 — zcode.cjs 协议课</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<script src="../assets/quiz.js" defer></script>
+<style>
+/* 本课专用：纯 CSS 架构图 */
+.arch { border:1px solid var(--line); border-radius:10px; padding:1rem; margin:1.2rem 0; background:var(--bg-card); }
+.arch-row { display:flex; gap:.6rem; align-items:stretch; justify-content:center; flex-wrap:wrap; margin:.4rem 0; }
+.arch-box { border:1.5px solid var(--accent); border-radius:8px; padding:.55rem .8rem; font-size:.85rem; text-align:center; background:var(--bg); min-width:120px; }
+.arch-box b { display:block; font-size:.9rem; color:var(--text-bright); }
+.arch-box small { color:var(--muted); font-size:.75rem; }
+.arch-box.dim { border-color:var(--line); }
+.arch-box.dim b { color:var(--ink-soft); }
+.arch-arrow { text-align:center; color:var(--accent); font-size:.85rem; margin:.15rem 0; }
+.arch-note { text-align:center; color:var(--muted); font-size:.78rem; margin-top:.5rem; }
+</style>
+</head>
+<body>
+
+<header class="lesson-head">
+  <a href="../index.html">← 课程索引</a>
+  <span>第 1 课 / 8</span>
+  <a href="0002-session-lifecycle.html">第 2 课 →</a>
+</header>
+
+<h1>第 1 课：整体架构与进程启动</h1>
+<p class="lead">目标：学完这课，你能<strong>画出插件与 zcode.cjs 的整体架构图</strong>，并自己用 20 行 Python
+把 app-server 拉起来、发对第一帧。这一课是后面 7 课的地基——帧格式错了，后面全白搭。</p>
+
+<h2>一、zcode.cjs 是什么，app-server 是什么</h2>
+<p><code>zcode.cjs</code> 是 ZCode CLI 的<strong>单文件打包产物</strong>（Node.js，约 12MB）。
+它本身是个多面手命令行：终端里敲 <code>zcode</code> 进交互模式，而带上 <code>app-server</code> 子命令启动时，
+它就变成一个<strong>stdio 上的 JSON-RPC 服务</strong>——不读键盘，stdin 收一帧、stdout 回一帧，专门给 GUI 宿主当后端用。</p>
+<p>ZC-GUI 插件的思路就是：<strong>不重新实现 AI 逻辑，而是把 CLI 当"引擎"子进程养起来</strong>。
+会话管理、模型调用、工具执行、MCP、技能……全在 CLI 侧；插件只做两件事：把 UI 翻译成 JSON-RPC 请求，把事件流翻译回 UI。</p>
+
+<div class="arch">
+  <div class="arch-row">
+    <div class="arch-box dim"><b>React 19 webview</b><small>JCEF 里的 UI（zustand + 事件归约）</small></div>
+  </div>
+  <div class="arch-arrow">↑↓ JCEF 桥：sendToJava / executeJavaScript</div>
+  <div class="arch-row">
+    <div class="arch-box"><b>Kotlin 插件端</b><small>ZCodeService 生命周期 · browser-use 宿主 · 审批/提问弹窗</small></div>
+    <div class="arch-box dim"><b>protocol-client</b><small>纯 Kotlin JSON-RPC 客户端<br>（无 IntelliJ 依赖，可独立测试）</small></div>
+  </div>
+  <div class="arch-arrow">↑↓ stdio JSON-RPC（本课主角）</div>
+  <div class="arch-row">
+    <div class="arch-box"><b>zcode.cjs app-server</b><small>子进程：会话/模型/工具/MCP 全在这</small></div>
+  </div>
+  <div class="arch-arrow">↑↓ HTTPS</div>
+  <div class="arch-row">
+    <div class="arch-box dim"><b>Z.ai / GLM API</b><small>模型推理 · 配额</small></div>
+  </div>
+  <div class="arch-note">反向请求（审批、提问、浏览器命令）也从 app-server 发往插件，方向与请求相反，见第 6 课</div>
+</div>
+
+<div class="note"><span class="h">为什么选 stdio 而不是 HTTP/WebSocket？</span>
+无需端口分配与防火墙顾虑，进程退出即连接断开，生命周期天然跟随 IDE；Line-delimited JSON 也最容易抓包调试（重定向 stdin/stdout 就能录帧）。</div>
+
+<h2>二、启动进程：三个环境变量是生命线</h2>
+<p>用 <code>ProcessBuilder</code>（或任何语言的 spawn）把 node 拉起来即可。<strong>但裸启动必失败</strong>——
+app-server 启动时要从环境变量拿到模型与凭证，否则建会话直接报 <code>-32603 "Model config is missing"</code>：</p>
+
+<pre><code># 必须注入的三件套（凭证注入后无法取消，属协议硬约束）
+ZCODE_MODEL=glm-4.7            # 默认模型
+ZCODE_BASE_URL=https://api.z.ai/api/anthropic  # 网关地址
+ANTHROPIC_API_KEY=xxxxxxxx     # API Key
+
+# 可选但推荐：让 CLI 的请求头带上宿主身份
+ZCODE_APP_VERSION=0.16.5       # 拼进 user-agent / x-title
+# 可选：代理
+ZCODE_HTTP_PROXY=http://127.0.0.1:7890</code></pre>
+
+<p>20 行 Python 跑通的最小宿主（scripts/diag-stream.py 的骨架，本课程大量复用）：</p>
+
+<pre><code>import subprocess, json, os, threading
+
+env = {**os.environ,
+       "ZCODE_MODEL": "glm-4.7",
+       "ZCODE_BASE_URL": "https://api.z.ai/api/anthropic",
+       "ANTHROPIC_API_KEY": os.environ["MY_KEY"]}
+p = subprocess.Popen(["node", "zcode.cjs", "app-server"],
+                     stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                     stderr=subprocess.PIPE, env=env, text=True)
+
+def drain_stderr():            # 见本课第四节，绝不省略
+    for line in p.stderr: print("[stderr]", line, end="")
+threading.Thread(target=drain_stderr, daemon=True).start()
+
+def rpc(id, method, params):   # 注意：帧里没有 "jsonrpc" 字段！
+    p.stdin.write(json.dumps({"id": id, "method": method, "params": params}) + "\n")
+    p.stdin.flush()
+
+def read_loop():               # 读循环：按 id 路由 + 反向请求应答
+    for line in p.stdout:
+        msg = json.loads(line)
+        if msg.get("id", "").startswith("server"):   # 反向请求，必须应答
+            reply(msg)
+        else:
+            print("←", json.dumps(msg, ensure_ascii=False)[:200])
+threading.Thread(target=read_loop, daemon=True).start()</code></pre>
+
+<div class="warn"><span class="h">stderr 必须持续排空</span>
+stderr 不读的话，管道缓冲区（Windows 上约 4KB）写满后 CLI 会<strong>整体卡死</strong>，表现为"所有请求超时但进程还在"。
+这是全站超时类故障的头号根因。同理，读循环里<strong>单帧解析失败绝不能让异常外溢</strong>——一个形状古怪的遥测帧把 reader 线程炸掉，全线请求跟着超时（实踩缺陷：数组帧杀 reader）。</div>
+
+<h2>三、帧格式：四种帧，没有 "jsonrpc" 字段</h2>
+<p>这是本课最重要的一行字：<strong>信封不带 <code>jsonrpc</code> 字段</strong>。
+带上了服务端直接回 <code>-32600</code>。它长得像 JSON-RPC 2.0，但实际是个方言。</p>
+
+<table>
+<thead><tr><th>帧类型</th><th>方向</th><th>形状</th></tr></thead>
+<tbody>
+<tr><td>请求</td><td>宿主 → CLI</td><td><code>{"id": 42, "method": "session/list", "params": {...}}</code>（id 为数字）</td></tr>
+<tr><td>响应</td><td>CLI → 宿主</td><td><code>{"id": 42, "result": {...}}</code> 或 <code>{"id": 42, "error": {"code": -32602, "message": "..."}}</code></td></tr>
+<tr><td>通知</td><td>CLI → 宿主</td><td><code>{"method": "session/event", "params": {...}}</code>（无 id）</td></tr>
+<tr><td>反向请求</td><td>CLI → 宿主</td><td><code>{"id": "server-1", "method": "interaction/requestPermission", "params": {...}}</code>（id 为 <b>字符串</b>，"server" 前缀）</td></tr>
+</tbody>
+</table>
+
+<p>宿主的读循环按 id 类型做三路分发：<strong>数字 id</strong> 查 pending 表唤醒等响应的协程；
+<strong>"server*" 字符串 id</strong> 交给反向请求 handler（异步执行，见第 6 课）；
+<strong>无 id</strong> 的按通知分发到事件监听器。反向请求的应答帧把原样 id 带回去：</p>
+
+<pre><code>{"id": "server-1", "result": {"decision": "allow"}}
+{"id": "server-2", "error": {"code": -32601, "message": "no handler"}}</code></pre>
+
+<h2>四、就绪探测：用最轻的请求当心跳</h2>
+<p>进程拉起 ≠ 服务就绪（Node 还要初始化配置、加载插件）。插件的做法：循环发
+<code>session/list</code> 的最小请求 <code>{"limit": 1}</code>，等到第一个响应即视为就绪（默认等 30s）。
+选它是因为最轻、幂等、无副作用——<strong>别用建会话当探测，失败会留垃圾会话</strong>。</p>
+
+<pre><code>rpc(1, "session/list", {"limit": 1})   # 循环发，收到 {"id":1,"result":...} 即就绪</code></pre>
+
+<h2>五、协议代际：同一方法，两代参数形状不同</h2>
+<p>CLI 版本号不可靠（<code>--version</code> 曾长期停在 0.16.5）。真实可用的判别法是<strong>读 zcode.cjs 文件内容找标记串</strong>：</p>
+<table>
+<thead><tr><th></th><th>OLD（v1 代）</th><th>NEW（v2 代）</th></tr></thead>
+<tbody>
+<tr><td>判别标记</td><td>不含 <code>ZCODE_PERSONAL_PROVIDER_CONFIG_FILE</code></td><td>文件含该标记串（兜底：看配置文件键形态）</td></tr>
+<tr><td>渠道配置</td><td><code>~/.zcode/cli/config.json</code></td><td><code>~/.zcode/v2/provider_config.json</code>（watch 热加载）</td></tr>
+<tr><td>参数风格</td><td>宽松，带 <code>runtimeModel</code> 大对象</td><td><strong>strict schema</strong>：多余字段直接 <code>-32602 Unrecognized key</code></td></tr>
+<tr><td>模型参数</td><td><code>runtimeModel</code> / <code>modelRef</code></td><td><code>modelSelection</code> / <code>selection</code> + <code>options.reasoningLevel</code></td></tr>
+</tbody>
+</table>
+<p>插件启动时判一次代，之后<strong>所有模型相关调用按代分支</strong>。strict 校验是新版最大行为差异，
+详细对照与自适应降级策略见第 5 课、第 8 课。</p>
+
+<div class="note"><span class="h">重试纪律</span>
+只有<strong>幂等读</strong>（session/list、session/read 等）允许超时重试；<code>session/create</code>、<code>session/send</code>
+这类写操作<strong>禁重试</strong>——超时≠失败，请求可能已在服务端生效，盲目重发会出两条一样的消息。</div>
+
+<h2>六、检索练习</h2>
+<div class="quiz" data-title="第 1 课练习">
+  <div class="quiz-q" data-answer="1">
+    <p class="q-text">1. 请求帧里能带 "jsonrpc": "2.0" 字段吗？</p>
+    <button class="quiz-opt">能，标准要求</button>
+    <button class="quiz-opt">不能，带了报 -32600</button>
+    <button class="quiz-opt">可选，无所谓</button>
+    <button class="quiz-opt">只有通知帧不能带</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="2">
+    <p class="q-text">2. "所有请求突然全部超时，但进程还活着"，最先查什么？</p>
+    <button class="quiz-opt">API Key 过期</button>
+    <button class="quiz-opt">stderr 没排空，管道堵死</button>
+    <button class="quiz-opt">会话没 resume</button>
+    <button class="quiz-opt">模型下线</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="0">
+    <p class="q-text">3. 反向请求（服务端发给宿主的请求）的 id 长什么样？</p>
+    <button class="quiz-opt">字符串，"server" 前缀</button>
+    <button class="quiz-opt">递增数字</button>
+    <button class="quiz-opt">UUID</button>
+    <button class="quiz-opt">没有 id</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="3">
+    <p class="q-text">4. 哪类请求允许超时后自动重试？</p>
+    <button class="quiz-opt">session/send</button>
+    <button class="quiz-opt">session/create</button>
+    <button class="quiz-opt">所有请求都行</button>
+    <button class="quiz-opt">仅幂等读（session/list 等）</button>
+    <p class="quiz-feedback"></p>
+  </div>
+</div>
+
+<h2>七、课后任务</h2>
+<p>用本课的 20 行 Python 骨架，把 app-server 拉起来并发 <code>session/list</code>，
+拿到 <code>{"id":1,"result":{"sessions":[...]}}</code> 就算通关。故意注释掉 stderr 排空线程、
+往帧里加 <code>"jsonrpc":"2.0"</code>，各复现一次故障，你会对这两个坑终身难忘。</p>
+
+<div class="next">
+<p><strong>下一课</strong>：会话生命周期——list / create / resume / close 四件套，以及那个最常背锅的 <code>-32004</code>。</p>
+</div>
+
+</body>
+</html>

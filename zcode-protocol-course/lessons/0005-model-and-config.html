@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 5 课 · 模型与配置 — zcode.cjs 协议课</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+
+<header class="lesson-head">
+  <a href="../index.html">← 课程索引</a>
+  <span>第 5 课 / 8</span>
+  <a href="0004-send-and-stream.html">← 第 4 课</a>
+  <a href="0006-server-to-client-requests.html">第 6 课 →</a>
+</header>
+
+<h1>第 5 课：模型与配置</h1>
+<p class="lead">目标：掌握模型六方法，重点搞定<strong>双代参数差异</strong>与 strict schema 自适应降级。
+这一课的方法最容易被 CLI 升级打断，所以"怎么防"比"怎么调"更重要。</p>
+
+<h2>一、模型方法全景</h2>
+<table>
+<thead><tr><th>方法</th><th>作用</th><th>会话级?</th></tr></thead>
+<tbody>
+<tr><td><code>session/setModel</code></td><td>切换会话模型</td><td>是</td></tr>
+<tr><td><code>session/setThoughtLevel</code></td><td>切思考级别（off/high/max…）</td><td>是</td></tr>
+<tr><td><code>session/updateRuntimeModelConfig</code></td><td>推完整运行时模型配置</td><td>是</td></tr>
+<tr><td><code>workspace/generateText</code></td><td>一次性生成（标题、润色）不带会话</td><td>否</td></tr>
+<tr><td><code>workspace/upsertModelProvider</code></td><td>注册自定义渠道（v2 已删）</td><td>否</td></tr>
+<tr><td><code>workspace/updateProviderRegistry</code></td><td>推渠道注册表（运行时态）</td><td>否</td></tr>
+</tbody>
+</table>
+
+<h2>二、session/setModel：同一方法，两代形状</h2>
+<pre><code>// v1 代（宽松）：带完整 runtimeModel 大对象
+{"id": 30, "method": "session/setModel",
+ "params": {"sessionId": "sess_abc",
+            "model": {"modelId": "glm-4.7", "providerId": "bigmodel-api"},
+            "runtimeModel": {"revision": "0", "generatedAt": 1758000000000,
+                             "model": {"providerId": "bigmodel-api", "modelId": "glm-4.7"},
+                             "provider": {"providerId": "bigmodel-api", "kind": "...",
+                                          "label": "...", "source": "...",
+                                          "baseURL": "https://api.z.ai/api/anthropic",
+                                          "apiKey": {"source": "inline", "value": "..."},
+                                          "models": [{"modelId": "glm-4.7", "contextWindow": 200000,
+                                                      "maxOutputTokens": 32768, "supportsImages": true,
+                                                      "supportsPdf": true, "supportsVideo": false,
+                                                      "label": "GLM-4.7"}]}}}}
+
+// v2 代（strict）：纯模型引用，options.reasoningLevel 对有 reasoning 的模型必填
+{"id": 31, "method": "session/setModel",
+ "params": {"sessionId": "sess_abc",
+            "model": {"providerId": "bigmodel-api", "modelId": "glm-4.7",
+                      "options": {"reasoningLevel": "high"}}}}</code></pre>
+
+<div class="warn"><span class="h">strict schema：多一个字段就拒收</span>
+v2 代用严格校验，params 里出现它不认识的 key（比如按 v1 习惯多塞的 runtimeModel）直接
+<code>-32602 "(root): Unrecognized key"</code>。好消息是：<strong>参数被拒时切换并未生效</strong>，
+所以"被 -32602 拒 → 换参数形状重发"没有副作用。插件的自适应策略：
+<strong>先按新代形状发，收到 -32602 就降级旧形状重试，反之亦然</strong>（三态探测，实际只探测一次就记住本代）。</div>
+
+<p>切模型的回执与状态对账也有一套：切换成功后靠 <code>session.updated</code>（model 字段）+ <code>state.updated</code> 对账；
+CLI 的模型管理接口有 TTL，回执迟到时宿主重发会撞出"幽灵横幅"——用 ack 会话集合去重。</p>
+
+<h2>三、setThoughtLevel：候选值永远是服务端权威</h2>
+<pre><code>{"id": 32, "method": "session/setThoughtLevel",
+ "params": {"sessionId": "sess_abc", "thoughtLevel": "high"}}
+// 发之前：session/read → settings.thoughtLevel.available 里查这个模型认哪些值</code></pre>
+<p>两个坑：① 级别集<strong>因模型而异</strong>（GLM=off/high/max，qwen=enabled/disabled），硬编码必翻车；
+② <strong>校验按"当前生效模型"进行</strong>——createSession 后立刻并发 setModel + setThoughtLevel 是竞态，
+级别按旧模型校验直接 -32603。顺序必须串行：先 setModel，read 拿新 available，再 setThoughtLevel。</p>
+
+<h2>四、workspace/generateText：不带会话的快速通道</h2>
+<p>标题生成、输入润色这类"问一句拿一段文字"的需求别建会话，直接：</p>
+<pre><code>// v2 形状（selection + maxOutputTokens 必填）
+{"id": 33, "method": "workspace/generateText",
+ "params": {"workspace": {"workspacePath": "G:\\demo"},
+            "selection": {"providerId": "bigmodel-api", "modelId": "glm-4.7",
+                          "options": {"reasoningLevel": "high"}},
+            "maxOutputTokens": 256,
+            "prompt": "给这个对话起个 8 字以内标题：...",
+            "querySource": "title_generation"}}
+// → {"id": 33, "result": {"text": "重构协议客户端", "finishReason": "stop", "usage": {...}}}
+// v1 形状：selection 换成 modelRef，去掉 maxOutputTokens；messages:[{role,content}] 形态也支持</code></pre>
+<p>注意：generateText 的模型选取规则与会话模型<strong>可能分叉</strong>（各自有默认值链），
+自定义渠道下它可能 -32603 渠道错位——兜底方案是退回 CLI 一次性子进程（<code>zcode -p</code>）跑同任务。
+另外它默认走注册表找渠道，<strong>新注册的渠道要在调用前注册好</strong>（upsertModelProvider 或写配置文件），未注册会报 -32603，此时可先 upsert 自愈再重发。</p>
+
+<h2>五、渠道持久化：RPC 写的都是运行时态</h2>
+<div class="warn"><span class="h">跨重启必丢</span>
+<code>upsertModelProvider / updateProviderRegistry</code>（v1）写的是<strong>进程内注册表，不落盘</strong>。
+自定义渠道要持久，唯一途径是写配置文件：v1 写 <code>~/.zcode/cli/config.json</code> 的 provider 注册表，
+v2 写 <code>~/.zcode/v2/provider_config.json</code>（服务端 watch 热加载，约 2 秒内生效）。
+两套命名还不一样（文件端 <code>name/options.apiKey/limit.context</code> vs RPC 端 <code>label/apiKey/contextWindow</code>），别照抄字段名。</div>
+<p>内置渠道列表怎么拿？插件实际用的是<strong>读文件 + 读会话设置双源合并</strong>，而不是某个 RPC——
+"列出可用模型"没有专门的 RPC 方法，模型列表 = 配置文件里的渠道定义 ∪ 会话 read 出的当前模型。</p>
+
+<h2>六、检索练习</h2>
+<div class="quiz" data-title="第 5 课练习">
+  <div class="quiz-q" data-answer="2">
+    <p class="q-text">1. v2 CLI 上按 v1 形状调 setModel（多带 runtimeModel），结果？</p>
+    <button class="quiz-opt">静默忽略多余字段</button>
+    <button class="quiz-opt">崩溃</button>
+    <button class="quiz-opt">-32602 Unrecognized key，且切换未生效</button>
+    <button class="quiz-opt">按 runtimeModel 执行</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="0">
+    <p class="q-text">2. 思考级别候选值的权威来源？</p>
+    <button class="quiz-opt">session/read 的 settings.thoughtLevel.available</button>
+    <button class="quiz-opt">模型 ID 前缀推断</button>
+    <button class="quiz-opt">上次会话的记忆</button>
+    <button class="quiz-opt">写死 off/high/max</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="1">
+    <p class="q-text">3. 自定义渠道想让重启后还在，应该？</p>
+    <button class="quiz-opt">每启动 upsertModelProvider 一次</button>
+    <button class="quiz-opt">写 provider_config.json / config.json（RPC 写不落盘）</button>
+    <button class="quiz-opt">存 localStorage</button>
+    <button class="quiz-opt">updateProviderRegistry 就够了</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="3">
+    <p class="q-text">4. createSession 后立刻并发 setModel + setThoughtLevel 会？</p>
+    <button class="quiz-opt">都成功</button>
+    <button class="quiz-opt">都静默失败</button>
+    <button class="quiz-opt">自动排队串行</button>
+    <button class="quiz-opt">竞态：级别按旧模型校验，-32603</button>
+    <p class="quiz-feedback"></p>
+  </div>
+</div>
+
+<div class="next">
+<p><strong>下一课</strong>：反向请求——服务端也会"打电话"过来：权限审批、AskUserQuestion、浏览器命令、定时任务，不接就卡死。</p>
+</div>
+
+</body>
+</html>

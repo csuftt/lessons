@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>zcode.cjs 协议课（app-server API 全操作）</title>
+<link rel="stylesheet" href="assets/lesson.css">
+</head>
+<body>
+
+<header class="doc-head">
+  <span>课程索引 · zcode.cjs app-server 协议</span>
+</header>
+
+<h1>zcode.cjs 协议课：app-server API 全操作</h1>
+<p class="lead">目标：<strong>从零把一个 GUI 宿主接到 zcode.cjs app-server 上</strong>——
+拉起进程、订阅事件流、切换模型、处理审批与提问，全操作走一遍。内容以真实 IDE 插件项目的线上实现为蓝本，所有结论都经真实帧验证。</p>
+
+<h2>它是什么</h2>
+<div class="grid-2">
+  <div class="card">
+    <h4>🔌 对接对象</h4>
+    <ul>
+      <li>zcode.cjs 的 <code>app-server</code> 子命令</li>
+      <li>stdio 上的行式 JSON-RPC（方言：无 jsonrpc 字段）</li>
+      <li>会话 / 模型 / 工具 / MCP / 定时任务全在后端</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>📡 通信形态</h4>
+    <ul>
+      <li>宿主 → CLI：约 30 个请求方法</li>
+      <li>CLI → 宿主：事件通知流 + 7 类反向请求</li>
+      <li>v4 面：订阅、行模型、写命令（CAS 并发）</li>
+    </ul>
+  </div>
+</div>
+
+<h2>学习路线（按 API 操作类型分章）</h2>
+<table>
+<thead>
+<tr><th>#</th><th>主题</th><th>内容</th><th>入口</th></tr>
+</thead>
+<tbody>
+<tr><td>0001</td><td>整体架构与进程启动</td><td>四层架构图 · spawn 三件套 env · 帧格式 · stderr 排空 · 判代</td><td><a href="lessons/0001-architecture-and-startup.html">进入 →</a></td></tr>
+<tr><td>0002</td><td>会话生命周期</td><td>list / create / resume / close / read / setMode · -32004 两种成因</td><td><a href="lessons/0002-session-lifecycle.html">进入 →</a></td></tr>
+<tr><td>0003</td><td>订阅与事件流</td><td>session/subscribe · 事件族全家福 · v4 订阅与行模型 · 白名单时序</td><td><a href="lessons/0003-subscription-and-events.html">进入 →</a></td></tr>
+<tr><td>0004</td><td>发消息与流式交互</td><td>send 与附件 · 三态路由（立即/排队/插队）· v4 stop · 队列管理</td><td><a href="lessons/0004-send-and-stream.html">进入 →</a></td></tr>
+<tr><td>0005</td><td>模型与配置</td><td>setModel 双代对照 · strict 降级 · 思考级别 · generateText · 渠道持久化</td><td><a href="lessons/0005-model-and-config.html">进入 →</a></td></tr>
+<tr><td>0006</td><td>反向请求</td><td>审批 / AskUserQuestion / 浏览器宿主 / 定时任务 · 应答纪律</td><td><a href="lessons/0006-server-to-client-requests.html">进入 →</a></td></tr>
+<tr><td>0007</td><td>历史与高级操作</td><td>转录与翻页 · fork / 编辑历史（CAS）· 改标题 · 目标模式</td><td><a href="lessons/0007-history-and-advanced.html">进入 →</a></td></tr>
+<tr><td>0008</td><td>错误码与避坑清单</td><td>错误码速查 · 十条军规 · 负面结论清单 · 诊断三板斧</td><td><a href="lessons/0008-errors-and-pitfalls.html">进入 →</a></td></tr>
+</tbody>
+</table>
+
+<h2>适合谁 / 前置</h2>
+<ul>
+<li>想给 ZCode CLI 做自有 GUI（IDE 插件、桌面端、远程面板）的开发者；</li>
+<li>会任意一门语言的基本进程与 JSON 操作即可，示例帧都能直接抄去发；</li>
+<li>配套练习只要 Node + 一个 API Key，每课 10~15 分钟。</li>
+</ul>
+
+</body>
+</html>

@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 6 课 · 反向请求 — zcode.cjs 协议课</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+
+<header class="lesson-head">
+  <a href="../index.html">← 课程索引</a>
+  <span>第 6 课 / 8</span>
+  <a href="0005-model-and-config.html">← 第 5 课</a>
+  <a href="0007-history-and-advanced.html">第 7 课 →</a>
+</header>
+
+<h1>第 6 课：反向请求——服务端也会"打电话"过来</h1>
+<p class="lead">目标：掌握 <code>"server-N"</code> 反向请求的处理纪律。协议是双向的：
+AI 执行中需要权限审批、要问用户问题、要操作浏览器时，会主动向宿主发请求——<strong>不接电话，回合就永远挂起</strong>。</p>
+
+<h2>一、处理纪律（三条铁律）</h2>
+<ul>
+<li><strong>必须应答</strong>：收到 <code>{"id":"server-1","method":...}</code> 后要把同 id 的 result（或 error）写回 stdin。
+没接住的未知方法<strong>回 -32601</strong>，绝不能沉默——服务端在等回执，沉默=空等；</li>
+<li><strong>handler 必须异步</strong>：反向请求在独立线程池处理，<strong>禁止在 reader 线程里同步弹窗等待</strong>——
+reader 一堵，所有请求全部超时；</li>
+<li><strong>请求级去重</strong>：服务端可能换 id 重发同一请求，按业务键（如 toolCallId）去重，回执缓存复用。</li>
+</ul>
+
+<h2>二、反向请求全家福</h2>
+<table>
+<thead><tr><th>method</th><th>何时来</th><th>应答 result</th></tr></thead>
+<tbody>
+<tr><td><code>session/requestRuntimePreferences</code></td><td>create/resume 会话后立刻</td><td><code>{"nativeSearchEnhancementsEnabled": bool, "memoryEnabled": bool, "askUserQuestionAutoResolutionEnabled": bool}</code> <b>三个键都必须给</b></td></tr>
+<tr><td><code>interaction/requestPermission</code></td><td>工具要执行敏感操作</td><td><code>{"decision": "allow"|"deny"|"escalate"|"modify", "reason"?, "modifiedInput"?, "permissionUpdates"?}</code></td></tr>
+<tr><td><code>interaction/requestUserInput</code></td><td>AI 调 AskUserQuestion 工具</td><td><code>{"action": "answer", "content": {"answer": "..."}}</code> 或 decline</td></tr>
+<tr><td><code>interaction/requestProviderRuntimeHeaders</code></td><td>套餐网关风控验证</td><td><code>{"headersApplied": bool, "errorMessage"?}</code></td></tr>
+<tr><td><code>interaction/browserList</code></td><td>AI 要用浏览器</td><td><code>{"browsers": [...]}</code>（能力清单，只列已实现的命令）</td></tr>
+<tr><td><code>interaction/browserExecute</code></td><td>执行浏览器命令</td><td>命令执行结果（约 40 个命令的 discriminatedUnion）</td></tr>
+<tr><td><code>automation/create|update|delete|list|checkTaskBinding</code></td><td>AI 调 Cron 系定时工具</td><td>宿主调度器的执行结果</td></tr>
+</tbody>
+</table>
+
+<h2>三、requestRuntimePreferences：最容易卡死新手的一帧</h2>
+<p>会话一创建，服务端马上发来这帧。<strong>三个布尔键缺任何一个，会话初始化都会一直等</strong>——
+表象是"会话建了但发消息没反应"。无脑全 false 也能跑：</p>
+<pre><code>// 收到 {"id":"server-1","method":"session/requestRuntimePreferences","params":{...}} 时：
+{"id": "server-1", "result": {
+    "nativeSearchEnhancementsEnabled": false,
+    "memoryEnabled": true,
+    "askUserQuestionAutoResolutionEnabled": false}}</code></pre>
+<p>memoryEnabled 等 开关要和插件设置页联动的话，就按设置回。这帧同时是官方客户端的一条隐藏链路——
+官方 GUI 能不注入凭证 env 裸跑靠的就是这类反向通道，纯 headless 宿主不具备，所以凭证 env 该注还是得注（第 1 课）。</p>
+
+<h2>四、requestPermission：strict schema，多字段必拒</h2>
+<pre><code>// 服务端 params 携带工具名、输入、权限上下文；宿主弹审批面板，用户点允许后：
+{"id": "server-2", "result": {"decision": "allow"}}
+
+// 修改后放行：
+{"id": "server-2", "result": {"decision": "modify",
+                              "modifiedInput": {"path": "G:\\demo\\a.py", "content": "..."},
+                              "reason": "调整了写入路径"}}
+
+// 拒绝（意见式拒绝会作为反馈回流给 AI 继续跑；裸 deny 则终止该工具）：
+{"id": "server-2", "result": {"decision": "deny", "reason": "这个文件不要动"}}</code></pre>
+<div class="note"><span class="h">strict 应答</span>
+应答对象也是 strict 的：<strong>多了协议外的字段会被整体拒绝</strong>。decision 取值固定四个，
+大小写敏感。审批面板要做"无超时等待"（超时自动拒绝会打断长任务），并处理同会话多个审批排队的情况。</div>
+
+<h2>五、requestUserInput：AskUserQuestion 的宿主侧</h2>
+<pre><code>// params 里是问题结构（question/header/options 等，选项带 label/description/multiSelect）
+// 用户选了"选项 B"：
+{"id": "server-3", "result": {"action": "answer",
+                              "content": {"answer": "B"}}}
+// 用户关掉弹窗：
+{"id": "server-3", "result": {"action": "decline"}}</code></pre>
+<p>宿主没有弹窗能力（如后台无人值守）时<strong>必须回 decline</strong>让 AI 走降级路径，
+沉默会让回合无限挂起。完成态的问答对会作为工具回执落进转录（工具卡回看功能的数据源）。</p>
+
+<h2>六、browserExecute：把 AI 的浏览器工具接进自己的内核</h2>
+<p>这是插件最"宿主"的一帧：AI 发起 <code>browser_navigate / browser_click / browser_snapshot</code> 等命令，
+宿主决定<strong>在哪执行</strong>——插件把它接进 IDE 内嵌 JCEF 浏览器：</p>
+<pre><code>// 服务端：
+{"id": "server-4", "method": "interaction/browserExecute",
+ "params": {"command": "navigate", "url": "https://example.com", ...}}
+// 宿主驱动 JCEF 完成后：
+{"id": "server-4", "result": {"ok": true, "snapshot": "..."}}
+
+// browserList 先声明能力（只列真正实现的命令，AI 会按能力选择）：
+{"id": "server-5", "result": {"browsers": [{"name": "jcef-embedded",
+                                            "capabilities": ["navigate","click","snapshot","fill", ...]}]}}</code></pre>
+<p>生命周期类命令（closeSession 等）要做<strong>幂等空应答</strong>（重复 close 不报错）；
+没有宿主能力时 browserList 回空数组，AI 会自动降级为"给你命令你自己跑"。</p>
+
+<h2>七、automation/*：定时任务的中继</h2>
+<p>AI 调 CronCreate / CronUpdate 这类工具时，服务端原样转成 automation 反向请求交给宿主——
+<strong>调度器在宿主手里</strong>（插件用 Java 定时器实现，webview 里只是镜像）。业务上拒绝（比如循环任务不支持）可以正常回执说明，
+handler 未注册则回 -32601。注意：CLI 的"闲时（off-peak）任务"定义存在官方 Electron 宿主的私有存储里，<strong>没有对应 RPC，第三方宿主拿不到也建不了</strong>。</p>
+
+<h2>八、检索练习</h2>
+<div class="quiz" data-title="第 6 课练习">
+  <div class="quiz-q" data-answer="1">
+    <p class="q-text">1. 会话创建后发消息一直没反应，读循环里看到一帧没处理的 requestRuntimePreferences。因为？</p>
+    <button class="quiz-opt">send 字段名错了</button>
+    <button class="quiz-opt">这帧没应答，服务端一直在等</button>
+    <button class="quiz-opt">订阅没建</button>
+    <button class="quiz-opt">模型没配</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="2">
+    <p class="q-text">2. 宿主收到不认识的反向请求，正确做法？</p>
+    <button class="quiz-opt">忽略，等下一帧</button>
+    <button class="quiz-opt">关掉进程重启</button>
+    <button class="quiz-opt">回 -32601 error，防止服务端空等</button>
+    <button class="quiz-opt">原样转发给用户</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="0">
+    <p class="q-text">3. 反向请求 handler 的线程纪律？</p>
+    <button class="quiz-opt">异步线程池处理，绝不阻塞 reader 线程</button>
+    <button class="quiz-opt">必须在 reader 线程同步处理</button>
+    <button class="quiz-opt">必须在 EDT 处理</button>
+    <button class="quiz-opt">随意，服务端会重试</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="3">
+    <p class="q-text">4. 无人值守场景收到 requestUserInput，应该？</p>
+    <button class="quiz-opt">缓存等用户回来</button>
+    <button class="quiz-opt">随便选一个选项</button>
+    <button class="quiz-opt">不处理</button>
+    <button class="quiz-opt">回 decline 让 AI 降级</button>
+    <p class="quiz-feedback"></p>
+  </div>
+</div>
+
+<div class="next">
+<p><strong>下一课</strong>：历史与高级操作——读转录、翻页、回合分叉（CAS）、编辑历史消息、改标题、目标模式。</p>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 4 课 · 发消息与流式交互 — zcode.cjs 协议课</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<script src="../assets/quiz.js" defer></script>
+<style>
+.arch { border:1px solid var(--line); border-radius:10px; padding:1rem; margin:1.2rem 0; background:var(--bg-card); }
+.arch-row { display:flex; gap:.6rem; align-items:stretch; justify-content:center; flex-wrap:wrap; margin:.4rem 0; }
+.arch-box { border:1.5px solid var(--accent); border-radius:8px; padding:.55rem .8rem; font-size:.85rem; text-align:center; background:var(--bg); min-width:130px; }
+.arch-box b { display:block; font-size:.9rem; color:var(--text-bright); }
+.arch-box small { color:var(--muted); font-size:.75rem; }
+.arch-box.dim { border-color:var(--line); } .arch-box.dim b { color:var(--ink-soft); }
+.arch-arrow { text-align:center; color:var(--accent); font-size:.85rem; margin:.15rem 0; }
+.arch-note { text-align:center; color:var(--muted); font-size:.78rem; margin-top:.5rem; }
+</style>
+</head>
+<body>
+
+<header class="lesson-head">
+  <a href="../index.html">← 课程索引</a>
+  <span>第 4 课 / 8</span>
+  <a href="0003-subscription-and-events.html">← 第 3 课</a>
+  <a href="0005-model-and-config.html">第 5 课 →</a>
+</header>
+
+<h1>第 4 课：发消息与流式交互</h1>
+<p class="lead">目标：掌握 <code>session/send</code> 与 <code>v4/command sendText</code> 双通道，
+理解消息的<strong>三态路由</strong>（立即/排队/插队）、附件形态、以及"停止回合"为什么不能用 legacy stop。</p>
+
+<h2>一、session/send：主入口与它的参数陷阱</h2>
+<pre><code>{"id": 20, "method": "session/send",
+ "params": {"sessionId": "sess_abc",
+            "content": "帮我看看这段代码",          // 注意：字段名是 content，不是 message！
+            "modelSelection": {"providerId": "bigmodel-api",   // v2 代才传；v1 代用 runtimeModel
+                               "modelId": "glm-4.7"},
+            "attachments": [{"kind": "image", "filename": "err.png",
+                             "mimeType": "image/png", "sizeBytes": 20480,
+                             "dataBase64": "iVBORw0..."}]}}
+// → {"id": 20, "result": {"accepted": true, "sessionId": "sess_abc", ...}}</code></pre>
+<p>要点：</p>
+<ul>
+<li><strong>字段名是 <code>content</code></strong>——写成 message 服务端不报错但也不干活，属"静默无效"类坑；</li>
+<li><strong>attachments 走 base64 内联</strong>（kind:"image"）；历史读回来时图片则变成 <code>zcode-artifact://</code> 引用，两个世界别搞混；</li>
+<li><strong>-32031（restoreWarning）自救</strong>：send 被拒 = 会话没有可用的模型上下文。对策是把当前模型<strong>随 send 一起带上</strong>
+（v1 带 runtimeModel / v2 带 modelSelection），原路重试即可，不需要先单独 setModel。</li>
+</ul>
+
+<h2>二、回合一分钟：send 之后事件怎么流</h2>
+<p>发送成功后，UI 完全由事件驱动（第 3 课的订阅此刻开始干活）：</p>
+<table>
+<thead><tr><th>#</th><th>事件</th><th>宿主动作</th></tr></thead>
+<tbody>
+<tr><td>1</td><td><code>turn.started</code></td><td>插入回合容器，锁定输入态</td></tr>
+<tr><td>2</td><td><code>model.streaming</code>(reasoning_delta…)</td><td>思考区滚动</td></tr>
+<tr><td>3</td><td><code>model.streaming</code>(text_delta…)</td><td>正文打字机</td></tr>
+<tr><td>4</td><td><code>tool.updated</code>(scheduled→started→progress→result)</td><td>工具卡生命周期，按 toolCallId 关联</td></tr>
+<tr><td>5</td><td><code>turn.completed</code>（usage 在 payload 里）</td><td>收尾、显示耗时与 token</td></tr>
+</tbody>
+</table>
+<div class="note"><span class="h">流式期间看门狗的豁免</span>
+宿主常有"N 秒无事件判卡死"的看门狗。但工具 <code>progress</code> 事件可能被 UI 拦截不落盘，造成"事件静默但回合活跃"的误报——
+看门狗的豁免判据要覆盖全部活跃信号（含 ended），别只看 streaming delta。</div>
+
+<h2>三、v4/command sendText：三态路由</h2>
+<p>回合进行中再发消息，走 <code>v4/command</code> 的 <code>sendText</code>，用 <code>requestedDelivery</code> 指定路由：</p>
+<pre><code>{"id": 21, "method": "v4/command",
+ "params": {"commandId": "cmd-uuid-1",              // 客户端生成，排队伍 id 可由它派生
+            "clientId": "zcode-idea-plugin",
+            "sessionId": "sess_abc",
+            "type": "sendText",
+            "payload": {"text": "先改这个再继续",
+                        "requestedDelivery": "guide"},   // startNow | queue | guide
+            "issuedAt": 1758000000000,
+            "connectionId": "b7e2...",
+            "clientMode": "desktop-continuous"}}</code></pre>
+
+<div class="arch">
+  <div class="arch-row">
+    <div class="arch-box"><b>startNow</b><small>立即开启新回合</small></div>
+    <div class="arch-box"><b>queue</b><small>进队列，当前回合结束后自动发出</small></div>
+    <div class="arch-box"><b>guide</b><small>插队：注入当前回合，AI 即刻看到</small></div>
+  </div>
+  <div class="arch-note">三态由服务端裁决；回合空闲时 guide/startNow 等价于直接开跑</div>
+</div>
+
+<p>两个必须知道的坑：</p>
+<ul>
+<li><strong>ack 的 <code>result.delivery</code> 恒报 "queue"，不可信</strong>。真实路由看后续事件：
+<code>turn.steerQueued</code>（已受理插队，带 targetTurnId）/ <code>turn.steerDrained</code>（注入完成，injectedMessageIds 可定位落位）；</li>
+<li><strong>guide + 附件 = 服务端强制降级 queue</strong>（reasonCode 类 <code>guide.attachmentsUnsupported</code>）——
+插队通道不支持图片，UI 要提前拦截或提示。</li>
+</ul>
+<p>队列管理配套两个命令：<code>deleteQueueItem</code>（撤回排队消息，队列 id = <code>"queue_" + commandId</code>，前端可预置）；
+队列排空（当前回合结束把队首发出去）是<strong>客户端职责</strong>，服务端不会自动替你 flush。</p>
+
+<h2>四、停止回合：legacy stop 已死，v4 stop 当立</h2>
+<pre><code>// 已实证失效：官方客户端从不调它，新版 CLI 上发了个寂寞
+{"id": 22, "method": "session/stop", "params": {"sessionId": "sess_abc"}}
+
+// 正确姿势（40ms 内真终止）：
+{"id": 23, "method": "v4/command",
+ "params": {"commandId": "cmd-uuid-2", "clientId": "zcode-idea-plugin",
+            "sessionId": "sess_abc", "type": "stop",
+            "payload": {}, "issuedAt": 1758000000000,
+            "connectionId": "b7e2...", "clientMode": "desktop-continuous"}}</code></pre>
+<p>stop 的收尾有个隐蔽差异：<strong>流式期（模型吐字中）停下后，legacy 流不发终止帧</strong>；
+工具执行期停则会发真实 turn.completed。所以宿主要按 turnId 守卫，<strong>自行合成收尾信号</strong>，
+否则 UI 会一直转圈。另外 stop 只停前台回合，<strong>后台任务要用 <code>session/cancelBackgroundTask</code></strong>（taskId 即子代理 agentId）单独停。</p>
+
+<h2>五、检索练习</h2>
+<div class="quiz" data-title="第 4 课练习">
+  <div class="quiz-q" data-answer="1">
+    <p class="q-text">1. session/send 发出去却毫无反应，先检查什么？</p>
+    <button class="quiz-opt">deliveryKind</button>
+    <button class="quiz-opt">字段名是不是写成了 message（应为 content）</button>
+    <button class="quiz-opt">connectionId</button>
+    <button class="quiz-opt">issuedAt</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="2">
+    <p class="q-text">2. send 报 -32031 restoreWarning，正确处理？</p>
+    <button class="quiz-opt">重建会话</button>
+    <button class="quiz-opt">重连订阅</button>
+    <button class="quiz-opt">带上当前模型（modelSelection/runtimeModel）原路重试</button>
+    <button class="quiz-opt">先 close 再 resume</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="0">
+    <p class="q-text">3. 插队（guide）消息的送达确认看哪？</p>
+    <button class="quiz-opt">turn.steerQueued / steerDrained 事件</button>
+    <button class="quiz-opt">命令 ack 的 result.delivery</button>
+    <button class="quiz-opt">session/read</button>
+    <button class="quiz-opt">没有确认机制</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="3">
+    <p class="q-text">4. 流式期间 v4 stop 成功后 UI 一直转圈，因为？</p>
+    <button class="quiz-opt">stop 没生效</button>
+    <button class="quiz-opt">订阅断了</button>
+    <button class="quiz-opt">队列没排空</button>
+    <button class="quiz-opt">流式期 stop 后 legacy 流不发终止帧，需按 turnId 自行合成收尾</button>
+    <p class="quiz-feedback"></p>
+  </div>
+</div>
+
+<div class="next">
+<p><strong>下一课</strong>：模型与配置——setModel 两代参数对照、strict schema 降级策略、generateText 快速通道、渠道为什么必须写文件才持久。</p>
+</div>
+
+</body>
+</html>

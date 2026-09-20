@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 2 课 · 会话生命周期 — zcode.cjs 协议课</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+
+<header class="lesson-head">
+  <a href="../index.html">← 课程索引</a>
+  <span>第 2 课 / 8</span>
+  <a href="0001-architecture-and-startup.html">← 第 1 课</a>
+  <a href="0003-subscription-and-events.html">第 3 课 →</a>
+</header>
+
+<h1>第 2 课：会话生命周期——list / create / resume / close</h1>
+<p class="lead">目标：掌握会话四件套 + <code>session/read</code> 万能读取。学完你能解释：
+为什么恢复历史会话前必须 resume、<code>-32004</code> 的两种成因、以及 Windows 路径为什么要查两遍。</p>
+
+<h2>一、会话的两种存在形态</h2>
+<p>app-server 里的会话有<strong>两层状态</strong>，很多坑都出在混淆这两层：</p>
+<ul>
+<li><strong>持久层</strong>：落盘在 CLI 的 sqlite 里，重启都在，<code>session/list</code> 看到的是它；</li>
+<li><strong>运行时层</strong>：进程内存里的"激活槽位"，只有 resume / subscribe / create 过的会话才占槽。
+<strong>绝大多数操作（read、setModel、send…）要求会话在运行时层是 active 的</strong>，否则报 <code>-32004</code>。</li>
+</ul>
+
+<div class="note"><span class="h">-32004 的两种成因，处理方式完全不同</span>
+① <strong>冷会话</strong>：历史会话还没激活——<code>session/resume</code> 一次即愈，这是绝大多数情况；
+② <strong>真槽位满</strong>：运行时槽位约 16 个（LRU），此时 resume 最旧的腾位置。
+先试 resume，无效才考虑挤槽。</div>
+
+<h2>二、session/list：列出 + 两个 Windows 特有坑</h2>
+<pre><code>{"id": 2, "method": "session/list",
+ "params": {"workspace": {"workspacePath": "G:\\demo", "workspaceKey": "G:\\demo"},
+            "includeArchived": false, "limit": 50}}
+// → {"id": 2, "result": {"sessions": [{"sessionId": "sess_xxx", "title": "...",
+//      "updatedAt": 1758000000000, "status": "...", ...}]}}</code></pre>
+<p>三个要点：</p>
+<ul>
+<li><strong>路径双形态</strong>：历史数据里 <code>G:\demo</code> 和 <code>G:/demo</code>（正反斜杠）可能并存。
+权威做法是<strong>两种形态各查一次取并集</strong>，只查一种会漏会话；</li>
+<li><strong>过滤子代理</strong>：结果里混着 <code>sess_subagent_*</code> 前缀的子代理会话，展示时要过滤掉（它们不是用户会话）；</li>
+<li><strong>按 updatedAt 重排</strong>：并集拼接会破坏倒序，客户端拿到后自己按 <code>updatedAt</code> 排。</li>
+</ul>
+
+<h2>三、session/create：四个模式值</h2>
+<pre><code>{"id": 3, "method": "session/create",
+ "params": {"workspace": {"workspacePath": "G:\\demo", "workspaceKey": "G:\\demo"},
+            "mode": "build"}}
+// → {"id": 3, "result": {"session": {"sessionId": "sess_abc", "protocol": {"name": "...", "version": 1}}}}</code></pre>
+<p><code>mode</code> 取 <code>build / edit / plan / yolo</code>（yolo = 全自动不放权限审批）。
+创建成功后服务端会立刻反向发来 <code>session/requestRuntimePreferences</code>（第 6 课）——
+<strong>不答它会一直等</strong>，所以读循环要先于 create 启动。</p>
+
+<h2>四、session/resume：激活历史会话的必经之路</h2>
+<pre><code>// 完整形态：激活 + 绑定工作区（恢复现场时用）
+{"id": 4, "method": "session/resume",
+ "params": {"sessionId": "sess_abc",
+            "workspace": {"workspacePath": "G:\\demo", "workspaceKey": "G:\\demo"}}}
+
+// 轻量形态：只激活（槽位管理、删除前处理时用）
+{"id": 5, "method": "session/resume", "params": {"sessionId": "sess_abc"}}</code></pre>
+<p>两条铁律：</p>
+<ul>
+<li><strong>subscribe 前必 resume</strong>：订阅一个冷会话，先 resume 再 subscribe，否则事件流接不上；</li>
+<li><strong>resume 要去重</strong>：并发两次 resume 同一会话会互相踩，插件侧维护"已 resume 集合"；</li>
+<li><strong>resume 中断回合的会话后有约 1.5~2 分钟"忙窗口"</strong>（服务端对中断的模型请求做指数退避重试），
+期间该会话的请求会超时，其他会话不受影响——对策是延迟 15s/30s 自动重试，别急着判死。</li>
+</ul>
+
+<h2>五、session/close 与删除</h2>
+<pre><code>{"id": 6, "method": "session/close", "params": {"sessionId": "sess_abc"}}</code></pre>
+<p>close 只做两件事：结束运行时、清内存索引，<strong>不删持久数据</strong>。对未激活（inactive）的会话 close 会报 <code>-32004</code>。
+所以完整的删除流程是三段式：<code>resume → close → 直删 sqlite 记录</code>（客户端删除语义是软删 <code>deleted=1</code>）。</p>
+
+<h2>六、session/read：万能状态读取器</h2>
+<p>一个方法顶四个用，插件的上下文圆环、设置面板、目标模式面板全靠它：</p>
+<pre><code>{"id": 7, "method": "session/read", "params": {"sessionId": "sess_abc"}}
+// → result 里按需取：
+//   runtime.contextUsage        上下文占用（圆环数据源）
+//   settings.mode               当前权限模式（build/plan/...）
+//   settings.thoughtLevel       {current, available:[{label,value}]} 思考级别
+//   settings.model              当前模型
+//   session.target              目标模式状态（objective/tokenBudget/timeUsed…）
+//   goalStats                   目标统计</code></pre>
+<p>注意 <code>settings.thoughtLevel.available</code> 是<strong>思考级别的唯一权威来源</strong>——
+级别集因模型而异（GLM 是 off/high/max，qwen 系是 enabled/disabled），<strong>禁止前端硬编码候选值</strong>，每次打开面板现场 read。</p>
+
+<h2>七、session/setMode：运行中切换权限模式</h2>
+<pre><code>{"id": 8, "method": "session/setMode", "params": {"sessionId": "sess_abc", "mode": "plan"}}</code></pre>
+<p>改完不要自己脑补状态——模式变更的<strong>权威回执走 <code>state.updated</code> 通知</strong>（patch 里有 mode 字段，见第 3 课），
+本地乐观更新 + 服务端回执对账才是稳的做法。</p>
+
+<h2>八、一张速查表</h2>
+<table>
+<thead><tr><th>方法</th><th>作用</th><th>前置条件</th><th>典型报错</th></tr></thead>
+<tbody>
+<tr><td><code>session/list</code></td><td>列会话（就绪探测也用它）</td><td>无</td><td>—</td></tr>
+<tr><td><code>session/create</code></td><td>建会话</td><td>凭证 env 已注入</td><td>-32603 Model config is missing</td></tr>
+<tr><td><code>session/resume</code></td><td>激活冷会话</td><td>无</td><td>忙窗口期超时</td></tr>
+<tr><td><code>session/close</code></td><td>结束运行时</td><td>会话 active</td><td>-32004</td></tr>
+<tr><td><code>session/read</code></td><td>读状态/设置/目标</td><td>会话 active</td><td>-32004</td></tr>
+<tr><td><code>session/setMode</code></td><td>切权限模式</td><td>会话 active</td><td>-32004</td></tr>
+</tbody>
+</table>
+
+<h2>九、检索练习</h2>
+<div class="quiz" data-title="第 2 课练习">
+  <div class="quiz-q" data-answer="2">
+    <p class="q-text">1. 历史会话上 setModel 报 -32004，最可能的原因？</p>
+    <button class="quiz-opt">模型 ID 写错</button>
+    <button class="quiz-opt">API Key 失效</button>
+    <button class="quiz-opt">冷会话没 resume</button>
+    <button class="quiz-opt">版本太旧</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="1">
+    <p class="q-text">2. Windows 下列会话为什么查两次？</p>
+    <button class="quiz-opt">list 一次最多 50 条</button>
+    <button class="quiz-opt">路径正反斜杠两种形态并存</button>
+    <button class="quiz-opt">区分归档与未归档</button>
+    <button class="quiz-opt">主会话与子代理分页</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="0">
+    <p class="q-text">3. session/read 里思考级别的候选值从哪来？</p>
+    <button class="quiz-opt">settings.thoughtLevel.available（服务端权威）</button>
+    <button class="quiz-opt">前端写死 off/high/max</button>
+    <button class="quiz-opt">模型名的命名规律推断</button>
+    <button class="quiz-opt">CHANGELOG 文档</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="3">
+    <p class="q-text">4. 彻底删除一个会话的正确顺序？</p>
+    <button class="quiz-opt">close → list → setMode</button>
+    <button class="quiz-opt">直接 deleteSession</button>
+    <button class="quiz-opt">read → close</button>
+    <button class="quiz-opt">resume → close → 删持久记录</button>
+    <p class="quiz-feedback"></p>
+  </div>
+</div>
+
+<div class="next">
+<p><strong>下一课</strong>：订阅与事件流——先 subscribe 再 send 的时序、事件族全家福、以及子会话为什么要另走 v4 通道。</p>
+</div>
+
+</body>
+</html>

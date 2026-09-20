@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 7 课 · 历史与高级操作 — zcode.cjs 协议课</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+
+<header class="lesson-head">
+  <a href="../index.html">← 课程索引</a>
+  <span>第 7 课 / 8</span>
+  <a href="0006-server-to-client-requests.html">← 第 6 课</a>
+  <a href="0008-errors-and-pitfalls.html">第 8 课 →</a>
+</header>
+
+<h1>第 7 课：历史与高级操作</h1>
+<p class="lead">目标：掌握读历史、翻页、回合分叉、编辑历史消息、改标题、目标模式这些"进阶动作"。
+核心新概念只有一个：<strong>乐观并发（CAS）</strong>——v4 写命令的通用套路。</p>
+
+<h2>一、读历史：两条通道</h2>
+<pre><code>// legacy 转录（一次性全量，适合渲染完整历史）
+{"id": 40, "method": "session/messages", "params": {"sessionId": "sess_abc"}}
+// → messages[]，其中用户图片 part 是 {type:"file", url:"zcode-artifact://..."}，
+//   宿主要自己把它映射成本地缓存 URL 才能显示
+
+// v4 行模型翻页（适合虚拟滚动/按需加载，每页 ≤200）
+{"id": 41, "method": "v4/conversation/rowsRange",
+ "params": {"sessionId": "sess_abc", "topic": "conversation/sess_abc",
+            "limit": 200, "beforeRowId": "row_0520"}}   // 不带 beforeRowId = 从最新往回
+// → {"rows": [{rowId, turnId, kind, text, input, output, actions:{canFork, canEdit}}], "hasMore": true}</code></pre>
+<p><code>rowsRange</code> 是 v4 写命令的<strong>定位器</strong>：fork / 编辑历史消息的 target（rowId + entityId）都从它的返回里拿，
+<code>actions.canFork / canEdit</code> 是服务端算好的可操作性标记，UI 直接用。</p>
+
+<h2>二、v4/command 的 CAS：乐观并发三步舞</h2>
+<p>所有"改历史"的写命令（fork / editUserQuery / deleteQueueItem）都带 <code>baseRevision</code>：
+<strong>它必须等于服务端当前 revision，不等就回 stale</strong>。但服务端不会把 revision 免费给你——标准流程：</p>
+<pre><code>1. 首发带 baseRevision: 0
+   → {"status": "stale", "revisionAtDecision": 57}    // 几乎必 stale，别慌，这是设计如此
+2. 用 revisionAtDecision 作为 baseRevision 重发
+   → {"status": "accepted"}                            // 一次重试即中
+3. 若再 stale（期间又有并发写），重复第 2 步（插件设了最多 5 轮）</code></pre>
+<div class="note"><span class="h">为什么这样设计</span>
+避免"读-算-写"竞态：服务端用 revision 做 CAS，保证两个客户端同时改历史不会互相覆盖。
+<code>revisionAtDecision</code> 是"服务端拒绝那一刻的最新版本"，天然就是你的下一次筹码。</div>
+
+<h2>三、forkAssistant：从任意轮分叉新会话</h2>
+<pre><code>{"id": 42, "method": "v4/command",
+ "params": {"commandId": "cmd-u1", "clientId": "zcode-idea-plugin",
+            "sessionId": "sess_abc", "type": "forkAssistant",
+            "payload": {"target": {"rowId": "row_0518", "entityId": "ent_3"}},
+            "baseRevision": 0, "baseLogEpoch": 3,       // CAS 双基准
+            "issuedAt": 1758000000000}}
+// stale → 用 revisionAtDecision 重试
+// accepted → result.sessionId 即分叉出的新会话</code></pre>
+<p>要点：target 行须 <code>actions.canFork</code>（轮末的 assistantText 行）；
+<strong>分叉会恢复工作区文件到那个时点</strong>——这是破坏性动作，且没有参数可跳过，UI 上要明示用户；
+历史遗留的 legacy <code>session/fork</code> 通道已弃用（行为怪、同样会恢复文件），一律走 v4。</p>
+
+<h2>四、editUserQuery：编辑历史消息</h2>
+<pre><code>{"id": 43, "method": "v4/command",
+ "params": {..., "type": "editUserQuery",
+            "payload": {"target": {"rowId": "row_0501", "entityId": "ent_1"},
+                        "newText": "改成这样：只用标准库实现",
+                        "attachments": [{"ref": "file:///tmp/x.png",   // ref 引用形态，非 base64
+                                         "fileName": "x.png", "mime": "image/png",
+                                         "bytes": 20480}]},
+            "baseRevision": 0}}</code></pre>
+<p>三个实战要点：</p>
+<ul>
+<li><strong>带图编辑必须显式传 attachments</strong>：不传数组，原图直接丢——服务端不会"保留原图"；</li>
+<li><strong>回合中编辑要 stop-first 两段式</strong>：工具执行中提交会 accepted 却永不生效（重发被排队）。
+正确姿势：先 stop 回合，等终态，再 edit，然后（可选）自动重发触发新回合；</li>
+<li>编辑后的行 id 行为：回合中=就地改写 id 复用；空闲=产生新 id。UI 不要缓存行 id 做长期主键。</li>
+</ul>
+
+<h2>五、renameSession 与 goal</h2>
+<pre><code>// 改标题（payload 极简，无 CAS 要求）
+{"id": 44, "method": "v4/command",
+ "params": {..., "type": "renameSession", "payload": {"title": "重构协议客户端"}}}
+// 注意：新会话要"发过一条消息激活 runtime"后改名才生效；自动标题只在第 0 回合正常结束后生成一次，
+// 中断过的会话永远停在 first_input 来源。
+
+// 目标模式：六动作引擎，执行在服务端
+{"id": 45, "method": "session/goal",
+ "params": {"sessionId": "sess_abc", "action": "set", "objective": "把测试全绿并保持不回退"}}
+// action ∈ set / replace / pause / resume / clear / show
+// → {response, snapshot:{...目标统计, tokenBudget, timeUsedSeconds}, startedTurn?}
+// 续跑轮是"model-only 合成 user 消息"（转录里看到无正文的 user 帧不是 bug）；
+// tokenBudget 没有设置入口，只能读。</code></pre>
+
+<h2>六、杂项但常用</h2>
+<table>
+<thead><tr><th>方法</th><th>作用</th><th>要点</th></tr></thead>
+<tbody>
+<tr><td><code>session/subagents</code></td><td>列出子代理</td><td>{endedLimit}（默认 20 上限 100），返回 running+ended 两列；子会话 read 前也要先 resume</td></tr>
+<tr><td><code>usage/stats</code></td><td>用量统计</td><td>{range:"7d"|"30d"|"all"}，本地聚合，无凭证也能用</td></tr>
+<tr><td><code>session/usage</code></td><td>会话累计 token</td><td>{sessionId}</td></tr>
+<tr><td><code>mcp/list</code></td><td>MCP 服务器状态</td><td>mode:"status" 只读状态；自己 spawn 的 app-server 自发现恒空，要看配置得读 config.json</td></tr>
+<tr><td><code>plugins/list</code></td><td>插件/技能清单</td><td>带 skillCount、hostMcpServerNames、diagnostics</td></tr>
+<tr><td>compact（压缩上下文）</td><td>转录压缩</td><td>压缩不清空转录，只插屏障帧；用 activeTurnId 拦截滞后读数</td></tr>
+</tbody>
+</table>
+
+<h2>七、检索练习</h2>
+<div class="quiz" data-title="第 7 课练习">
+  <div class="quiz-q" data-answer="2">
+    <p class="q-text">1. forkAssistant 首发带 baseRevision:0 被拒 stale，说明？</p>
+    <button class="quiz-opt">会话坏了</button>
+    <button class="quiz-opt">没有 fork 权限</button>
+    <button class="quiz-opt">设计如此，用 revisionAtDecision 重试即可</button>
+    <button class="quiz-opt">要先 unsubscribe</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="0">
+    <p class="q-text">2. editUserQuery 不传 attachments 数组，原图会？</p>
+    <button class="quiz-opt">丢失（不会自动保留）</button>
+    <button class="quiz-opt">自动保留</button>
+    <button class="quiz-opt">报 -32602</button>
+    <button class="quiz-opt">转成文字占位并保留原图</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="1">
+    <p class="q-text">3. 工具执行中提交 editUserQuery 会？</p>
+    <button class="quiz-opt">立即生效</button>
+    <button class="quiz-opt">accepted 却永不生效，须 stop-first 两段式</button>
+    <button class="quiz-opt">报 stale</button>
+    <button class="quiz-opt">自动排队到轮末执行</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="3">
+    <p class="q-text">4. goal 续跑轮在转录里表现为无正文的 user 消息，因为？</p>
+    <button class="quiz-opt">转录损坏</button>
+    <button class="quiz-opt">压缩屏障帧</button>
+    <button class="quiz-opt">子代理注入</button>
+    <button class="quiz-opt">model-only 合成消息，属正常机制</button>
+    <p class="quiz-feedback"></p>
+  </div>
+</div>
+
+<div class="next">
+<p><strong>下一课（最后一课）</strong>：错误码总表 + 十大避坑清单 + 负面结论——把 8 课的教训浓缩成一页防呆手册。</p>
+</div>
+
+</body>
+</html>

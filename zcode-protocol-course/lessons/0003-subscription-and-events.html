@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 3 课 · 订阅与事件流 — zcode.cjs 协议课</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<script src="../assets/quiz.js" defer></script>
+<style>
+.arch { border:1px solid var(--line); border-radius:10px; padding:1rem; margin:1.2rem 0; background:var(--bg-card); }
+.arch-row { display:flex; gap:.6rem; align-items:stretch; justify-content:center; flex-wrap:wrap; margin:.4rem 0; }
+.arch-box { border:1.5px solid var(--accent); border-radius:8px; padding:.55rem .8rem; font-size:.85rem; text-align:center; background:var(--bg); min-width:110px; }
+.arch-box b { display:block; font-size:.9rem; color:var(--text-bright); }
+.arch-box small { color:var(--muted); font-size:.75rem; }
+.arch-box.dim { border-color:var(--line); } .arch-box.dim b { color:var(--ink-soft); }
+.arch-arrow { text-align:center; color:var(--accent); font-size:.85rem; margin:.15rem 0; }
+.arch-note { text-align:center; color:var(--muted); font-size:.78rem; margin-top:.5rem; }
+</style>
+</head>
+<body>
+
+<header class="lesson-head">
+  <a href="../index.html">← 课程索引</a>
+  <span>第 3 课 / 8</span>
+  <a href="0002-session-lifecycle.html">← 第 2 课</a>
+  <a href="0004-send-and-stream.html">第 4 课 →</a>
+</header>
+
+<h1>第 3 课：订阅与事件流</h1>
+<p class="lead">目标：理解"请求拿一回执，订阅拿一辈子"的模型。学完你能画出一条消息从 send
+到屏幕渲染的完整事件链，并知道为什么子代理会话要另走一条 v4 通道。</p>
+
+<h2>一、订阅模型总览</h2>
+<p>JSON-RPC 请求是"一问一答"，而 AI 回合是持续几分钟的流。事件的搬运靠<strong>订阅</strong>：
+订阅一次，之后该会话的所有事件以通知帧持续推给宿主，直到进程结束（插件实践中<strong>从不退订</strong>，16 个运行时槽位跟着进程活死）。</p>
+
+<div class="arch">
+  <div class="arch-row">
+    <div class="arch-box"><b>session/subscribe</b><small>主会话事件主通道（legacy 面）</small></div>
+    <div class="arch-box"><b>v4/conversation/subscribe</b><small>子会话 / v4 帧通道</small></div>
+  </div>
+  <div class="arch-arrow">↓↓ 通知帧持续下发（无 id）</div>
+  <div class="arch-row">
+    <div class="arch-box dim"><b>session/event</b><small>信封 {type, seq, sessionId, payload}</small></div>
+    <div class="arch-box dim"><b>v4/conversation/frame</b><small>行模型帧，客户端映射成 legacy 事件</small></div>
+  </div>
+  <div class="arch-arrow">↓↓ 按 sessionId 路由</div>
+  <div class="arch-row">
+    <div class="arch-box dim"><b>宿主事件监听器</b><small>归约进 UI 状态（16ms 节流批量刷新）</small></div>
+  </div>
+</div>
+
+<h2>二、session/subscribe：主会话事件唯一来源</h2>
+<pre><code>{"id": 10, "method": "session/subscribe",
+ "params": {"sessionId": "sess_abc",
+            "deliveryKind": "desktop-continuous",   // 必填
+            "includeSnapshot": true,                // 带一次全量快照（历史回放）
+            "afterSeq": 0}}                          // 断点续传：只推 seq 之后的事件
+// → {"id": 10, "result": { ...快照对象... }}</code></pre>
+<p>三条纪律：</p>
+<ul>
+<li><strong>先 subscribe 再 send</strong>：时序反了，回合事件在订阅生效前就发出去了，永远收不到；</li>
+<li><code>deliveryKind</code> 固定 <code>desktop-continuous</code>（continuous 才有流式增量路径）；</li>
+<li><code>afterSeq + includeSnapshot</code> 组合可实现<strong>断点续传</strong>：从上次收到的 seq 续着收，之前的从快照回放。</li>
+</ul>
+
+<div class="warn"><span class="h">订阅白名单要先登记，再发请求</span>
+服务端在订阅 ack 回来<strong>之前</strong>就可能开始推首批帧。如果宿主"收到帧→查白名单→没登记→丢弃"，
+首批快照+增量会静默丢失。正确顺序：<strong>先把会话记进本地白名单，再发 subscribe 请求</strong>；失败路径把登记回滚，否则重试也会错乱。</div>
+
+<h2>三、session/event：事件信封与全家福</h2>
+<p>legacy 通道上服务端→宿主的通知<strong>几乎只有 <code>session/event</code> 一个方法</strong>，一切业务事件都是它信封里的 <code>type</code>：</p>
+<pre><code>{"method": "session/event",
+ "params": {"type": "model.streaming", "seq": 1042, "sessionId": "sess_abc",
+            "turnId": "turn_1", "timestamp": 1758000000000,
+            "payload": {"kind": "text_delta", "delta": "你好", "assistantMessageId": "msg_9"}}}</code></pre>
+<table>
+<thead><tr><th>type</th><th>payload 要点</th><th>UI 用途</th></tr></thead>
+<tbody>
+<tr><td><code>turn.started</code></td><td>{turnNumber, input, messageId}</td><td>开新回合气泡</td></tr>
+<tr><td><code>model.streaming</code></td><td>kind = <b>text_delta / reasoning_delta</b>（另有 tool_input_start/delta 走 v4 映射），delta 增量文本</td><td>打字机效果、思考区</td></tr>
+<tr><td><code>tool.updated</code></td><td>kind = scheduled / started / <b>progress</b> / result / error / batch，按 toolCallId 关联</td><td>工具卡全生命周期</td></tr>
+<tr><td><code>session.updated</code></td><td>{model, modelRef, iteration}；goal 推送也走它</td><td>模型指示器、目标面板</td></tr>
+<tr><td><code>turn.completed</code></td><td>{response, usage:{inputTokens, outputTokens, totalTokens, cacheReadTokens…}}</td><td>收尾 + 耗时统计</td></tr>
+<tr><td><code>turn.failed</code></td><td>{error:{type, code, message, stack}, turnPhase}——<b>终止帧</b></td><td>报错呈现</td></tr>
+<tr><td><code>session.titleUpdated</code></td><td>{title, source, previousTitle}</td><td>标签页标题</td></tr>
+<tr><td><code>turn.steerQueued / steerDrained</code></td><td>{delivery:"guide", targetTurnId} / {injectedMessageIds}</td><td>插队消息落位提示</td></tr>
+</tbody>
+</table>
+<p>另一个独立通知 <code>state.updated</code>（模式/思考级别/模型/权限的变更回执，patch 字段+revision）会被宿主转成
+<code>type="state.updated"</code> 的事件进同一条流。此外新版 CLI 每几分钟会推 <code>process/mcpResourceSamples</code> 之类的
+<strong>遥测通知，params 直接是数组</strong>——解析时必须安全转换，单帧失败不能炸掉读循环（第 1 课的教训）。</p>
+
+<h2>四、v4/conversation/subscribe：子会话的唯一实时通道</h2>
+<p>关键事实：<strong>对子代理会话调 legacy <code>session/subscribe</code> 会成功，但一条事件都不会推</strong>（恒 0 投递）。
+子会话的实时流必须走 v4 通道：</p>
+<pre><code>{"id": 11, "method": "v4/conversation/subscribe",
+ "params": {"topic": "conversation/sess_sub_1",   // topic = "conversation/" + sessionId
+            "connectionId": "b7e2...",            // 连接级 UUID，整条连接复用一个
+            "clientMode": "desktop-continuous"}}
+// → {"id": 11, "result": {"ack": {"subscriptionId": "sub_9", "logEpoch": 3}}}</code></pre>
+<p>退订要带<strong>三件套</strong>：topic + connectionId + subscriptionId，缺一个就 <code>-32603</code>。
+帧到达时是 <code>v4/conversation/frame</code> 方法，payload 是"行模型"：</p>
+<table>
+<thead><tr><th>op</th><th>含义</th></tr></thead>
+<tbody>
+<tr><td><code>row.appended / row.upserted</code></td><td>追加/更新一行：{rowId, turnId, kind, text, output, status, actions:{canFork, canEdit}}；kind ∈ turnHeader / assistantText / reasoning / toolCall / userInput / timelineMarker</td></tr>
+<tr><td><code>row.delta</code></td><td>{rowId, path:"text", append}——流式增量往某行追加</td></tr>
+<tr><td><code>state.updated / row.removed</code></td><td>状态与删行（多数宿主可忽略）</td></tr>
+</tbody>
+</table>
+<p>宿主拿到帧后自己映射成 legacy 事件（turn.started / model.streaming / tool.updated…），
+这样上层 UI 只面对一种事件模型。要点：<strong>v4 订阅会话要先进本地白名单再发请求</strong>，
+且临时订阅（比如只为取 logEpoch）不要进白名单，否则快照回放会误推给 UI。</p>
+
+<h2>五、v4/telemetry/event：v2 代的回合终态</h2>
+<p>v2 代 CLI 有个行为变化：<strong>模型校验后置</strong>——send 回执正常，但模型创建失败时 legacy 流上
+<strong>没有 turn.failed</strong>，终态只走 <code>v4/telemetry/event</code> 通知（type=turn.terminal）：</p>
+<pre><code>{"method": "v4/telemetry/event",
+ "params": {"kind": "turn.terminal", "status": "failed", "sessionId": "sess_abc",
+            "turnId": "turn_1", "errorCode": "...", "errorMessage": "..."}}</code></pre>
+<p>宿主的映射纪律：<code>failed</code> → 合成 turn.failed；<code>aborted / cancelled</code> → 合成 turn.completed；
+<code>success</code> → <strong>跳过</strong>（legacy 流已有真实完成帧，重复合成会出现两个结束气泡）。
+终态来源必须收敛到单一出口。</p>
+
+<h2>六、检索练习</h2>
+<div class="quiz" data-title="第 3 课练习">
+  <div class="quiz-q" data-answer="2">
+    <p class="q-text">1. 订阅了子代理会话的 legacy session/subscribe，能收到什么？</p>
+    <button class="quiz-opt">全部事件</button>
+    <button class="quiz-opt">只有 turn.completed</button>
+    <button class="quiz-opt">订阅成功但 0 条事件，必须走 v4 通道</button>
+    <button class="quiz-opt">直接报 -32603</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="1">
+    <p class="q-text">2. v4/conversation/unsubscribe 参数缺谁会报 -32603？</p>
+    <button class="quiz-opt">只缺 topic 会</button>
+    <button class="quiz-opt">topic / connectionId / subscriptionId 任缺其一</button>
+    <button class="quiz-opt">全部可选</button>
+    <button class="quiz-opt">还要加 sessionId 才完整</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="0">
+    <p class="q-text">3. 订阅后首批事件收不到，最可能的根因？</p>
+    <button class="quiz-opt">白名单登记晚于首帧到达，帧被当野帧丢弃</button>
+    <button class="quiz-opt">deliveryKind 拼错</button>
+    <button class="quiz-opt">afterSeq 设太大</button>
+    <button class="quiz-opt">忘了发 session/send</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="3">
+    <p class="q-text">4. v4 telemetry turn.terminal status=success 时应该？</p>
+    <button class="quiz-opt">合成 turn.failed</button>
+    <button class="quiz-opt">合成 turn.completed</button>
+    <button class="quiz-opt">重置订阅</button>
+    <button class="quiz-opt">跳过，legacy 流已有真实完成帧</button>
+    <p class="quiz-feedback"></p>
+  </div>
+</div>
+
+<div class="next">
+<p><strong>下一课</strong>：发消息与流式交互——send 的参数陷阱、附件三种形态、消息插队三态路由、以及停止回合的正确姿势。</p>
+</div>
+
+</body>
+</html>
