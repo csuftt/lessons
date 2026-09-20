@@ -43,7 +43,7 @@
   <h2><span class="sec-num">02</span>是什么：官方定义与一句话心智模型</h2>
   <p>spring.io 项目页的官方定义值得逐词读（2026-09-19 核对）：<strong>"This project provides a library for building an API Gateway on top of Spring. Spring Cloud Gateway aims to provide a simple, yet effective way to route to APIs and provide cross-cutting concerns to them such as: security, monitoring/metrics, and resiliency."</strong>注意定位词是 library（类库）而不是独立中间件——它跟着你的 Spring Boot 应用一起启动、一起部署，这是它跟 Nginx/Kong 这类独立网关最大的形态差异。同页特性清单里，官方点名了这些本事：构建在 Spring Framework 和 Spring Boot 之上、同时兼容 Spring WebFlux 与 Spring Web MVC 两种形态、能按任意请求属性匹配路由、断言与过滤器按路由生效、集成熔断（CircuitBreaker）与服务发现（DiscoveryClient）、限流、路径重写。</p>
   <p>一句话心智模型：<strong>响应式网关——请求进来先匹配路由（Predicate 决定"这条请求走哪条路"），再过过滤器链（Filter 决定"路上要做什么加工"），然后转发到下游服务，响应原路返回时还能再加工一次。</strong>官方文档《How it works》的原话：客户端请求进入 SCG，若 Handler Mapping 判定匹配某条路由，就交给 Web Handler，把请求穿过一条为该请求定制的过滤器链——过滤器分虚线两侧，转发前的逻辑（pre）与转发后的逻辑（post）各跑一遍。</p>
-  <p class="note"><img src="../output/0056-scg-what-and-why/images/scg-github-repo.png" alt="GitHub spring-cloud/spring-cloud-gateway 仓库主页" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">GitHub spring-cloud/spring-cloud-gateway 仓库主页：About 自述 An API Gateway built on Spring Framework and Spring Boot providing routing and more · Java · Apache-2.0 · Star 4.9k · Fork 3.5k（2026-09-19 截图）。</p>
+  <p class="note"><img src="../output/0056-scg-what-and-why/images/scg-github-org.png" alt="GitHub spring-cloud 组织仓库列表中的 spring-cloud-gateway 卡片" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">GitHub spring-cloud 组织仓库列表中的 spring-cloud-gateway 卡片：About 自述 An API Gateway built on Spring Framework and Spring Boot providing routing and more · Java · Apache License 2.0 · Star 4.9k · Fork 3.5k · 话题标签 java、microservices、reactor 在列（2026-09-19 截图，github.com/orgs/spring-cloud/repositories）。</p>
 </section>
 
 <!-- ================= 03 心智模型图 ================= -->
@@ -119,7 +119,7 @@
   <table>
     <thead><tr><th>指标</th><th>数值</th><th>来源与口径</th></tr></thead>
     <tbody>
-      <tr><td>GitHub Stars</td><td><strong>4.9k</strong>（4,908）</td><td>spring-cloud/spring-cloud-gateway 仓库页，2026-09-19 核对</td></tr>
+      <tr><td>GitHub Stars</td><td><strong>4.9k</strong>（4,908）</td><td>spring-cloud/spring-cloud-gateway 仓库页与 GitHub API，2026-09-19 核对</td></tr>
       <tr><td>Maven Central 被依赖</td><td><strong>336</strong> 个组件</td><td>central.sonatype.com 坐标页 "Used in"，2026-09-19 核对（Spring 项目走 BOM 管理依赖，此数低估真实采用）</td></tr>
       <tr><td>首发时间</td><td><strong>2017-11</strong></td><td>Maven Central 首个 1.0.0.RELEASE 制品记录（2017-11-22）</td></tr>
       <tr><td>Spring Initializr</td><td>双选项内置</td><td>start.spring.io 的 Spring Cloud Routing 分组同时提供 Gateway（Servlet）与 Reactive Gateway（WebFlux），2026-09-19 核对</td></tr>

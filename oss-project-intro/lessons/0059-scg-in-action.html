@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Spring Cloud Gateway 系列第 4 期：实战——给微服务装上统一入口 | 2026-09-20</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0059</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0058-scg-core-concepts-architecture.html">上一期:0058</a> · Spring Cloud Gateway 系列第 4 期 / 共 5 期 · <a href="0060-scg-source-reading.html">下一期:0060</a> · <a href="https://spring.io/projects/spring-cloud-gateway" target="_blank" rel="noopener">spring.io/spring-cloud-gateway ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · SPRING CLOUD GATEWAY 系列第 4 期：实战场景</p>
+  <h1>Spring Cloud Gateway 实战：给微服务装上统一入口</h1>
+  <p class="subtitle">上一期我们拿到了 Route、Predicate、Filter 的概念地图。今天把地图用起来：把网关的三板斧串成一次真实接入——<strong>服务名路由自动生成、每秒限流真把请求拦成 429、十行以内的鉴权过滤器把缺 token 的请求挡成 401</strong>。两个极简下游服务、一个官方开关、一个路由过滤器、一个 Bean，端到端跑通"统一域名入口"；最后一张全景图把四道关卡对号入座，401 / 429 / 503 / 404 状态码即路标。全部口径当场对照官方文档（2026-09-20 核对），跟着敲就能通。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧭 微服务网关 · Java · Apache-2.0（Spring 官方项目）</span>
+    <span class="tag">📦 基于 Spring Cloud Gateway 5.0.3（Spring Cloud 2025.1.3 · Boot 4.1.1 · JDK 17+，2026-09-20 核对）</span>
+    <span class="tag-date">📅 2026-09-20 · 第 4 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 本期目标 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>本期目标：三步搭出一个统一入口</h2>
+  <p>需求先摆上桌，都是微服务接入期的真实诉求：<strong>统一域名入口</strong>——客户端只认网关，按路径找到对应服务；<strong>热点接口限流</strong>——突发流量把下游打挂之前，在入口先拦；<strong>无效请求进门就拦</strong>——缺 token 的请求不该到达下游。三步走，对应三样东西：</p>
+  <ul>
+    <li><strong>服务名路由：</strong>开官方的 discovery locator 开关，按注册发现到的服务自动生成路由——路由 uri 用 <code>lb://服务名</code>，默认谓词 <code>Path=/服务名/**</code>，转发前自动剥掉服务名前缀；</li>
+    <li><strong>限流：</strong>给订单路由挂 RequestRateLimiter 过滤器，底层是 RedisRateLimiter（令牌桶，计数存 Redis，需本机起一个 Redis）；</li>
+    <li><strong>鉴权：</strong>自定义一个 GlobalFilter Bean，校验 <code>X-Token</code> 请求头，缺头回 401——官方开发者指南同款写法，十行以内。</li>
+  </ul>
+  <p class="warn"><strong>版本前提沿用第 2 期口径：</strong>Spring Cloud 2025.1.3（Oakwood）+ Boot 4.1.1 + Gateway 5.0.3 + JDK 17+，网关工程仍是那个只带 <code>spring-cloud-starter-gateway-server-webflux</code> 起步器的应用。本期新增两样依赖：负载均衡起步器（服务名路由必需）与 reactive 版 data-redis 起步器（限流必需），下文逐一给官方出处。</p>
+</section>
+
+<!-- ================= 02 第一步 服务名路由 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>第一步：服务名路由——两个极简下游 + 一个官方开关</h2>
+  <p>先备两个极简下游：用户服务起在 8081，订单服务起在 8082，各自只有一个接口、回一句 JSON（order-service 同款：<code>@GetMapping("/order/list")</code>，返回 items 数量）。它们就是两个普通 Web 应用，不知道网关的存在。</p>
+  <pre class="codeblock"><code>@SpringBootApplication
+public class UserServiceApp {
+    public static void main(String[] args) {
+        SpringApplication.run(UserServiceApp.class, "--server.port=8081");
+    }
+}
+@RestController
+class MeController {
+    @GetMapping("/me")
+    Map&lt;String, String&gt; me() {
+        return Map.of("service", "user-service", "ok", "true");
+    }
+}</code></pre>
+  <p>让网关认识它们，官方有现成机制——<strong>DiscoveryClient 路由定位器</strong>，不是什么黑魔法。官方 5.0.3 文档原话：默认生成的路由用 <code>lb://service-name</code> 协议（负载均衡转发），默认谓词是 <code>/serviceId/**</code> 路径匹配，默认过滤器是一个 RewritePath——把服务名前缀剥掉再转发；因为要做负载均衡，classpath 上需要有 <code>spring-cloud-starter-loadbalancer</code>：</p>
+  <p class="note"><img src="../output/0059-scg-in-action/images/scg-docs-discovery.png" alt="官方文档：DiscoveryClient Route Definition Locator" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方 5.0.3《The DiscoveryClient Route Definition Locator》：lb:// 默认协议、Path=/serviceId/** 默认谓词、剥前缀的默认过滤器，以及 IMPORTANT 警告——自定义 filters 会整组替换默认列表，RewritePath 必须保留（docs.spring.io，2026-09-20 截图）。</p>
+  <p>演示为了"零注册中心先跑起来"，用官方 Spring Cloud Commons 的 <strong>SimpleDiscoveryClient</strong> 静态实例清单——文档原话：classpath 上没有注册中心实现时，它自动兜底，实例信息按属性格式传入。开关用官方属性表（appendix）里的完整路径，注意 5.0 起挂在 <code>server.webflux</code> 之下——discovery 文档页示例里还是 4.x 风格的短根，以官方属性表为准（与第 2 期讲的属性根变更一脉相承）：</p>
+  <pre class="codeblock"><code>spring.cloud.discovery.client.simple.instances.user-service[0].uri=http://localhost:8081
+spring.cloud.discovery.client.simple.instances.order-service[0].uri=http://localhost:8082
+spring.cloud.gateway.server.webflux.discovery.locator.enabled=true</code></pre>
+  <pre class="codeblock"><code>$ curl http://localhost:8080/user-service/me
+{"service":"user-service","ok":"true"}</code></pre>
+  <p>按服务名访问：网关自动生成的 <code>/user-service/**</code> 路由接住，剥掉前缀转发到 8081，客户端第一次<strong>只报服务名就拿到了响应</strong>。公司栈换成 Nacos 注册中心，走的也是同一个 DiscoveryClient 抽象——配置换成 Nacos 起步器即可，注册、配置与 Spring Cloud 集成的实战第 <a href="0004-nacos-spring-cloud-in-action.html">0004 期</a>已经带大家跑过，这里不重讲。</p>
+</section>
+
+<!-- ================= 03 第二步 限流 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>第二步：限流——RequestRateLimiter + RedisRateLimiter</h2>
+  <p><strong>官方前提先钉住：</strong>限流文档原话——Redis 实现"requires the use of the spring-boot-starter-data-redis-reactive Spring Boot starter"，算法是令牌桶（Token Bucket，源自 Stripe 的方案）。令牌桶的计数放在 Redis 里意味着这是<strong>全局限流</strong>：网关起多个实例，共享同一个桶。本机起一个 Redis、加这个 Boot 自家起步器（版本由依赖清单托管，不用手写）就位：</p>
+  <p class="note"><img src="../output/0059-scg-in-action/images/scg-maven-redis-reactive.png" alt="Maven Central：spring-boot-starter-data-redis-reactive" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">Maven Central 坐标页实拍：spring-boot-starter-data-redis-reactive，描述原文"Starter for using Redis key-value data store with Spring Data Redis reactive"。页面片段默认带出的 4.2.0-M1 是里程碑预发布——生产认准 GA 线，版本交给所用 Boot 的依赖清单托管（central.sonatype.com，2026-09-20 截图）。</p>
+  <p>给订单路由挂上 RequestRateLimiter。注意官方明示的坑：这个过滤器<strong>不支持 shortcut 一行式写法</strong>（原话：The RequestRateLimiter is not configurable with the 'shortcut' notation），必须展开成 name + args 的完整结构：</p>
+  <pre class="codeblock"><code>routes:
+  - id: order_route
+    uri: lb://order-service
+    predicates:
+      - Path=/order/**
+    filters:
+      - name: RequestRateLimiter
+        args:
+          redis-rate-limiter.replenishRate: 2    # 每秒注水 2 个令牌
+          redis-rate-limiter.burstCapacity: 4    # 桶最多装 4 个
+          redis-rate-limiter.requestedTokens: 1  # 每个请求花 1 个</code></pre>
+  <p><strong>限流数字里的令牌桶，两个参数定节奏：</strong><code>replenishRate</code> 是注水速率——每秒往桶里放几个令牌，决定稳态下每秒放行几个（官方口径"without any dropped requests"的速率）；<code>burstCapacity</code> 是桶容量——允许的瞬时突发上限，官方明确<strong>设成零等于全拒</strong>。官方还给三档配方：要平稳，两值相等；要扛突发，桶容量调大；要低于每秒一次的限速，用 <code>requestedTokens</code> 凑——例如 1 / 60 / 60 折成每分钟一次。三段定义原文都在官方文档这一页：</p>
+  <p class="note"><img src="../output/0059-scg-in-action/images/scg-docs-tokenbucket.png" alt="官方文档：RedisRateLimiter 令牌桶三参数定义" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方 RequestRateLimiter 文档实拍：Redis 实现源自 Stripe、算法为 Token Bucket；replenishRate / burstCapacity / requestedTokens（默认 1）三段定义原文（docs.spring.io，2026-09-20 截图）。</p>
+  <p><strong>还差一把钥匙：限流按谁算？</strong>官方的答案叫 KeyResolver，样例按 <code>user</code> 请求参数取值——同一个 user 打一百发，合用一个桶。这里藏着一个默认坑：默认实现是 PrincipalNameKeyResolver（从认证主体取名字），我们没接认证，官方口径是<strong>取不到 key 就默认拒绝</strong>（deny-empty-key 默认开启）——不配它，全站 429：</p>
+  <pre class="codeblock"><code>@Bean
+KeyResolver userKeyResolver() {   // 官方文档样例
+    return exchange -&gt; Mono.just(
+        exchange.getRequest().getQueryParams().getFirst("user"));
+}</code></pre>
+  <p>官方也注明了：样例按参数取 key，不适合直接上生产（真实场景按用户 ID、IP 等稳定维度）。现在见证时刻——对订单路由连打六发，间隔不到半秒：</p>
+  <pre class="codeblock"><code>$ for i in $(seq 1 6); do
+    curl -s -o /dev/null -w "%{http_code}\n" \
+      "http://localhost:8080/order/list?user=tom"
+  done</code></pre>
+  <pre class="codeblock"><code>200
+200
+200
+200
+429
+429</code></pre>
+  <p>前四发全绿——正好是桶容量 4 个令牌；第五发起 429，注水速率每秒 2 个跟不上（连打间隔小于 0.5 秒，回显为可复现演示输出）。429 响应还带官方默认的 <code>X-RateLimit-Remaining</code> 等额度头，看一眼就知道还能打几发。限流从配置到拦截，闭环。</p>
+</section>
+
+<!-- ================= 04 第三步 鉴权 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>第三步：鉴权——十行以内的自定义 GlobalFilter</h2>
+  <p>官方开发者指南《Writing Custom Global Filters》的写法：实现 GlobalFilter 接口注册成 Bean，原话"applies the filter to all requests"——<strong>对所有路由生效</strong>，这正是"进门先验票"该有的语义。逻辑读一遍：请求头里有 <code>X-Token</code> 就放行；没有，把响应状态码设成 401 直接打回：</p>
+  <pre class="codeblock"><code>@Bean
+@Order(-1)  // 标准 Spring 排序：站到过滤器链最前面
+GlobalFilter authGlobalFilter() {
+    return (exchange, chain) -&gt; {
+        boolean ok = exchange.getRequest().getHeaders().containsKey("X-Token");
+        if (!ok) exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
+        return ok ? chain.filter(exchange) : exchange.getResponse().setComplete();
+    };
+}</code></pre>
+  <p><code>@Order(-1)</code> 借的是标准 Spring 排序约定：路由过滤器按官方实现取正序号（源码 <code>RouteDefinitionRouteLocator</code> 里按定义顺序取 1、2、3……），-1 让鉴权闸站到链条最前面——<strong>无效请求进门就挡，不浪费后面任何一段</strong>（思考一展开这个顺序的讲究）。验收：同一条路由、前后两发：</p>
+  <pre class="codeblock"><code>$ curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/order/list
+$ curl -s -H "X-Token: secret123" http://localhost:8080/order/list</code></pre>
+  <pre class="codeblock"><code>401
+{"service":"order-service","items":3}</code></pre>
+  <p>缺头 401、带头放行（可复现演示回显）。三条需求全部兑现。</p>
+</section>
+
+<!-- ================= 05 全景解读 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>全景解读：一条请求穿过的四道关卡</h2>
+  <p>把整条链画出来（自绘，概念图）：① 是我们写的鉴权闸，② 是挂在路由上的限流闸，这两道决定请求死不死在门口；③ 负载均衡解析与 ④ Netty 转发，是框架自带的全局过滤器——官方文档《Global Filters》页原文：lb 协议由 ReactiveLoadBalancerClientFilter 把服务名换成真实地址，<strong>找不到实例默认回 503</strong>；Netty Routing Filter 用 Netty HttpClient 真正发往下游，回写响应。</p>
+  <div class="diagram"><svg viewBox="0 0 860 150" xmlns="http://www.w3.org/2000/svg" style="max-width:100%;height:auto">
+    <defs><marker id="ar" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#c2632c"/></marker></defs>
+    <g font-size="14" fill="#3d3229" text-anchor="middle" font-family="system-ui,sans-serif">
+      <rect x="8"   y="55" width="96"  height="40" rx="8" fill="#fff" stroke="#d8cbb8"/><text x="56"  y="80">curl 请求</text>
+      <rect x="146" y="42" width="140" height="66" rx="8" fill="#fdf1e7" stroke="#c2632c"/><text x="216" y="68">① 鉴权闸</text><text x="216" y="92" fill="#a34d1e">缺 X-Token → 401</text>
+      <rect x="328" y="42" width="140" height="66" rx="8" fill="#fdf1e7" stroke="#c2632c"/><text x="398" y="68">② 限流闸</text><text x="398" y="92" fill="#a34d1e">令牌不足 → 429</text>
+      <rect x="510" y="42" width="150" height="66" rx="8" fill="#fff" stroke="#d8cbb8"/><text x="585" y="68">③ 负载均衡解析</text><text x="585" y="92" fill="#8a7a66">无实例 → 503</text>
+      <rect x="702" y="42" width="150" height="66" rx="8" fill="#fff" stroke="#d8cbb8"/><text x="777" y="68">④ Netty 转发下游</text><text x="777" y="92" fill="#8a7a66">回写响应</text>
+      <line x1="104" y1="75" x2="140" y2="75" stroke="#c2632c" stroke-width="2" marker-end="url(#ar)"/>
+      <line x1="286" y1="75" x2="322" y2="75" stroke="#c2632c" stroke-width="2" marker-end="url(#ar)"/>
+      <line x1="468" y1="75" x2="504" y2="75" stroke="#c2632c" stroke-width="2" marker-end="url(#ar)"/>
+      <line x1="660" y1="75" x2="696" y2="75" stroke="#c2632c" stroke-width="2" marker-end="url(#ar)"/>
+    </g>
+  </svg></div>
+  <p>本期三条 curl 对号入座：<strong>401 死在①，429 死在②，503 死在③</strong>。排障视角记住这条钩子——状态码即路标：<strong>401</strong> 鉴权闸拦的，查 token 头带没带、名字拼写对不对；<strong>429</strong> 限流闸拦的，看剩余额度头是不是归零；<strong>503</strong> 负载均衡没找到实例，先单独 curl 下游确认活着；<strong>404</strong> 根本没命中路由，查谓词和路径。四个信号四种病，先分诊再动手，别一上来就重启。</p>
+</section>
+
+<!-- ================= 06 高频翻车速查 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>高频翻车速查（全部可对官方原文）</h2>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>现象</th><th>根源</th><th>解法</th></tr></thead>
+    <tbody>
+      <tr><td><strong>全站请求都被 429</strong></td><td>没配 KeyResolver：默认实现从认证主体取不到 key，官方默认拒绝（deny-empty-key）</td><td>自定义 KeyResolver Bean（本文写法）</td></tr>
+      <tr><td><strong>一行式写法不生效</strong></td><td>官方原话：RequestRateLimiter is not configurable with the 'shortcut' notation</td><td>展开 name + args 完整结构（本文写法）</td></tr>
+      <tr><td><strong>服务名路由 503</strong></td><td>lb:// 找不到实例（官方：默认回 503）</td><td>核对实例清单 / 注册中心；classpath 加负载均衡起步器</td></tr>
+      <tr><td><strong>动态路由下游 404</strong></td><td>官方 IMPORTANT 警告：自定义 discovery filters 会<strong>整组替换</strong>默认过滤器，RewritePath 没了前缀剥不掉</td><td>自定义时务必带上默认的 RewritePath</td></tr>
+      <tr><td><strong>限流配置写了不动</strong></td><td>5.0 属性根挂在 <code>server.webflux</code> 下，老教程的短根路径不生效</td><td>对照官方属性表（appendix）核对完整路径</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ================= 07 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：鉴权闸放在限流闸前面，还是后面？两种顺序各付出什么代价？</summary>
+    <div class="details-body">
+      <p>先想清楚两道闸的成本模型。鉴权闸只查一个请求头，几乎零成本；限流闸要连一次 Redis、扣一个令牌。若把限流放在鉴权前面：<b>缺 token 的垃圾请求也会消耗桶里的令牌</b>——攻击者不用带合法凭证，就能把正常用户的配额打空，限流从"保护下游"变成可以被借刀的"间接 DoS"。所以本期用 @Order(-1) 让鉴权站最前：无效请求根本不占限流配额。反过来，"先鉴权"也有代价：鉴权逻辑如果将来升级成调远程认证服务，它自己就成了链条上第一个可能被拖垮的环节。排序不是技术对错，是<b>成本与风险的位置经营</b>：便宜且能挡掉大量后续工作的闸靠前，贵的闸靠后，还要警惕"便宜闸"变贵的那天。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：本期用官方 SimpleDiscoveryClient 静态清单跑通了服务名路由，换成 Nacos 后，什么变了、什么没变？</summary>
+    <div class="details-body">
+      <p>没变的是<b>网关这一侧的全部机制</b>：discovery locator 照样按 DiscoveryClient::getServices 拿服务列表，照样生成 lb://服务名 的路由、照样剥前缀；ReactiveLoadBalancerClientFilter 照样解析地址。变的在<b>清单的来源</b>：静态清单要人肉维护，服务扩缩容、换端口都得改配置重启；Nacos 这样的注册中心让实例清单自动跟随心跳上下线，动态路由才名副其实——这正是"服务名路由是官方机制"的底气：机制不绑定任何一个注册中心实现。迁移成本小到只有依赖与实例来源两处（集成实战见第 0004 期）。这也回答了一个架构问题：为什么 Spring Cloud 坚持把"发现服务"抽象成 DiscoveryClient 接口——<b>抽象稳定，实现可换，上层机制才能一次建成、处处复用</b>。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 08 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>随堂小测</h2>
+  <div class="quiz">
+    <div class="quiz-q">
+      <p class="quiz-question">1. 网关加了 RequestRateLimiter 但没配 KeyResolver，会发生什么？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["官方默认 KeyResolver 从认证主体取名字，没接认证也能拿到名字——多半还是取不到。","对：默认实现取不到 key 就默认拒绝（deny-empty-key），所以钥匙必须自己给。","限流不配照样放行——恰恰相反，默认行为是拒绝。"]'>
+        <li class="quiz-option">限流自动按请求路径计数，正常工作</li>
+        <li class="quiz-option">全站请求被默认拒绝（429）</li>
+        <li class="quiz-option">限流静默失效，全部放行</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. RequestRateLimiter 过滤器在 yml 里的正确写法是？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["官方明说不支持 shortcut 一行式，这样写不生效。","名称写成 RedisRateLimiter 不对——过滤器名是 RequestRateLimiter，Redis 实现靠参数指定。","对：必须展开 name + args 完整结构，这是官方文档明示的。"]'>
+        <li class="quiz-option">- RequestRateLimiter=2, 4, #{@userKeyResolver}（一行式）</li>
+        <li class="quiz-option">- name: RedisRateLimiter（直接写实现名）</li>
+        <li class="quiz-option">- name: RequestRateLimiter + args: redis-rate-limiter.replenishRate 等</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 客户端访问 /order/list 返回 503，最先该查什么？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["令牌桶空了回的是 429，不是 503。","对：官方口径 lb:// 路由找不到实例默认回 503——先单独 curl 下游确认活着，再查清单与负载均衡依赖。","503 不是路由没命中，那是 404 的语义。"]'>
+        <li class="quiz-option">限流桶是不是空了</li>
+        <li class="quiz-option">lb 找不到实例：下游活着吗、实例清单/负载均衡依赖对吗</li>
+        <li class="quiz-option">谓词是不是没命中路由</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. 开启 discovery locator 后，user-service 会被自动生成什么样的路由？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对：默认 uri 用 lb://服务名，谓词 Path=/服务名/**，默认过滤器剥掉服务名前缀再转发。","转发目标不是写死的地址——写死就用不着负载均衡了。","谓词不带 /user-service/** 前缀的话，客户端就没法按服务名找到它了。"]'>
+        <li class="quiz-option">uri=lb://user-service，谓词 Path=/user-service/**，并剥前缀转发</li>
+        <li class="quiz-option">uri=http://localhost:8081，谓词 Path=/**</li>
+        <li class="quiz-option">uri=lb://user-service，谓词 Host=user-service</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 09 小结 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>本期小结</h2>
+  <div class="key-points">
+    <ul>
+      <li><strong>三步搭出统一入口：</strong>服务名路由（开官方开关，静态清单先行）→ 限流（RequestRateLimiter + RedisRateLimiter）→ 鉴权（自定义 GlobalFilter Bean）；</li>
+      <li><strong>服务名路由是官方机制：</strong>默认生成 lb://服务名 路由、Path=/服务名/** 谓词、剥前缀转发；无注册中心时官方 SimpleDiscoveryClient 静态清单先行，Nacos 即插即换（集成实战见第 0004 期）；</li>
+      <li><strong>限流两参数一把钥匙：</strong>replenishRate 注水速率 + burstCapacity 桶容量（设零全拒；官方三档配方）；KeyResolver 必配——默认实现取不到 key 就默认拒绝；不支持 shortcut 一行式写法；</li>
+      <li><strong>状态码即路标：</strong>401 鉴权闸 / 429 限流闸 / 503 无实例 / 404 无路由——先分诊再动手；</li>
+      <li><strong>版本口径：</strong>Gateway 5.0.3 + Spring Cloud 2025.1.3 + Boot 4.1.1，限流需 spring-boot-starter-data-redis-reactive，服务名路由需 spring-cloud-starter-loadbalancer。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 5 期《架构与源码导读》——这套入口你已经能照着搭。下一期我们进源码，看一条请求是怎么穿过过滤器链的：从 Netty 进来到转发出去，Route、Predicate、Filter 各在哪一站。</p>
+  <p><strong>Primary source：</strong><a href="https://docs.spring.io/spring-cloud-gateway/reference/" target="_blank" rel="noopener">Spring Cloud Gateway 官方参考文档（5.0.3）</a>——本期 RequestRateLimiter 三参数、discovery locator 默认路由与 IMPORTANT 警告、Global Filters 清单均出自该文档对应节；静态实例清单出自 <a href="https://docs.spring.io/spring-cloud-commons/reference/spring-cloud-commons/common-abstractions.html" target="_blank" rel="noopener">Spring Cloud Commons《Common Abstractions》</a>，属性根以 <a href="https://docs.spring.io/spring-cloud-gateway/reference/appendix.html" target="_blank" rel="noopener">Common application properties</a> 为准；自定义 GlobalFilter 写法出自官方 <a href="https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux/developer-guide.html" target="_blank" rel="noopener">Developer Guide</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0058-scg-core-concepts-architecture.html">← 上一期：核心概念与整体架构</a></span>
+  <a class="next" href="0060-scg-source-reading.html">下一期：架构与源码导读 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+
+</body>
+</html>

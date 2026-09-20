@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Spring Cloud Gateway 系列第 3 期：核心概念与整体架构 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0058</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0057-scg-quickstart.html">上一期:0057</a> · Spring Cloud Gateway 系列第 3 期 / 共 5 期 · <a href="0059-scg-in-action.html">下一期:0059</a> · <a href="https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux/how-it-works.html" target="_blank" rel="noopener">官方文档 ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · SPRING CLOUD GATEWAY 系列第 3 期：核心概念与整体架构</p>
+  <h1>Spring Cloud Gateway 核心概念与整体架构：三件套协作与一条请求的旅程</h1>
+  <p class="subtitle">上一期我们把网关跑了起来：<strong>一条路由配置下去，请求转发成功</strong>。但那条路由背后，网关里到底发生了什么？本期把黑盒拆开，带你拿走一张概念地图：<strong>Route、Predicate、Filter 三件套怎么协作出千条路由，一条请求在网关里走什么线程、过哪几个组件</strong>。概念口径全部对齐官方文档（v5.0.3），类名逐个在 v5.0.3 源码里核对。看完本期，"限流、鉴权装进网关"就不再是背配置，而是知道每一行配置落在地图的哪个位置。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🚪 API 网关 · Java · Apache-2.0（Spring 官方）</span>
+    <span class="tag">📦 基于 5.0.3（Spring Cloud 2025.1 · Boot 4.x）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 3 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 上期回顾与本期成果 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>上期回顾与本期成果</h2>
+  <p>第 2 期里，我们建了一个 Spring Boot 工程、引了 starter、写了一条最简单的路由——启动之后，请求从网关进来，被转发到了配置的目的地。跑通的那一刻很爽，但有个问题悬着：<strong>这条路由是谁在什么时候读的？请求命中路由之前和之后，都经过了谁？</strong>本期就回答这些。结束时你带走四样东西：</p>
+  <div class="card">
+    <ul>
+      <li><strong>认全三件套：</strong>Route（路由）的四要素、Predicate（断言）的一整族工厂、Filter（过滤器）的两个层级——此后看任何网关配置都能对号入座；</li>
+      <li><strong>看懂一条请求的完整旅程：</strong>官方 how-it-works 架构图逐框拆讲，概念名与源码类名一一对照（基于 v5.0.3 tag 核对）；</li>
+      <li><strong>想明白一条红线：</strong>为什么过滤器里不能写阻塞调用——这要从响应式底座 Reactor 和 Netty 事件循环说起；</li>
+      <li><strong>拿到仓库顶层模块地图：</strong>十个构建模块各自是干什么的，为第 5 期源码导读铺路。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= 02 三件套 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>三件套：Route、Predicate、Filter</h2>
+  <p>先认主角色。<strong>Route（路由）</strong>是官方口径下的"基本积木"（Glossary 原话：The basic building block of the gateway），由四要素构成：<code>id</code> 是这条路由的名字，<code>uri</code> 是转发目的地，<code>predicates</code> 是一组断言，<code>filters</code> 是一组过滤器——<strong>断言"全真"（aggregate predicate is true）这条路由才算命中</strong>。<strong>Predicate（断言）</strong>是匹配条件，本质是一个输入为 ServerWebExchange（Spring 对"请求 + 响应"上下文的封装）的 Java Predicate 函数，请求里任何东西——路径、方法、请求头、参数、Cookie、甚至时间点——都能拿来当匹配依据。<strong>Filter（过滤器）</strong>是加工环节：官方定义明确说，你可以在<strong>把请求发给下游之前或之后</strong>修改请求和响应。</p>
+  <p class="note"><img src="../output/0058-scg-core-concepts-architecture/images/scg-docs-glossary.png" alt="官方文档 Glossary 页：Route / Predicate / Filter 定义" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档 Glossary 页：Route / Predicate / Filter 三个核心词的权威定义，本节口径逐条对照（docs.spring.io，Spring Cloud Gateway Server WebFlux 5.0.3，2026-09-19 截图）。</p>
+  <p>断言不是一个而是一族。官方内置的 Route Predicate Factory 按匹配维度各分一员，常用的有这些（全部可以在 yml 里用"名字=参数"的捷径写法组合，多个断言之间是逻辑与）：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>断言工厂</th><th>匹配什么</th><th>速记例子</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Path</strong></td><td>路径模式，支持 <code>{segment}</code> 变量提取</td><td><code>Path=/api/**</code></td></tr>
+      <tr><td><strong>Method</strong></td><td>HTTP 方法，可写多个</td><td><code>Method=GET,POST</code></td></tr>
+      <tr><td><strong>Header</strong></td><td>请求头存在且值匹配正则</td><td><code>Header=X-Request-Id, \d+</code></td></tr>
+      <tr><td><strong>Query</strong></td><td>请求参数存在且值匹配正则</td><td><code>Query=red, gree.</code></td></tr>
+      <tr><td><strong>Cookie</strong></td><td>Cookie 存在且值匹配正则</td><td><code>Cookie=chocolate, ch.p</code></td></tr>
+      <tr><td><strong>After / Before / Between</strong></td><td>时间窗：某时刻之后 / 之前 / 两时刻之间（定时开闸、维护窗口）</td><td><code>After=2026-01-20T00:00+08:00[Asia/Shanghai]</code></td></tr>
+      <tr><td><strong>Weight</strong></td><td>按组权重分流（灰度切流的底座）</td><td><code>Weight=group1, 8</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>v5.0.3 文档里这族工厂共 14 个，还有 Host、RemoteAddr、XForwardedRemoteAddr、Version、ReadBody 等，完整清单见官方《Route Predicate Factories》一节。断言家族是"门槛"，过滤器才是"关卡"——它分两层：<strong>GatewayFilter</strong> 挂在某条路由的 <code>filters</code> 键下，只对命中该路由的请求生效，官方内置工厂 v5.0.3 文档列出 38 个（AddRequestHeader、RewritePath、RequestRateLimiter、CircuitBreaker、Retry……治理动作基本不用自己写）；<strong>GlobalFilter</strong> 则是"签名的签名与 GatewayFilter 相同、条件化地应用于所有路由"的特殊过滤器（官方原话：The GlobalFilter interface has the same signature as GatewayFilter. These are special filters that are conditionally applied to all routes），转发动作本身（把请求真正发往下游的 NettyRoutingFilter 就是一个 GlobalFilter）都藏在这一层。无论哪层，每个过滤器都干两段活：<strong>转发前的 pre 逻辑</strong>（改请求头、鉴权、限流、打标）和<strong>转发后的 post 逻辑</strong>（改响应头、记录指标、收集耗时）。</p>
+  <p class="note"><img src="../output/0058-scg-core-concepts-architecture/images/scg-docs-predicates.png" alt="官方文档 Route Predicate Factories 页" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档《Route Predicate Factories》开篇与 After 工厂样例：断言匹配构建在 Spring WebFlux HandlerMapping 基础设施之上，多个断言用逻辑与组合（docs.spring.io，v5.0.3，2026-09-19 截图）。</p>
+</section>
+
+<!-- ================= 03 路由定义两途径 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>路由定义两条路：配置式与编程式</h2>
+  <p>路由本质上是<strong>一份配置对象</strong>——第 1 期说过"断言 + 过滤器组合出千条路由"，写法上官方给了两条路。<strong>配置式</strong>写在 application.yml 里，上期你已经用过：</p>
+  <pre class="codeblock"><code>spring:
+  cloud:
+    gateway:
+      server:
+        webflux:
+          routes:
+          - id: path_route
+            uri: https://example.org
+            predicates:
+            - Path=/red/{segment},/blue/{segment}</code></pre>
+  <p><strong>编程式</strong>则声明一个 RouteLocator Bean，用 RouteLocatorBuilder 的链式 API 把断言、过滤器、目的地一路写下来（样例节选自官方《Fluent Java Routes API》）：</p>
+  <pre class="codeblock"><code>@Bean
+public RouteLocator customRouteLocator(RouteLocatorBuilder builder) {
+    return builder.routes()
+        .route(r -> r.path("/image/png")
+            .filters(f -> f.addResponseHeader("X-TestHeader", "foobar"))
+            .uri("http://httpbin.org:80"))
+        .build();
+}</code></pre>
+  <p>两条路底层是同一个模型：yml 走 <code>PropertiesRouteDefinitionLocator</code> 读进 RouteDefinition（路由定义对象），编程式直接产出 Route。这个"定义"抽象正是动态路由的钩子——官方还提供 <code>DiscoveryClientRouteDefinitionLocator</code>，从注册中心自动生成路由；配置中心改了配置，发一个 <code>RefreshRoutesEvent</code> 事件，路由缓存就刷新。<strong>路由来源可以有很多种，匹配引擎只认统一的 Locator 接口</strong>——与 Nacos 配置中心联动做动态路由，第 4 期实战展开（公司主栈 Spring Cloud Alibaba 的常见组合），Nacos 本身的入门见本系列 <a href="0001-nacos-what-and-why.html">0001~0005 期</a>。</p>
+</section>
+
+<!-- ================= 04 处理流程 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>处理流程：官方 how-it-works 图逐框拆</h2>
+  <p>三件套认识了，现在把它们放回流水线。官方文档《How it works》给了一张总图，原话只有两句："如果 Gateway Handler Mapping 判定请求匹配某条路由，请求被送给 Gateway Web Handler；这个 handler 让请求穿过一条<strong>为该请求定制的</strong>过滤器链。"过滤器之所以被虚线分成两半，官方解释是：过滤器在代理请求发出前后各有一段逻辑——<strong>先全部执行 pre，然后发出代理请求，之后执行 post</strong>。</p>
+  <p class="note"><img src="../output/0058-scg-core-concepts-architecture/images/scg-docs-howitworks.png" alt="官方 how-it-works 架构图" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方文档《How it works》：Gateway Client → Gateway Handler Mapping → Gateway Web Handler → 过滤器链（虚线上 pre / 虚线下 post，Proxy Filter 负责转发）→ Proxied Service（docs.spring.io，v5.0.3，2026-09-19 截图）。</p>
+  <p>把图上的方框落到类名（逐个在 v5.0.3 源码 tag 里核对过路径），一条请求的完整旅程是：请求先进 Spring WebFlux 的总调度 <code>DispatcherHandler</code>，它把请求交给路由专用的 Handler Mapping——<code>RoutePredicateHandlerMapping</code>，后者拿着全部断言逐条测试，找出命中的 Route；命中后请求交给 <code>FilteringWebHandler</code>（就是图里的 Gateway Web Handler），它把<strong>全局过滤器 + 该路由的路由级过滤器</strong>合并、按 order 排序，组成一条只属于这个请求的链；链上每个过滤器先跑 pre，走到链尾由 NettyRoutingFilter 用 Netty 客户端把请求真正发往下游，响应原路返回时再倒序跑一遍各过滤器的 post。</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>图上的概念</th><th>源码类（org.springframework.cloud.gateway 下，v5.0.3）</th><th>一句话职责</th></tr></thead>
+    <tbody>
+      <tr><td>Gateway Handler Mapping</td><td><code>handler.RoutePredicateHandlerMapping</code></td><td>拿断言测试请求，命中返回路由</td></tr>
+      <tr><td>Gateway Web Handler</td><td><code>handler.FilteringWebHandler</code></td><td>组装并驱动过滤器链</td></tr>
+      <tr><td>路由清单</td><td><code>route.RouteLocator</code>（缓存包装 <code>route.CachingRouteLocator</code>）</td><td>提供 Route 集合，缓存 + 刷新</td></tr>
+      <tr><td>路由定义来源</td><td><code>route.RouteDefinitionLocator</code></td><td>yml / 编程式 / 注册中心都汇成它</td></tr>
+      <tr><td>转发动作</td><td><code>filter.NettyRoutingFilter</code>（GlobalFilter）</td><td>真正把请求发往下游</td></tr>
+      <tr><td>路由刷新</td><td><code>event.RefreshRoutesEvent</code></td><td>清路由缓存，动态路由生效点</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ================= 05 响应式底座 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>响应式底座：为什么过滤器里不能写阻塞调用</h2>
+  <p>上表所有类都活在同一套底座上：<strong>Reactor + Netty</strong>。Reactor 是 Spring 的响应式流实现（过滤器签名里的 <code>Mono&lt;Void&gt;</code> 就是它的类型）；Netty 提供通信层，核心是<strong>事件循环（Event Loop）</strong>：固定的很少几根线程，每根线程用"哪个连接就绪就处理哪个"的方式服务成千上万个连接。网关恰好是最典型的 IO 密集场景——它自己几乎不算业务，只是收请求、转请求、回响应，时间都花在等网络上。<strong>线程数与连接数解耦</strong>之后，少量线程就能扛住大量并发转发，这正是第 1 期演进故事里 SCG 替代 Zuul 1 的根本原因：Zuul 1 建在 Servlet 阻塞模型上，一个请求占住一根线程从头等到尾，线程池上限就是并发上限，转发型负载一高，线程全耗在"等下游"上。</p>
+  <div class="card">
+    <p><strong>由此得出本期最重要的红线：过滤器里不能写阻塞调用。</strong>你处在事件循环线程上，线程是全体请求共享的——</p>
+    <ul>
+      <li><strong>会发生什么：</strong>在 pre 过滤器里用 RestTemplate 同步查一次令牌、同步访问一次数据库、哪怕 <code>Thread.sleep</code> 一小段，这根事件循环线程就被你按住不动了，<strong>排在它身上的其他所有请求一起陪停</strong>；几根线程很快全被按住，整个网关吞吐瞬间归零；</li>
+      <li><strong>运行时真的会拦：</strong>在 Netty 事件循环线程上调用 Reactor 的 <code>block()</code> 系列方法，Reactor 会直接抛 IllegalStateException（提示 block 系列是阻塞调用，在 reactor-http-nio 线程上不受支持）——这是运行时兜底，别指望它；</li>
+      <li><strong>正确姿势：</strong>需要调下游就用 WebClient 等响应式客户端，"发起调用 → 注册回调 → 立刻还线程"，等待期间线程去服务别的连接；纯内存计算、改请求头这类非阻塞操作随便做。</li>
+    </ul>
+  </div>
+  <p>一句话总结这层设计：<strong>阻塞式网关用"人多"解决问题，响应式网关用"不傻等"解决问题</strong>。线程不再被某个等待独占，吞吐自然上去——代价是写法上必须全程非阻塞，这就是第 4 期实战里每一段过滤器代码都要遵守的纪律。</p>
+</section>
+
+<!-- ================= 06 整体架构图 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>自绘整体架构：一张图收拢全部概念</h2>
+  <div class="diagram">
+  <svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar58" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="14" y="130" width="120" height="60" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="74" y="155" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">客户端</text>
+    <text x="74" y="173" text-anchor="middle" fill="var(--muted)" font-size="9">Gateway Client</text>
+    <rect x="180" y="26" width="360" height="278" rx="12" fill="var(--card)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="360" y="52" text-anchor="middle" fill="var(--ink)" font-size="13" font-weight="700">Spring Cloud Gateway（响应式栈）</text>
+    <rect x="202" y="66" width="316" height="42" rx="8" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="360" y="84" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">① DispatcherHandler → RoutePredicateHandlerMapping</text>
+    <text x="360" y="100" text-anchor="middle" fill="var(--muted)" font-size="9">断言全真才命中 · 路由清单来自 CachingRouteLocator</text>
+    <rect x="202" y="118" width="316" height="42" rx="8" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="360" y="136" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">② FilteringWebHandler（Gateway Web Handler）</text>
+    <text x="360" y="152" text-anchor="middle" fill="var(--muted)" font-size="9">GlobalFilter + 该路由的 GatewayFilter 按 order 合并成链</text>
+    <rect x="202" y="170" width="146" height="42" rx="8" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="275" y="188" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">③ pre 过滤器</text>
+    <text x="275" y="204" text-anchor="middle" fill="var(--muted)" font-size="9">鉴权 · 限流 · 改头</text>
+    <rect x="358" y="170" width="160" height="42" rx="8" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="438" y="188" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">④ post 过滤器</text>
+    <text x="438" y="204" text-anchor="middle" fill="var(--muted)" font-size="9">改响应头 · 记指标</text>
+    <rect x="240" y="238" width="240" height="40" rx="8" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="360" y="256" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">NettyRoutingFilter 代理转发</text>
+    <text x="360" y="271" text-anchor="middle" fill="var(--muted)" font-size="9">Reactor + Netty 事件循环 · 少量线程扛大量连接</text>
+    <rect x="600" y="130" width="146" height="60" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="673" y="155" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">下游微服务</text>
+    <text x="673" y="173" text-anchor="middle" fill="var(--muted)" font-size="9">Proxied Service</text>
+    <line x1="134" y1="160" x2="174" y2="160" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar58)"/>
+    <line x1="540" y1="150" x2="594" y2="152" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar58)"/>
+    <line x1="594" y1="172" x2="540" y2="196" stroke="var(--accent-3)" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#ar58)"/>
+    <line x1="360" y1="212" x2="360" y2="232" stroke="var(--accent-3)" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#ar58)"/>
+    <text x="557" y="140" text-anchor="middle" fill="var(--muted)" font-size="9">请求（pre 之后）</text>
+    <text x="560" y="212" text-anchor="middle" fill="var(--muted)" font-size="9">响应（post 加工）</text>
+    <text x="16" y="322" fill="var(--muted)" font-size="9.5">图例：①②匹配与组装，③④同一批过滤器的两段逻辑，虚线为响应回程——对照官方 how-it-works 图，类名已按 v5.0.3 源码核对</text>
+  </svg>
+  </div>
+  <p>这张图值得打印贴墙：左边进请求，右边出响应；中间三层——<strong>匹配层</strong>（Handler Mapping 找路由）、<strong>组装层</strong>（Web Handler 排链）、<strong>执行层</strong>（过滤器链 pre → 代理 → post）。第 4 期限流、鉴权、灰度每加一样东西，都只是往这张图的过滤器链上挂一个新节点；第 5 期读源码，就沿着 ①②③ 的顺序进。</p>
+</section>
+
+<!-- ================= 07 仓库模块地图 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>仓库顶层模块地图（tag v5.0.3）</h2>
+  <p>架构最后落到代码才踏实。spring-cloud/spring-cloud-gateway 仓库按 tag v5.0.3 核对（目录名逐个对照根 pom 的 modules 清单），顶层是这样的：</p>
+  <pre class="codeblock"><code>spring-cloud-gateway @ v5.0.3
+├─ spring-cloud-gateway-server-webflux/     响应式网关本体（本期讲的类全在这）
+├─ spring-cloud-gateway-server-webmvc/      Servlet 形态网关本体
+├─ spring-cloud-starter-gateway-server-webflux/  响应式形态 starter
+├─ spring-cloud-starter-gateway-server-webmvc/   Servlet 形态 starter
+├─ spring-cloud-gateway-proxyexchange-webflux/   ProxyExchange（WebFlux）
+├─ spring-cloud-gateway-proxyexchange-webmvc/    ProxyExchange（WebMVC）
+├─ spring-cloud-gateway-dependencies/       BOM 依赖清单
+├─ spring-cloud-gateway-sample/             官方示例工程
+├─ spring-cloud-gateway-integration-tests/  跨形态集成测试
+└─ docs/                                    官方文档源</code></pre>
+  <p>三个看点。其一，<strong>本体与 starter 分离</strong>：server-webflux / server-webmvc 两个实现模块放代码，starter 只管依赖装配——第 2 期"别拿错坐标"的答案就在这，两个 starter 对应两种运行形态。其二，<strong>ProxyExchange 是第三种用法</strong>：不接管整个应用，在普通 Spring 应用里注入 ProxyExchange 对象手工转发个别端点，轻量但覆盖面小。其三，<strong>响应式本体是主角</strong>：第 5 期源码导读的入口就在 spring-cloud-gateway-server-webflux 的 handler / route / filter 三个包——正好对应本期架构图的匹配、清单、执行三层。另注：顶层还有一个 spring-cloud-gateway-server 目录，里面只放共享的配置元数据，不在构建模块清单里，翻源码时别迷路。</p>
+</section>
+
+<!-- ================= 08 本期要点 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>本期要点</h2>
+  <div class="card">
+    <ul>
+      <li><strong>Route 四要素：</strong>id、uri、predicates、filters——断言全真才命中，路由本质是一份配置对象；</li>
+      <li><strong>断言定门槛，过滤器定关卡：</strong>14 个断言工厂按请求任意维度匹配；过滤器分 GatewayFilter（路由级，38 个工厂）与 GlobalFilter（全局），每个都有 pre / post 两段；</li>
+      <li><strong>一条请求的旅程：</strong>DispatcherHandler → RoutePredicateHandlerMapping 匹配 → FilteringWebHandler 组链 → pre → NettyRoutingFilter 代理转发 → post；</li>
+      <li><strong>响应式底座：</strong>Reactor + Netty 事件循环让线程数与连接数解耦，这是网关这类 IO 密集场景的正确姿势——代价是过滤器里禁止阻塞调用；</li>
+      <li><strong>仓库十模块：</strong>双形态本体 + 双 starter + ProxyExchange 双实现 + BOM / 示例 / 集成测试 / 文档源。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= 09 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：路由本质是一份配置对象，那把路由存进数据库或配置文件谁不会做——SCG 专门抽象出 RouteDefinitionLocator 接口，图的是什么？</summary>
+    <div class="details-body">
+      <p>图的是<strong>把"路由从哪来"和"路由怎么匹配"彻底解耦</strong>。匹配引擎（RoutePredicateHandlerMapping）只认 RouteLocator 这一层的 Route 对象，而路由从哪来，全部收编为 RouteDefinitionLocator 的实现：yml 是 PropertiesRouteDefinitionLocator，编程式 API 直接产 Route，注册中心发现是 DiscoveryClientRouteDefinitionLocator，管理端点动态下发是另一条路——CompositeRouteDefinitionLocator 把它们聚到一起，RouteDefinitionRouteLocator 再把"定义"翻译成带真断言真过滤器的 Route，最后 CachingRouteLocator 套一层缓存。新增一种路由来源（比如第 4 期接 Nacos 配置中心），<strong>只是多写一个 Locator 实现 + 在配置变更时发一个 RefreshRoutesEvent 清缓存</strong>，匹配引擎一行不改。反过来想"存数据库"方案：每接一个来源就要改一次匹配查询逻辑，路由表结构还会把"断言怎么配"焊死在表结构上——SCG 用一个接口把变化关在了门外。这是"稳定核心 + 可插拔供给"的经典分层，自己设计配置驱动的系统时直接可抄。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：在 pre 过滤器里用 RestTemplate 同步查一次鉴权服务，单次只要 50 毫秒——为什么说这种代码可能拖垮整个网关？</summary>
+    <div class="details-body">
+      <p>算一笔账就清楚了。事件循环线程是<strong>全体连接共享</strong>的：8 核机器上 Netty 事件循环默认也就 8 根线程（与 CPU 核数相关），但瞬时并发可能是几千个连接。你在 pre 过滤器里同步等 50 毫秒，这根线程上的<strong>所有其他请求陪停 50 毫秒</strong>；假设鉴权接口平均 50 毫秒，一根线程每秒最多处理 20 个请求，8 根线程的吞吐天花板就是每秒 160 次——而且这 160 次里还包括所有不需要鉴权的正常转发。更糟的是抖动：鉴权服务一旦慢到 2 秒，网关线程被成批按住 2 秒，入口吞吐瞬间归零，<strong>下游没事、网关先死</strong>，故障面反而被网关放大。对照 正确姿势：换成 WebClient 发起异步调用，发起后立刻归还线程，响应到达时再回到过滤器继续跑——同样的 8 根线程，等待期间能服务成千上万个其他请求。这正是"线程数与连接数解耦"的全部意义：响应式不是为快，是<strong>为等待期间不浪费线程</strong>。所以那条红线不是风格洁癖，是这类网关的生死线。</p>
+    </div>
+  </details>
+  <p class="note">本期 primary source：<a href="https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux/how-it-works.html" target="_blank" rel="noopener">Spring Cloud Gateway Reference · How it works（v5.0.3）</a>；延伸阅读：网关要对接的注册与配置中心，见本系列 <a href="0001-nacos-what-and-why.html">Nacos 系列五连讲（0001~0005 期）</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0057-scg-quickstart.html">← 上一期：5 分钟跑起来 Spring Cloud Gateway</a></span>
+  <a class="next" href="0059-scg-in-action.html">下一期：把限流、鉴权装进网关（实战）→</a>
+</nav>
+
+</body>
+</html>

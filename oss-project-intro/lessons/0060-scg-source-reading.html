@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Spring Cloud Gateway 系列第 5 期：架构与源码导读 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0060</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0059-scg-in-action.html">上一期:0059</a> · Spring Cloud Gateway 系列第 5 期 / 共 5 期 · <a href="https://spring.io/projects/spring-cloud-gateway" target="_blank" rel="noopener">spring.io ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · SPRING CLOUD GATEWAY 系列第 5 期：架构与源码导读（收官）</p>
+  <h1>读进 Spring Cloud Gateway 源码：一条请求的网关之旅</h1>
+  <p class="subtitle">上一期我们把统一入口的"三板斧"——认证、限流、动态路由——串成了一个完整实战。本期是 Spring Cloud Gateway 系列的收官：不写任何配置，走进 <strong>spring-cloud/spring-cloud-gateway</strong> 仓库，把前四期讲过的每个概念落到真实的类和调用链上。本期你带走三样东西：<strong>一张读码路线图</strong>（一条 HTTP 请求在网关源码里的完整旅程，从 DispatcherHandler 进、过滤器链走、Netty 转发出）、<strong>三个设计决策的来龙去脉</strong>（路由即数据、一条链的两半、配置化工厂生态，每个都讲清"为什么这么设计、解决什么问题、换种做法会怎样"）、外加<strong>一个属性袋的传递思路</strong>。屏幕上出现的每个目录和类，路径都核对自源码 tag <strong>v5.0.3</strong>，不是凭记忆写的。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🚪 API 网关 · Java · Apache-2.0（Spring 官方）</span>
+    <span class="tag">📦 源码 tag v5.0.3（Spring Cloud 2025.1 · Boot 4.x）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 5 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 读码动线 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>读码动线：从哪个模块进、按什么顺序读</h2>
+  <p>读码第一步是钉版本、认地图。SCG 的仓库在 5.0 世代做了模块拆分，本系列前几期说的"两个 starter 别拿错"，根源就在仓库布局上。以下顶层目录逐条核对自 tag v5.0.3（2026-09-19）：</p>
+  <pre class="codeblock"><code>spring-cloud/spring-cloud-gateway @ v5.0.3 · 顶层目录
+spring-cloud-gateway-server-webflux    响应式网关主模块（本系列主角，读码主战场）
+spring-cloud-gateway-server-webmvc     Servlet 形态：同一套路由模型跑在 Tomcat 栈
+spring-cloud-gateway-server            两形态共用的配置元数据（无 Java 源码）
+spring-cloud-gateway-proxyexchange-*   ProxyExchange 工具（webflux / webmvc 各一）
+spring-cloud-starter-gateway-server-*  两个起步器（webflux / webmvc 各一）
+spring-cloud-gateway-sample            示例工程
+spring-cloud-gateway-integration-tests 跨形态集成测试
+spring-cloud-gateway-dependencies      BOM 依赖管理
+docs                                   参考文档源（docs.spring.io 的内容出自这里）</code></pre>
+  <p>主战场只有一处：<code>spring-cloud-gateway-server-webflux/src/main/java/org/springframework/cloud/gateway/</code>。这个包下面再分家：<code>handler/</code> 管"请求进来先到哪"，<code>route/</code> 管"路由怎么定义、怎么加载"，<code>filter/</code> 管"转发前后做什么加工"——正好对应心智模型的三步：<strong>匹配路由 → 装配链 → 执行链</strong>。本期三个设计决策，一个包一个。</p>
+</section>
+
+<!-- ================= 02 路线图 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>本期主成果：一条请求的读码路线图</h2>
+  <p>先看终点长什么样。一条 HTTP 请求打到网关端口后，在源码里的完整旅程如下（每一站都标了类名，全部位于 <code>org.springframework.cloud.gateway</code> 包或 Spring WebFlux 框架层）：</p>
+  <div class="diagram">
+  <svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar60" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="10" y="20" width="150" height="56" rx="10" fill="var(--card)" stroke="var(--line)" stroke-width="1.5"/>
+    <text x="85" y="44" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">HTTP 请求</text>
+    <text x="85" y="62" text-anchor="middle" fill="var(--muted)" font-size="9">GET /api/orders</text>
+    <rect x="205" y="20" width="170" height="56" rx="10" fill="var(--card)" stroke="var(--line)" stroke-width="1.5"/>
+    <text x="290" y="42" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">HttpWebHandlerAdapter</text>
+    <text x="290" y="58" text-anchor="middle" fill="var(--muted)" font-size="8.5">WebFlux 框架层 · 请求适配为 exchange</text>
+    <rect x="420" y="20" width="150" height="56" rx="10" fill="var(--card)" stroke="var(--line)" stroke-width="1.5"/>
+    <text x="495" y="42" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">DispatcherHandler</text>
+    <text x="495" y="58" text-anchor="middle" fill="var(--muted)" font-size="8.5">WebFlux 统一调度器</text>
+    <rect x="10" y="130" width="240" height="76" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="130" y="155" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">① RoutePredicateHandlerMapping</text>
+    <text x="130" y="173" text-anchor="middle" fill="var(--muted)" font-size="9">lookupRoute：路由逐条试断言</text>
+    <text x="130" y="191" text-anchor="middle" fill="var(--muted)" font-size="9">命中的 Route 塞进 exchange 属性袋</text>
+    <rect x="290" y="130" width="220" height="76" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="400" y="155" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">② FilteringWebHandler</text>
+    <text x="400" y="173" text-anchor="middle" fill="var(--muted)" font-size="9">GlobalFilter + 路由内 GatewayFilter</text>
+    <text x="400" y="191" text-anchor="middle" fill="var(--muted)" font-size="9">按 order 排序，合成一条链</text>
+    <rect x="550" y="130" width="200" height="76" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="650" y="155" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">③ 过滤器链执行</text>
+    <text x="650" y="173" text-anchor="middle" fill="var(--muted)" font-size="9">pre 加工请求 → 转发 → post 加工响应</text>
+    <text x="650" y="191" text-anchor="middle" fill="var(--muted)" font-size="9">转发由 NettyRoutingFilter 完成</text>
+    <rect x="290" y="260" width="220" height="52" rx="10" fill="var(--card)" stroke="var(--line)" stroke-width="1.5"/>
+    <text x="400" y="282" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">下游微服务</text>
+    <text x="400" y="300" text-anchor="middle" fill="var(--muted)" font-size="9">订单 / 库存 / 用户……</text>
+    <line x1="160" y1="48" x2="199" y2="48" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar60)"/>
+    <line x1="375" y1="48" x2="414" y2="48" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar60)"/>
+    <line x1="470" y1="76" x2="150" y2="124" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar60)"/>
+    <line x1="250" y1="168" x2="284" y2="168" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar60)"/>
+    <line x1="510" y1="168" x2="544" y2="168" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar60)"/>
+    <line x1="620" y1="206" x2="460" y2="254" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar60)"/>
+    <text x="540" y="240" text-anchor="middle" fill="var(--muted)" font-size="9">pre 末端转发</text>
+    <text x="16" y="322" fill="var(--muted)" font-size="9.5">读法：先记住三大件（①匹配路由 ②装配链 ③执行链），每一站都是一个设计决策，下文逐站展开 · 路径核对自 tag v5.0.3</text>
+  </svg>
+  </div>
+  <p>前三站（HttpWebHandlerAdapter、DispatcherHandler）是 Spring WebFlux 框架的地基，不属于网关代码——网关自己的第一个类是 <code>RoutePredicateHandlerMapping</code>。官方《How it works》的定义原话：<strong>"If the Gateway Handler Mapping determines that a request matches a route, it is sent to the Gateway Web Handler. This handler runs the request through a filter chain that is specific to the request."</strong>——Handler Mapping 判定匹配，交给 Web Handler，穿过一条"为这个请求定制"的过滤器链。这句话里的三个名词，就是下面三节的三个主角。</p>
+  <p class="note"><img src="../output/0060-scg-source-reading/images/scg-docs-howitworks.png" alt="官方文档 How it works 页实拍" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方参考文档《How it works》实拍：客户端请求 → Gateway Handler Matching（匹配路由）→ Gateway Web Handler → 过滤器链（虚线分隔 pre 与 post）→ 代理请求到目标服务（docs.spring.io，5.0.3，2026-09-19 截图）。</p>
+</section>
+
+<!-- ================= 03 决策一 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>决策一：路由是数据，不是代码——lookupRoute 的逐条断言</h2>
+  <p>读码入口就一个方法。<code>handler/RoutePredicateHandlerMapping.java</code> 里的 <code>lookupRoute</code>，它回答"怎么找到匹配路由"（摘自 tag v5.0.3，L131-147 节选）：</p>
+  <pre class="codeblock"><code>protected Mono&lt;Route&gt; lookupRoute(ServerWebExchange exchange) {
+    return this.routeLocator.getRoutes().filterWhen(route -&gt; {
+        // 把"正在试哪条路由"记进属性袋，断言异常时能定位
+        exchange.getAttributes().put(GATEWAY_PREDICATE_ROUTE_ATTR, route.getId());
+        try {
+            return route.getPredicate().apply(exchange);
+        }
+        catch (Exception e) { logger.error(...); }
+        return Mono.just(false);
+    }).next();  // 取第一条命中的路由</code></pre>
+  <p>三行读出三层信息。<strong>第一，路由的来源是个流</strong>：<code>routeLocator.getRoutes()</code> 返回 <code>Flux&lt;Route&gt;</code>，路由不是存在 Map 里等查询，而是一条可以随时变换的数据流。<strong>第二，匹配就是逐条试断言</strong>：<code>filterWhen</code> 把每条路由的断言拿到请求上执行，<code>next()</code> 取第一条命中的——路由的 <code>order</code> 顺序就是优先级，先匹配先赢。<strong>第三，命中的路由放属性袋</strong>：后续所有环节都从属性袋取路由，不再重复匹配。路由对象从哪来？<code>route/RouteDefinitionRouteLocator.java</code> 的 <code>convertToRoute</code>（L131-135）给出答案：</p>
+  <pre class="codeblock"><code>private Route convertToRoute(RouteDefinition routeDefinition) {
+    AsyncPredicate&lt;ServerWebExchange&gt; predicate = combinePredicates(routeDefinition);
+    List&lt;GatewayFilter&gt; gatewayFilters = getFilters(routeDefinition);
+    return Route.async(routeDefinition).asyncPredicate(predicate)
+                .replaceFilters(gatewayFilters).build();
+}</code></pre>
+  <p class="note"><img src="../output/0060-scg-source-reading/images/scg-tree-route-dir.png" alt="GitHub 上 route 目录实拍" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">源码 <code>route/</code> 目录实拍（tag v5.0.3，2026-09-19 截图，github.com/spring-cloud/spring-cloud-gateway）：<code>RouteDefinition</code>（配置态）与 <code>Route</code>（运行态）分家，中间由 <code>RouteDefinitionRouteLocator</code> 转换；<code>CachingRouteLocator</code> 提供缓存，<code>RouteDefinitionWriter</code>/<code>InMemoryRouteDefinitionRepository</code> 支撑运行期动态增删路由。</p>
+  <p>现在回答钩子的问题：<strong>网关为什么敢把路由当数据？</strong>因为"路由的定义"（RouteDefinition：id、uri、断言参数、过滤器参数，全是字符串和数字）和"路由的运行时对象"（Route：编译好的断言、过滤器实例）被拆成两个世界，中间隔着 <code>convertToRoute</code> 这道转换工序。配置态是纯数据——所以它可以来自 yml、来自注册中心（DiscoveryClientRouteDefinitionLocator）、来自 actuator 端点的运行期写入，甚至来自数据库（仓库里有 RedisRouteDefinitionRepository 现成参考）。<strong>解决什么问题：</strong>路由增删改不需要重新编译、不需要重启，第 4 期"改一下 Nacos 配置路由就生效"的动态路由，源码依据就是这一层。<strong>换种做法会怎样：</strong>路由写成 Java 代码（第 2 期见过的 DSL），规则能写测试、有类型检查，但每次调整都要走"编译—打包—发布"流水线，动态路由无从谈起。SCG 的取舍是：<strong>运行态用代码（性能与灵活性兼得），定义态用数据（可配置、可推送、可热更）</strong>，两边各取所长。</p>
+</section>
+
+<!-- ================= 04 决策二 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>决策二：GlobalFilter 与 GatewayFilter 合流成一条链</h2>
+  <p>第二个入口是 <code>handler/FilteringWebHandler.java</code>。第 3 期讲过"全局过滤器 GlobalFilter 作用于所有路由，GatewayFilter 只挂在单条路由上"，这两套怎么协作？答案是：在网关眼里它们其实是同一种东西（摘自 tag v5.0.3，L99-124 节选）：</p>
+  <pre class="codeblock"><code>public Mono&lt;Void&gt; handle(ServerWebExchange exchange) {
+    Route route = exchange.getRequiredAttribute(GATEWAY_ROUTE_ATTR); // 从属性袋取路由
+    List&lt;GatewayFilter&gt; combined = getCombinedFilters(route);
+    return new DefaultGatewayFilterChain(combined).filter(exchange);
+}
+protected List&lt;GatewayFilter&gt; getAllFilters(Route route) {
+    List&lt;GatewayFilter&gt; combined = new ArrayList&lt;&gt;(this.globalFilters);
+    combined.addAll(route.getFilters());        // 路由内过滤器接在全局过滤器后面
+    AnnotationAwareOrderComparator.sort(combined); // 按 order 统一排序
+    return combined;
+}</code></pre>
+  <p>全局过滤器被 <code>GatewayFilterAdapter</code> 包了一层，再跟命中路由自带的过滤器合并、按 <code>order</code> 排序，成了一条链。<strong>为什么这么设计：</strong>把"对所有请求生效的基础能力"（转发、负载均衡、写回响应、指标）跟"对单条路由生效的业务策略"统一成同一种执行单元，链的推进逻辑只需写一遍。<strong>解决什么问题：</strong>避免两套过滤器、两套执行模型并存——想想如果 pre 一套接口、post 一套接口、全局和路由各一套，组合状态会爆炸。<strong>换种做法会怎样：</strong>祖辈 Zuul 就是反例，它把过滤器分成 pre / route / post 三种类型各自排队，类型之间的数据传递和错误处理都要额外约定；SCG 只有一条链，"类型"退化成链上的位置。</p>
+  <p>这条链最精妙的地方是<strong>pre 和 post 的对称性</strong>。看转发过滤器 <code>NettyRoutingFilter</code> 的收尾（摘自 tag v5.0.3，L202）：</p>
+  <pre class="codeblock"><code>return responseFlux.then(chain.filter(exchange));
+// responseFlux：把请求发往下游、拿到响应头（pre 阶段的终点）
+// .then(...)  ：下游响应就绪后，才继续执行链上剩下的过滤器（post 阶段的起点）</code></pre>
+  <p>响应式链里没有"调用返回"这回事，所谓 post 逻辑，就是写在 <code>chain.filter(exchange).then(...)</code> 后面的那段 Mono——<strong>pre 和 post 是同一条链的两半，中间隔着一次真正的网络转发</strong>。过滤器想加工响应头，把代码放在 then 后面即可；想加工请求，放在 chain.filter 调用之前即可。这跟第 0006~0010 期读过的 Netty Pipeline 是同族思路：一条双向链，出站入站各走各的半程，但共享同一个上下文。</p>
+</section>
+
+<!-- ================= 05 决策三 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>决策三：Name + Config 模式，长出几十个工厂的生态</h2>
+  <p>前四期你反复在写 <code>Path=/api/**</code>、<code>AddRequestHeader=Hello, World</code> 这样的短配置——等号左边一个名字、右边一堆参数，这是怎么变成 Java 对象的？答案是两个工厂接口的"Name + Config"模式（摘自 <code>handler/predicate/RoutePredicateFactory.java</code>，tag v5.0.3，L71-75）：</p>
+  <pre class="codeblock"><code>@FunctionalInterface
+public interface RoutePredicateFactory&lt;C&gt; extends ShortcutConfigurable, Configurable&lt;C&gt; {
+    Predicate&lt;ServerWebExchange&gt; apply(C config);   // 配置对象 → 断言实例
+    default String name() {   // 类名去掉 RoutePredicateFactory 后缀 = 配置名
+        return NameUtils.normalizeRoutePredicateName(getClass());
+    }
+}</code></pre>
+  <p>规矩一共三条。<strong>第一条，名字从类名来</strong>：类叫 <code>PathRoutePredicateFactory</code>，配置里就能写 <code>Path=...</code>；<code>GatewayFilterFactory</code> 同理。<strong>第二条，配置变对象、对象变断言/过滤器</strong>：RouteDefinitionRouteLocator 拿到配置里的名字去工厂注册表按名查找，把参数绑定成泛型 <code>C</code> 类型的配置对象，再调 <code>apply(config)</code> 造出断言或过滤器实例——这正是决策一里 <code>convertToRoute</code> 干的活。<strong>第三条，多条件自动 and</strong>：<code>combinePredicates</code> 用 <code>reduce(..., AsyncPredicate::and)</code> 把一条路由的多个断言串成组合断言。</p>
+  <p><strong>为什么这样能长出生态：</strong>社区要加一种匹配方式或一个过滤器，只需新增一个实现类——一个类自带三样东西：名字（配置入口）、配置类（参数 schema）、apply（行为）。不用改任何框架代码，Spring 容器收集所有工厂 Bean，RouteDefinitionRouteLocator 构造函数里 <code>forEach(factory -> put(factory.name(), factory))</code> 就收编完毕。这是"微核 + 插件"结构在过滤器场景的教科书实现。<strong>换种做法会怎样：</strong>用一个大 switch 按字符串分发，每加一种能力都要改核心类、重新发版，社区贡献只能以 patch 形式挤进主干——生态扩张速度会慢一个数量级。规模用数字说话（自 tag v5.0.3 源码清点）：<code>handler/predicate</code> 包 20 个 Java 文件、<code>filter/factory</code> 包 73 个 Java 文件，断言 + 过滤器工厂合计几十个开箱即用，而支撑这一切的核心接口只有两个。</p>
+</section>
+
+<!-- ================= 06 属性袋 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>穿针引线的属性袋：exchange.getAttributes</h2>
+  <p>把镜头拉回路线图：Handler Mapping 找到的路由、断言试到哪条、转发目标 URL、下游原始响应……这些中间信息都存在哪？答案是一个看起来平平无奇的 Map：<code>ServerWebExchange</code> 的 <code>getAttributes()</code>。常量都定义在 <code>support/ServerWebExchangeUtils.java</code>（tag v5.0.3，L96-117 节选）：</p>
+  <pre class="codeblock"><code>public static final String GATEWAY_ROUTE_ATTR = qualify("gatewayRoute");
+public static final String GATEWAY_REQUEST_URL_ATTR = qualify("gatewayRequestUrl");
+public static final String GATEWAY_ORIGINAL_REQUEST_URL_ATTR = qualify("gatewayOriginalRequestUrl");
+public static final String GATEWAY_HANDLER_MAPPER_ATTR = qualify("gatewayHandlerMapper");
+public static final String GATEWAY_PREDICATE_ROUTE_ATTR = qualify("gatewayPredicateRouteAttr");</code></pre>
+  <p>这条链上的接力赛是这样的：RoutePredicateHandlerMapping 放进 <code>GATEWAY_PREDICATE_ROUTE_ATTR</code>（正在试哪条）和 <code>GATEWAY_ROUTE_ATTR</code>（命中哪条）；RouteToRequestUrlFilter 放进 <code>GATEWAY_REQUEST_URL_ATTR</code>（改写后的转发目标）；NettyRoutingFilter 放进 <code>CLIENT_RESPONSE_ATTR</code>（下游原始响应），让排在它后面的 NettyWriteResponseFilter 拿去写回客户端。<strong>为什么用属性袋而不是显式参数：</strong>过滤器链的接口是固定的 <code>filter(exchange, chain)</code>，几十个过滤器各取所需，如果每个中间产物都走函数签名，接口就得天天改；属性袋让链上每一站"用得到就取，用不到不感知"，排障时还顺手——第 2 期开过的 DEBUG 日志，输出的正是这些属性的变化。<strong>代价与纪律：</strong>属性袋是无类型 Map，拼写错了编译器不管，所以网关把它收在 ServerWebExchangeUtils 一个类里、用 <code>qualify()</code> 统一前缀。借鉴到自己项目：<strong>上下文对象可以"轻"，但 key 必须集中管理、有唯一前缀</strong>。</p>
+</section>
+
+<!-- ================= 07 可借鉴点 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>收尾：把三个设计带回家</h2>
+  <div class="card card-tip">
+    <p><strong>可借鉴点三则：</strong></p>
+    <ul>
+      <li><strong>链式责任分离：</strong>路由匹配、链装配、链执行三个动作各归一个类（RoutePredicateHandlerMapping / FilteringWebHandler / DefaultGatewayFilterChain），每一环都能单独替换——自己写拦截器、审批流、消息处理管线时，"装配"与"执行"分开，加个环节就不用动主流程；</li>
+      <li><strong>配置化生态：</strong>Name + Config 模式让"加一种能力 = 加一个类"，定义态与运行态分离让数据可热更——规则类需求（风控规则、告警规则、灰度规则）都适用这个形状；</li>
+      <li><strong>响应式红线意识：</strong>pre 与 post 靠 <code>then()</code> 衔接，链上任何一环写了阻塞调用（同步数据库、Thread.sleep），堵住的不是自己一个请求，而是整个事件循环的 Worker 线程——用响应式网关，全链路的依赖都得是非阻塞的，这是第 2 期"加了 starter-web 网关就失效"那条红线的深层原因。</li>
+    </ul>
+  </div>
+  <p>读码路线图收个尾：想继续深挖，就从 <code>handler/RoutePredicateHandlerMapping</code> 进，顺 <code>lookupRoute → convertToRoute → handle → DefaultGatewayFilterChain</code> 走一遍，再按兴趣分叉——限流看 <code>filter/ratelimit/</code>（<a href="0059-scg-in-action.html">第 0059 期实战</a>里配的 Redis 令牌桶，实现就是 <code>RedisRateLimiter</code>），动态路由看 <code>route/InMemoryRouteDefinitionRepository</code>，WebMVC 形态的差异看 <code>spring-cloud-gateway-server-webmvc</code> 模块——同一套路由模型在 Servlet 世界的对应物。</p>
+</section>
+
+<!-- ================= 08 quiz ================= -->
+<section>
+  <h2><span class="sec-num">08</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 4 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. lookupRoute 是怎么从一堆路由里找到"那条"路由的？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，路由不是哈希查询，而是逐条试断言。","对的：getRoutes() 拿到路由流，filterWhen 逐条执行断言，next() 取第一条命中的——order 在前的先试。","不对，命中靠断言求值，不靠路径哈希表。"]'>
+        <li class="quiz-option">按 uri 前缀查哈希表，一次定位</li>
+        <li class="quiz-option">路由流逐条执行断言，取第一条命中的（order 优先）</li>
+        <li class="quiz-option">把请求并发发给所有路由，谁响应算谁的</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. GlobalFilter 和路由内的 GatewayFilter 是怎么协作的？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，GlobalFilter 对所有路由生效，两者不是并列关系，而是被合成一条链。","不对，没有先全局后单条的两轮执行，是一轮、一条链。","对的：全局过滤器被适配成 GatewayFilter，跟路由内过滤器合并后按 order 统一排序，一条链执行。"]'>
+        <li class="quiz-option">两者独立执行，互不干扰</li>
+        <li class="quiz-option">先执行完所有 GlobalFilter，再执行路由内过滤器</li>
+        <li class="quiz-option">合并成一条链，按 order 统一排序执行</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 配置里写的 Path=/api/**，最终是怎么变成"能判断请求的断言"的？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，配置字符串不会被 eval，工厂是强类型的。","对的：按名字找到 PathRoutePredicateFactory，参数绑定成配置对象，apply(config) 造出断言实例。","不对，Path 不是注解，是工厂名。"]'>
+        <li class="quiz-option">框架把字符串表达式动态编译执行</li>
+        <li class="quiz-option">按名字找到工厂，参数绑定成配置对象，apply 造出断言实例</li>
+        <li class="quiz-option">Path 是注解，启动时扫描出来的</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. 响应式链里，"post 逻辑"（转发之后的响应加工）写在哪？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，另起一条链的话，上下文传递和错误处理都要额外设计，SCG 没这么做。","不对，不存在 post 阶段的独立调度。","对的：pre 和 post 是同一条链的两半，转发发生在 chain.filter 内部，then 后面拿到的就是响应就绪之后的时机。"]'>
+        <li class="quiz-option">单独注册一个 post 类型过滤器</li>
+        <li class="quiz-option">由框架在响应到达时自动回调</li>
+        <li class="quiz-option">写在 chain.filter(exchange).then(...) 之后</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 09 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：RouteDefinition（配置态）和 Route（运行态）分家的设计，除了动态路由还带来什么？什么情况下这层拆分反而碍事？</summary>
+    <div class="details-body">
+      <p>先列收益。<strong>其一，路由的来源彻底开放</strong>：定义态是纯数据，任何能产出数据的渠道都能当路由源——yml、注册中心、actuator 端点、数据库（仓库里 RedisRouteDefinitionRepository 就是"路由进 Redis"的现成样），甚至自己写一个 RouteDefinitionLocator 从内部配置平台拉，管路由的系统跟执行路由的系统就此解耦。<strong>其二，热更新落点干净</strong>：配置变了重走 convertToRoute、重建缓存（CachingRouteLocator 监听 RefreshRoutesEvent），运行态对象整体替换、不可变，没有"改一半"的中间态，也不用为并发读加锁。<strong>其三，可观测性好做</strong>：路由就是数据，actuator 端点能把当前生效的路由清单整表吐出来，"网关到底认了哪些路由"一目了然。再说代价。<strong>这层拆分让强类型信息在配置态全部退化成字符串</strong>：参数写错要到绑定阶段才报错，IDE 补全和编译期检查都不存在——第 2 期"配置写了不生效"那类坑就源于此。对路由规模大、变更频繁的团队这层拆分是刚需；反之路由就十几条、一年改一次，直接用 Java DSL（RouteLocatorBuilder）反而更稳：有类型检查、能写单测、能进版本管理，代价只是放弃热更。一句话：<strong>变更频率决定拆不拆，SCG 两种都给，运行时模型是同一个 Route</strong>。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：属性袋（exchange.getAttributes）本质是个无类型 Map。你在自己的系统里要设计类似的链路上下文，该从 SCG 学什么、防什么？</summary>
+    <div class="details-body">
+      <p>先说该学的三件事。<strong>第一，key 集中收口</strong>：SCG 把所有属性 key 收在 ServerWebExchangeUtils 一个工具类里，统一 <code>qualify()</code> 前缀，谁放谁取一目了然。<strong>第二，命名空间隔离</strong>：前缀机制（gatewayRoute、gatewayRequestUrl……）让多个组件往同一个 Map 里放东西也不打架。<strong>第三，写时留痕</strong>：lookupRoute 在试断言前先放 GATEWAY_PREDICATE_ROUTE_ATTR，断言抛异常时日志能说出"是哪条路由的断言炸了"——中间状态写进上下文不只是给下游用的，也是给排障的人看的。再说该防的三件事。<strong>一是类型漂移</strong>：Map 里存的是 Object，取的时候强转，改类型编译器不拦，防法是读写都走带类型的小工具方法（getAttributeOrDefault 这类），把强转收在一点上。<strong>二是内存驻留</strong>：属性跟着 exchange 走完整生命周期，塞大对象等于变相泄漏，SCG 专门有 RemoveCachedBodyFilter 这类过滤器负责清理缓存请求体，你的上下文也要有"用完即清"的纪律。<strong>三是语义腐烂</strong>：属性袋用久了容易变成杂物抽屉，定期盘点 key 的生产者和消费者，删掉没人认领的。适用边界：链路短、环节多、每站各取所需的管线场景，它是轻量解法；一旦变成"多环节深度协作、需要编译期保证"的长流程，就回到显式参数和强类型上下文对象。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 10 要点 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>本期要点与系列收尾</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>读码路线图：HttpWebHandlerAdapter → DispatcherHandler → RoutePredicateHandlerMapping（lookupRoute 逐条断言）→ FilteringWebHandler（合流装配）→ 过滤器链 pre → Netty 转发 → post 回程，三大件各管一站；</li>
+      <li>决策一"路由即数据"：RouteDefinition 配置态与 Route 运行态分离，convertToRoute 是转换工序——动态路由、配置中心推送的源码依据；</li>
+      <li>决策二"一条链的两半"：GlobalFilter 适配后与路由内 GatewayFilter 合并排序成一条链，pre/post 靠 then() 衔接，响应式链天然对称；</li>
+      <li>决策三"配置化工厂生态"：Name 从类名来、Config 绑定成对象、apply 造实例——加一种能力就是加一个类，predicate 包 20 个文件、factory 包 73 个文件（tag v5.0.3 清点）；</li>
+      <li>属性袋贯穿全链：GATEWAY_ROUTE_ATTR 等常量集中在 ServerWebExchangeUtils，key 集中收口 + 统一前缀是自研上下文的作业模板。</li>
+    </ul>
+  </div>
+  <p><strong>Spring Cloud Gateway 的入门系列就聊到这里：</strong>五期走完，从它是什么、五分钟跑起来、Route/Predicate/Filter 的概念与架构，到认证限流灰度的实战，再到今天读进源码。留个作业：把仓库切到 v5.0.3 标签，顺着本期的路线图亲手走一遍 lookupRoute 到 Netty 转发的完整链路。<strong>下期开启新项目 Apache Kafka</strong>——消息队列里的事实标准，与 Pulsar 系列对照着学，还是老路数：先问它为谁而生，再走进它的设计决策。</p>
+  <p><strong>Primary source：</strong><a href="https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux/how-it-works.html" target="_blank" rel="noopener">Spring Cloud Gateway 官方参考文档 · How it works（5.0.3）</a>——本期处理链口径出自该页；源码引用全部核对自 <a href="https://github.com/spring-cloud/spring-cloud-gateway/tree/v5.0.3" target="_blank" rel="noopener">spring-cloud/spring-cloud-gateway @ tag v5.0.3</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0059-scg-in-action.html">← 上一期：统一入口三板斧实战</a></span>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

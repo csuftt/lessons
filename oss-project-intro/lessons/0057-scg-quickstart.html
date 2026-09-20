@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Spring Cloud Gateway 系列第 2 期：5 分钟跑起来 | 2026-09-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0057</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0056-scg-what-and-why.html">上一期:0056</a> · Spring Cloud Gateway 系列第 2 期 / 共 5 期 · <a href="0058-scg-core-concepts-architecture.html">下一期:0058</a> · <a href="https://spring.io/projects/spring-cloud-gateway" target="_blank" rel="noopener">spring.io/spring-cloud-gateway ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · SPRING CLOUD GATEWAY 系列第 2 期：5 分钟跑起来</p>
+  <h1>5 分钟跑起来 Spring Cloud Gateway：一条路由一个过滤器，第一次转发成功</h1>
+  <p class="subtitle">上一期我们认识了 Spring Cloud Gateway——Spring 官方生态里的响应式网关，心智模型是"请求先到网关，路由匹配后转发给下游，过滤器顺手加工"。今天把认识变成动手。本期结束，你将亲手做出四样东西：<strong>一个跑起来的网关应用、一条配好的转发路由、一次 curl 验证通过的端到端转发、一个真正生效的请求头过滤器</strong>。全部命令与配置逐条对照官方文档与官方入门指南（2026-09-19 核对），跟着敲就能通；最后给一份"三条全绿才算跑通"的判定清单和五个高频翻车点的解法。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧭 微服务网关 · Java · Apache-2.0（Spring 官方项目）</span>
+    <span class="tag">📦 基于 Spring Cloud Gateway 5.0.3（Spring Cloud 2025.1.3 · Boot 4.1.1 · JDK 17+，2026-09-19 核对）</span>
+    <span class="tag-date">📅 2026-09-19 · 第 2 期</span>
+    <span class="tag time">⏱ 预计阅读 15 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 本期目标 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>本期目标：跑通长什么样，先说清楚</h2>
+  <p>上期结论先回忆一句：网关的价值在"横切"——安全、限流、审计这些事，收口到一个入口统一做。今天验证它。本期端到端演示链五步走，每一环都有官方口径的预期结果：</p>
+  <ul>
+    <li><strong>建应用：</strong>用 start.spring.io 新建一个只带网关起步器的空应用，不写一行业务代码；</li>
+    <li><strong>配路由：</strong>在 application.yml 里配一条最小路由——路径匹配 <code>/get</code> 的请求，转发到官方指南指定的回显服务 httpbin.org；</li>
+    <li><strong>起服务：</strong>默认端口 8080，日志看到 Netty started（响应式栈就位的标志）；</li>
+    <li><strong>验证转发：</strong>curl 一下网关，拿到下游服务的 JSON 回显；</li>
+    <li><strong>加过滤器：</strong>给路由加一个 AddRequestHeader 过滤器，再验证一次——响应回显里能看到这个新加的请求头。</li>
+  </ul>
+  <p>为什么下游选 httpbin.org？它是<strong>官方入门指南《Building a Gateway》指定的演示上游</strong>：你发什么请求，它原样回显什么——请求头、参数一目了然，过滤器加没加上，它替你作证。本期全程不需要装注册中心、数据库或任何中间件，5 分钟的口径才立得住。</p>
+</section>
+
+<!-- ================= 02 环境与版本 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>动手前：环境要求与版本钉子</h2>
+  <p><strong>环境要求两条：</strong>第一，<strong>JDK 17 及以上</strong>——Spring Boot 4.1 官方系统要求"at least Java 17"，最高兼容到 Java 26，本机装 17/21/25 都行；第二，构建工具 Maven 3.6.3+ 或 Gradle 8.14+（用 start.spring.io 生成的自带 wrapper 就不用管）。网关应用本身不依赖任何外部中间件，起起来就是一个普通 Java 进程。</p>
+  <p><strong>版本钉子钉三条线</strong>（2026-09-19 核对）：Spring Cloud 版本列车 <strong>2025.1.x（代号 Oakwood）</strong>，最新服务版本 <strong>2025.1.3</strong>；它对应的 <strong>Spring Cloud Gateway 是 5.0.3</strong>（当前 Latest，8 月发布，建议至少用这个版本——它带一个 SSRF 安全修复）；列车兼容的 Spring Boot 是 <strong>4.0.x / 4.1.x</strong>，start.spring.io 当前默认生成 <strong>4.1.1</strong>。三者的关系一句话：<strong>版本列车（BOM）管全局，Boot 定基础，Gateway 的具体版本由 BOM 解析，不用你手写版本号</strong>。</p>
+  <p>特别提醒：<strong>别拿老教程的配置直接套</strong>。4.x 时代的路由配置写在 <code>spring.cloud.gateway.routes</code> 下；5.0 起，响应式版的路由要写在 <code>spring.cloud.gateway.server.webflux.routes</code>——根路径多了一截。配置"看起来怎么写都不生效"的疑难杂症，九成是版本对不上，第 07 节有对照表。</p>
+</section>
+
+<!-- ================= 03 第一步 建应用 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>第一步：建一个网关应用（不写业务代码）</h2>
+  <p>打开 <strong>start.spring.io</strong>，Artifact 填 gateway，依赖搜索 gateway 后<strong>选 "Reactive Gateway"</strong>（分类标签 SPRING CLOUD ROUTING），点 Generate 下载 zip，解压即是完整工程。注意页面上有两个像的：<strong>"Reactive Gateway" 对应 <code>spring-cloud-starter-gateway-server-webflux</code></strong>——经典的 Spring Cloud Gateway 响应式版，官方指南和本期都选它；另一个 "Gateway" 是 Servlet 技术栈的 <code>spring-cloud-starter-gateway-server-webmvc</code>，两者别选混（第 07 节细说）。</p>
+  <p class="note"><img src="../output/0057-scg-quickstart/images/scg-start-spring-io.png" alt="start.spring.io 已添加 Reactive Gateway 依赖" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">start.spring.io：Spring Boot 4.1.1 为当前默认（快照版不用碰），Java 17 起步；右侧已添加 Reactive Gateway 依赖，描述原文"Provides a simple, yet effective way to route to APIs"（2026-09-19 截图）。</p>
+  <p>不想用网页，也可以在 pom.xml 里直接加两个坐标（生成的工程就是这么来的）：</p>
+  <pre class="codeblock"><code>&lt;parent&gt;
+    &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+    &lt;artifactId&gt;spring-boot-starter-parent&lt;/artifactId&gt;
+    &lt;version&gt;4.1.1&lt;/version&gt;
+&lt;/parent&gt;
+&lt;properties&gt;
+    &lt;java.version&gt;17&lt;/java.version&gt;
+    &lt;spring-cloud.version&gt;2025.1.3&lt;/spring-cloud.version&gt;
+&lt;/properties&gt;
+&lt;dependencies&gt;
+    &lt;dependency&gt;
+        &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+        &lt;artifactId&gt;spring-cloud-starter-gateway-server-webflux&lt;/artifactId&gt;
+    &lt;/dependency&gt;
+&lt;/dependencies&gt;</code></pre>
+  <p>注意 starter 这里<strong>不写版本号</strong>：由 <code>spring-cloud-dependencies</code> BOM（2025.1.3）统一解析——它解析出来的就是 Spring Cloud Gateway <strong>5.0.3</strong>。这是 Maven Central 上该起步器 5.0.3 的坐标页，版本看得清清楚楚：</p>
+  <p class="note"><img src="../output/0057-scg-quickstart/images/scg-maven-central.png" alt="Maven Central：spring-cloud-starter-gateway-server-webflux 5.0.3" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">Maven Central 的 spring-cloud-starter-gateway-server-webflux 坐标片段：版本 5.0.3，由 BOM 托管（central.sonatype.com，2026-09-19 截图）。</p>
+</section>
+
+<!-- ================= 04 第二步 配路由 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>第二步：配第一条路由（Path=/get → httpbin.org）</h2>
+  <p>应用零代码，路由全在配置里。新建 <code>src/main/resources/application.yml</code>（start.spring.io 默认给的是 application.properties，改成 yml 或直接写 properties 都行），写入官方文档 5.0.3 属性结构的第一条路由：</p>
+  <pre class="codeblock"><code>spring:
+  cloud:
+    gateway:
+      server:
+        webflux:
+          routes:
+            - id: httpbin_route        # 路由 id，随便起，别重复
+              uri: http://httpbin.org:80   # 下游地址：官方指南的回显服务
+              predicates:
+                - Path=/get            # 路径匹配：/get 才走这条路由</code></pre>
+  <p>三个字段各管一件事：<strong>id 是这条路由的名字；uri 是转发目的地；predicates 是"什么请求算命中"</strong>。这正好是网关的三要素——第 3 期我们会给它们正式的名字：Route、Predicate、Filter。上面写法是官方文档的 shortcut 语法（<code>Path=/get</code> 短横线一行搞定）；官方入门指南同一章用 Java DSL 写的是同一件事，两种写法等价，挑顺手的：</p>
+  <p class="note"><img src="../output/0057-scg-quickstart/images/scg-guide-route.png" alt="官方指南 Building a Gateway：创建第一条路由" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">官方入门指南《Building a Gateway》"Creating A Simple Route"一节原文：path("/get") 匹配、addRequestHeader 加过滤器、uri 指向 http://httpbin.org:80（spring.io/guides/gs/gateway，2026-09-19 截图）。指南用 Java DSL，与上面 yml 等价。</p>
+</section>
+
+<!-- ================= 05 第三步 起服务+验证 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>第三步：起服务，验证第一次转发</h2>
+  <p>工程根目录执行（IDE 里直接跑 GatewayApplication 主类也行）：</p>
+  <pre class="codeblock"><code>./mvnw spring-boot:run        # Windows 用 mvnw.cmd spring-boot:run</code></pre>
+  <p>启动日志找这一行：<strong>Netty started on port 8080</strong>——注意是 <strong>Netty</strong> 不是 Tomcat。这就是上一期说的响应式底座在起作用：网关应用默认就是 Netty + WebFlux 栈，8080 是 Spring Boot 默认端口。起稳之后，对着网关发第一次请求：</p>
+  <pre class="codeblock"><code>$ curl http://localhost:8080/get</code></pre>
+  <pre class="codeblock"><code>{
+  "args": {},
+  "headers": {
+    "Accept": "*/*",
+    "Host": "httpbin.org",
+    ...
+  },
+  "origin": "127.0.0.1, 73.68.251.70",
+  "url": "http://httpbin.org/get"
+}</code></pre>
+  <p>读一下这段回显（节选自官方指南样例）：<code>"url": "http://httpbin.org/get"</code> 说明请求真到了 httpbin.org，<strong>网关替你把请求转发出去了</strong>；回显里的 <code>X-Forwarded-Host</code> 等头还留着"经由 localhost:8080 中转"的痕迹。你敲的是本机 8080，响应却是下游给的——<strong>网关的第一课：它是透明反代，转发对客户端无感</strong>。</p>
+</section>
+
+<!-- ================= 06 第四步 加过滤器 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>第四步：加一个过滤器，改请求头再验证</h2>
+  <p>转发通了，再验证过滤器。按官方指南，给路由加一个 AddRequestHeader 过滤器——下游收到的请求会多一个 <code>Hello: World</code> 头。yml 写法在 routes 里加一段 <code>filters</code>（与 Java DSL 的 <code>.filters(f -&gt; f.addRequestHeader("Hello", "World"))</code> 等价）：</p>
+  <pre class="codeblock"><code>              filters:
+                - AddRequestHeader=Hello, World</code></pre>
+  <p>重启网关再 curl 一次，看回显的 headers 部分（官方指南样例原文）：</p>
+  <pre class="codeblock"><code>{
+  "headers": {
+    "Accept": "*/*",
+    "Forwarded": "proto=http;host=\"localhost:8080\";for=\"0:0:0:0:0:0:0:1:56207\"",
+    "Hello": "World",
+    "Host": "httpbin.org",
+    "X-Forwarded-Host": "localhost:8080"
+  }
+}</code></pre>
+  <p><strong><code>"Hello": "World"</code> 出现了</strong>——官方指南原话："Note that HTTPBin shows that the Hello header with a value of World was sent in the request." 网关在转发前把请求改了，下游看得见。这就是过滤器的工作位置：<strong>请求发出前、响应返回后，网关都能加工</strong>。限流、改写路径、熔断，全是同一机制下几十个现成工厂中的三个，第 3 期展开。</p>
+</section>
+
+<!-- ================= 07 跑通判定与高频报错 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>跑通判定三条全绿 + 高频报错速查</h2>
+  <p><strong>跑通判定（三条全绿才算数）：</strong></p>
+  <ul>
+    <li><strong>转发通：</strong>curl http://localhost:8080/get 拿到 httpbin 的 JSON 回显，url 字段是 httpbin.org/get；</li>
+    <li><strong>过滤器生效：</strong>回显 headers 里出现 "Hello": "World"；</li>
+    <li><strong>谓词在把关：</strong>curl http://localhost:8080/other 返回 404——Path=/get 不匹配，网关拒绝转发。路由不是管道，是带条件的闸门。</li>
+  </ul>
+  <p><strong>高频报错速查（按出现概率排序）：</strong></p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>现象</th><th>根源</th><th>解法</th></tr></thead>
+    <tbody>
+      <tr><td><strong>503 SERVICE_UNAVAILABLE</strong></td><td>路由 uri 不可达（下游没起/写错端口）；官方文档明确：lb:// 路由找不到实例时默认回 503</td><td>先 curl 下游地址本身确认活着，再核对网关 uri 端口</td></tr>
+      <tr><td><strong>请求挂死、日志刷屏</strong></td><td>路由 uri 指回了网关自己（如把 uri 写成本机 8080）——无限自转发，网关不会替你拦截这种配置</td><td>检查 routes 里 uri 是否指回网关端口，改掉</td></tr>
+      <tr><td><strong>加了 spring-boot-starter-web 后网关不转发/起不来</strong></td><td>官方文档原话：网关要求 Netty 运行时，"does not work in a traditional Servlet Container or when built as a WAR"——Servlet 栈与响应式栈互斥</td><td>去掉 spring-boot-starter-web 依赖，网关应用保持纯 WebFlux</td></tr>
+      <tr><td><strong>配置写了不生效</strong></td><td>老教程根路径 <code>spring.cloud.gateway.routes</code> 在 5.0 的 Server WebFlux 版下不生效</td><td>换成 <code>spring.cloud.gateway.server.webflux.routes</code>（本文写法）</td></tr>
+      <tr><td><strong>Port 8080 was already in use</strong></td><td>端口被占</td><td>配置 server.port 换端口，或停掉占用进程</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>排障第一手段（官方 Troubleshooting 页口径）：把日志调到 DEBUG，路由匹配、转发决策的全过程都会打出来；再深一层可开 wiretap 抓 Netty 收发的原始报文：</p>
+  <pre class="codeblock"><code>logging:
+  level:
+    org.springframework.cloud.gateway: DEBUG   # 官方排障页推荐的 logger
+# spring.cloud.gateway.httpserver.wiretap=true  # 服务端抓包
+# spring.cloud.gateway.httpclient.wiretap=true  # 客户端抓包</code></pre>
+</section>
+
+<!-- ================= 08 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：本期网关"零业务代码"，那 main 方法所在的应用类到底干了什么？把网关嵌进自己的业务 Spring Boot 应用（加个 Controller）行不行？</summary>
+    <div class="details-body">
+      <p>应用类只干了一件事：<code>@SpringBootApplication</code> 触发自动配置——starter 里带了一整套自动装配，把路由定位、Handler Mapping、过滤器链这些 Bean 建好，Netty 起在 8080。所以"网关应用"本质是一个<b>被配置驱动的空壳</b>。嵌入式也官方支持：文档明确 Server 形态"can be standalone or embedded in a Spring Boot application"，嵌进去时这个应用同时是网关和业务服务。但生产上通常不这么干——网关要横向扩、要独立发布节奏，跟业务绑死会把这层"横切收口"的意义削掉大半。嵌入式更适合内部小工具、原型期。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：503 为什么不是 404？"下游不可达"和"路由不匹配"网关分别怎么回应，为什么要有这个区别？</summary>
+    <div class="details-body">
+      <p>404 是网关自己回的：请求没命中任何路由的谓词，网关说"这不归我管"（判定三验证的就是它）。503 是命中了路由、但转发环节失败的信号——对 lb:// 路由，官方文档写明"找不到服务实例默认回 503"；对直连 uri，下游连不上同样到不了"拿到响应"那一步。这个区分是网关作为<b>基础设施</b>的分寸：404 告诉客户端"路径错了，别重试"；503 告诉调用方"下游暂时不行"——重试、熔断、降级策略都挂在后者的语义上。语义混了，重试策略就会踩空。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 09 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>随堂小测</h2>
+  <div class="quiz">
+    <div class="quiz-q">
+      <p class="quiz-question">1. start.spring.io 上本期应该选哪个依赖？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["WebFlux 核心没问题，但网关要选的是起步器，不是裸 WebFlux。","对：Reactive Gateway 对应 spring-cloud-starter-gateway-server-webflux，经典响应式网关。","那是 Servlet 版的 Gateway（server-webmvc），本期主线不是它。"]'>
+        <li class="quiz-option">Spring WebFlux（单独添加）</li>
+        <li class="quiz-option">Reactive Gateway（spring-cloud-starter-gateway-server-webflux）</li>
+        <li class="quiz-option">Gateway（spring-cloud-starter-gateway-server-webmvc）</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. Spring Cloud 2025.1.x 下，Gateway 响应式版的第一条路由应该写在哪条属性路径下？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["这是 4.x 及更早教程的写法，5.0 的 Server WebFlux 版下不生效。","server.webflux 少了 server 一级，属性树对不上。","对：5.0 起响应式版路由在 spring.cloud.gateway.server.webflux.routes 下。"]'>
+        <li class="quiz-option">spring.cloud.gateway.routes</li>
+        <li class="quiz-option">spring.cloud.gateway.webflux.routes</li>
+        <li class="quiz-option">spring.cloud.gateway.server.webflux.routes</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 启动日志里"Netty started on port 8080"这个 Netty 说明了什么？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["Netty 在这里是 HTTP 服务器，不是消息中间件的通信组件。","对：网关跑在 Netty + WebFlux 响应式栈上，所以与 Servlet 栈的 spring-boot-starter-web 互斥。","8080 是 Spring Boot 默认端口，跟用什么服务器无关。"]'>
+        <li class="quiz-option">网关内嵌了 Netty 消息队列</li>
+        <li class="quiz-option">网关是响应式栈（这也是它不能与 Servlet 栈共存的原因）</li>
+        <li class="quiz-option">Netty 是网关的默认端口号来源</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">4. curl http://localhost:8080/other 返回 404，说明什么？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对：Path=/get 不匹配 /other，网关拒绝转发——谓词是带条件的闸门。","httpbin.org 挂了会表现为 503 一类的转发失败，不是 404。","8080 端口正常在听（有响应），不是没人监听。"]'>
+        <li class="quiz-option">没有路由匹配这个路径，网关没转发</li>
+        <li class="quiz-option">下游 httpbin.org 挂了</li>
+        <li class="quiz-option">网关进程没在 8080 监听</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 10 小结 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>本期小结</h2>
+  <div class="key-points">
+    <ul>
+      <li><strong>四个动作跑通网关：</strong>start.spring.io 建应用（只带 Reactive Gateway 起步器）→ application.yml 配一条 Path=/get → httpbin.org 的路由 → 8080 起服务 → curl 验证转发；</li>
+      <li><strong>过滤器真的能改请求：</strong>AddRequestHeader=Hello, World 加进路由后，下游回显里出现 "Hello": "World"——转发前加工请求，是网关一切横切能力的雏形；</li>
+      <li><strong>三条判定全绿：</strong>转发通（url 指向下游）、过滤器生效（新头出现）、谓词把关（不匹配路径 404）；</li>
+      <li><strong>五个高频坑：</strong>503（下游不可达/lb 无实例）、uri 指回自己无限循环、starter-web 与 Netty 互斥（官方明确不支持 Servlet 容器/WAR）、4.x 老属性路径在 5.0 不生效、8080 占用；</li>
+      <li><strong>版本口径：</strong>Spring Cloud 2025.1.3（Oakwood）+ Boot 4.1.1 + Gateway 5.0.3 + JDK 17+，BOM 托管版本号。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 3 期《核心概念与整体架构》——今天配置里 id、uri、predicates、filters 四个字段，正式的名字叫 Route、Predicate、Filter，它们怎么组成一条处理链、请求从 Netty 进来到转发出去经过哪几站，一期拆清楚。</p>
+  <p><strong>Primary source：</strong><a href="https://docs.spring.io/spring-cloud-gateway/reference/" target="_blank" rel="noopener">Spring Cloud Gateway 官方参考文档（5.0.3）</a>——本期路由属性结构、AddRequestHeader 语法与排障日志开关均出自该文档（与所用版本匹配）；建应用与演示链出自官方入门指南 <a href="https://spring.io/guides/gs/gateway" target="_blank" rel="noopener">Building a Gateway（gs-gateway）</a>，版本兼容矩阵见 <a href="https://spring.io/projects/spring-cloud" target="_blank" rel="noopener">spring.io/projects/spring-cloud</a>，版本发布见 <a href="https://github.com/spring-cloud/spring-cloud-gateway/releases" target="_blank" rel="noopener">GitHub Releases</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev"><a href="0056-scg-what-and-why.html">← 上一期：认识 Spring Cloud Gateway</a></span>
+  <a class="next" href="0058-scg-core-concepts-architecture.html">下一期：核心概念与整体架构 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>
