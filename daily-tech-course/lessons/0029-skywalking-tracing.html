@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · SkyWalking 链路追踪：一次请求的完整作案记录 | 2026-09-21</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0029</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0028-prometheus-grafana.html">上一期：Prometheus + Grafana 监控体系</a> · <a href="https://www.bilibili.com/video/BV1myha6nEoH" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">ARCH &amp; OPS · 架构与中间件运维通用系列第 3 讲（可观测性篇）</p>
+  <h1>SkyWalking 链路追踪：一次请求的完整作案记录</h1>
+  <p class="subtitle">上一讲（<a href="0028-prometheus-grafana.html">第 28 期</a>）解决了"健不健康、哪里不健康"——指标告诉订单接口 P99 延迟飙了，但它给不出答案：这次请求到底在哪个服务、哪次数据库访问上耗掉了 1.8 秒？回答"为什么"的是链路追踪。这一讲把一个 Trace 从头跟到尾：TraceId/Span 数据模型、字节码注入如何做到零代码接入、跨进程传播协议 sw8、采样的真实位置（比多数人以为的更靠后）、告警 API 以及容量账，最后用一个"链路断在网关和订单服务之间"的经典断链故事收尾——你会看到元数据错位比代码 Bug 更难查。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🛠 架构运维</span>
+    <span class="tag-date">📅 2026-09-21 · 第 29 期</span>
+    <span class="tag time">⏱ 预计阅读 10 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>一次"翻遍六个服务日志"的 P1 事故排查复盘</h2>
+  <p>周五晚高峰，用户反馈下单偶发超时，成功率从 99.9% 掉到 97%。值班同学的做法是教科书式的：监控大盘确认订单接口 P99 从 320ms 飙到 2.1s（上一讲搭的 Prometheus 立了功），然后开始翻日志——网关、订单、库存、支付、积分、营销，六个服务的日志按时间窗 grep 了一遍。两小时后定位到原因：库存服务一个慢 SQL 拖住了支付回调。复盘会上算了一笔账：<strong>两小时里一小时在"对时间戳"</strong>——把六个服务分散的日志按毫秒对齐、人工拼出一次请求的路径，全靠肉眼。</p>
+  <p>第二个动作更值得玩味：团队给每个服务加了 <code>X-Request-Id</code> 头做关联，排查确实快了，但新问题接踵而至—— dubbos/gRPC 调用不知道怎么传这个头；Nacos 服务名和 K8s 命名空间拼出来的"服务名"两套体系对不上；某次网关重写头把 RequestId 弄丢，链路又断了。自研关联走到第三个月，维护不动了。</p>
+  <p>复盘结论：<strong>"哪里不健康"用指标，"为什么"必须交给结构化的调用链数据</strong>。日志关联本质是在给"无结构的文本"做人工索引，而链路追踪从数据模型层面就是为"一次请求跨 N 个进程"设计的：TraceId 全局唯一并跨进程传播，每个 Span 记录一段有起止时间的操作，异常堆栈、SQL 语句、标签就地挂在 Span 上。这不是"更好的 grep"，是另一类数据。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：一个 Trace 的解剖结构</h2>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar29" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <text x="380" y="20" text-anchor="middle" fill="var(--muted)" font-size="13">瀑布图：一个 TraceId 串起跨服务的全部 Span（宽度=耗时）</text>
+
+    <!-- 时间轴 -->
+    <line x1="150" y1="40" x2="740" y2="40" stroke="var(--muted)" stroke-dasharray="3 3" marker-end="url(#ar29)"/>
+    <text x="150" y="32" fill="var(--muted)" font-size="9.5">0ms</text>
+    <text x="445" y="32" fill="var(--muted)" font-size="9.5">1000ms</text>
+    <text x="725" y="32" fill="var(--muted)" font-size="9.5">2100ms</text>
+
+    <!-- gateway span -->
+    <text x="142" y="66" text-anchor="end" fill="var(--ink)" font-size="10.5" font-weight="700">网关</text>
+    <rect x="150" y="52" width="590" height="26" rx="5" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="160" y="69" fill="var(--ink)" font-size="9.5">EntrySpan · gateway:/api/order · 整条链路的父亲，耗时=2100ms</text>
+
+    <!-- order span -->
+    <text x="142" y="106" text-anchor="end" fill="var(--ink)" font-size="10.5" font-weight="700">订单服务</text>
+    <rect x="165" y="92" width="560" height="26" rx="5" fill="var(--bg-accent)" stroke="var(--accent)"/>
+    <text x="175" y="109" fill="var(--ink)" font-size="9.5">EntrySpan · order:createOrder + ExitSpan 调库存/调支付（子 Span）</text>
+
+    <!-- inventory span -->
+    <text x="142" y="146" text-anchor="end" fill="var(--ink)" font-size="10.5" font-weight="700">库存服务</text>
+    <rect x="180" y="132" width="120" height="26" rx="5" fill="var(--bg-accent)" stroke="var(--accent)"/>
+    <text x="190" y="149" fill="var(--ink)" font-size="9.5">lockStock 120ms</text>
+    <rect x="310" y="132" width="410" height="26" rx="5" fill="var(--warn-bg)" stroke="var(--bad)"/>
+    <text x="320" y="149" fill="var(--ink)" font-size="9.5">ExitSpan · MySQL UPDATE stock（慢 SQL，红色即问题所在）</text>
+
+    <!-- payment span -->
+    <text x="142" y="186" text-anchor="end" fill="var(--ink)" font-size="10.5" font-weight="700">支付服务</text>
+    <rect x="180" y="172" width="140" height="26" rx="5" fill="var(--bg-accent)" stroke="var(--accent)"/>
+    <text x="190" y="189" fill="var(--ink)" font-size="9.5">createPay 145ms</text>
+
+    <!-- points span -->
+    <text x="142" y="226" text-anchor="end" fill="var(--ink)" font-size="10.5" font-weight="700">积分服务</text>
+    <rect x="330" y="212" width="130" height="26" rx="5" fill="var(--bg-accent)" stroke="var(--accent)"/>
+    <text x="340" y="229" fill="var(--ink)" font-size="9.5">addPoints 130ms</text>
+
+    <!-- legend -->
+    <rect x="20" y="262" width="720" height="52" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="34" y="283" fill="var(--ink)" font-size="10.5" font-weight="700">读图就一句话：顺着最宽的条找红色 —— 慢 SQL 一眼锁定，不用再对时间戳</text>
+    <text x="34" y="301" fill="var(--muted)" font-size="9.5">每个条 = 一个 Span（有起止时间戳的操作单元）；同一 TraceId 下按父子关系嵌套；异常与 SQL 语句挂在 Span 标签里</text>
+  </svg>
+  </div>
+
+  <p><strong>数据模型两层结构：Trace 是逻辑树，Segment 是物理单位。</strong>一次请求对应一个 TraceId；每个 JVM 进程内产生一个 TraceSegment（Java Agent 的上报单位），Segment 内含若干 Span。Span 分三类：<strong>EntrySpan</strong>（服务端视角，接进来的请求，如 Tomcat/Dubbo Provider）、<strong>ExitSpan</strong>（客户端视角，发出去的调用，如 HTTP Client/MySQL 驱动）、<strong>LocalSpan</strong>（进程内方法）。上面这张瀑布图里，订单服务的 Segment 同时含一个 EntrySpan 和两个 ExitSpan——<strong>耗时真相藏在 ExitSpan</strong>：EntrySpan 只知道自己慢，ExitSpan 才说清"慢在调库存的哪一步"。</p>
+
+  <p><strong>跨进程传播：八段管线 sw8 头。</strong>订单调用支付时，Agent 自动在请求头注入 <code>sw8</code>：基地址编码的 TraceId、SegmentId、父 SpanId、采样标记、服务名……支付侧 Agent 解出后创建自己的 EntrySpan 并挂到同一棵 Trace 树上。HTTP 头、Dubbo Attachment、Kafka 消息头、gRPC Metadata 各有对应插件实现，<strong>你不用写一行传播代码</strong>。看一眼真实传播头长什么样（base64 之前的部分）：</p>
+  <pre><code><span class="c-com"># 一次订单→支付调用里的 HTTP 请求头（sw8 = SkyWalking Wire Protocol 第 8 版）</span>
+sw8: 1-MS4xLjE3MjY5MDgzNjU5MTAwMg==-MS4xLjE3MjY5MDgzNjU5MTAwMg==-1-c2VydmljZQ==-YXBpL3BheQ==-MA==
+<span class="c-com">#  段1 采样标记(1=采) · 段2 TraceId · 段3 父SegmentId · 段4 父SpanId</span>
+<span class="c-com">#  段5 目标服务 · 段6 目标端点 · 段7 是否在本端终结采样</span></code></pre>
+
+  <p><strong>零代码接入的秘密：字节码注入。</strong>Java Agent 在 JVM 启动时通过 <code>-javaagent</code> 挂进 ClassLoader，在类加载阶段把拦截逻辑织入 Tomcat、Dubbo、OpenFeign、MyBatis、Redis 客户端等框架的字节码里——方法进出门自动开 Span、自动注 sw8 头。代价与边界都要清楚：只对<strong>有插件</strong>的框架生效（公司自研 RPC 得手写插件或用 Toolkit 注解）；插件有版本匹配表（Dubbo 2.7 与 3.x 插件不同），升级框架前先查官方插件兼容清单；字节码增强对性能有开销，社区口径在个位数百分比量级，压测要算进去。</p>
+
+  <div class="callout">
+    <p class="callout-title">告警：链路数据也能算指标，指标就能触发告警</p>
+    <p>SkyWalking 的 OAP 在分析链路时顺手聚合出服务级指标（响应时间、成功率、CPM 每分钟调用数），告警规则基于这些指标运行，如 <code>service_sla &lt; 990</code>（成功率跌破 99%）、<code>service_resp_time &gt; 800</code>（平均响应超 800ms）。触发后走 Webhook 推给钉钉/企微机器人，消息体里直接带 TraceId 深链——<strong>告警点进去就是作案现场</strong>，这是"指标告警 + 链路证据"的闭环打法，与上一讲的 Prometheus 告警互补而非替代（Prometheus 管资源与业务指标，SkyWalking 告警管服务间调用质量）。</p>
+  </div>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：组件拓扑、采样与容量</h2>
+
+  <h3>OAP + 存储 + UI：极简三件套</h3>
+  <p>SkyWalking 后端只有一个核心进程 <strong>OAP（Observability Analysis Platform）</strong>：接数据（gRPC 11800 / HTTP 12800）、做流式聚合分析（Topology 图、服务指标都在这里算）、落存储。UI 只是 OAP 的 GraphQL 前端。<strong>集群化很简单：OAP 无状态多副本 + 注册中心（K8s Service 或 Nacos）对 Agent 暴露统一 gRPC 地址，Agent 客户端负载均衡</strong>——对比某些 APM 的 collector 分层设计，这套拓扑的运维面非常小。OAP 与 Agent 版本要配套升级（大版本不匹配会出现数据上报了但 UI 空白）。</p>
+
+  <h3>存储选型：ES 托管时代结束，BanyanDB 走向主场</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>存储</th><th>适用</th><th>要点</th></tr>
+    <tr><td><strong>BanyanDB</strong>（官方）</td><td>新部署首选</td><td>专为可观测数据设计（trace/metric/log 一库），0.11 已默认向量查询、性能与压缩对标 ES 有优势；11.0 起 Horizon UI 默认搭配</td></tr>
+    <tr><td><strong>Elasticsearch</strong></td><td>存量主流</td><td>生态成熟、团队熟；成本高（JVM 内存大户），索引生命周期管理（ILM）必须配</td></tr>
+    <tr><td><strong>H2 / MySQL 等</strong></td><td>演示与评估</td><td>单机演示用，生产别选</td></tr>
+  </table>
+  </div>
+  <p>趋势判断：SkyWalking 11.0（2026-08 发布）已经把 BanyanDB 作为一等公民，新项目直接上 BanyanDB，ES 存量按迁移节奏走——存储选型错位的代价是两年后的搬迁成本。</p>
+
+  <h3>采样：真实的决策点在 Agent，兜底在 OAP</h3>
+  <p>采样是链路系统的第一成本阀门，两层各司其职：</p>
+  <ul>
+    <li><strong>Agent 端（<code>agent.sample_n_per_3_secs</code>，默认 -1 全采）：</strong>每 3 秒最多保留 N 条 TraceSegment，超过的直接不上报——省的是<strong>应用侧上报带宽与 OAP 摄入压力</strong>。500 QPS 的服务配 50，约等于 1/30 采样。Agent 端采样有"链路断裂"副作用：上游采了下游没采，链路只显示半截——所以这个值要全链路统一策略。</li>
+    <li><strong>OAP 端（sampleRate，精度万分之一，默认 10000 全留）：</strong>数据已经上报到服务端，决定<strong>存不存</strong>。关键在这两个兜底：<code>forceSampleErrorSegment</code>（默认 <strong>true</strong>：错误链路无视采样率强制保留）与 <code>slowTraceSegmentThreshold</code>（默认 -1 不启用；设为如 2000ms 则慢链路全留）。<strong>生产配置的黄金组合：Agent 限量上报 + OAP 错误与慢链路强制留存</strong>——正常流量抽样式观察，异常证据 100% 在库。注意官方文档的警告：故障大面积发生时错误段占比飙升，实际留存率会远超采样率，容量要按"故障时刻全量错误链路"预留余量。</li>
+  </ul>
+
+  <div class="callout">
+    <p class="callout-title">容量三笔账（以 500 QPS、平均 6 Span、采样 10% 为例）</p>
+    <p><strong>摄入账：</strong>500 QPS × 6 Span × 10% ≈ 300 Span/s，每个 Span 序列化后约 0.5~1KB，摄入带宽约 0.2~0.3MB/s——网络从来不是瓶颈。<strong>存储账：</strong>300 Span/s × 86400s ≈ 2600 万 Span/天 × 1KB ≈ 26GB/天（含索引膨胀按 1.5 倍算 40GB），保留 7 天就是 280GB、14 天翻倍——<strong>Trace 数据的保留期与采样率是存储账的两个总开关</strong>，先定保留期再倒推采样率。<strong>查询账：</strong>UI 的 Trace 查询按时间窗 + 服务过滤，BanyanDB/ES 都按时间分片，查询尽量缩到 15 分钟窗内——全天的模糊查询谁都救不了。</p>
+  </div>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：K8s 挂 Agent、日志打 TraceId、告警接钉钉</h2>
+
+  <h3> Deployment 一段式接入（sidecar 共享 Volume 方案）</h3>
+  <pre><code><span class="c-com"># 订单服务 Deployment 片段 —— 业务镜像零改动</span>
+spec:
+  template:
+    spec:
+      volumes:
+        - name: sw-agent
+          emptyDir: {}
+      initContainers:                       <span class="c-com"># 把 agent 拷进共享目录</span>
+        - name: agent-container
+          image: apache/skywalking-java-agent:9.7.0-java8
+          command: [<span class="c-str">"sh"</span>]
+          args: [<span class="c-str">"-c"</span>, <span class="c-str">"cp -R /skywalking/agent /sw-agent/"</span>]
+          volumeMounts:
+            - { name: sw-agent, mountPath: /sw-agent }
+      containers:
+        - name: order-service
+          image: registry.example.com/order-service:1.42.0
+          env:
+            - name: JAVA_TOOL_OPTIONS        <span class="c-com"># JVM 原生机制，业务启动脚本不用改</span>
+              value: <span class="c-str">"-javaagent:/sw-agent/agent/skywalking-agent.jar"</span>
+            - name: SW_AGENT_NAME
+              value: <span class="c-str">"prod.order-service"</span>
+            - name: SW_AGENT_COLLECTOR_BACKEND_SERVICES
+              value: <span class="c-str">"skywalking-oap.observability:11800"</span>
+            - name: SW_AGENT_SAMPLE_N_PER_3_SECS
+              value: <span class="c-str">"50"</span>   <span class="c-com"># 每 3 秒 50 条，500QPS 下约 1/30 采样</span>
+          volumeMounts:
+            - { name: sw-agent, mountPath: /sw-agent }</code></pre>
+  <p>镜像不想动、YAML 只加一段——这是 Java 栈最平滑的接入路径。进阶可以用 SWCK 的 Java Agent Injector（给 Namespace 打标签自动注入 sidecar），多团队大规模接入时把"每个团队改 YAML"变成"平台统一治理"。</p>
+
+  <h3>日志与链路关联：让 %tid 进日志格式</h3>
+  <pre><code><span class="c-com">&lt;!-- pom.xml 引入 toolkit --&gt;
+&lt;dependency&gt;
+  &lt;groupId&gt;org.apache.skywalking&lt;/groupId&gt;
+  &lt;artifactId&gt;apm-toolkit-logback-1.x&lt;/artifactId&gt;
+  &lt;version&gt;9.7.0&lt;/version&gt;
+&lt;/dependency&gt;</span>
+
+<span class="c-com">&lt;!-- logback.xml：pattern 里放 %tid（用 %X{tid} 走 MDC 同理） --&gt;</span>
+&lt;appender name=<span class="c-str">"STDOUT"</span> class=<span class="c-str">"ch.qos.logback.core.ConsoleAppender"</span>&gt;
+  &lt;encoder class=<span class="c-str">"org.qos.logback.core.encoder.LayoutWrappingEncoder"</span>&gt;
+    &lt;layout class=<span class="c-str">"org.apache.skywalking.apm.toolkit.log.logback.v1.x.TraceIdPatternLogbackLayout"</span>&gt;
+      &lt;pattern&gt;%d{HH:mm:ss.SSS} [%tid] [%thread] %-5level %logger{36} - %msg%n&lt;/pattern&gt;
+    &lt;/layout&gt;
+  &lt;/encoder&gt;
+&lt;/appender&gt;
+
+<span class="c-com">&lt;!-- 输出：21:07:33.412 [TID:9e2f...] [http-nio-8080-exec-3] ERROR o.s.OrderApi - 下单失败 --&gt;</span></code></pre>
+  <p>从此 ELK 里搜一个 TraceId 就能拉出全链路日志，日志平台与链路平台互相跳转——第 01 节"对时间戳"的苦活彻底消失。注意：未挂 agent 的环境（本地起服务）会输出 <code>TID: N/A</code>，不影响运行。</p>
+
+  <h3>告警规则与 Webhook 对接</h3>
+  <pre><code><span class="c-com"># OAP config/alarm-settings.yml（核心段）</span>
+rules:
+  service_sla_rule:                <span class="c-com"># 服务成功率跌破 99%</span>
+    expression: sum(service_sla &lt; 990) &gt;= 1
+    period: 10                     <span class="c-com"># 10 分钟窗口</span>
+    silence-period: 5              <span class="c-com"># 触发后 5 分钟内不重复报，防告警风暴</span>
+    message: <span class="c-str">"服务 {name} 最近10分钟成功率低于99%"</span>
+
+webhooks:
+  - <span class="c-str">"https://oapi.dingtalk.com/robot/send?access_token=xxx"</span>
+<span class="c-com"># 消息体 JSON 里带 scope.entity serviceName/endpoint 与时间窗，</span>
+<span class="c-com"># 机器人模板拼上 UI 域名 + TraceId 即可生成"点开直达链路"的深链</span></code></pre>
+
+  <div class="warn">
+    <p><strong>三个必踩的坑：</strong>① <strong>采样率两边打架</strong>——Agent 端配了 1/30，OAP 端默认 10000 全留，实际存储量=Agent 上报量，别误以为 OAP 端配低能省钱（数据已经付了摄入成本）；反过来 Agent 全采 + OAP 低采会白烧上报带宽。② <strong>服务命名两套体系</strong>——Nacos 里的服务名、K8s 的 Service 名、SkyWalking 的 <code>service_name</code> 若不一致，拓扑图会出现"同一个服务的两个分身"，链路在分身处断裂。命名规范先行：<code>环境.服务名</code> 全公司一张表。③ <strong>OAP 与 Agent 版本错配</strong>——UI 空白十有八九是这个原因，升级必须成套。</p>
+  </div>
+
+  <div class="card card-tip">
+    <h4>✅ 上线体检清单</h4>
+    <p>☐ 全链路所有服务统一采样策略（Agent 端 sample_n_per_3_secs 同值），避免链路半截　☐ OAP 端 forceSampleErrorSegment=true（默认即开，确认没被改）、slowTraceSegmentThreshold 按业务定档（如 2000ms）　☐ 服务命名规范统一（环境.服务名），与注册中心/Ingress 对齐　☐ OAP 集群 ≥2 副本 + K8s Service 对 Agent 暴露 gRPC 11800　☐ 存储选型已定（新项目 BanyanDB，存量 ES 配好 ILM/保留期）　☐ 日志 pattern 已带 %tid 并 ELK 建索引　☐ 告警 silence-period 已设，webhook 机器人已通　☐ 大版本升级前核对 Agent-OAP 兼容矩阵，灰度一个服务先验证　☐ 压测报告含"挂 agent 前后"对比数据　☐ 容量按"故障时刻错误链路全量"预留过载余量</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>指标答"哪里"，链路答"为什么"：</strong>TraceId+Span 是为跨进程请求设计的结构化数据模型，EntrySpan 知道慢、ExitSpan 说清慢在谁身上——瀑布图上顺着最宽的条找红色，排查从两小时缩到两分钟。</li>
+    <li><strong>零代码接入靠字节码注入：</strong>Agent 织入框架字节码自动开 Span、跨进程自动传 sw8 头；边界也在这里——只覆盖有插件的框架，自研协议要手写插件，插件与框架有版本匹配表。</li>
+    <li><strong>采样分两层，各管各的账：</strong>Agent 端 sample_n_per_3_secs 管上报量（省带宽与摄入），OAP 端 sampleRate 管留存（省存储）；黄金组合=Agent 限量 + 错误链路强制保留 + 慢链路阈值留存，正常抽样、异常全留。</li>
+    <li><strong>拓扑极简但配套要齐：</strong>OAP 无状态多副本即可集群化；存储新项目首选 BanyanDB、存量 ES 配好生命周期；Agent 与 OAP 版本必须成套升级。</li>
+    <li><strong>链路的真正威力在关联：</strong>日志打 %tid、告警带 TraceId 深链、拓扑与指标同屏——单点功能都能替代，数据关联才是护城河。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目一：你们计划全公司 40 个 Java 服务接入链路追踪，CTO 提了三个要求：业务无感知（不能改代码）、核心支付链路 100% 留痕、存储成本可控。① 给出你的采样架构与参数；② 支付链路 100% 留痕怎么落地？③ 存储容量怎么算，哪些参数是总开关？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>分层采样架构：</strong>接入层统一用 sidecar/initContainer 挂 agent（镜像不动、YAML 一段、平台可批量下发，满足"业务无感知"）；采样策略分两类——普通服务 Agent 端 <code>sample_n_per_3_secs</code> 按 QPS 定（500QPS 配 50 约 1/30，100QPS 配 10），支付链路特殊处理（见②）；OAP 端全局保持 <code>forceSampleErrorSegment=true</code> 并把 <code>slowTraceSegmentThreshold</code> 设为 2000ms——错误与慢链路无视采样全留，这是"成本可控"与"证据完整"的平衡点。要点：Agent 端采样值要全链路统一策略（同一调用链上下游采样档位一致，否则链路半截）。</p>
+      <p>② <strong>支付 100% 留痕的两条路：</strong>路 A（原生够用）：支付链路涉及的服务（网关/订单/支付/账务）Agent 端配 <code>sample_n_per_3_secs=-1</code> 全采——支付 QPS 通常不高（占公司总量零头），全采的成本完全付得起，这是最简单可靠的做法；路 B（更精细）：用 OAP 端按服务差异化采样（trace-sampling-policy-settings.yml 的 services 列表对支付服务单独配 rate: 10000）——但注意这只影响"留存"，Agent 端若限量就根本没上报，所以 B 必须以 Agent 全采为前提，等于回到 A。<strong>结论：关键链路在 Agent 端全采 + 其余服务限量，是这套系统最实用的分工。</strong>若未来要求"按业务标签动态采样"（如同一个服务里只有支付接口全采），原生不支持，需要在网关层给 Trace 染色再由 Agent 扩展读取——架构上留这个演进位，但别一开始就过度设计。</p>
+      <p>③ <strong>容量账与总开关：</strong>存储 = Span 摄入速率 × 平均 Span 大小 × 保留期。40 个服务先分层估 QPS（假设合计 2 万 QPS、平均 6 Span、其中支付链路 500 QPS 全采、其余 1/30 采样）：支付侧 500×6=3000 Span/s，其余 19500×6×1/30=3900 Span/s，合计约 7000 Span/s × 1KB ≈ 7GB/天原始数据，含索引膨胀按 1.5 倍约 10GB/天，保留 7 天 ≈ 70GB、14 天翻倍——BanyanDB/ES 集群按此定容并留 50% 余量。<strong>三个总开关：保留期（TTL）、普通服务采样率、慢链路阈值</strong>——前两个线性决定存储量，第三个在"慢请求占比高的系统"里可能是隐形炸弹（慢链路全留 × 慢请求 20% = 实际留存远超名义采样率，容量要按这个上界校验一次）。另外记住官方警告：大面积故障时错误链路会让留存量瞬间逼近全量——容量规划必须按"故障时刻"而非"平日水位"留余量，这与上一讲 Prometheus 的 churn 账是同一个思想。</p>
+    </div>
+  </details>
+
+  <details class="q-card">
+    <summary>题目二：上线三个月后收到投诉：链路经常"断"——拓扑图上网关和订单服务之间没有连线，但从网关的 ExitSpan 能看到它确实调用了订单服务。排查发现：网关是用 Envoy 做的，订单服务注册在 Nacos 的名字是 <code>order-service-prod</code>，而 K8s Service 名是 <code>order-service</code>。① 链路为什么断？② 服务命名两套体系怎么治？③ 如果还有自研 GO 网关（非 Java），链路怎么接上？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>断链根因是"元数据错位"而非代码问题：</strong>SkyWalking 拓扑图的连线由 OAP 在分析链路时匹配"ExitSpan 声明的对端服务名"与"下游 EntrySpan 上报的服务名"生成。这里网关侧（Envoy）上报的对端名取自服务发现/路由配置（K8s Service 名 order-service），而订单服务 Agent 上报的 service_name 若配成 Nacos 名（order-service-prod）——两个名字对不上，OAP 认为是两个不同服务：ExitSpan 悬空（拓扑无线线）、EntrySpan 成为孤儿节点（显示为独立服务）。链路数据本身没丢（TraceId 仍在传播，Trace 详情页能看到完整瀑布），丢的是<strong>自动拓扑关联</strong>。这类问题的隐蔽性在于：每个组件单看都"工作正常"，错位发生在系统边界上——架构师review接入方案时，"服务名从哪取、谁跟谁对齐"必须是显式检查项。</p>
+      <p>② <strong>命名治理一条线三件事：</strong>第一，定全公司唯一服务名规范并落到 SkyWalking（推荐 <code>环境.服务名</code> 或直接统一用注册中心名，关键是<strong>一处定义、处处引用</strong>）；第二，非 Java 数据面（Envoy/Nginx）的接入配置里显式指定服务名映射，让 ExitSpan 的对端名与 Agent 的 service_name 收敛到同一张表——Envoy 通过其 SkyWalking 遥测扩展上报，服务名取自 cluster 名或显式配置，把 cluster 命名对齐即可；第三，建"服务名对照表"纳入接入清单，新服务上线时平台侧校验（Nacos 名、K8s Service 名、SkyWalking service_name 三处一致性检查），把命名错位拦在上线前。治理顺序先对齐增量、再消化存量——存量错位逐个改 agent 配置滚动重启即可，不需要动数据。</p>
+      <p>③ <strong>自研 Go 网关的接入按"有没有 SDK"分两条路：</strong>路 A（优先）：官方 Go Agent（skywalking-go）已支持主流 HTTP/gRPC 框架，网关若用标准库或 gin/echo 一类，挂 Agent 即可获得与 Java 侧同源的 Span 与 sw8 传播——代码侵入很小；路 B（SDK 覆盖不了的自研框架）：走手动 API——创建 EntrySpan/ExitSpan、用 apm-toolkit 等价物把 TraceContext 序列化进 sw8 头，工作量集中在"自研协议的传播器"一处。还有一个兜底选项：<strong>不接网关、接受链路从网关后一跳开始</strong>——Envoy 已经给了入口侧指标，网关自身不产 Span 只损失"网关内部耗时"这一段。架构判断：网关是全流量的咽喉，ExitSpan 数据（去了哪个服务、耗时多少、成功失败）价值极高，值得优先投入路 A/B 接入；若网关逻辑极薄（纯转发），路 C 的信息损失可以接受。<strong>决策框架：组件在拓扑中的位置越靠近流量入口，其 Span 的边际价值越高。</strong></p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>SkyWalking 官方文档（架构、Agent 配置、采样与告警的权威参考，本期原理侧口径来源）：<br>
+    <a href="https://skywalking.apache.org/docs/" target="_blank" rel="noopener">https://skywalking.apache.org/docs/</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>采样策略的服务端细节见官方 <a href="https://skywalking.apache.org/docs/main/next/en/setup/backend/trace-sampling/" target="_blank" rel="noopener">Trace Sampling 文档</a>；K8s 注入器见 <a href="https://skywalking.apache.org/docs/skywalking-swck/latest/en/setup/java-agent-injector/" target="_blank" rel="noopener">SWCK Java Agent Injector</a>。可观测性四信号的整体框架回看<a href="0028-prometheus-grafana.html">第 28 期</a>；日志信号（ELK/Loki）与 OpenTelemetry 统一词汇表，后续课程再展开。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0028-prometheus-grafana.html">← 上一期：Prometheus + Grafana 监控体系</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 29 期 · 架构与中间件运维通用系列 · 下一期预告：日志体系——ELK 与 Loki 的取舍，可观测性第三类信号</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
