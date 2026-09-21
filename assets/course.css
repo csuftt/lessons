@@ -490,6 +490,11 @@ p, li, summary { overflow-wrap: break-word; }
 summary .chev { white-space: nowrap; }   /* 展开按钮文本禁止折行（防竖排） */
 .diagram svg { max-width: 100%; }
 section, .section, details, .callout, .note, .tip, .warn, .danger, .card { min-width: 0; max-width: 100%; }
+/* 表格：长内容（代码/URL）单元格折行 + 窄屏整体横向滚动兜底 */
+th, td { overflow-wrap: break-word; }
+@media (max-width: 640px) {
+  table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+}
 
 /* 打印 */
 @media print {

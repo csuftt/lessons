@@ -1,2 +1,20 @@
-/* zcode-protocol-course — 样式已全站统一，真身在 ../../assets/course.css */
+/* zcode-protocol-course — 全站样式在 ../../assets/course.css，本文件只放课程级增量 */
 @import url("../../assets/course.css");
+
+/* --- 代码块壳（hl.js 动态生成 .codeblock）的课程级微调 --- */
+.codeblock .code-head .lang { color: var(--accent); font-weight: 600; letter-spacing: .06em; }
+.codeblock pre { font-size: .82rem; }
+
+/* --- 手机端适配（本课程表格多、代码帧长） --- */
+@media (max-width: 640px) {
+  h1 { font-size: 1.42rem; }
+  pre { font-size: .75rem; padding: .8rem .85rem; }
+  .codeblock pre { font-size: .72rem; }
+  code { overflow-wrap: anywhere; }
+  th, td { padding: .45rem .5rem; }
+  .quiz { padding: 1rem .9rem; }
+  /* 架构图：窄屏收缩盒子、留出边距 */
+  .arch { padding: .7rem; }
+  .arch-box { min-width: 96px; padding: .45rem .55rem; font-size: .78rem; }
+  .arch-box b { font-size: .82rem; }
+}
