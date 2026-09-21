@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · 日志体系选型：ELK 与 Loki 的取舍 | 2026-09-22</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0030</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0029-skywalking-tracing.html">上一期：SkyWalking 链路追踪</a> · <a href="https://www.bilibili.com/video/BV1XDh66EEAM" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">ARCH &amp; OPS · 架构与中间件运维通用系列第 4 讲（可观测性篇 · 日志信号）</p>
+  <h1>日志体系选型：ELK 与 Loki 的取舍</h1>
+  <p class="subtitle">可观测性走到第三类信号：日志。上一讲（<a href="0029-skywalking-tracing.html">第 29 期</a>）链路追踪已经把 TraceId 织进了每条日志，但这些日志散落在几百个 Pod 的 stdout 里——你要的是一套"存得起、查得到、查得快"的日志平台。这一讲从一次 ELK 存储账单膨胀复盘讲起，拆开 Elasticsearch 倒排索引与 Loki"只索引标签"两种哲学的成本分叉点，讲透 Loki 最容易翻车的流爆炸（标签基数是它的"高基数爆炸"），给出统一语义约定（TraceID/SeverityText）的结构化改造实战与 ELK 迁移 Loki 的五步方案，最后回答"能不能两个都要"。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🛠 架构运维</span>
+    <span class="tag-date">📅 2026-09-22 · 第 30 期</span>
+    <span class="tag time">⏱ 预计阅读 10 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>一次"存储账单膨胀 8 倍"的 ELK 复盘</h2>
+  <p>某平台 60 个微服务上 K8s 后，日志统一进 ELK（Filebeat → Logstash → Elasticsearch → Kibana），头一年风平浪静：日增 200GB 原始日志，保留 30 天，ES 集群 6 数据节点跑得稳稳的。第二年开春两件事撞在一起——业务量翻倍、顺带把 K8s 元数据字段全量带进了每个文档。存储从 12TB 悄悄涨到 90TB+：原始日志多了 1 倍，<strong>索引膨胀贡献了剩下 3 倍多</strong>（每行日志的所有分词进倒排索引、_source 存原始 JSON、doc values 存列值、副本再 ×2）。集群开始频繁投毒：热点分片把磁盘 IO 打满，查询 P99 十几秒，大促压测期间 ES 先于业务挂掉——这是 ELK 用户的经典剧本。</p>
+  <p>复盘时发现更扎心的账：过去 90 天的查询里，<strong>95% 是"某服务某时间窗的 ERROR 日志"这类带上下文的定向查询</strong>，真正用到"全库任意词搜索"的不到 5%——但所有日志都在为 100% 的全文索引能力付钱。安全团队一次"在 90 天日志里大海捞针找某个支付单号"确实救过急，可那是三个月里唯一一次。</p>
+  <p>复盘结论：<strong>日志平台的选型分歧，本质是"为哪种查询模式付钱"</strong>。ELK 为全文检索付索引钱，Loki 为"标签圈定 + 内容扫描"付查询时间钱。这不是哪个更好的问题，是访问模式占比的问题——这一讲把这笔账算清楚。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：两种索引哲学与查询代价模型</h2>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 400" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar30" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <text x="380" y="20" text-anchor="middle" fill="var(--muted)" font-size="13">同一条日志的两种下场：钱花在写入时，还是花在查询时</text>
+
+    <!-- ELK row -->
+    <rect x="20" y="42" width="150" height="64" rx="9" fill="var(--card)" stroke="var(--line)"/>
+    <text x="95" y="68" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">一行日志进来</text>
+    <text x="95" y="88" text-anchor="middle" fill="var(--muted)" font-size="9.5">Filebeat/Agent 采集</text>
+    <line x1="170" y1="74" x2="205" y2="74" stroke="var(--muted)" marker-end="url(#ar30)"/>
+
+    <rect x="208" y="42" width="260" height="64" rx="9" fill="var(--warn-bg)" stroke="var(--bad)"/>
+    <text x="338" y="66" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">ES：写入时展开成 4 份磁盘结构</text>
+    <text x="338" y="84" text-anchor="middle" fill="var(--muted)" font-size="9.5">倒排索引(全字段分词) + _source 原文</text>
+    <text x="338" y="99" text-anchor="middle" fill="var(--muted)" font-size="9.5">+ doc values 列存 + 副本 ×2</text>
+    <line x1="468" y1="74" x2="503" y2="74" stroke="var(--muted)" marker-end="url(#ar30)"/>
+
+    <rect x="506" y="42" width="234" height="64" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="623" y="66" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">查询：任意词毫秒级命中</text>
+    <text x="623" y="84" text-anchor="middle" fill="var(--muted)" font-size="9.5">"大海捞针"是主场，写入与存储贵</text>
+    <text x="623" y="99" text-anchor="middle" fill="var(--muted)" font-size="9.5">磁盘 通常为原始日志的 3~6 倍</text>
+
+    <!-- Loki row -->
+    <rect x="20" y="150" width="150" height="64" rx="9" fill="var(--card)" stroke="var(--line)"/>
+    <text x="95" y="176" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">同一行日志进来</text>
+    <text x="95" y="196" text-anchor="middle" fill="var(--muted)" font-size="9.5">Promtail/Alloy 采集</text>
+    <line x1="170" y1="182" x2="205" y2="182" stroke="var(--muted)" marker-end="url(#ar30)"/>
+
+    <rect x="208" y="150" width="260" height="64" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="338" y="174" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">Loki：只索引标签，内容进压缩块</text>
+    <text x="338" y="192" text-anchor="middle" fill="var(--muted)" font-size="9.5">索引只记"哪个标签组合在哪个时间段"</text>
+    <text x="338" y="207" text-anchor="middle" fill="var(--muted)" font-size="9.5">内容 gzip/snappy 压缩块进对象存储</text>
+    <line x1="468" y1="182" x2="503" y2="182" stroke="var(--muted)" marker-end="url(#ar30)"/>
+
+    <rect x="506" y="150" width="234" height="64" rx="9" fill="var(--warn-bg)" stroke="var(--bad)"/>
+    <text x="623" y="174" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">查询：标签先圈，内容再扫</text>
+    <text x="623" y="192" text-anchor="middle" fill="var(--muted)" font-size="9.5">定向查询快（索引圈定少量块）</text>
+    <text x="623" y="207" text-anchor="middle" fill="var(--muted)" font-size="9.5">宽时间窗扫内容会慢几秒到几十秒</text>
+
+    <!-- conclusion -->
+    <rect x="20" y="248" width="720" height="132" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="380" y="276" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">成本模型的本质：这条轴是"写入时预计算 ↔ 查询时现算"的取舍</text>
+    <text x="380" y="300" text-anchor="middle" fill="var(--muted)" font-size="10.5">ES = 写入时付钱（每行都建全文索引）→ 任意查询都快；Loki = 查询时付钱（压缩+扫描）→ 写入与存储极便宜</text>
+    <text x="380" y="322" text-anchor="middle" fill="var(--muted)" font-size="10.5">你的查询画像决定账单：95% 定向查询 → Loki 省 5~10 倍；大海捞针是日常 → 别虐待自己</text>
+    <text x="380" y="346" text-anchor="middle" fill="var(--muted)" font-size="10.5">（与第 28 期 Prometheus 同一句忠告：基数是同一个问题换的衣服——见 03 节流爆炸）</text>
+  </svg>
+  </div>
+
+  <p><strong>ELK 的本质是搜索引擎。</strong>Elasticsearch 继承 Lucene 血统：每行日志写入时被分词、展开成倒排索引（词 → 文档列表）、_source（原始 JSON）、doc values（列式排序聚合），再加副本容灾——同一个字段值落在多个结构里。代价换来的是"任意词毫秒级命中"，且词汇表里有模糊匹配、相关性评分、任意字段聚合。值得一提的是 ES 自己也在治这个账：9.0 起 logsdb 索引模式成为 logs 数据流默认（主机优先排序 + 合成 _source + ZSTD 压缩，官方口径最高省 65%+ 存储）——但"写入时全量索引"的哲学没变，只是把同样的哲学压缩得更便宜。</p>
+
+  <p><strong>Loki 的本质是"分组 + grep"。</strong>设计宣言是"像给 Prometheus 打标签一样给日志打标签"：索引里只存<strong>标签组合 → 压缩块位置</strong>的映射，日志内容本身以 gzip/snappy 压缩块躺在对象存储（S3/OSS/MinIO）里。查询分两步：先用标签选择器（<code>{app="payment", level="error"}</code>）从索引圈出少量流（stream）的时间段，再把对应压缩块拉下来解压、按行过滤。写入路径几乎只剩"压缩 + 追加"，所以摄入吞吐高、存储便宜（社区参考值：原始量 5~10 倍压缩后进对象存储，约 $0.02/GB 量级；对比 ES 本地 SSD $0.10/GB + 索引膨胀）。<strong>同样的便宜也意味着查询侧的边界必须诚实</strong>：没有标签圈定的"全库搜某个词"、跨几十个小时的宽窗扫描，就是大量拉块解压——几秒到几十秒能回来，但它永远赢不了倒排索引的主场。</p>
+
+  <div class="callout">
+    <p class="callout-title">Loki 3.x 的两个现代能力，选型时要摆进天平</p>
+    <p>① <strong>原生 OTLP 摄取端点</strong>：Loki 3.0 起可直接接收 OpenTelemetry 的 OTLP 日志（<code>http://loki:3100/otlp</code>），不再需要 Collector 里那个已废弃的 Loki exporter 做格式转换；资源属性自动映射为标签（<code>service.name</code> → <code>service_name</code> 等，点号规范化为下划线），其余属性进<strong>结构化元数据（Structured Metadata）</strong>——可不建索引、查询时无需 json 管道就能直接过滤（如 <code>| severity_text="ERROR"</code>）,"高维上下文不付索引钱"就是这个机制。标签策略收敛成服务端一处配置（<code>limits_config.otlp_config</code> 可对每个属性指定 index_label / structured_metadata / drop），平台团队改策略不用重发应用。② <strong>模式识别与 pattern 过滤</strong>：自动聚类相似日志行、变量位置挖洞，配合 pattern 过滤运算符做"日志模板分析"，治的是"打印了一大篇但其实是同 20 个模板"的观测噪声。注意：原生 OTLP 的默认标签白名单里有 <code>k8s.pod.name</code>、<code>service.instance.id</code> 这类高基数项（官方文档已提示审计），落地时要主动降级处理。</p>
+  </div>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：选型决策、流爆炸防线与容量账</h2>
+
+  <h3>选型对比：八维一张表</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>维度</th><th>ELK（Elasticsearch）</th><th>Loki（+ Grafana）</th></tr>
+    <tr><td>索引哲学</td><td>全文倒排，任意词毫秒级</td><td>只索引标签，内容查询时扫</td></tr>
+    <tr><td>存储与成本</td><td>本地/网络 SSD，含索引为原始量 3~6 倍</td><td>对象存储，压缩 5~10 倍，约为 ELK 的 1/5~1/10</td></tr>
+    <tr><td>典型查询体验</td><td>全文/模糊/聚合全能</td><td>标签圈定快；宽窗全库扫描慢数秒到数十秒</td></tr>
+    <tr><td>高基数爆炸点</td><td>mapping 字段数失控（mapping explosion）</td><td>标签组合失控 → 流爆炸（ingester 内存+索引）</td></tr>
+    <tr><td>运维形态</td><td>有状态 JVM 集群：分片/ILM/堆内存，专职运维</td><td>存算可分离：读/写路径独立扩缩，状态外置对象存储</td></tr>
+    <tr><td>多租户</td><td>索引级隔离，较重</td><td>内置租户头（X-Scope-OrgID），轻</td></tr>
+    <tr><td>生态契合</td><td>检索/安全审计/SIEM 场景深</td><td>Grafana 面板里与 Prometheus 指标、Tempo 链路同屏联动</td></tr>
+    <tr><td>许可证</td><td>SSPL/Elastic 许可（OpenSearch 为 Apache 2.0 分支）</td><td>AGPL v3</td></tr>
+  </table>
+  </div>
+
+  <p><strong>选型口诀：按查询画像投票。</strong>95% 定向排障（知道服务、知道时间窗）+ 成本敏感 + 已在 Grafana 体系 → Loki；全文检索/安全审计/复杂聚合是日常主业、或合规要求任意词可查 → ELK/OpenSearch；两者都重 → 分层混合（Loki 存全量长保留，ELK 只收错误/安全/关键链路子集）。<strong>别忘了第三票是团队</strong>：ES 集群要有人会养（分片、ILM、堆调优），Loki 的运维面小但出了流爆炸也得有人会查——没有对应技能的团队，选型优势兑现不了。</p>
+
+  <h3>流爆炸：Loki 版的"高基数爆炸"</h3>
+  <p>与第 28 期 Prometheus 的序列爆炸同构：<strong>每一种唯一的标签组合 = 一条独立的流（stream）</strong>，每条流有独立的块、独立的索引项、独立的刷盘行为。把 <code>user_id</code>、<code>request_id</code>、<code>trace_id</code> 塞进标签，百万用户就是百万条流——索引膨胀、ingester 内存告警、小碎块刷爆对象存储，集群直接趴下。防线三道：① <strong>标签白名单制度</strong>：只有"描述日志来自哪"的静态低基数键可进标签（app/env/namespace/container/level），"描述日志说了什么"的一切高基数值进日志行或结构化元数据；② <strong>服务端闸门</strong>：<code>max_streams_per_user</code>、<code>max_global_streams_per_tenant</code>、每流速率限制 <code>per_stream_rate_limit</code>（超限拒绝并计数，可观测到而不是默默炸）；③ <strong>审计常态化</strong>：用 Loki 自身的指标与 <code>topk</code> 查询找出最大的流生产者，纳入平台巡检。这是从 ELK 迁过来的团队最容易撞的墙——在 ES 里"多索引一个字段"是习惯，在 Loki 里是事故。</p>
+
+  <div class="callout">
+    <p class="callout-title">容量三笔账（日增 200GB 原始日志、保留 30 天、95% 定向查询画像）</p>
+    <p><strong>存储账：</strong>Loki 侧 200GB/天 ÷ 8（压缩比 5~10 取中）≈ 25GB/天 × 30 天 ≈ <strong>750GB 对象存储</strong>，按 $0.02/GB/月 ≈ $15/月，加索引零头；同样数据 ES 侧 200GB × 30 天 × 4（索引膨胀+副本）≈ 24TB SSD ≈ $2400/月——<strong>一个数量级的存储差</strong>（ES 9 logsdb 能压回不少，但量级差在"对象存储 vs SSD"这条底层轴上）。<strong>查询账：</strong>定向查询（标签圈定 ≤ 几十条流、15 分钟窗）秒级返回；宽窗全库扫描要评估查询并发与读路径扩容（读副本水平扩展），把"全库捞针"路由给 ELK 子集或事前采样。<strong>保留账：</strong>Loki 便宜到"热日志 7 天 + 对象存储归档 180 天"都做得起；ELK 的保留期每个档位都是真金白银，通常只保热 7~14 天。<strong>两条总开关仍然是：保留期 × 采样/分级策略</strong>——与第 28/29 期同一句结论，三类信号的成本治理是一个思想。</p>
+  </div>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：结构化改造、LogQL 与迁移五步</h2>
+
+  <h3>第一步永远是语义统一（无论选哪个平台）</h3>
+  <p>先按 OpenTelemetry 语义约定改造日志格式——这是比"选 ELK 还是 Loki"更根本的工程：TraceID/SpanID 进资源属性（接第 29 期的 %tid），级别用语义键 SeverityText，服务名统一 <code>service.name</code>。格式统一成 JSON 后，ELK 的字段解析和 Loki 的 <code>| json</code> 管道都直接可用，也把未来接入 OTel Collector 的路铺平了。</p>
+
+  <pre><code><span class="c-com"># logback 输出 OTLP 语义的 JSON 日志（MDC 里已有 trace_id/span_id，见第 29 期）</span>
+{
+  "timestamp": "2026-09-22T10:15:32.412Z",
+  "severity_text": "ERROR",
+  "service_name": "payment",
+  "trace_id": "a4f7c2e9b1d3...",     <span class="c-com"># 与链路追踪互通的钥匙</span>
+  "span_id": "6b2e9f1c8a4d...",
+  "order_no": "PO2026092215",         <span class="c-com"># 高基数业务键：留在行内，绝不进标签</span>
+  "body": "支付回调处理失败: 下游超时"
+}</code></pre>
+
+  <h3>Loki 侧：Alloy 采集 + LogQL 三板斧</h3>
+  <pre><code><span class="c-com"># Alloy（OTel Collector 发行版）日志管线：K8s 发现 → 只放行低基数标签 → OTLP 直推 Loki</span>
+<span class="c-com"># promtail 同理：kubernetes_sd_configs + relabel_configs 白名单</span>
+loki.source.kubernetes "pods" { targets = discovery.kubernetes.pods.targets }
+loki.process "drop_hi_card" {
+  forward_to = [loki.write.default.receiver]
+  stage.labels { values = { app = "", namespace = "", level = "" } }   <span class="c-com"># 白名单：只放静态键</span>
+}
+loki.write "default" { endpoint { url = "http://loki-gateway:3100/loki/api/v1/push" } }</code></pre>
+
+  <pre><code><span class="c-com"># LogQL 三板斧 —— ① 定向排障：标签圈定 + 行过滤 + 取上下文</span>
+{app="payment", level="error"} |= "回调处理失败" | json | order_no="PO2026092215"
+<span class="c-com"># ② 指标化：把日志变成告警序列（日志版 rate）</span>
+sum by (app) (count_over_time({level="error"}[5m])) &gt; 50
+<span class="c-com"># ③ 大盘：各服务错误日志量排行</span>
+topk(10, sum by (app) (bytes_rate({namespace="prod"}[1h])))</code></pre>
+  <p>三板斧的用法边界要清楚：<code>| json</code> 管道发生在查询时、扫多少行就解多少行——白名单标签 + 15 分钟窗内它很快，宽窗全量解析它就慢；这正是 02 节代价模型的日常体现。若走了 OTLP 原生摄取，<code>severity_text</code>、<code>trace_id</code> 等已是结构化元数据，可跳过 json 管道直接过滤。</p>
+
+  <h3>ELK 迁移 Loki：五步走</h3>
+  <ol class="steps">
+    <li><strong>查询画像审计</strong>：拉 90 天 Kibana 查询日志，统计"带服务/时间窗的定向查询"占比；全文检索占比高且刚性的部分（安全审计）标记保留在 ES。</li>
+    <li><strong>结构化与标签白名单落地</strong>：日志改 JSON + 语义键，采集层白名单定型——这一步做扎实，后面全是顺水推舟。</li>
+    <li><strong>双写并行（影子期）</strong>：采集层同时推 ES 与 Loki（Alloy/Promtail 多出口），只验证不切流；重点观察流数量、ingester 内存、查询体验对照。</li>
+    <li><strong>看板与告警搬迁</strong>：Kibana 仪表盘 → Grafana（LogQL 重写）、Watcher → Loki Ruler/Grafana Alerting；常用查询沉淀成 variables 模板，别让每个人重学一遍。</li>
+    <li><strong>灰度切流 + ES 降级</strong>：团队逐个切查询入口，观察一个完整故障周期；ES 数据按保留期自然滚动清空，硬件分批回收——<strong>不做 reindex 搬家</strong>（历史日志让它按保留期自然过期，比搬运便宜得多）。</li>
+  </ol>
+
+  <div class="warn">
+    <p><strong>三个必踩的坑：</strong>① <strong>把 ELK 习惯带进 Loki</strong>——什么字段都想要索引，半年后流爆炸；记住"标签描述日志来自哪，行内容描述它说了什么"。② <strong>裸容器化部署 Loki 单体</strong>——量小没事，量上来读写互相拖累；Simple Scalable 模式（读/写分组独立扩缩）是自建的标准姿势，状态全部外置对象存储。③ <strong>忽视采集层的解析职责</strong>——Loki 不替你解析日志，多行堆栈（异常 stack trace）必须在采集层配多行合并（multiline），否则一行堆栈碎成 N 条流记录，ERROR 日志根本看不全。</p>
+  </div>
+
+  <div class="card card-tip">
+    <h4>✅ 上线体检清单</h4>
+    <p>☐ 标签白名单已评审（只含 app/env/namespace/container/level 级别静态键），高基数键全部留在行内或结构化元数据　☐ 90 天查询画像已审计，选型结论有数据背书　☐ max_streams_per_user 等服务端闸门已配并接了告警　☐ 多行堆栈合并（multiline）已在采集层配置并抽查验证　☐ 保留策略已定（热 + 归档两档），compactor 清理任务已启用　☐ TraceID 语义键已进日志结构，Grafana 里日志 ↔ 链路可互跳　☐ 日志量指标看板已建（bytes_rate / topk 流量异常发现）　☐ 告警规则用 LogQL 指标化语法重写并验证触发　☐ 双写影子期结论已归档（流数/内存/查询耗时对照）　☐ 安全审计等全文检索刚需已安排归属（ELK 子集或保留 ES）</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>索引哲学决定账单结构：</strong>ELK 写入时付钱（全文索引换任意查询毫秒级），Loki 查询时付钱（标签圈定 + 压缩扫描换对象存储级便宜）——选型是查询画像问题，不是优劣问题。</li>
+    <li><strong>流爆炸是 Loki 的第一杀手：</strong>唯一标签组合 = 独立流；高基数值（user_id/trace_id/order_no）永远不进标签。标签描述"来自哪"，行内容描述"说了什么"——与 Prometheus 高基数治理同一个思想。</li>
+    <li><strong>语义统一比平台选型更根本：</strong>OTLP 语义键（service.name/severity_text/trace_id）+ JSON 结构化，让日志与指标、链路三信号互通；Loki 3.x 原生 OTLP 端点让这条路零转换成本。</li>
+    <li><strong>容量两条总开关不变：</strong>保留期 × 采样分级；对象存储便宜到值得"热 7 天 + 归档 180 天"，ES 的保留期每个档位都是真金白银。</li>
+    <li><strong>混合架构是体面答案：</strong>Loki 存全量长保留 + ELK 只收错误/安全/关键链路子集，两个平台各干各的主场，别让任何一个干全部。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目一：你们 ES 集群日增原始日志 500GB、保留 15 天，存储已经压不起，CTO 要求"日志成本砍到 1/5，查询体验不能明显变差"。① 先给三个"不动平台也能省钱"的动作；② 如果决定迁 Loki，给出容量估算与切流步骤；③ "查询体验不能变差"你怎么验收？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>先摘低垂的果实，再谈换平台：</strong>第一，<strong>调级降采样</strong>——DEBUG/INFO 按服务分级降保留（比如 DEBUG 只保 24 小时甚至不落平台），ERROR/WARN 全保留；多数系统里 DEBUG 体量占 60~80%，一刀下去存储账单先掉一半。第二，<strong>字段瘦身</strong>——审计采集层带进来的 K8s 元数据字段，砍掉查询里从未用过的（labels/annotations 整个 JSON 常常是白拖的）；ES 侧再确认 logsdb 索引模式与合成 _source（9.0 已默认）生效，老集群升级能省一大截。第三，<strong>ILM 分层</strong>——热数据 SSD 3 天、温节点便宜盘、冻结层可搜索快照，把"全量都热"改成按访问频率分层。这三步做完通常已省 40~60%，而且给"是否真要迁移"赢得了冷静评估的时间——<strong>没做过这三步就上马迁移，多半会把坏习惯一起带进新平台</strong>。</p>
+      <p>② <strong>容量估算：</strong>假设降级采样后日增 300GB（DEBUG 只保 1 天折算）。Loki 侧：300GB ÷ 8（压缩 5~10 取中）≈ 38GB/天；ERROR/WARN 全量 + 其他降保留，平均按"7 天热 + 90 天归档"算：38GB × 7 ≈ 266GB 热 + 38GB × 90 ≈ 3.4TB 归档，对象存储总账不到 4TB，月成本几十美元量级；读写路径：Simple Scalable 模式起步 2 写 + 2 读副本（ ingest 300GB/天 ≈ 峰值 10~20MB/s，对 Loki 是小菜），memcached 结果缓存一块。<strong>切流五步照第 04 节：</strong>查询画像审计 → 结构化+标签白名单 → 双写影子期（重点盯流数与 ingester 内存）→ 看板告警搬迁 → 灰度切流、ES 按保留期自然滚动清空。<strong>不搬历史数据</strong>——ES 留着只读跑完保留期，比 reindex 便宜且风险低。</p>
+      <p>③ <strong>验收要量化、不能凭感觉：</strong>影子期把 90 天真实查询日志里的 Top 50 高频查询在两边各跑一遍，统计 P50/P95 耗时与结果一致性（抽样比对行数与内容）；定义体验红线——定向查询 P95 &lt; 3 秒、告警规则评估周期内无超时；把"全库任意词搜索"这类长尾查询单独归类，明确它们走保留的 ES 子集（或接受降级为采样检索），<strong>在验收单上写清楚每个查询类的归属和耗时承诺</strong>。最后留一个月并行期，让"查询体验不能变差"由值班工程师的实际使用投票，而不是架构评审会上拍胸脯。</p>
+    </div>
+  </details>
+
+  <details class="q-card">
+    <summary>题目二：Loki 上线三个月后的凌晨，Grafana 突然报 ingester 内存 92%、写入 429 限流，业务日志出现缺口。排查发现某团队把 <code>user_id</code>（千万级）放进了日志标签，还有团队采集器把整个 K8s labels JSON 塞进了标签。① 现场怎么止血？② 流爆炸的根因链条完整讲一遍；③ 治理机制怎么设计，让这类事故不再靠事后发现？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>止血三步，顺序很重要：</strong>第一步，<strong>定位最大流生产者</strong>——用 Loki 自身指标（per-tenant streams、topk 按标签组合的 chunk 数）或 <code>/loki/api/v1/label</code> 系列接口，找出谁在制造海量流；第二步，<strong>掐源头而不是扩容</strong>——通知两个团队改采集配置（去掉 user_id 与 K8s labels 标签）滚动重启采集器；配置改不动时用服务端手段：把对应标签在 limits_config 里降级或用 <code>max_label_names_per_series</code>/<code>max_streams_per_user</code> 强制拒收（429 已在拒，确认拒绝计数归属到租户，让对方"疼得知道找谁"）；第三步，<strong>ingester 侧缓解</strong>——必要时临时调低 flush 阈值让块尽快落盘、水平加 ingester 副本分摊（注意这是争取时间不是治病）。<strong>顺序错了会白花钱：先扩容，等于给泄漏的管道换更大的泵。</strong></p>
+      <p>② <strong>根因链条：</strong>高基数标签 → 每个唯一组合注册一条流 → 每条流在 ingester 里独立的 chunk + 索引条目 + 刷盘单元 → 流数从千级暴涨到百万级：索引膨胀（查询定位变慢）、ingester 内存被小碎块吃满（每个未刷盘的 chunk 都占内存）、对象存储出现海量小对象（请求放大）、写入触发 429 限流 → 日志缺口。要害在于它和第 28 期 Prometheus 序列爆炸、第 26 期向量库内存墙是<strong>同一个数学结构：基数 × 每单位成本</strong>——唯一的标签组合数乘上每条流的固定开销，超过了系统设计水位。user_id 千万级基数一进标签，这场爆炸在数学上就已经发生了，只差几小时发酵时间。</p>
+      <p>③ <strong>治理三道防线：</strong>第一道，<strong>采集模板集中管理</strong>——标签白名单固化在平台统一分发的 Alloy/Promtail 配置里，业务侧只能选白名单内的标签，"想加标签"走平台评审（评审清单就一条：基数上限是多少）；第二道，<strong>服务端硬闸门 + 提前告警</strong>——max_streams_per_user/max_global_streams_per_tenant 按容量模型设定并留 50% 余量，stream 数、429 计数、ingester 内存三条告警在"爬坡期"就该响（阈值设在 60~70% 而不是 90%），把事故从事后发现变成事前拦住；第三道，<strong>租户维度可观测</strong>——每个团队的日志按租户（X-Scope-OrgID）或至少按 label 源头隔离计量，流量/流数排行周报自动化，谁引入高基数标签当周就能看到。配套一条组织规则：采集配置变更与代码变更同级走评审——<strong>流爆炸从来不是 Loki 的 Bug，是治理缺位的必然结果</strong>。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>Grafana Loki 官方文档（架构、标签与流、最佳实践的权威参考，本期 Loki 侧口径来源）：<br>
+    <a href="https://grafana.com/docs/loki/latest/" target="_blank" rel="noopener">https://grafana.com/docs/loki/latest/</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>选型对比的另一侧看 <a href="https://www.elastic.co/what-is/elk-stack" target="_blank" rel="noopener">Elastic 官方 ELK 文档</a>；OTLP 摄取细节见 Loki 官方 <a href="https://grafana.com/docs/loki/latest/send-data/otlp/" target="_blank" rel="noopener">OpenTelemetry 文档</a>。可观测性四信号框架回看<a href="0028-prometheus-grafana.html">第 28 期</a>（指标·高基数爆炸）、<a href="0029-skywalking-tracing.html">第 29 期</a>（追踪·TraceId 语义键）；日志里那个 trace_id 字段为什么存在，答案在上一讲。下一期轮换回到 Spring Cloud Alibaba 线，开启新专题。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0029-skywalking-tracing.html">← 上一期：SkyWalking 链路追踪</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 30 期 · 架构与中间件运维通用系列 · 下一期预告：回到 Spring Cloud Alibaba 主线开启新专题；可观测性四信号已齐聚，进阶实践后面再回来</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
