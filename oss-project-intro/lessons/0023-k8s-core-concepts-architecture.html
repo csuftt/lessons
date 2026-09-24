@@ -60,7 +60,7 @@
       <ul>
         <li>类比发版系统：你只提交新版本声明，它控制新旧 ReplicaSet 此消彼长，滚动着换流量；</li>
         <li>改镜像不是改 Pod，而是生成<strong>新的 ReplicaSet</strong>——<code>get rs</code> 里每代哈希就是一次发版存档；</li>
-        <li>副本数随负载自动伸缩是另一套机制，用法见每日微课程线 <a href="../../daily-tech-course/lessons/0016-k8s-hpa.html">第 0016 期 · Kubernetes HPA 自动伸缩</a>。</li>
+        <li>副本数随负载自动伸缩是另一套机制，用法见 <a href="https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/" target="_blank" rel="noopener">官方文档 · Horizontal Pod Autoscaler</a>。</li>
       </ul>
     </div>
     <div class="card">
@@ -68,11 +68,11 @@
       <p><strong>一句话定义：</strong>给一组 Pod 提供固定访问入口（虚拟 IP 与 DNS 名），Pod 换了一茬照样找得到。</p>
       <ul>
         <li>Pod 会死会换、IP 随机分配——Service 用标签选择器圈住一组 Pod，入口地址却不变，类比公司前台总机：员工工位天天换，总机号码不变；</li>
-        <li>第 2 期那个 <code>EXTERNAL-IP &lt;pending&gt;</code> 只是入口体系的最小演示，生产级流量入口（Ingress、Gateway API）见 <a href="../../daily-tech-course/lessons/0024-k8s-ingress-service-traffic.html">第 0024 期 · Kubernetes 流量入口</a>。</li>
+        <li>第 2 期那个 <code>EXTERNAL-IP &lt;pending&gt;</code> 只是入口体系的最小演示，生产级流量入口（Ingress、Gateway API）见 <a href="https://kubernetes.io/docs/concepts/services-networking/ingress/" target="_blank" rel="noopener">官方文档 · Ingress</a>。</li>
       </ul>
     </div>
   </div>
-  <p class="note"><span class="h">边界说明</span>各对象的 YAML 用法与日常排障，每日微课程线已讲过的不换皮重讲，需要时看上面两处延伸阅读；本期只回答"这些对象是什么、谁在背后驱动它们"。</p>
+  <p class="note"><span class="h">边界说明</span>各对象的 YAML 用法与日常排障不在本期展开，需要时看上面两处延伸阅读；本期只回答"这些对象是什么、谁在背后驱动它们"。</p>
 </section>
 
 <!-- ================= 03 期望状态与声明式 ================= -->
@@ -88,7 +88,7 @@
     </tbody>
   </table>
   </div>
-  <p>官方给 K8s 对象的定义是 <strong>"record of intent"（意图记录）</strong>——对象一旦创建，系统会持续工作确保它存在。声明式的完整含义在 <code>kubectl apply</code> 里：官方 object-management 文档把对象管理分成三种——<strong>命令式命令</strong>（直接操作活动对象，适合入门）、<strong>命令式对象配置</strong>（<code>kubectl create -f</code> 单文件全量定义）、<strong>声明式对象配置</strong>（<code>kubectl apply -f 目录</code>，增删改由 kubectl 逐对象自动判定，还能保留其他人的直接改动）。生产推荐第三种，官方同时警告：<strong>同一对象只用一种方式管理，混用会导致未定义行为</strong>。API 侧，对象按 API 组与版本暴露在 <code>/api/v1</code>、<code>/apis/apps/v1</code> 这样的路径上，<code>apiVersion</code> 与 <code>kind</code> 正是 YAML 头两行的来历；序列化的对象状态写入 etcd 持久化——etcd 就是这本总账（etcd 本身详见本系列第 16~20 期，点到为止）。</p>
+  <p>官方给 K8s 对象的定义是 <strong>"record of intent"（意图记录）</strong>——对象一旦创建，系统会持续工作确保它存在。声明式的完整含义在 <code>kubectl apply</code> 里：官方 object-management 文档把对象管理分成三种——<strong>命令式命令</strong>（直接操作活动对象，适合入门）、<strong>命令式对象配置</strong>（<code>kubectl create -f</code> 单文件全量定义）、<strong>声明式对象配置</strong>（<code>kubectl apply -f 目录</code>，增删改由 kubectl 逐对象自动判定，还能保留其他人的直接改动）。生产推荐第三种，官方同时警告：<strong>同一对象只用一种方式管理，混用会导致未定义行为</strong>。API 侧，对象按 API 组与版本暴露在 <code>/api/v1</code>、<code>/apis/apps/v1</code> 这样的路径上，<code>apiVersion</code> 与 <code>kind</code> 正是 YAML 头两行的来历；序列化的对象状态写入 etcd 持久化——etcd 就是这本总账，是集群唯一可信的状态存储。</p>
 </section>
 
 <!-- ================= 04 组件与架构 ================= -->
@@ -144,7 +144,7 @@
     <rect x="36" y="222" width="150" height="72" rx="8" fill="var(--card)" stroke="var(--line)"/>
     <text x="111" y="244" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">etcd</text>
     <text x="111" y="261" text-anchor="middle" fill="var(--muted)" font-size="8.5">一致且高可用的键值存储</text>
-    <text x="111" y="277" text-anchor="middle" fill="var(--muted)" font-size="8.5">集群总账本（第 16~20 期）</text>
+    <text x="111" y="277" text-anchor="middle" fill="var(--muted)" font-size="8.5">集群总账本 · 唯一可信源</text>
 
     <rect x="226" y="222" width="150" height="72" rx="8" fill="var(--card)" stroke="var(--line)"/>
     <text x="301" y="244" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">kube-scheduler</text>

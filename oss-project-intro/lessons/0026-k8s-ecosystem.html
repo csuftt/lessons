@@ -119,14 +119,14 @@
     <tbody>
       <tr><td>打包与发布 · Helm</td><td>K8s 的包管理器（helm.sh 原话："The package manager for Kubernetes"；2026-09 查得最新版 4.3.0，CNCF 毕业项目）：一组 YAML 打成 Chart，参数化、版本化安装升级</td><td>应用 YAML 超过两三个文件、想一键升级回滚时；装现成第三方应用几乎必经它</td></tr>
       <tr><td>GitOps · Argo CD / Flux</td><td>Git 里的声明就是期望状态，工具盯着仓库与集群的漂移自动对账（Argo CD 仓库自述 "Declarative Continuous Delivery for Kubernetes"，24.2k stars，2026-09 实测 GitHub）</td><td>多环境频繁发布、发布要可审计、想让"回滚 = git revert"时</td></tr>
-      <tr><td>可观测性 · Prometheus + Grafana</td><td>Prometheus 拉取并存储指标、Grafana 出大盘，告警也在这层；CNCF 毕业项目</td><td>生产集群第一天就需要。项目池后续专讲 Prometheus 系列，这里只认门</td></tr>
+      <tr><td>可观测性 · Prometheus + Grafana</td><td>Prometheus 拉取并存储指标、Grafana 出大盘，告警也在这层；CNCF 毕业项目</td><td>生产集群第一天就需要。想深入再看 Prometheus 官方文档，这里只认门</td></tr>
       <tr><td>镜像仓库 · Harbor</td><td>自托管的企业级镜像仓库：存储、漏洞扫描、镜像签名、跨机房复制（CNCF 毕业项目）</td><td>镜像不放公网、要审计谁推了什么镜像时；第 4 期清单里 image: 的来源就是它</td></tr>
       <tr><td>网关与流量 · Gateway API / Istio</td><td>Gateway API 是 Ingress 的下一代官方 API（2023-10 发布 v1.0 GA）；Istio 做服务网格，把重试熔断灰度下沉到 Sidecar</td><td>Ingress 注解力不从心、或要跨语言统一治理流量时</td></tr>
       <tr><td>存储与安全 · CSI 驱动 / cert-manager 等</td><td>CSI 标准接存储后端；cert-manager 自动签发续期 TLS 证书（官方自述："creates TLS certificates ... and renews the certificates before they expire"）</td><td>挂持久卷要挑存储后端、证书申请人工跑到忘记续期时</td></tr>
     </tbody>
   </table>
   </div>
-  <p class="note"><span class="h">两个衔接</span>网关一层：Ingress 的运维视角与流量入口选型，见每日微课程线 <a href="../../daily-tech-course/lessons/0024-k8s-ingress-service-traffic.html">第 0024 期 · 流量入口：Service 与 Ingress</a>；可观测一层：本线项目池里 Prometheus 排在后面，届时从 Pull 模型讲到 TSDB。</p>
+  <p class="note"><span class="h">两个衔接</span>网关一层：Ingress 的运维视角与流量入口选型，见 <a href="https://kubernetes.io/docs/concepts/services-networking/ingress/" target="_blank" rel="noopener">官方文档 · Ingress</a>；可观测一层：Prometheus 从 Pull 模型到 TSDB 的完整机制，见 <a href="https://prometheus.io/docs/introduction/overview/" target="_blank" rel="noopener">Prometheus 官方文档</a>。</p>
 </section>
 
 <!-- ================= 04 CRD 与 Operator ================= -->
@@ -167,7 +167,7 @@ spec:
     <div class="step"><span class="step-n">6</span><div><strong>2026-08-26 · v1.37 "Garhwal"：</strong>67 项增强（16 项转正、23 项进 beta、27 项进 alpha，官方发布博客）；kubectl 支持更安全的 KYAML 输出格式；HPA 支持缩到零副本进入 beta。</div></div>
   </div>
   <p>读这份时间线有一个视角：<strong>K8s 的演进不是"加功能"，而是"把曾经的生态约定收编为官方 API"</strong>——Gateway API 收编了流量入口的碎片化，DRA 在收编 GPU 调度的碎片化。这也是判断"某个周边工具会不会被平台吃掉"的常用框架。</p>
-  <p class="note"><span class="h">延伸一步</span>HPA 的原理视角见每日微课程线 <a href="../../daily-tech-course/lessons/0016-k8s-hpa.html">第 0016 期 · Kubernetes HPA 自动伸缩</a>；v1.37 里 HPA 的 <code>spec.minReplicas: 0</code> 已进 beta，缩容不再受"至少一个副本"的旧约束。</p>
+  <p class="note"><span class="h">延伸一步</span>HPA 的原理视角见 <a href="https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/" target="_blank" rel="noopener">官方文档 · Horizontal Pod Autoscaler</a>；v1.37 里 HPA 的 <code>spec.minReplicas: 0</code> 已进 beta，缩容不再受"至少一个副本"的旧约束。</p>
 </section>
 
 <!-- ================= 06 继续学习 ================= -->

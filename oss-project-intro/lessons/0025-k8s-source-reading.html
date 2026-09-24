@@ -41,7 +41,7 @@
     </tbody>
   </table>
   </div>
-  <p class="note"><span class="h">版本口径</span>K8s 主仓 tag <code>v1.37.0</code>（2026-08-26 发布，GitHub Latest，系列基准 v1.37.x）。所有类名与路径按该 tag 的 raw 文件逐行核对；etcd 的 watch 本体见本系列第 16~20 期，本期看它如何被 API Server 转译给控制器。</p>
+  <p class="note"><span class="h">版本口径</span>K8s 主仓 tag <code>v1.37.0</code>（2026-08-26 发布，GitHub Latest，系列基准 v1.37.x）。所有类名与路径按该 tag 的 raw 文件逐行核对；etcd 的 watch 机制本期只讲它如何被 API Server 转译给控制器。</p>
 </section>
 
 <!-- ================= 02 决策一 ================= -->
@@ -66,7 +66,7 @@ updatedRS, err := updateReplicaSetStatus(logger, rsc.kubeClient.AppsV1()
 <!-- ================= 03 决策二 ================= -->
 <section>
   <h2><span class="sec-num">03</span>决策二：Informer 的 list-watch——凭什么敢把集群读进内存</h2>
-  <p>对账的前提是"随时知道实际状态"。如果每轮对账都去 API Server 全量 List，几千个控制器轮询起来，API Server 和它背后的 etcd（本系列第 16~20 期的老朋友——etcd 只管存，watch 链路由 API Server 对外转译）会被读请求打爆。K8s 的答案是 client-go 的 <strong>Informer</strong>：<code>shared_informer.go</code> 头注释写得像设计文档，三大件——</p>
+  <p>对账的前提是"随时知道实际状态"。如果每轮对账都去 API Server 全量 List，几千个控制器轮询起来，API Server 和它背后的 etcd（etcd 只管存，watch 链路由 API Server 对外转译）会被读请求打爆。K8s 的答案是 client-go 的 <strong>Informer</strong>：<code>shared_informer.go</code> 头注释写得像设计文档，三大件——</p>
   <ul>
     <li><strong>indexer 本地缓存</strong>：带索引的全量对象副本，控制器的读九成落在内存；</li>
     <li><strong>Reflector</strong>：<code>ListAndWatch</code>——原注释 <em>"first lists all items and get the resource version at the moment of call, and then use the resource version to watch"</em>，先 List 拿全量和版本号，再凭版本号 Watch 增量，断线从上次版本续传；</li>
@@ -139,7 +139,7 @@ node := framework.NewSortedScoredNodes(priorityList).Pop().Name  // ② 打分�
 <section>
   <h2><span class="sec-num">05</span>从源码把控制面跑起来（轻讲）</h2>
   <p>读码最好的伴侣是断点。仓库自带一条最小组件启动路径：<code>hack/local-up-cluster.sh</code> 把 apiserver、etcd、controller-manager、scheduler 在本机进程级拉起——加 <code>-O</code> 可复用预编译二进制免重复构建；日志末尾给一句 <code>export KUBECONFIG=/var/run/kubernetes/admin.kubeconfig</code>，照抄就能用 kubectl 连上这个"裸"集群。想单看某个组件，从 <code>cmd/</code> 的 main 进：<code>cmd/kube-scheduler/app/server.go</code> 的 <code>NewSchedulerCommand</code> → <code>scheduler.New</code>，一条线读完启动流程。与第 2 期 minikube 的差别：minikube 起的是"生产形态"的沙盘，这条是"开发形态"——<strong>直接跑你工作区里的源码，改一行也能立刻验证</strong>。</p>
-  <p class="note"><span class="h">延伸一步</span>控制器模式不只内置：HPA 自动伸缩也是"改别人期望"的控制器——它调 Deployment 的 replicas，真正建 Pod 的还是 ReplicaSet 控制器。用法见每日微课程线 <a href="../../daily-tech-course/lessons/0016-k8s-hpa.html">第 0016 期 · Kubernetes HPA 自动伸缩</a>；服务交付后流量入口（Service/Ingress）的运维视角同见该线 <a href="../../daily-tech-course/lessons/0024-k8s-ingress-service-traffic.html">第 0024 期 · 流量入口</a>。</p>
+  <p class="note"><span class="h">延伸一步</span>控制器模式不只内置：HPA 自动伸缩也是"改别人期望"的控制器——它调 Deployment 的 replicas，真正建 Pod 的还是 ReplicaSet 控制器。用法见 <a href="https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/" target="_blank" rel="noopener">官方文档 · Horizontal Pod Autoscaler</a>；服务交付后流量入口（Service/Ingress）的运维视角见 <a href="https://kubernetes.io/docs/concepts/services-networking/ingress/" target="_blank" rel="noopener">官方文档 · Ingress</a>。</p>
 </section>
 
 <!-- ================= 06 旅程与路线图 ================= -->
@@ -172,7 +172,7 @@ informer 链: Reflector.ListAndWatch → DeltaFIFO → HandleDeltas
   <h2><span class="sec-num">07</span>架构师视角：能搬回自己系统的三件事</h2>
   <ul>
     <li><strong>用"期望 vs 实际的差额"建模，把事件当提醒而不是指令。</strong>自研平台里的定时对账、补偿任务常常写得心虚——"事件都到了才敢动"。level-based 给了相反的底气：处理逻辑幂等、只认最新状态，丢了就下一轮补；故障恢复从"回放历史"简化成"重读账本"；</li>
-    <li><strong>读多写少的系统：本地缓存 + 版本续传 + 周期对账三件套。</strong>Informer 的这套组合对配置中心、注册中心客户端是照抄级答案（本系列 etcd 期读过的 watch 语义，在客户端侧长成了这样）——先全量、后增量、断了从版本续、再定期全量兜底，四道防线各管一段；</li>
+    <li><strong>读多写少的系统：本地缓存 + 版本续传 + 周期对账三件套。</strong>Informer 的这套组合对配置中心、注册中心客户端是照抄级答案（watch 语义在客户端侧长成了这样）——先全量、后增量、断了从版本续、再定期全量兜底，四道防线各管一段；</li>
     <li><strong>把贵的计算隔离在"可行集"内。</strong>先便宜的硬约束过滤、再昂贵的打分排序，过滤为空宁可排队也不硬塞——调度、推荐、风控引擎同样适用；顺带把"硬约束"与"软偏好"拆成两组扩展点，语义谁也不污染谁。</li>
   </ul>
 </section>
@@ -227,7 +227,7 @@ informer 链: Reflector.ListAndWatch → DeltaFIFO → HandleDeltas
   <details class="q-card">
     <summary>思考一：watch 断网十分钟、期间积压的所有事件全部丢失，控制器靠哪几层兜底把状态收敛回来？这暴露了 edge-triggered 方案的什么死穴？<span class="chev">展开解析 ▾</span></summary>
     <div class="details-body">
-      <p>逐层看。<strong>第一层：重连续传</strong>——Reflector 重连时带着断开前的 resourceVersion，API Server 从该版本回放此后所有变更，只要服务端历史窗口没滑走，一秒补齐。<strong>第二层：全量重新 List</strong>——版本号太旧已被压缩（对应 etcd 期的 compacted 报错），Reflector 干脆重 List 一遍全量替换本地缓存，等价于" Forget everything, read the ledger again"。<strong>第三层：周期 Resync</strong>——就算什么都没断，MinResyncPeriod（默认 12 小时、乘随机因子错峰）也会把全部对象以 Sync 增量重放一遍，专治"事件到了但处理逻辑当时有 bug"这类静默漏账。<strong>第四层：workqueue 限流重试</strong>——对账本身失败也不丢：key 退避重排，下一轮再来。</p>
+      <p>逐层看。<strong>第一层：重连续传</strong>——Reflector 重连时带着断开前的 resourceVersion，API Server 从该版本回放此后所有变更，只要服务端历史窗口没滑走，一秒补齐。<strong>第二层：全量重新 List</strong>——版本号太旧已被压缩（对应 etcd 的 compacted 报错），Reflector 干脆重 List 一遍全量替换本地缓存，等价于" Forget everything, read the ledger again"。<strong>第三层：周期 Resync</strong>——就算什么都没断，MinResyncPeriod（默认 12 小时、乘随机因子错峰）也会把全部对象以 Sync 增量重放一遍，专治"事件到了但处理逻辑当时有 bug"这类静默漏账。<strong>第四层：workqueue 限流重试</strong>——对账本身失败也不丢：key 退避重排，下一轮再来。</p>
       <p>反观 edge-triggered：它的正确性依赖"事件序列完整且按序处理"，丢一条就是永久漂移，而恢复手段只有一种——回放全部历史，代价与历史长度成正比。level-based 把恢复问题从"历史回放"降维成"重读当前账本"，成本与历史无关。<strong>这就是"不信任事件、只信任状态"的完整含义：不是不要事件，而是任何时候都可以不需要事件。</strong></p>
     </div>
   </details>
@@ -235,7 +235,7 @@ informer 链: Reflector.ListAndWatch → DeltaFIFO → HandleDeltas
     <summary>思考二：调度器为什么不把"过滤"与"打分"合并成一个插件、一次算完？拆成两阶段，牺牲了什么、换来了什么？<span class="chev">展开解析 ▾</span></summary>
     <div class="details-body">
       <p>先看合并的隐含前提：每个节点都要算完整分数——包括那些最终会被硬约束一票否决的节点。资源不足、污点不匹配、亲和冲突的节点，它们的"得分"毫无意义却照常消耗插件计算；万节点集群一轮调度几十万次评分，热点插件还会互相拖慢。<strong>两阶段把 O(节点×插件) 的昂贵评分，压缩到只对可行集执行</strong>，再加 <code>numFeasibleNodesToFind</code> 的比例控制（50% 起步、下限 5%），可行集本身也有上限——性能是拆分换来的第一收益。</p>
-      <p>第二收益是语义：硬约束（Filter 插件）与软偏好（Score 插件）分属两组扩展点，"不允许"与"不 Prefer"不会被一个加权公式搅在一起，自定义插件注册时职责天然清晰。牺牲也明码标价：<strong>两阶段顺序执行，过滤结果的截断（候选上限）可能让真正最优的节点没进打分池</strong>——这是一种"足够好"对"全局最优"的让步；另外插件间想传递中间结果，要靠 CycleState 显式协作。与 etcd 期 ReadIndex 的取舍同构：不追全局最优档，停在"默认档"，把最常见场景的性价比做到最高。</p>
+      <p>第二收益是语义：硬约束（Filter 插件）与软偏好（Score 插件）分属两组扩展点，"不允许"与"不 Prefer"不会被一个加权公式搅在一起，自定义插件注册时职责天然清晰。牺牲也明码标价：<strong>两阶段顺序执行，过滤结果的截断（候选上限）可能让真正最优的节点没进打分池</strong>——这是一种"足够好"对"全局最优"的让步；另外插件间想传递中间结果，要靠 CycleState 显式协作。与 etcd ReadIndex 的取舍同构：不追全局最优档，停在"默认档"，把最常见场景的性价比做到最高。</p>
     </div>
   </details>
 </section>

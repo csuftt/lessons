@@ -69,7 +69,7 @@
     <rect x="496" y="60" width="140" height="96" rx="10" fill="var(--warn-bg)" stroke="var(--accent)"/>
     <text x="566" y="86" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">etcd · 存储层</text>
     <text x="566" y="106" text-anchor="middle" fill="var(--muted)" font-size="9.5">集群状态的唯一可信源</text>
-    <text x="566" y="126" text-anchor="middle" fill="var(--accent-3)" font-size="8.5">详见本系列第 16~20 期</text>
+    <text x="566" y="126" text-anchor="middle" fill="var(--accent-3)" font-size="8.5">分布式键值存储 · 一致且高可用</text>
 
     <line x1="176" y1="108" x2="232" y2="108" stroke="var(--muted)" marker-end="url(#ar21)"/>
     <text x="204" y="98" text-anchor="middle" fill="var(--muted)" font-size="8.5">提交</text>
@@ -96,7 +96,7 @@
   </svg>
   </div>
 
-  <p>把这张图记住，Kubernetes 的一半架构就懂了：<strong>API Server 是唯一入口，期望状态落到 etcd 只存一份，控制器们订阅变更、驱动现实</strong>。etcd 就站在存储层那个位置——上个系列拆过的"心脏"，在这里正是它的落位（etcd 本身详见本系列第 16~20 期）。声明式还有个容易被低估的副产品：<strong>状态是数据，不是记忆</strong>——集群"现在什么样"随时可查、可审计、可重建，第 3 期把它展开成一次完整的部署旅程。</p>
+  <p>把这张图记住，Kubernetes 的一半架构就懂了：<strong>API Server 是唯一入口，期望状态落到 etcd 只存一份，控制器们订阅变更、驱动现实</strong>。etcd 就站在存储层那个位置——集群状态唯一可信的"心脏"，在这里正是它的落位。声明式还有个容易被低估的副产品：<strong>状态是数据，不是记忆</strong>——集群"现在什么样"随时可查、可审计、可重建，第 3 期把它展开成一次完整的部署旅程。</p>
 </section>
 
 <!-- ================= 03 关键数据 ================= -->
@@ -154,10 +154,10 @@
   </div>
   <p>一条判断捷径：<strong>先数服务数量和变更频率——超过"一台机器放得下、一个月改不了几次"这条线，再认真评估 K8s；否则把学习成本花在业务上更划算。</strong>当然，"会用 K8s"已是基础设施工程师的默认技能，学它永远不亏。</p>
   <div class="note">
-    <p><strong>延伸阅读（每日微课程线，对象使用与排障不重讲）：</strong></p>
+    <p><strong>延伸阅读（官方文档，对象使用与排障不重讲）：</strong></p>
     <ul>
-      <li><a href="../../daily-tech-course/lessons/0016-k8s-hpa.html">第 0016 期 · Kubernetes HPA 自动伸缩</a>——弹性伸缩对象的日常使用与调参，从使用视角讲；</li>
-      <li><a href="../../daily-tech-course/lessons/0024-k8s-ingress-service-traffic.html">第 0024 期 · Kubernetes 流量入口：Service、Ingress 与 Gateway API</a>——流量对象的配置与排障，本系列不重复展开。</li>
+      <li><a href="https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/" target="_blank" rel="noopener">官方文档 · Horizontal Pod Autoscaler</a>——弹性伸缩对象的日常使用与调参，从使用视角讲；</li>
+      <li><a href="https://kubernetes.io/docs/concepts/services-networking/ingress/" target="_blank" rel="noopener">官方文档 · Ingress 与 Service 流量入口</a>——流量对象的配置与排障，本系列不重复展开。</li>
     </ul>
   </div>
 </section>

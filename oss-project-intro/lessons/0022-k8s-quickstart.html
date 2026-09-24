@@ -144,7 +144,7 @@ hello-node-5f76cf6ccf-br9b5   1/1     Running   0          1m</code></pre>
     <rect x="230" y="40" width="160" height="90" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
     <text x="310" y="72" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">API Server</text>
     <text x="310" y="92" text-anchor="middle" fill="var(--muted)" font-size="9.5">唯一入口 · 落账</text>
-    <text x="310" y="110" text-anchor="middle" fill="var(--muted)" font-size="9.5">etcd 存一份（第 16~20 期）</text>
+    <text x="310" y="110" text-anchor="middle" fill="var(--muted)" font-size="9.5">etcd 存一份状态账</text>
 
     <rect x="450" y="24" width="130" height="56" rx="10" fill="var(--card)" stroke="var(--line)"/>
     <text x="515" y="48" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">Deployment 控制器</text>
@@ -308,10 +308,10 @@ kubernetes   ClusterIP      10.96.0.1       &lt;none&gt;        443/TCP         
   </div>
   <p><strong>下期预告：</strong>第 3 期《核心概念与整体架构》——声明式 API 的术语体系（对象、资源、标签与选择器）、控制平面四件套怎么分工，以及一次部署从 kubectl 到 Pod 运行的完整旅程：今天看到的每一步，下期给出内部原理图。Primary source：<a href="https://kubernetes.io/docs/tutorials/hello-minikube/" target="_blank" rel="noopener">Kubernetes 官方教程 · Hello Minikube</a>——本期部署、暴露、访问与全部输出出处；minikube 安装、前置要求与驱动见 <a href="https://minikube.sigs.k8s.io/docs/start/" target="_blank" rel="noopener">minikube 官方文档 · Start</a> 与 <a href="https://minikube.sigs.k8s.io/docs/drivers/" target="_blank" rel="noopener">Drivers 页</a>，start 命令参数见 <a href="https://minikube.sigs.k8s.io/docs/commands/start/" target="_blank" rel="noopener">minikube start 命令参考</a>，本地工具选型官方口径见 <a href="https://kubernetes.io/docs/tasks/tools/" target="_blank" rel="noopener">Install Tools</a>，版本与发布记录见 <a href="https://github.com/kubernetes/kubernetes/releases" target="_blank" rel="noopener">GitHub Releases</a>。</p>
   <div class="note">
-    <p><strong>延伸阅读（每日微课程线，对象使用与排障不重讲）：</strong></p>
+    <p><strong>延伸阅读（官方文档，对象使用与排障不重讲）：</strong></p>
     <ul>
-      <li><a href="../../daily-tech-course/lessons/0024-k8s-ingress-service-traffic.html">第 0024 期 · Kubernetes 流量入口：Service、Ingress 与 Gateway API</a>——今天 expose 出来的 Service 只是流量入口的最小演示，生产级入口配置与排障在那边讲透；</li>
-      <li><a href="../../daily-tech-course/lessons/0016-k8s-hpa.html">第 0016 期 · Kubernetes HPA 自动伸缩</a>——Deployment 的副本数今天写死为 1，让它随负载自动伸缩的用法见该课。</li>
+      <li><a href="https://kubernetes.io/docs/concepts/services-networking/ingress/" target="_blank" rel="noopener">官方文档 · Ingress 与 Service 流量入口</a>——今天 expose 出来的 Service 只是流量入口的最小演示，生产级入口配置与排障在那里讲透；</li>
+      <li><a href="https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/" target="_blank" rel="noopener">官方文档 · Horizontal Pod Autoscaler</a>——Deployment 的副本数今天写死为 1，让它随负载自动伸缩的用法见该页。</li>
     </ul>
   </div>
 </section>

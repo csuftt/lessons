@@ -104,7 +104,7 @@
       <li>④ <strong>历史与回滚：</strong>发版记录自动留存，一条 undo 命令退回上一版。</li>
     </ul>
   </div>
-  <p class="note"><span class="h">为什么选 nginx</span>本期讲的是<strong>交付流程与平台机制</strong>，示例选 nginx 是因为每个字段都能在官方文档找到原文，不掺任何臆测。换成你自己的 Spring Boot 镜像：改 <code>image</code>、探针路径换成真实健康端点、端口改成应用端口，清单一行结构都不用动。上期预告里提过的 ConfigMap（配置注入）走的是同一条 spec 声明思路，官方文档单独成页，本期不展开；各对象字段的详细用法与日常排障，每日微课程线已讲的也不换皮重讲（<a href="../../daily-tech-course/lessons/0024-k8s-ingress-service-traffic.html">流量入口：Service、Ingress 与 Gateway API</a>）。</p>
+  <p class="note"><span class="h">为什么选 nginx</span>本期讲的是<strong>交付流程与平台机制</strong>，示例选 nginx 是因为每个字段都能在官方文档找到原文，不掺任何臆测。换成你自己的 Spring Boot 镜像：改 <code>image</code>、探针路径换成真实健康端点、端口改成应用端口，清单一行结构都不用动。上期预告里提过的 ConfigMap（配置注入）走的是同一条 spec 声明思路，官方文档单独成页，本期不展开；各对象字段的详细用法与日常排障，官方文档有专页（<a href="https://kubernetes.io/docs/concepts/services-networking/ingress/" target="_blank" rel="noopener">Ingress 与流量入口</a>），本期不重复展开。</p>
 </section>
 
 <!-- ================= 02 Deployment 清单 ================= -->
@@ -200,7 +200,7 @@ NAME               TYPE       CLUSTER-IP    EXTERNAL-IP   PORT(S)        AGE
 nginx-deployment   NodePort   10.96.34.117  &lt;none&gt;        80:31432/TCP   12s
 $ curl -s http://$(minikube ip):31432 | grep title
 &lt;title&gt;Welcome to nginx!&lt;/title&gt;</code></pre>
-  <p><code>Welcome to nginx!</code> 出现，四条目标完成两条。CLUSTER-IP 与分配到的端口每台机器不同（端口落在 30000-32767 内），<code>minikube service nginx-deployment</code> 一条命令直接在浏览器打开。生产级流量入口（Ingress、Gateway API）daily 线有专课，从 Service 往上走的路那里都有。</p>
+  <p><code>Welcome to nginx!</code> 出现，四条目标完成两条。CLUSTER-IP 与分配到的端口每台机器不同（端口落在 30000-32767 内），<code>minikube service nginx-deployment</code> 一条命令直接在浏览器打开。生产级流量入口（Ingress、Gateway API）见官方文档专页，从 Service 往上走的路那里都有。</p>
 </section>
 
 <!-- ================= 04 滚动更新 ================= -->
@@ -312,7 +312,7 @@ deployment.apps/nginx-deployment rolled back</code></pre>
     </ul>
   </div>
   <p><strong>下期预告：</strong>第 5 期《架构与源码导读：控制器模式与调度器》——本期你看到的"新 RS 渐进扩容、旧 RS 缩容"，就是 deployment controller 的对账循环在跑；调度器怎么给 surge 出来的 Pod 挑节点（过滤 + 打分）。读码入口已经踩好点：<code>pkg/controller/deployment</code> 与 <code>pkg/scheduler</code>，下一期进去看源码。</p>
-  <p><strong>延伸阅读：</strong>Primary source 官方文档：<a href="https://kubernetes.io/docs/concepts/workloads/controllers/deployment/" target="_blank" rel="noopener">Deployments</a>（本期命令与回显的官方出处）、<a href="https://kubernetes.io/docs/tasks/run-application/run-stateless-application-deployment/" target="_blank" rel="noopener">Run a Stateless Application Using a Deployment</a>（无状态应用交付任务页）、<a href="https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/" target="_blank" rel="noopener">Configure Liveness, Readiness and Startup Probes</a>（探针任务页）、<a href="https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/" target="_blank" rel="noopener">Resource Management for Pods and Containers</a>（requests/limits 口径）、<a href="https://kubernetes.io/docs/concepts/services-networking/service/" target="_blank" rel="noopener">Service</a>（类型与端点机制）、<a href="https://kubernetes.io/docs/concepts/configuration/configmap/" target="_blank" rel="noopener">ConfigMap</a>（上期预告的配置注入）；深入排障与字段用法见 daily 线 <a href="../../daily-tech-course/lessons/0024-k8s-ingress-service-traffic.html">流量入口</a> 与 <a href="../../daily-tech-course/lessons/0016-k8s-hpa.html">HPA 自动伸缩</a>；仓库与版本见 <a href="https://github.com/kubernetes/kubernetes" target="_blank" rel="noopener">github.com/kubernetes/kubernetes</a>。</p>
+  <p><strong>延伸阅读：</strong>Primary source 官方文档：<a href="https://kubernetes.io/docs/concepts/workloads/controllers/deployment/" target="_blank" rel="noopener">Deployments</a>（本期命令与回显的官方出处）、<a href="https://kubernetes.io/docs/tasks/run-application/run-stateless-application-deployment/" target="_blank" rel="noopener">Run a Stateless Application Using a Deployment</a>（无状态应用交付任务页）、<a href="https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/" target="_blank" rel="noopener">Configure Liveness, Readiness and Startup Probes</a>（探针任务页）、<a href="https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/" target="_blank" rel="noopener">Resource Management for Pods and Containers</a>（requests/limits 口径）、<a href="https://kubernetes.io/docs/concepts/services-networking/service/" target="_blank" rel="noopener">Service</a>（类型与端点机制）、<a href="https://kubernetes.io/docs/concepts/configuration/configmap/" target="_blank" rel="noopener">ConfigMap</a>（上期预告的配置注入）；深入排障与字段用法另见官方文档 <a href="https://kubernetes.io/docs/concepts/services-networking/ingress/" target="_blank" rel="noopener">Ingress 流量入口</a> 与 <a href="https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/" target="_blank" rel="noopener">HPA 自动伸缩</a>；仓库与版本见 <a href="https://github.com/kubernetes/kubernetes" target="_blank" rel="noopener">github.com/kubernetes/kubernetes</a>。</p>
 </section>
 
 <nav class="lesson-nav">
