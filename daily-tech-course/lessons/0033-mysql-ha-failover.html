@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · MySQL 高可用与故障切换架构 | 2026-09-25</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0033</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0032-spring-cloud-gateway.html">上一期：Spring Cloud Gateway 流量入口治理</a> · <a href="https://www.bilibili.com/video/BV1ZmaT6KEot" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">MYSQL · MySQL 系列第 2 讲（高可用篇 · 故障切换）</p>
+  <h1>MySQL 高可用与故障切换架构：主库挂了，谁说了算？</h1>
+  <p class="subtitle">上一讲聊了<a href="0032-spring-cloud-gateway.html">网关这条流量防线</a>，今天开启 MySQL 主线，讲数据库的高可用地基。很多团队对"主从复制"的理解停在"从库有一份数据"——但主库凌晨三点挂掉的那一刻，真正的问题才开始：谁来发现？选哪个从库顶上？怎么保证不丢数据？切换完旧主回来怎么办？这一讲从一次"值班同学手工切库切丢十分钟订单"的复盘讲起，把故障切换拆成探测、选主、切换、对账四幕，讲透 RPO/RTO 的账怎么算，最后比较自动切换的两大流派——外部编排（Orchestrator）与数据库自治（InnoDB Cluster）——给出一套可以演练落地的清单。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🐬 MySQL</span>
+    <span class="tag-date">📅 2026-09-25 · 第 33 期</span>
+    <span class="tag time">⏱ 预计阅读 10 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>一次"手工切库，切丢十分钟订单"的复盘</h2>
+  <p>某业务凌晨 02:47 主库硬件故障宕机，监控两分钟后告警。值班同学按应急手册操作：挑了一台"看起来正常"的从库，STOP SLAVE、RESET SLAVE ALL、改写应用配置里的数据库地址、重启应用——全程 23 分钟，服务恢复。早上对账发现两个问题：<strong>切丢的事务</strong>与<strong>切出的分叉</strong>。切丢：被提升的从库 SQL 线程落后主库约 4 秒（异步复制 + 凌晨批任务突增），主库已提交返回成功的事务里，有一批订单在这台从库上<strong>从未到达</strong>——用户看到下单成功，数据库里没有。分叉：集群里还有另外两台从库，其中一台因为网络分区比新主库<strong>多收了 40 秒事务</strong>；值班同学上午把它们直接 CHANGE REPLICATION SOURCE 指回新主库，多出来的事务导致一批主键冲突报错，复制断裂，只能重搭。</p>
+  <p>复盘结论很扎心：<strong>复制品不等于高可用，故障切换是一套工程，不是一条命令</strong>。它至少要回答五个问题：故障怎么探测（多准、多快）；数据边界在哪（哪个从库最能代表崩溃瞬间的主库）；谁来提升（怎么防止两个主库）；应用怎么切（数据库地址变更怎么让几十个服务感知）；旧主怎么回来（多出来的事务怎么办）。手工操作在这五步里每一步都可能出错——不是值班同学的问题，是<strong>把高可用设计成了"人肉运行手册"</strong>的问题。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：故障切换的四幕工程</h2>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 430" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar33" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <text x="380" y="22" text-anchor="middle" fill="var(--muted)" font-size="13">故障切换四幕：探测 → 选主 → 切换 → 对账，每一幕都有自己的坑</text>
+
+    <!-- Act 1 -->
+    <rect x="20" y="44" width="170" height="150" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="105" y="68" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">① 探测</text>
+    <text x="105" y="88" text-anchor="middle" fill="var(--muted)" font-size="10">连不上 = 死了？</text>
+    <text x="32" y="110" fill="var(--muted)" font-size="9.5">· 探测者自身要多点（仲裁）</text>
+    <text x="32" y="126" fill="var(--muted)" font-size="9.5">· 崩溃 vs 网络分区要区分</text>
+    <text x="32" y="142" fill="var(--muted)" font-size="9.5">· 探测间隔 = RTO 下界之一</text>
+    <text x="32" y="158" fill="var(--muted)" font-size="9.5">· 宁可慢不可脑裂</text>
+    <text x="32" y="180" fill="var(--bad)" font-size="9.5">坑：单点探测器 + 双主</text>
+
+    <!-- Act 2 -->
+    <rect x="210" y="44" width="170" height="150" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="295" y="68" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">② 选主（数据边界）</text>
+    <text x="295" y="88" text-anchor="middle" fill="var(--muted)" font-size="10">谁最能代表旧主？</text>
+    <text x="222" y="110" fill="var(--muted)" font-size="9.5">· GTID 集合比大小</text>
+    <text x="222" y="126" fill="var(--muted)" font-size="9.5">· 追平者才配当新主</text>
+    <text x="222" y="142" fill="var(--muted)" font-size="9.5">· 半同步 ACK 过的更稳</text>
+    <text x="222" y="158" fill="var(--muted)" font-size="9.5">· binlog 最完整者优先</text>
+    <text x="222" y="180" fill="var(--bad)" font-size="9.5">坑：跳过复制冲突硬提升</text>
+
+    <!-- Act 3 -->
+    <rect x="400" y="44" width="170" height="150" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="485" y="68" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">③ 切换（流量迁移）</text>
+    <text x="485" y="88" text-anchor="middle" fill="var(--muted)" font-size="10">应用怎么知道？</text>
+    <text x="412" y="110" fill="var(--muted)" font-size="9.5">· 代理层：ProxySQL / Router</text>
+    <text x="412" y="126" fill="var(--muted)" font-size="9.5">· 编排工具改后端指向</text>
+    <text x="412" y="142" fill="var(--muted)" font-size="9.5">· VIP 漂移（网络层）</text>
+    <text x="412" y="158" fill="var(--muted)" font-size="9.5">· 连接要重建，事务要重试</text>
+    <text x="412" y="180" fill="var(--bad)" font-size="9.5">坑：只切库不动应用配置</text>
+
+    <!-- Act 4 -->
+    <rect x="590" y="44" width="150" height="150" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="665" y="68" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">④ 对账（PITR）</text>
+    <text x="665" y="88" text-anchor="middle" fill="var(--muted)" font-size="10">旧主回来了</text>
+    <text x="602" y="110" fill="var(--muted)" font-size="9.5">· GTID 差集 = 多出的事务</text>
+    <text x="602" y="126" fill="var(--muted)" font-size="9.5">· 差集导出人工裁决</text>
+    <text x="602" y="142" fill="var(--muted)" font-size="9.5">· 旧主重搭或克隆回集群</text>
+    <text x="602" y="158" fill="var(--muted)" font-size="9.5">· 业务侧幂等兜底</text>
+    <text x="602" y="180" fill="var(--bad)" font-size="9.5">坑：直接指回 → 主键冲突</text>
+
+    <!-- arrows between acts -->
+    <line x1="190" y1="119" x2="208" y2="119" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar33)"/>
+    <line x1="380" y1="119" x2="398" y2="119" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar33)"/>
+    <line x1="570" y1="119" x2="588" y2="119" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar33)"/>
+
+    <!-- bottom: RPO/RTO band -->
+    <rect x="20" y="216" width="720" height="72" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="380" y="240" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">两把尺子：RPO（能容忍丢多少数据）与 RTO（能容忍多久不可用）</text>
+    <text x="380" y="260" text-anchor="middle" fill="var(--muted)" font-size="10.5">RPO 由复制模式决定（异步 ≈ 复制延迟 / 半同步 ≈ 0 / 半同步降级窗口 &gt; 0）——切换工具改不了它，只能如实兑现</text>
+    <text x="380" y="278" text-anchor="middle" fill="var(--muted)" font-size="10.5">RTO = 探测时间 + 选主决策 + 流量切换 + 应用恢复，自动化的价值几乎全在 RTO 这一侧</text>
+
+    <!-- bottom note -->
+    <text x="380" y="316" text-anchor="middle" fill="var(--muted)" font-size="10.5">四幕不是串行流水就完事：每一幕都要有"失败了自己怎么办"的答案（探测者挂了、提升失败、切换超时、对账冲突）</text>
+    <text x="380" y="336" text-anchor="middle" fill="var(--muted)" font-size="10.5">与 0004 期分工：0004 讲复制怎么搭（binlog/位点/半同步插件），本期专讲"主库挂了之后"的那套工程</text>
+  </svg>
+  </div>
+
+  <p><strong>第一幕探测的核心矛盾是"快"与"稳"。</strong>连不上就判死，网络抖一下就会误杀健康主库；判得太慢，RTO 就被拉长。生产答案几乎都是<strong>多数派探测</strong>：探测者本身至少 3 个节点（Orchestrator 后端存储可配 raft / MySQL 自带仲裁节点），对主库状态达成多数意见才触发切换——单探测点既可能误判，自己还是单故障点。<strong>第二幕选主是数据问题不是可用性问题：</strong>所有从库里 GTID 集合最大（执行过的事务最多）的那个才配当新主，落后太多的候选要么等追平、要么直接出局。这里要显式做<strong>数据边界检查</strong>：拒绝提升有复制错误的从库——"跳过错误硬提升"等于亲手制造数据丢失。</p>
+
+  <p><strong>第三幕切换的本质是流量迁移：</strong>几十个微服务的连接怎么从旧主搬到新主？靠人改配置重启是最差解。主流是代理层（ProxySQL、MySQL Router）或编排工具直接改后端指向，应用无感。<strong>第四幕最常被忽略也最容易翻车：</strong>旧主修复回来时，它的 binlog 里可能有新主没有的事务（故障瞬间异步复制的缺口），这些"多出来的事务"必须先用 GTID 差集算出来、人工裁决（补录或丢弃），然后旧主<strong>重搭或克隆</strong>后再回集群——直接 CHANGE REPLICATION SOURCE 指回新主，就是 01 节那批主键冲突的来路。</p>
+
+  <div class="callout">
+    <p class="callout-title">版本现状速览（2026-09 口径，影响选型判断）</p>
+    <p>MySQL <strong>8.0 已于 2026-04-30 结束支持（EOL）</strong>，不再收到安全补丁——还在 8.0 的集群应把迁往 <strong>8.4 LTS</strong>（支持到 2032，当前 8.4.11）排上日程；新的 9.7 LTS 已发布（2026-04），Innovation 线改为年份编号（26.x）。工具生态两个要点：<strong>MHA 已停更多年</strong>，新项目不要选；<strong>Orchestrator</strong> 原仓库（openark）2025-02 归档，项目先转 Percona、2026 年起由 <strong>ProxySQL 组织</strong>接手维护——存量用它的盯紧新仓库，新部署先评估 InnoDB Cluster。</p>
+  </div>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：RPO 靠复制模式，RTO 靠切换方案</h2>
+
+  <h3>先把 RPO 钉死：复制模式决定数据边界</h3>
+  <p>切换工具只能"如实兑现"复制模式决定的数据边界，所以<strong>先选复制，再选工具</strong>。异步复制 RPO ≈ 复制延迟（正常亚秒，高峰几秒）；半同步（AFTER_SYNC，8.0 默认语义，先落盘再提交、无幻读回滚）在<strong>至少一台从库 ACK</strong> 前不提交，正常情况 RPO = 0，代价是写延迟增加一次网络 RTT，且<strong>超时会自动降级为异步</strong>——降级窗口内主库宕机照样丢，所以参数目标是"宁可短暂拒写，不要静默降级"（rpl_semi_sync_master_timeout 设成极大值或配监控告警盯降级事件）。金融级强一致再往上是 MGR / InnoDB Cluster 的多数派提交。</p>
+
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>方案</th><th>RPO</th><th>RTO</th><th>仲裁机制</th><th>适用与代价</th></tr>
+    <tr><td>手工脚本 / 运行手册</td><td>取决于复制模式</td><td>10~30 分钟</td><td>人（+电话）</td><td>小集群兜底；凌晨三点的人是不可靠组件</td></tr>
+    <tr><td>Orchestrator + 代理</td><td>兑现半同步 ≈ 0</td><td>约 1 分钟级</td><td>外部多数派</td><td>存量异步/半同步拓扑的成熟方案；仓库已移交 ProxySQL 组织维护</td></tr>
+    <tr><td>MGR / InnoDB Cluster</td><td>多数派提交 = 0</td><td>约 10 秒级</td><td>内置（组通信）</td><td>新项目首选；强网低延迟要求 + 全套栈约束（仅 InnoDB、行格式 ROW）</td></tr>
+    <tr><td>云 RDS 高可用版</td><td>厂商承诺</td><td>约 30 秒级</td><td>黑盒</td><td>托管换掌控；切换行为要实测（只读模式的只写降级窗口）</td></tr>
+  </table>
+  </div>
+
+  <p><strong>InnoDB Cluster 是"数据库自己管自己"</strong>：MGR 用组通信协议（Paxos 变种）做多数派认证，主挂了组内选举，秒级出新主；MySQL Router 靠元数据会话自动把连接迁到新主；MySQL Shell 的 AdminAPI 负责建组、加节点、克隆恢复——探测、选主、切换三幕全部内建，还自带防脑裂（少数派分区自动变只读）。<strong>Orchestrator 是"外部裁判"路线</strong>：自己爬拓扑建实时图，故障时按规则挑最优从库提升，通过钩子改 ProxySQL / DNS 完成流量迁移；对拓扑形态几乎无要求（级联、跨机房都行），这是它至今在存量集群里流行的原因。选型直觉：<strong>新部署优先 InnoDB Cluster，存量复杂拓扑用 Orchestrator 续命，同时把迁往前者写进演进路线</strong>。</p>
+
+  <div class="callout">
+    <p class="callout-title">容量与部署的三笔账（3 节点起步）</p>
+    <p><strong>节点数：</strong>多数派机制要奇数——3 节点容忍 1 节点故障，5 节点容忍 2；2 节点是伪 HA（谁也拿不到多数派）。跨机房 3 节点要保证任意两机房网络互通且延迟足够低（组复制对延迟敏感，同城内建议 RTT 几毫秒内）。<strong>写放大：</strong>多数派协议让每次提交都要走组内共识，写吞吐不是"主库单机 × N"而是受最慢成员拖累——慢成员会拖全组的提交水位（ remedial 动作：让大查询走异步 Read Replica，而不是塞进组里）。<strong>恢复带宽：</strong>节点重加入走克隆（Clone 插件全量 + 增量追平），要按"数据盘容量 ÷ 允许的恢复时长"预留网络与磁盘带宽，否则一次故障后的回补会拖几个小时。另外<strong>备份独立于复制</strong>：从库不是备份，RPO=0 的集群也需要 PITR（binlog 全量留存 + 定期全备）兜住人为 DROP TABLE 这种复制帮不了你的事故。</p>
+  </div>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：InnoDB Cluster 建组与半同步的关键参数</h2>
+
+  <h3>InnoDB Cluster：三条命令建一个能自动切换的集群</h3>
+  <pre><code><span class="c-com"># 1. 三台实例先自检配置（gtid、binlog、事务写集等由 MySQL Shell 自动纠正）</span>
+mysqlsh --uri root@10.0.0.11:3306 -e "dba.configureInstance()"   <span class="c-com"># 12/13 各执行一次</span>
+
+<span class="c-com"># 2. 建组 + 加成员（空实例默认用 Clone 插件全量同步，无需手工搬数据）</span>
+mysqlsh --uri root@10.0.0.11:3306
+  var cluster = dba.createCluster('prod', {multiPrimary: false})  <span class="c-com"># 单主模式</span>
+  cluster.addInstance('root@10.0.0.12:3306')   <span class="c-com"># interactive 提示选 Clone</span>
+  cluster.addInstance('root@10.0.0.13:3306')
+
+<span class="c-com"># 3. 应用侧 Router 引导：从此应用只认 6446 读写口，不认任何一台物理库</span>
+mysqlrouter --bootstrap root@10.0.0.11:3306 --directory /var/lib/mysqlrouter</code></pre>
+  <p>应用 JDBC 串指向 Router 的 6446（读写）/6447（只读）端口。主库宕机时组内选举出新主，<strong>Router 秒级感知并迁移新连接</strong>——已有连接会断开，应用要配连接池的致命错误重连与事务重试（这也是 0031 期"调用治理"在数据库客户端侧的同款要求）。计划内换主用 <code>cluster.setPrimaryInstance()</code> 平滑让位，故障后旧主回来 <code>cluster.rejoinInstance()</code> 自动走恢复流程。</p>
+
+  <h3>半同步复制：三个参数决定降级行为</h3>
+  <pre><code><span class="c-com"># 8.0.26+ 新命名（旧前缀 rpl_semi_sync_master_* 仍兼容）</span>
+SET PERSIST rpl_semi_sync_source_timeout = 9007199254740991;  <span class="c-com"># 本质"永不超时"：等不到 ACK 宁可挂住，不静默降级</span>
+<span class="c-com"># 温和派做法：timeout 给 10s + 告警盯 rpl_semi_sync_source_status 降级事件</span>
+SET PERSIST rpl_semi_sync_source_wait_for_ack = 1;            <span class="c-com"># AFTER_SYNC：先落盘 ACK 再提交（默认，无损）</span>
+<span class="c-com"># 从库侧至少一台装 source 插件并 REPORT，否则半同步无从谈起</span>
+<span class="c-com"># 观测：SHOW STATUS LIKE 'Rpl_semi_sync_source_%'  —— yes_tx / no_tx 比例进监控</span></code></pre>
+
+  <h3>切换演练：不演练的高可用是薛定谔的 HA</h3>
+  <pre><code><span class="c-com"># 每季度（大版本升级前必做）：生产同构演练环境，模拟主库宕机</span>
+systemctl stop mysql                     <span class="c-com"># 直接杀主库进程亦可（演练环境）</span>
+<span class="c-com"># 验收四件事：</span>
+<span class="c-com"># ① 秒表计时：RTO 是否达标（InnoDB Cluster 参考值 < 30s，Orchestrator < 2min）</span>
+<span class="c-com"># ② 数据核对：演练前持续写入的校验程序，故障窗口丢了多少条（RPO 实测）</span>
+<span class="c-com"># ③ 应用自愈：连接池重连 + 事务重试是否生效，有无需要人工重启的服务</span>
+<span class="c-com"># ④ 旧主回归：rejoin 后 GTID 一致性核对，业务对账零差异才算闭环</span></code></pre>
+
+  <div class="warn">
+    <p><strong>五个必踩的坑：</strong>① <strong>双主（脑裂）</strong>——旧主被交换机隔离后自己还认为自己是主，客户端还在往里写：网络设备侧配仲裁或 STONITH 思路（隔离时禁写），InnoDB Cluster 的少数派自动只读就是内建答案；② <strong>半同步静默降级</strong>——从库全挂时主库退回异步继续写，等真宕机才发现 RPO 承诺早已失效，降级事件必须告警；③ <strong>2 节点"高可用"</strong>——谁也拿不到多数派，故障时一起僵死，要么 3 节点要么加仲裁；④ <strong>切换成功 ≠ 应用恢复</strong>——连接池里躺着的旧连接、DNS/VIP 缓存、配置中心推送延迟，都会让"库好了应用还挂着"；⑤ <strong>把从库当备份</strong>——DROP TABLE 会被忠实地复制到每个节点，PITR（binlog + 全备）才是最后的后悔药。</p>
+  </div>
+
+  <div class="card card-tip">
+    <h4>✅ 上线体检清单</h4>
+    <p>☐ 节点数 ≥ 3 且为奇数（或 2+仲裁），跨机房延迟实测满足组复制/半同步要求　☐ 复制模式与业务 RPO 显式对齐：核心链路半同步（AFTER_SYNC）且降级事件有告警　☐ 探测/仲裁是多数派机制，单探测点方案有评审过的豁免理由　☐ 切换是自动或一键（Orchestrator/InnoDB Cluster），运行手册里的手工步骤每季度真演练并计时　☐ 应用经过 Router/ProxySQL 访问，直连主库 IP 的服务清单为空　☐ 连接池配了致命错误重连与事务幂等重试　☐ 旧主回归 SOP：GTID 差集裁决 → 克隆重搭 → rejoin，禁止直接指回　☐ binlog 保留策略 + 每日全备 + 每月恢复演练（PITR 演练，不是备份演练）　☐ GTID 全集群开启（8.0 默认开）且无本地手工绕过　☐ 版本路线明确：8.0 集群（已 EOL）迁 8.4 LTS 有排期</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>复制品不等于高可用：</strong>故障切换是探测、选主、切换、对账四幕的工程，手工操作在每一幕都可能出错——凌晨三点的人是系统里最不可靠的组件。</li>
+    <li><strong>RPO 靠复制模式，RTO 靠切换方案：</strong>半同步（AFTER_SYNC）把数据边界推到 ≈0，但降级事件必须告警；自动化切换缩短的是 RTO——两把尺子分开设计、分开验收。</li>
+    <li><strong>数据边界用 GTID 说话：</strong>选主比的是 GTID 集合大小，旧主回归先算 GTID 差集人工裁决再重搭——直接指回新主就是主键冲突的标准剧本。</li>
+    <li><strong>两大流派按现状选：</strong>新部署优先 InnoDB Cluster（MGR 多数派 + Router 秒级切流 + AdminAPI 全托管）；存量复杂拓扑用 Orchestrator（现由 ProxySQL 组织维护）续命并规划演进；MHA 已停更，新项目不要选。</li>
+    <li><strong>不演练的高可用是薛定谔的 HA：</strong>RTO 秒表计时、RPO 写入校验、应用自愈、旧主回归四件事每季度真演一次；从库不是备份，PITR 才兜得住人为事故。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目一：半同步集群，主库与两台从库中一台之间的网络故障（从库 B 失联），但主库与从库 A、与应用之间一切正常。① 描述接下来主库上会发生什么（提示：rpl_semi_sync_source_timeout 的两种配法）；② "永不超时"和"10 秒超时降级"两种配置各适合什么业务？③ 网络恢复后，从库 B 怎么追回缺口，主库需要为它做什么？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>关键在于半同步的 ACK 策略：</strong>半同步要求"至少一台从库 ACK"。B 失联后，A 还在正常 ACK——所以 <strong>rpl_semi_sync_source_wait_for_ack_count=1 的默认配置下，主库写事务完全不受影响</strong>，半同步状态不降级，这是很多同学想不到的：坏一台从库 ≠ 降级，坏到"一台 ACK 者都不剩"才降级。真正的分叉在<strong>如果 A 也挂了</strong>（或一开始就只有 B 一台 ACK 从库）：配置一"永不超时"（timeout 设极大值）——主库写事务全部挂住等待 ACK，应用写入超时，集群以"不可写"为代价守住 RPO=0；配置二"10 秒超时"——10 秒后自动降级异步，写入恢复，但从此 RPO 变成 ≈ 复制延迟，直到 ACK 者回归。</p>
+      <p>② <strong>取舍的本质是把"丢数据"和"不可用"哪个摆前面：</strong>金融账务、支付流水类业务选"宁可拒写"——降级静默发生比短暂不可用危险得多（RPO 承诺失效却无人知晓）；内容、日志、行为类业务选"降级续写 + 告警"——可用性优先，且降级事件必须进监控（Rpl_semi_sync_source_status），事后对降级窗口内的事务做补偿核对。中间路线也常见：核心库与从库分开部署，让降级概率本身就趋近于零。</p>
+      <p>③ <strong>B 的追回是自动的，主库的配合是"别删 binlog"：</strong>B 重连后 IO 线程按 GTID 自动从主库 binlog 拉缺口（AUTO_POSITION），SQL 线程重放追平——前提是缺口仍在主库 binlog 保留期内；若 B 离席太久、binlog 已被 purged，B 只能克隆重搭。所以主库侧要做两件事：binlog 保留期按"最长容忍离席时间"配置（而非默认赶尽杀绝），以及给 B 的重连留出 IO 带宽（大量堆积事务重放时主库也要扛住读 binlog 的压力）。恢复后核对 B 的 GTID 集合与主库一致，再回到正常轮转。</p>
+    </div>
+  </details>
+
+  <details class="q-card">
+    <summary>题目二：你接手一个"一主两从 + 手工切换"的存量集群（8.0，异步复制），要给出高可用改造方案。① 只允许一个改造动作，先做哪个？② 分三步走完整个改造，每步的验收标准是什么？③ 如果公司暂时不给三台新机器组 InnoDB Cluster，2 台存量 + 1 台低配机的组合怎么设计？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>先做"演练 + 秒表"，不是先买工具。</strong>理由：手工切换的真实 RTO/RPO 是未知数——不实测，后面所有改造的收益都无法度量；而且演练会暴露最致命的问题（切换手册缺步骤、从库延迟无人知晓、旧主回归没有 SOP）。一次演练成本半天，它决定整个改造的优先级排序。这比急着上 Orchestrator 更符合"先度量再优化"的工程纪律。</p>
+      <p>② <strong>三步走：</strong>第一步，复制模式升级——两台从库装半同步插件，主库 AFTER_SYNC + 降级告警，验收 = 注入从库故障，RPO 实测为 0（或降级事件告警触发）；同时确认全集群 GTID 开启（8.0 默认开）。第二步，切换自动化——部署 Orchestrator（ProxySQL 组织维护版）+ ProxySQL，应用改走代理，验收 = 演练环境杀主库，RTO &lt; 2 分钟且应用无人工干预自愈。第三步，架构升级——三台新机组建 InnoDB Cluster + Router（8.4 LTS），存量数据迁移（克隆或逻辑导入），验收 = 生产流量灰度切换 + 双跑对账零差异 + 故障演练 RTO &lt; 30 秒。每步独立可回滚，不让改造本身成为最大故障源。</p>
+      <p>③ <strong>2 台存量 + 1 台低配机 = 3 节点组 + 1 个"轻量仲裁"位。</strong>MGR 支持第五种角色：<code>group_replication_paxos_single_leader</code> 之外更实用的是把低配机作为<strong>arbiter-style 的轻量成员</strong>——注意 MGR 没有纯投票节点角色（那是 Windows Server 故障转移集群的概念），正确做法是：低配机加入组但<strong>不承载读流量</strong>（Router 不给它读权重），只参与多数派投票与认证协议，数据照常同步（磁盘按数据规模给足，计算规格可以低）。这样两台存量机 Network Partition 时，低配机跟谁站在一起，谁就是多数派——用一台便宜机器买来防脑裂。替代方案：MGR 的 <code>autorejoin</code> + 5 节点里 3 节点跨机房布局，或干脆 MySQL 自带的 <strong>仲裁成员（group_replication_arbitration_member，仅投票不存数据）</strong>若你的版本可用——设计思想一致：<strong>奇数票防的是"两派对峙谁也不服谁"，票比数据便宜</strong>。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>MySQL 官方文档 · InnoDB Cluster（AdminAPI 建组/加节点/故障恢复/仲裁恢复的权威口径，本期实战与选型依据）：<br>
+    <a href="https://dev.mysql.com/doc/mysql-shell/8.4/en/mysql-innodb-cluster.html" target="_blank" rel="noopener">https://dev.mysql.com/doc/mysql-shell/8.4/en/mysql-innodb-cluster.html</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>复制机制的底子（binlog/位点/半同步插件/读写分离）回看<a href="0004-mysql-replication.html">第 4 期 MySQL 主从复制</a>——那一期讲"怎么搭"，本期讲"挂了之后"；执行计划与索引排查见<a href="0019-mysql-explain-index-failure.html">第 19 期</a>；应用侧连接池重连与事务重试的纪律与<a href="0031-openfeign-service-call-governance.html">第 31 期 OpenFeign</a>的调用治理同源；高可用的数学（串联可用性/错误预算/冗余层级）回看<a href="0017-arch-ha-overview.html">第 17 期高可用架构设计</a>。下一期继续 MySQL 主线，从行锁与 MVCC 讲并发控制。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0032-spring-cloud-gateway.html">← 上一期：Spring Cloud Gateway 流量入口治理</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 33 期 · MySQL 系列 · 下一期预告：行锁与 MVCC——并发控制的两只手</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
