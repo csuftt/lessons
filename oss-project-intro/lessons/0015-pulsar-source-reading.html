@@ -10,7 +10,7 @@
 
 <header class="lesson-head">
   <span class="num">OSS PROJECT INTRO · 0015</span>
-  <span><a href="../index.html">课程目录</a> · <a href="0014-pulsar-spring-in-action.html">上一期：实战场景</a> · Pulsar 系列第 5 期 / 共 5 期 · <a href="https://pulsar.apache.org" target="_blank" rel="noopener">pulsar.apache.org ↗</a></span>
+  <span><a href="../index.html">课程目录</a> · 上一期：实战场景 · Pulsar 系列第 5 期 / 共 5 期 · <a href="https://pulsar.apache.org" target="_blank" rel="noopener">pulsar.apache.org ↗</a></span>
 </header>
 
 <div class="hero">
@@ -35,7 +35,7 @@
     <li><strong>决策二 · 分片日志：</strong>一卷 ledger 写满就封卷，条带化摊在多台 bookie 上，故障时不修卷、换新卷；</li>
     <li><strong>决策三 · 冷热分离：</strong>封卷即不可变，不可变才能整体搬去对象存储，读起来对消费者透明。</li>
   </ul>
-  <p class="note"><span class="h">跨线提示</span>存算分离与 Kafka 的整体对比、订阅模型与游标原理，daily 线已有专课（文末延伸阅读），本期不换皮重讲；本期讲的是<strong>项目本身的设计决策与源码落点</strong>。</p>
+  <p class="note"><span class="h">跨线提示</span>存算分离与 Kafka 的整体对比、订阅模型与游标原理，官方文档有系统说明（文末延伸阅读），本期不换皮重讲；本期讲的是<strong>项目本身的设计决策与源码落点</strong>。</p>
 </section>
 
 <!-- ================= 02 决策一 ================= -->
@@ -56,7 +56,7 @@ public CompletableFuture&lt;Optional&lt;Topic&gt;&gt; getTopic(final TopicName t
         // 没缓存才真正加载/创建 topic，归属写入元数据存储
     });</code></pre>
   <p>每个 topic 同一时刻只归一个 broker 服务（官方架构页：each topic is handled by only one broker），归属就一条记录——"扩容"因此才是起进程这么轻的事。反过来想<strong>换种做法会怎样</strong>：把消息绑在 broker 本地盘（Kafka 的存算一体路线），扩缩容就得拷数据，故障转移变成数据搬运。两种定价各有所长，但"无状态 + 独立存储层"让你在扩容、故障、冷数据三件事上拿到同一张牌——分层。</p>
-  <p class="note"><span class="h">读码坐标</span>归属仲裁：<code>BrokerService.getTopic</code>（行 1194 起）；topic 门面：<code>org.apache.pulsar.broker.service.persistent.PersistentTopic</code>——名字里的 persistent 正对应 <code>persistent://</code> 协议头。整体架构对比见 daily 线 <a href="../../daily-tech-course/lessons/0012-pulsar-vs-kafka.html">《Pulsar 存算分离架构与 Kafka 对比》</a>。</p>
+  <p class="note"><span class="h">读码坐标</span>归属仲裁：<code>BrokerService.getTopic</code>（行 1194 起）；topic 门面：<code>org.apache.pulsar.broker.service.persistent.PersistentTopic</code>——名字里的 persistent 正对应 <code>persistent://</code> 协议头。整体架构见<a href="https://pulsar.apache.org/docs/next/concepts-architecture-overview/" target="_blank" rel="noopener">官方文档 · 《Pulsar 存算分离架构与 Kafka 对比》</a>。</p>
 </section>
 
 <!-- ================= 03 写入旅程 ================= -->
@@ -285,7 +285,7 @@ prepareLedgerInfoForOffloaded(ledgerId, uuid, driverName, driverMetadata)
     <p>Pulsar 入门系列就聊到这里，最新版本和完整文档认准官方文档 <a href="https://pulsar.apache.org" target="_blank" rel="noopener">pulsar.apache.org</a>；课程目录里还有其他开源项目的入门系列，感兴趣可以按需点开。</p>
   </div>
   <p><strong>Primary source：</strong><a href="https://pulsar.apache.org/docs/4.2.x/concepts-architecture-overview/" target="_blank" rel="noopener">Pulsar 4.2.x · Architecture Overview</a>（broker 无状态、BookKeeper WAL 定位的一手出处）与 <a href="https://github.com/apache/pulsar/tree/v4.2.4" target="_blank" rel="noopener">github.com/apache/pulsar @ v4.2.4 源码</a>（本期所有类路径与行号的核对基准，2026-09-19）。分层存储细节见 <a href="https://pulsar.apache.org/docs/4.2.x/concepts-tiered-storage/" target="_blank" rel="noopener">Tiered storage 概念页</a>。</p>
-  <p class="note"><span class="h">延伸阅读（daily 线原理专题）</span>存算分离与 Kafka 对比：<a href="../../daily-tech-course/lessons/0012-pulsar-vs-kafka.html">《Apache Pulsar 存算分离架构与 Kafka 对比》</a>；订阅模型与游标原理：<a href="../../daily-tech-course/lessons/0013-pulsar-subscription-models.html">《Apache Pulsar 订阅模型深入》</a>；可靠性全链路：<a href="../../daily-tech-course/lessons/0021-pulsar-message-reliability.html">《消息到底丢在哪：消息可靠性全链路》</a>。</p>
+  <p class="note"><span class="h">延伸阅读（官方文档）</span>存算分离与 Kafka 对比：<a href="https://pulsar.apache.org/docs/next/concepts-architecture-overview/" target="_blank" rel="noopener">官方文档 · 《Apache Pulsar 存算分离架构与 Kafka 对比》</a>；订阅模型与游标原理：<a href="https://pulsar.apache.org/docs/next/concepts-messaging/" target="_blank" rel="noopener">官方文档 · 《Apache Pulsar 订阅模型深入》</a>；可靠性全链路：<a href="https://pulsar.apache.org/docs/next/concepts-messaging/" target="_blank" rel="noopener">官方文档 · 《消息到底丢在哪：消息可靠性全链路》</a>。</p>
 </section>
 
 <nav class="lesson-nav">

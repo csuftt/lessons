@@ -10,7 +10,7 @@
 
 <header class="lesson-head">
   <span class="num">OSS PROJECT INTRO · 0044</span>
-  <span><a href="../index.html">课程目录</a> · <a href="0043-prom-quickstart.html">上一期：0043</a> · Prometheus 系列第 3 期 / 共 5 期 · <a href="0045-prom-in-action.html">下一期：0045</a> · <a href="https://prometheus.io/docs" target="_blank" rel="noopener">prometheus.io/docs ↗</a></span>
+  <span><a href="../index.html">课程目录</a> · 上一期：0043 · Prometheus 系列第 3 期 / 共 5 期 · 下一期：0045 · <a href="https://prometheus.io/docs" target="_blank" rel="noopener">prometheus.io/docs ↗</a></span>
 </header>
 
 <div class="hero">
@@ -104,7 +104,7 @@
 <section>
   <h2><span class="sec-num">04</span>抓取体系：job、instance 与服务发现</h2>
   <p>第 2 期你配过 <code>scrape_configs</code>，现在把背后的概念钉牢。官方《Jobs and instances》的定义：<strong>"一个可以被抓取的端点叫 instance（实例），通常对应一个进程；一组同用途的 instance 叫 job（作业）</strong>"——比如 api-server 四个副本就是一个 job 下的四个 instance。抓取时 Prometheus 自动给每个样本附加 <code>job</code> 和 <code>instance</code> 标签（后者是目标的 host:port），所以"哪台机器来的数据"不用业务自己埋点。</p>
-  <p>目标名单从哪来？官方 Configuration 的原话："目标可以通过 static_configs 静态配置，也可以用受支持的服务发现机制动态发现"。服务发现（SD）是独立模块：Kubernetes 的 <code>kubernetes_sd_configs</code>、Consul 的 <code>consul_sd_configs</code>、DNS、文件（<code>file_sd_configs</code>）等一整排 <code>*_sd_configs</code>，监控端直接问基础设施"现在有哪些目标"，扩容缩容不用改监控配置。静态配置适合固定设备，SD 适合云原生弹性环境——Kubernetes 对象与控制面的机制，K8s 系列课已讲过，延伸阅读见 <a href="0023-k8s-core-concepts-architecture.html">K8s 系列第 3 期</a>。目标在抓取前还能过一道 <code>relabel_configs</code>——官方一句话："对任何目标及其标签做高级修改"（过滤目标、改写地址），本期知道有这一步就够。</p>
+  <p>目标名单从哪来？官方 Configuration 的原话："目标可以通过 static_configs 静态配置，也可以用受支持的服务发现机制动态发现"。服务发现（SD）是独立模块：Kubernetes 的 <code>kubernetes_sd_configs</code>、Consul 的 <code>consul_sd_configs</code>、DNS、文件（<code>file_sd_configs</code>）等一整排 <code>*_sd_configs</code>，监控端直接问基础设施"现在有哪些目标"，扩容缩容不用改监控配置。静态配置适合固定设备，SD 适合云原生弹性环境——Kubernetes 对象与控制面的机制，延伸阅读见 <a href="https://kubernetes.io/docs/concepts/architecture/" target="_blank" rel="noopener">官方文档 · K8s 系列第 3 期</a>。目标在抓取前还能过一道 <code>relabel_configs</code>——官方一句话："对任何目标及其标签做高级修改"（过滤目标、改写地址），本期知道有这一步就够。</p>
   <p>还剩一个第 1 期埋的伏笔：Pull 模型"抓不到"怎么办？答案第 2 期你已经见过——<strong>每次抓取的结果本身就是一条指标</strong>：<code>up</code> 在实例可达时记 1、抓取失败时记 0（官方定义），还有 <code>scrape_duration_seconds</code>（抓取耗时）等伴生序列。服务发现管"知道去抓谁"，<code>up</code> 管"抓没抓到"——两个机制配合，Pull 的"抓不到即信号"才闭环：目标挂了不用它上报，监控端自己第一个知道。</p>
 </section>
 
@@ -339,7 +339,7 @@ rate(http_requests_total{job="prometheus"}[5m])</pre></div>
 </section>
 
 <nav class="lesson-nav">
-  <span class="prev"><a href="0043-prom-quickstart.html">← 上一期：5 分钟跑起来 Prometheus</a></span>
+  <span class="prev">← 上一期：5 分钟跑起来 Prometheus</span>
   <a class="next" href="0045-prom-in-action.html">下一期：Prometheus 实战：端到端监控 →</a>
 </nav>
 

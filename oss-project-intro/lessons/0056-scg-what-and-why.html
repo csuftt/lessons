@@ -10,13 +10,13 @@
 
 <header class="lesson-head">
   <span class="num">OSS PROJECT INTRO · 0056</span>
-  <span><a href="../index.html">课程目录</a> · <a href="0055-harbor-in-action-source-reading.html">上一期:0055</a> · Spring Cloud Gateway 系列第 1 期 / 共 5 期 · <a href="0057-scg-quickstart.html">下一期:0057</a> · <a href="https://spring.io/projects/spring-cloud-gateway" target="_blank" rel="noopener">spring.io ↗</a></span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0055 · Spring Cloud Gateway 系列第 1 期 / 共 5 期 · 下一期:0057 · <a href="https://spring.io/projects/spring-cloud-gateway" target="_blank" rel="noopener">spring.io ↗</a></span>
 </header>
 
 <div class="hero">
   <p class="issue">OSS PROJECT INTRO · SPRING CLOUD GATEWAY 系列第 1 期：认识项目</p>
   <h1>Spring Cloud Gateway 是什么：微服务世界的代码级网关</h1>
-  <p class="subtitle">上一个项目我们聊完了 Harbor，今天开启新项目 Spring Cloud Gateway。所有微服务请求都要从某个"大门"进来：路由转发、认证鉴权、限流、灰度发布，这些事总得有个统一的门卫来管。Spring Cloud Gateway（下文按社区习惯简称 SCG）就是 Spring 交出的答案。官方定义一句话：<strong>a library for building an API Gateway on top of Spring…aims to provide a simple, yet effective way to route to APIs and provide cross-cutting concerns to them such as: security, monitoring/metrics, and resiliency</strong>——在 Spring 之上构建 API 网关，把安全、监控、韧性这些横切关注点统一接到 API 前面。一句话心智模型：<strong>响应式网关——请求进来先匹配路由（Predicate 断言），再过过滤器链（Filter），然后转发到下游服务</strong>。本期结束，你能答上四个问题：SCG 是什么、网关要解决什么、和 Nginx/Kong 怎么分工、什么场景该选它。</p>
+  <p class="subtitle">今天开启新项目 Spring Cloud Gateway。所有微服务请求都要从某个"大门"进来：路由转发、认证鉴权、限流、灰度发布，这些事总得有个统一的门卫来管。Spring Cloud Gateway（下文按社区习惯简称 SCG）就是 Spring 交出的答案。官方定义一句话：<strong>a library for building an API Gateway on top of Spring…aims to provide a simple, yet effective way to route to APIs and provide cross-cutting concerns to them such as: security, monitoring/metrics, and resiliency</strong>——在 Spring 之上构建 API 网关，把安全、监控、韧性这些横切关注点统一接到 API 前面。一句话心智模型：<strong>响应式网关——请求进来先匹配路由（Predicate 断言），再过过滤器链（Filter），然后转发到下游服务</strong>。本期结束，你能答上四个问题：SCG 是什么、网关要解决什么、和 Nginx/Kong 怎么分工、什么场景该选它。</p>
   <div class="lesson-meta">
     <span class="tag cat">🚪 API 网关 · Java · Apache-2.0（Spring 官方）</span>
     <span class="tag">📦 基于 5.0.3（Spring Cloud 2025.1 · Boot 4.x）</span>
@@ -162,7 +162,7 @@
     </tbody>
   </table>
   </div>
-  <p>分工怎么定？<strong>Nginx/Kong 管接入层的"静态流量"：TLS 卸载、静态资源、粗粒度路径转发，性能是第一诉求；SCG 管业务语义层：要读请求内容做认证、按用户标签灰度、按接口限流时，代码级扩展才是刚需。</strong>生产里常见的组合是 Nginx 在前、SCG 在后——接入层归 Nginx，业务网关归 SCG，两层各干各的，并不重复。如果你的主栈是 Spring Cloud Alibaba，SCG 与 Nacos 的组合是常见搭配：服务清单从注册中心自动来，路由跟着服务走——这条动态路由的线，本系列第 5 期展开，Nacos 本身的入门见<a href="0001-nacos-what-and-why.html">本系列第 0001~0005 期</a>。</p>
+  <p>分工怎么定？<strong>Nginx/Kong 管接入层的"静态流量"：TLS 卸载、静态资源、粗粒度路径转发，性能是第一诉求；SCG 管业务语义层：要读请求内容做认证、按用户标签灰度、按接口限流时，代码级扩展才是刚需。</strong>生产里常见的组合是 Nginx 在前、SCG 在后——接入层归 Nginx，业务网关归 SCG，两层各干各的，并不重复。如果你的主栈是 Spring Cloud Alibaba，SCG 与 Nacos 的组合是常见搭配：服务清单从注册中心自动来，路由跟着服务走——这条动态路由的线，本系列第 5 期展开，Nacos 本身的入门见其官方文档。</p>
 </section>
 
 <!-- ================= 08 场景 ================= -->
@@ -183,7 +183,7 @@
     </ul>
   </div>
   <p>一条判断捷径：<strong>当路由规则需要"读懂请求"（认证、灰度、限流、按内容转发）的那一天，就是需要代码级网关的一天；规则如果永远写不满一页 Nginx 配置，就别急着上。</strong></p>
-  <p class="note">延伸阅读两则：K8s 集群入口层（Ingress 与 Gateway API）怎么把流量从公网送进集群，属于基础设施视角，原理深入见 <a href="../daily-tech-course/lessons/0024-k8s-ingress-service-traffic.html">daily 系列 0024 期</a>；网关后面的服务注册与发现，见本系列 <a href="0001-nacos-what-and-why.html">Nacos 系列第 0001 期</a>起的五连讲。</p>
+  <p class="note">延伸阅读两则：K8s 集群入口层（Ingress 与 Gateway API）怎么把流量从公网送进集群，属于基础设施视角，原理深入见 <a href="https://kubernetes.io/docs/concepts/services-networking/ingress/" target="_blank" rel="noopener">官方文档 · 官方 Ingress 文档</a>；网关后面的服务注册与发现，见 Nacos 官方文档。</p>
 </section>
 
 <!-- ================= 09 quiz ================= -->
@@ -265,7 +265,7 @@
 </section>
 
 <nav class="lesson-nav">
-  <span class="prev"><a href="0055-harbor-in-action-source-reading.html">← 上一期：Harbor 实战与源码导读</a></span>
+  <span class="prev">← 上一期：Harbor 实战与源码导读</span>
   <a class="next" href="0057-scg-quickstart.html">下一期：5 分钟跑起来 Spring Cloud Gateway →</a>
 </nav>
 

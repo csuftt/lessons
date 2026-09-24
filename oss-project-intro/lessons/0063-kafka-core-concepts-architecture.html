@@ -10,7 +10,7 @@
 
 <header class="lesson-head">
   <span class="num">OSS PROJECT INTRO · 0063</span>
-  <span><a href="../index.html">课程目录</a> · <a href="0062-kafka-quickstart.html">上一期:0062</a> · Apache Kafka 系列第 3 期 / 共 5 期 · <a href="0064-kafka-in-action.html">下一期:0064</a> · <a href="https://kafka.apache.org/" target="_blank" rel="noopener">kafka.apache.org ↗</a></span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0062 · Apache Kafka 系列第 3 期 / 共 5 期 · 下一期:0064 · <a href="https://kafka.apache.org/" target="_blank" rel="noopener">kafka.apache.org ↗</a></span>
 </header>
 
 <div class="hero">
@@ -147,7 +147,7 @@ Topic: orders  Partition: 1  Leader: 2  Replicas: 1,2  Isr: 2</code></pre>
 <section>
   <h2><span class="sec-num">08</span>伏笔与对照：分区多了会抖，Pulsar 换了条路</h2>
   <p>留一个反直觉的伏笔：都说分区越多并行度越高，可分区上了规模，集群反而开始抖。原因不在玄学——<strong>每个分区都是一段独立日志</strong>（第 03 节那张图）：段文件、索引、文件句柄随分区数线性涨；每个副本一条同步流，元数据事件翻倍；broker 重启还要为名下全部分区重选主，演示链里那记秒级选主，放到几万分区面前就不是秒级了。"为什么快"和"为什么抖"是同一套机制的两面，<strong>第 5 期源码导读专门拆</strong>。</p>
-  <p>放回系列坐标系：本系列前面五期讲过的 <a href="0011-pulsar-what-and-why.html">Pulsar</a> 走<strong>存算分离</strong>——broker 不存数据，存储压给 BookKeeper 层，扩缩容不搬数据，百万级主题从容，代价是多养一层组件；Kafka 反着走<strong>存算一体</strong>——日志躺在 broker 本机磁盘，页缓存与零拷贝火力全开，换来吞吐标杆，代价是分区规模要自己扛。两条路线没有输赢，只有取舍。</p>
+  <p>放回坐标系：Pulsar <a href="https://pulsar.apache.org/docs/next/concepts-architecture-overview/" target="_blank" rel="noopener">官方文档</a>里的 Pulsar 走<strong>存算分离</strong>——broker 不存数据，存储压给 BookKeeper 层，扩缩容不搬数据，百万级主题从容，代价是多养一层组件；Kafka 反着走<strong>存算一体</strong>——日志躺在 broker 本机磁盘，页缓存与零拷贝火力全开，换来吞吐标杆，代价是分区规模要自己扛。两条路线没有输赢，只有取舍。</p>
 </section>
 
 <!-- ================= 09 quiz ================= -->
@@ -220,7 +220,7 @@ Topic: orders  Partition: 1  Leader: 2  Replicas: 1,2  Isr: 2</code></pre>
 </section>
 
 <nav class="lesson-nav">
-  <span class="prev"><a href="0062-kafka-quickstart.html">← 上一期：5 分钟跑起来 Apache Kafka</a></span>
+  <span class="prev">← 上一期：5 分钟跑起来 Apache Kafka</span>
   <a class="next" href="0064-kafka-in-action.html">下一期：Kafka 实战场景 →</a>
 </nav>
 

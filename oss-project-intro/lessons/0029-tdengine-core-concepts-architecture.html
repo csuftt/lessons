@@ -11,7 +11,7 @@
 
 <header class="lesson-head">
   <span class="num">OSS PROJECT INTRO · 0029</span>
-  <span><a href="../index.html">课程目录</a> · <a href="0028-tdengine-quickstart.html">上一期:0028</a> · TDengine 系列第 3 期 / 共 5 期 · <a href="https://www.taosdata.com" target="_blank" rel="noopener">taosdata.com ↗</a></span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0028 · TDengine 系列第 3 期 / 共 5 期 · <a href="https://www.taosdata.com" target="_blank" rel="noopener">taosdata.com ↗</a></span>
 </header>
 
 <div class="hero">
@@ -71,7 +71,7 @@
       </ul>
     </div>
   </div>
-  <p class="note"><span class="h">边界说明</span>怎么选标签、怎么设计列这类<strong>建模方法论</strong>,每日微课程线<a href="../../daily-tech-course/lessons/0015-tdengine-supertable.html">第 0015 期 · TDengine 超级表与子表数据建模</a>已讲透,本系列不换皮重讲;本期只回答"它们在架构里是什么、存在哪"。</p>
+  <p class="note"><span class="h">边界说明</span>怎么选标签、怎么设计列这类<strong>建模方法论</strong>,<a href="https://docs.taosdata.com/" target="_blank" rel="noopener">官方文档 · TDengine 数据建模</a>已讲透,本系列不换皮重讲;本期只回答"它们在架构里是什么、存在哪"。</p>
 </section>
 
 <!-- ================= 03 服务侧六名词 ================= -->
@@ -202,11 +202,11 @@
   <div class="grid-2">
     <div class="card">
       <h4>钩子一:为什么"一个采集点一张表"反而省存储?</h4>
-      <p>直觉上"1 万台设备拆 1 万张表"很浪费,架构账正好相反。<strong>其一,标签只存一份</strong>——location、groupId 挂在 vnode 的元数据里(官方口径:标签信息与标签索引用 B+ 树管理),不随每条读数重复写;大宽表方案里,每行都得背一遍设备属性。<strong>其二,列存压缩吃得更饱</strong>——单设备电流电压缓变,块内相邻值高度相似,官方样例压缩率 <strong>23.98%</strong>(压到约 1/4,演示链②量过)。建模方法完整版见 daily 线 <a href="../../daily-tech-course/lessons/0015-tdengine-supertable.html">0015 期</a>。</p>
+      <p>直觉上"1 万台设备拆 1 万张表"很浪费,架构账正好相反。<strong>其一,标签只存一份</strong>——location、groupId 挂在 vnode 的元数据里(官方口径:标签信息与标签索引用 B+ 树管理),不随每条读数重复写;大宽表方案里,每行都得背一遍设备属性。<strong>其二,列存压缩吃得更饱</strong>——单设备电流电压缓变,块内相邻值高度相似,官方样例压缩率 <strong>23.98%</strong>(压到约 1/4,演示链②量过)。建模方法完整版见<a href="https://docs.taosdata.com/" target="_blank" rel="noopener">官方文档 · 0015 期</a>。</p>
     </div>
     <div class="card">
       <h4>钩子二:vnode 怎么把写入并行度打开?</h4>
-      <p>每个 vnode 有<strong>独立的运行线程、内存空间和持久化存储路径</strong>(官方原话),等于库内自带并行单元:10,000 张子表由一致性哈希摊到多个 vnode,各写各的 WAL、各刷各的盘——<strong>一张表的数据不跨 vnode</strong>,单表内天然无锁追加;跨表聚合时 mnode 给路由、各 vnode 并行扫描、taosc 做最后一级归并。这就是 COUNT(*) 0.075 秒和"1 亿条十几秒灌完"的架构底气。调优细节见 daily 线 <a href="../../daily-tech-course/lessons/0022-tdengine-write-read-performance.html">0022 期</a>。</p>
+      <p>每个 vnode 有<strong>独立的运行线程、内存空间和持久化存储路径</strong>(官方原话),等于库内自带并行单元:10,000 张子表由一致性哈希摊到多个 vnode,各写各的 WAL、各刷各的盘——<strong>一张表的数据不跨 vnode</strong>,单表内天然无锁追加;跨表聚合时 mnode 给路由、各 vnode 并行扫描、taosc 做最后一级归并。这就是 COUNT(*) 0.075 秒和"1 亿条十几秒灌完"的架构底气。调优细节见<a href="https://docs.taosdata.com/" target="_blank" rel="noopener">官方文档 · 0022 期</a>。</p>
     </div>
   </div>
 </section>

@@ -10,7 +10,7 @@
 
 <header class="lesson-head">
   <span class="num">OSS PROJECT INTRO · 0014</span>
-  <span><a href="../index.html">课程目录</a> · <a href="0013-pulsar-core-concepts-architecture.html">上一期：核心概念与整体架构</a> · <a href="https://pulsar.apache.org" target="_blank" rel="noopener">pulsar.apache.org ↗</a></span>
+  <span><a href="../index.html">课程目录</a> · 上一期：核心概念与整体架构 · <a href="https://pulsar.apache.org" target="_blank" rel="noopener">pulsar.apache.org ↗</a></span>
 </header>
 
 <div class="hero">
@@ -95,7 +95,7 @@
       <li>④ <strong>失败兜底：</strong>构造一条"毒丸"事件，看它重投若干次后被转存进死信 Topic。</li>
     </ul>
   </div>
-  <p class="note">订阅模式（独占/灾备/共享/按键共享）与游标的原理，daily 线已有专课：<a href="../../daily-tech-course/lessons/0013-pulsar-subscription-models.html">《Pulsar 订阅模型深入：四种订阅、游标机制与 Key_Shared 保序》</a>。本期只讲"在 Spring 里怎么用"，原理不换皮重讲；整体存算分离架构见 <a href="../../daily-tech-course/lessons/0012-pulsar-vs-kafka.html">《Apache Pulsar 存算分离架构与 Kafka 对比》</a>。</p>
+  <p class="note">订阅模式（独占/灾备/共享/按键共享）与游标的原理，官方文档有系统说明：<a href="https://pulsar.apache.org/docs/next/concepts-messaging/" target="_blank" rel="noopener">官方文档 · 《Pulsar 订阅模型深入：四种订阅、游标机制与 Key_Shared 保序》</a>。本期只讲"在 Spring 里怎么用"，原理不换皮重讲；整体存算分离架构见 <a href="https://pulsar.apache.org/docs/next/concepts-architecture-overview/" target="_blank" rel="noopener">官方文档 · 《Apache Pulsar 存算分离架构与 Kafka 对比》</a>。</p>
 </section>
 
 <!-- ================= 02 依赖与版本 ================= -->
@@ -166,7 +166,7 @@ public class OrderEventPublisher {
     <li><strong>没写任何建连代码：</strong>PulsarClient、生产者工厂、模板全部由 Boot 自动配置好，生产者实例默认还会被缓存复用（<code>spring.pulsar.producer.cache.*</code> 可调）。</li>
   </ul>
   <div class="card card-tip">
-    <p><strong>给事件带上业务键：</strong>需要按订单号保序或路由时，用流式 API 定制消息：<code>pulsarTemplate.newMessage(event).withMessageCustomizer(mb -&gt; mb.key(event.orderId())).send()</code>——key 进了消息元数据，分区 Topic 下同 key 落同一分区，配合按键共享订阅就是"同一订单串行处理"的地基（保序原理见 daily 线订阅模型一课）。</p>
+    <p><strong>给事件带上业务键：</strong>需要按订单号保序或路由时，用流式 API 定制消息：<code>pulsarTemplate.newMessage(event).withMessageCustomizer(mb -&gt; mb.key(event.orderId())).send()</code>——key 进了消息元数据，分区 Topic 下同 key 落同一分区，配合按键共享订阅就是"同一订单串行处理"的地基（保序原理见官方文档订阅一章）。</p>
   </div>
 </section>
 
@@ -194,7 +194,7 @@ public class PointsListener {
   <p>启动应用（<code>mvn spring-boot:run</code>），下单后看日志，两端各有一行：</p>
   <pre><code>订单事件已发布: orderId=SO-20260919-0001, messageId=12:5:-1:0
 积分服务已处理订单事件: orderId=SO-20260919-0001, amount=399.0</code></pre>
-  <p class="note">messageId 是 <code>ledger:entry:partition:batch</code> 四段式——ledger 就是第 5 期要进 BookKeeper 源码时见到的账本。至此目标①②③达成：一个依赖、一个注解、一行发送，事件已经端到端流通。生产者/消费者更细的调优参数（批量、超时、接收队列）daily 线有专课：<a href="../../daily-tech-course/lessons/0014-pulsar-prod-cons-tuning.html">《Apache Pulsar 生产者/消费者调优》</a>。</p>
+  <p class="note">messageId 是 <code>ledger:entry:partition:batch</code> 四段式——ledger 就是第 5 期要进 BookKeeper 源码时见到的账本。至此目标①②③达成：一个依赖、一个注解、一行发送，事件已经端到端流通。生产者/消费者更细的调优参数（批量、超时、接收队列）官方文档有系统说明：《Apache Pulsar 生产者/消费者调优》。</p>
 </section>
 
 <!-- ================= 05 失败与死信 ================= -->
@@ -244,7 +244,7 @@ public class RiskControlListener {
 }</code></pre>
   <p>四个关键点，个个都是官方文档的原文口径：</p>
   <ul>
-    <li><strong>只有共享（Shared）订阅支持 DLQ</strong>，独占与灾备都不行——所以这里必须显式把订阅类型改成 Shared（四种订阅的语义差异见 daily 线订阅模型课）；</li>
+    <li><strong>只有共享（Shared）订阅支持 DLQ</strong>，独占与灾备都不行——所以这里必须显式把订阅类型改成 Shared（四种订阅的语义差异见官方文档订阅一章）；</li>
     <li><strong>死信 Topic 建议显式命名：</strong>不指定时默认名是 <code>&lt;topicname&gt;-&lt;subscriptionname&gt;-DLQ</code>；官方文档特别提醒，Topic 一旦分区，默认名里会混进 <code>partition-&lt;n&gt;</code>，干脆一开始就写死名字；</li>
     <li><strong>重投来源二选一：</strong>要么异常否定确认，要么确认超时（上面的 <code>ackTimeoutMillis</code>），次数记满 <code>maxRedeliverCount</code> 后由消费者把消息转存进死信 Topic；</li>
     <li><strong>死信也要有人接：</strong>再挂一个普通监听器盯着 <code>order-events-dlq</code>，告警、落库、人工排查都从这里走。</li>
@@ -253,7 +253,7 @@ public class RiskControlListener {
 public void onDeadLetter(OrderEvent event) {
     log.warn("进入死信, 需人工介入: orderId={}", event.orderId());
 }</code></pre>
-  <p>把毒丸事件（amount=-1）发出去，应用日志会依次打出三段：处理失败的异常栈 → 数次重投 → 最后死信监听器的告警行。目标④达成——<strong>消息一条没丢，只是从"正常通道"转进了"人工通道"</strong>，这正是死信队列的全部意义。可靠性全链路（ack、副本、持久化的整体视角）daily 线有更深的专课：<a href="../../daily-tech-course/lessons/0021-pulsar-message-reliability.html">《消息到底丢在哪：消息可靠性全链路》</a>。</p>
+  <p>把毒丸事件（amount=-1）发出去，应用日志会依次打出三段：处理失败的异常栈 → 数次重投 → 最后死信监听器的告警行。目标④达成——<strong>消息一条没丢，只是从"正常通道"转进了"人工通道"</strong>，这正是死信队列的全部意义。可靠性全链路（ack、副本、持久化的整体视角）官方文档有更深的说明：<a href="https://pulsar.apache.org/docs/next/concepts-messaging/" target="_blank" rel="noopener">官方文档 · 《消息到底丢在哪：消息可靠性全链路》</a>。</p>
   <div class="warn">
     <p><strong>顺手要做的实验：</strong>把毒丸事件发一条，观察日志里的重投节奏；再把 <code>maxRedeliverCount</code> 改成 0 重发一条，看它"秒进"死信——两个数字一对比，重投与死信的接力关系就不用背了。</p>
   </div>

@@ -10,7 +10,7 @@
 
 <header class="lesson-head">
   <span class="num">OSS PROJECT INTRO · 0039</span>
-  <span><a href="../index.html">课程目录</a> · <a href="0038-es-quickstart.html">上一期:0038</a> · Elasticsearch 系列第 3 期 / 共 5 期 · <a href="0040-es-in-action.html">下一期:0040</a> · <a href="https://www.elastic.co/docs" target="_blank" rel="noopener">elastic.co/docs ↗</a></span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0038 · Elasticsearch 系列第 3 期 / 共 5 期 · 下一期:0040 · <a href="https://www.elastic.co/docs" target="_blank" rel="noopener">elastic.co/docs ↗</a></span>
 </header>
 
 <div class="hero">
@@ -125,7 +125,7 @@
       <tr><td>存储体积</td><td>通用行存为主</td><td>不可变文件压缩率高，列存 doc values 让排序聚合也快</td></tr>
     </tbody>
   </table></div>
-  <p>四行账合起来就是那句行业直觉：<strong>ES 的快是"用写入时的预处理，换查询时的直查"</strong>。B+ 树一侧的原理（什么时候走索引、什么时候失效）daily 线已详细讲过，延伸阅读见：<a href="../../daily-tech-course/lessons/0003-mysql-index-explain.html">MySQL 索引与 EXPLAIN</a>。</p>
+  <p>四行账合起来就是那句行业直觉：<strong>ES 的快是"用写入时的预处理，换查询时的直查"</strong>。B+ 树一侧的原理（什么时候走索引、什么时候失效）MySQL 官方文档有详细说明，延伸阅读见：<a href="https://dev.mysql.com/doc/refman/8.0/en/explain.html" target="_blank" rel="noopener">官方文档 · MySQL 索引与 EXPLAIN</a>。</p>
 </section>
 
 <!-- ================= 04 从索引到分片 ================= -->
@@ -395,7 +395,7 @@ POST my-index-000001/_refresh</pre>
 </section>
 
 <nav class="lesson-nav">
-  <span class="prev"><a href="0038-es-quickstart.html">← 上一期：5 分钟跑起来 Elasticsearch</a></span>
+  <span class="prev">← 上一期：5 分钟跑起来 Elasticsearch</span>
   <a class="next" href="0040-es-in-action.html">下一期：Elasticsearch 实战：端到端小场景 →</a>
 </nav>
 

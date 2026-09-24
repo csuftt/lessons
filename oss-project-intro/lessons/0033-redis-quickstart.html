@@ -11,7 +11,7 @@
 
 <header class="lesson-head">
   <span class="num">OSS PROJECT INTRO · 0033</span>
-  <span><a href="../index.html">课程目录</a> · <a href="0032-redis-what-and-why.html">上一期:0032</a> · Redis 系列第 2 期 / 共 5 期 · <a href="https://redis.io" target="_blank" rel="noopener">redis.io ↗</a></span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0032 · Redis 系列第 2 期 / 共 5 期 · <a href="https://redis.io" target="_blank" rel="noopener">redis.io ↗</a></span>
 </header>
 
 <div class="hero">
@@ -138,7 +138,7 @@ OK
 127.0.0.1:6379&gt; HGET bike:2 model
 "Deimos"
 127.0.0.1:6379&gt; SCAN 0 MATCH "bike:*" COUNT 100</code></pre>
-  <p class="note"><code>HSET</code> 一次写四个字段,回显 <code>(integer) 4</code> 是"新增字段数";<code>HGET</code> 取单字段;<code>SCAN</code> 游标扫描键空间——官方文档用它替代有隐患的 <code>KEYS</code> 全量遍历。字符串之外,Redis 还有列表、集合、有序集合、流等原生结构,daily 线第 0005 期专讲(见文末延伸阅读)。</p>
+  <p class="note"><code>HSET</code> 一次写四个字段,回显 <code>(integer) 4</code> 是"新增字段数";<code>HGET</code> 取单字段;<code>SCAN</code> 游标扫描键空间——官方文档用它替代有隐患的 <code>KEYS</code> 全量遍历。字符串之外,Redis 还有列表、集合、有序集合、流等原生结构,官方文档数据类型一章专讲(见文末延伸阅读)。</p>
 
   <h3>跑通判定,就这三条</h3>
   <div class="card card-tip">
@@ -244,11 +244,11 @@ OK
   </div>
   <p><strong>下一期预告:</strong>Redis 已经在你机器上跑起来了。下一期我们拆开看它的核心概念与整体架构——键空间背后是什么、单线程到底单在哪、一条 SET 命令在实例内部的完整旅程。Primary source:<a href="https://redis.io/docs/latest/develop/get-started/data-store/" target="_blank" rel="noopener">Redis 官方文档 · Redis as an in-memory data structure store(quickstart)</a>——本期 SET/GET 与 SCAN 示例出处;安装细节见 <a href="https://redis.io/docs/latest/operate/oss_and_stack/install/install-stack/apt/" target="_blank" rel="noopener">APT 安装</a>、<a href="https://redis.io/docs/latest/operate/oss_and_stack/install/install-stack/docker/" target="_blank" rel="noopener">Docker 运行</a>、<a href="https://redis.io/docs/latest/operate/oss_and_stack/install/install-stack/windows/" target="_blank" rel="noopener">Windows 路线</a>,版本与发布记录见 <a href="https://github.com/redis/redis/releases" target="_blank" rel="noopener">GitHub Releases</a>。</p>
   <div class="note">
-    <p><strong>延伸阅读(每日微课程线,使用与调优不重讲):</strong></p>
+    <p><strong>延伸阅读（官方文档）：</strong></p>
     <ul>
-      <li><a href="../../daily-tech-course/lessons/0005-redis-data-structures.html">第 0005 期 · Redis 数据结构</a>——今天只用字符串和哈希开了个头,五大结构的命令面与适用场景在那边讲透;</li>
-      <li><a href="../../daily-tech-course/lessons/0010-redis-performance-tuning.html">第 0010 期 · Redis 性能调优</a>——跑通之后的慢查询、大键与连接池问题,见该课;</li>
-      <li><a href="../../daily-tech-course/lessons/0011-redis-memory-management.html">第 0011 期 · Redis 内存管理</a>——maxmemory 与淘汰策略的生产配置细节,见该课。</li>
+      <li><a href="https://redis.io/docs/latest/develop/data-types/" target="_blank" rel="noopener">官方文档 · Redis 数据结构</a>——今天只用字符串和哈希开了个头,五大结构的命令面与适用场景在那边讲透;</li>
+      <li><a href="https://redis.io/docs/latest/operate/oss_and_stack/management/optimization/" target="_blank" rel="noopener">官方文档 · Redis 性能调优</a>——跑通之后的慢查询、大键与连接池问题,见该课;</li>
+      <li>Redis 内存管理——maxmemory 与淘汰策略的生产配置细节,见该课。</li>
     </ul>
   </div>
 </section>

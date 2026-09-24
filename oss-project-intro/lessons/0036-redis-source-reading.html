@@ -11,7 +11,7 @@
 
 <header class="lesson-head">
   <span class="num">OSS PROJECT INTRO · 0036</span>
-  <span><a href="../index.html">课程目录</a> · <a href="0035-redis-in-action.html">上一期:0035</a> · Redis 系列第 5 期 / 共 5 期（收官） · <a href="https://github.com/redis/redis/tree/8.10.2" target="_blank" rel="noopener">redis/redis @ 8.10.2 ↗</a></span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0035 · Redis 系列第 5 期 / 共 5 期（收官） · <a href="https://github.com/redis/redis/tree/8.10.2" target="_blank" rel="noopener">redis/redis @ 8.10.2 ↗</a></span>
 </header>
 
 <div class="hero">
@@ -104,7 +104,7 @@
     </tbody>
   </table>
   </div>
-  <p class="note">行号与路径逐条核对自 tag 8.10.2。持久化与复制的机制原理第 3 期讲过，日常使用视角的调优见 daily 线<a href="../../daily-tech-course/lessons/0006-redis-persistence.html">《持久化 RDB vs AOF》</a>与<a href="../../daily-tech-course/lessons/0010-redis-performance-tuning.html">《性能调优》</a>，本期不重讲。</p>
+  <p class="note">行号与路径逐条核对自 tag 8.10.2。持久化与复制的机制原理第 3 期讲过，日常使用视角的调优见<a href="https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/" target="_blank" rel="noopener">官方文档 · 《持久化 RDB vs AOF》</a>与<a href="https://redis.io/docs/latest/operate/oss_and_stack/management/optimization/" target="_blank" rel="noopener">官方文档 · 《性能调优》</a>，本期不重讲。</p>
 </section>
 
 <!-- ================= 04 决策一 SDS ================= -->
@@ -219,7 +219,7 @@
   </div>
 
   <p><strong>解决什么问题？</strong>执行链的源码坐标（tag 8.10.2）：server.c 的 main 启动一切，末尾 <code>aeMain(server.el)</code> 把控制权交给事件循环（ae.c），大循环反复处理事件；命令到达后由 networking.c 的 <code>readQueryFromClient</code> 收下解析，进 server.c 的 <code>processCommand</code> 查命令表、过校验，再由 <code>call</code> 经函数指针 <code>c->cmd->proc(c)</code> 调到具体命令实现——整条链上没有一把锁。IO 线程组在 8.0 起独立为 iothread.c：客户端按分配进某个线程完成读写解析，命令仍交回主线程。配置口径：io-threads 默认 1（注释原文 Single threaded by default），且在 8.10.2 中为启动级配置，改线程数需重启。</p>
-  <p><strong>换种做法会怎样？</strong>命令也多线程化：锁竞争与线程切换立刻盖过微秒级的计算本身，INCR 这类命令还得靠脚本或锁补原子性，复杂度上去了，收益却仍看网络脸色。Redis 把最贵的并发问题整个收走，把真正的瓶颈交给线程组——官方基准每秒十八万次写入就是这么来的。<strong>设计不是堆并发，是把钱花在瓶颈上。</strong>也记住代价：正因串行，一条慢命令会堵住后面所有人（延伸阅读见 daily 线<a href="../../daily-tech-course/lessons/0010-redis-performance-tuning.html">《性能调优》</a>）。</p>
+  <p><strong>换种做法会怎样？</strong>命令也多线程化：锁竞争与线程切换立刻盖过微秒级的计算本身，INCR 这类命令还得靠脚本或锁补原子性，复杂度上去了，收益却仍看网络脸色。Redis 把最贵的并发问题整个收走，把真正的瓶颈交给线程组——官方基准每秒十八万次写入就是这么来的。<strong>设计不是堆并发，是把钱花在瓶颈上。</strong>也记住代价：正因串行，一条慢命令会堵住后面所有人（延伸阅读见<a href="https://redis.io/docs/latest/operate/oss_and_stack/management/optimization/" target="_blank" rel="noopener">官方文档 · 《性能调优》</a>）。</p>
 </section>
 
 <!-- ================= 08 可借鉴点 ================= -->
@@ -308,13 +308,13 @@
       <li>读码路线：main → aeMain → readQueryFromClient → processCommand → 命令实现 → 写传播，基准 tag 8.10.2。</li>
     </ul>
   </div>
-  <p><strong>延伸阅读（daily 线已讲过使用与调优视角，本期不重讲）：</strong><a href="../../daily-tech-course/lessons/0005-redis-data-structures.html">数据结构与选型</a> · <a href="../../daily-tech-course/lessons/0010-redis-performance-tuning.html">性能调优与慢命令排查</a> · <a href="../../daily-tech-course/lessons/0011-redis-memory-management.html">内存管理与淘汰</a></p>
+  <p><strong>延伸阅读（官方文档使用与调优章节，本期不重讲）：</strong><a href="https://redis.io/docs/latest/develop/data-types/" target="_blank" rel="noopener">官方文档 · 数据结构与选型</a> · <a href="https://redis.io/docs/latest/operate/oss_and_stack/management/optimization/" target="_blank" rel="noopener">官方文档 · 性能调优与慢命令排查</a> · 内存管理与淘汰</p>
   <p><strong>系列收尾：</strong>Redis 的入门系列就聊到这里。最新版本和完整文档认准官方文档 <a href="https://redis.io/" target="_blank" rel="noopener">redis.io</a>。课程目录里还有其他开源项目的入门系列，感兴趣可以按需点开。</p>
   <p><strong>Primary source：</strong><a href="https://redis.io/docs/latest/develop/data-types/sorted-sets/" target="_blank" rel="noopener">Redis 官方文档 · Sorted sets（含 dual-ported 实现注记）</a>；源码基准与逐条核对的仓库位置：<a href="https://github.com/redis/redis/tree/8.10.2/src" target="_blank" rel="noopener">redis/redis tag 8.10.2 · src/</a>（sds.h、sds.c、t_zset.c、server.c、ae.c、networking.c、iothread.c、config.c 均于 2026-09-19 核对）。</p>
 </section>
 
 <nav class="lesson-nav">
-  <span class="prev"><a href="0035-redis-in-action.html">← 上一期：Redis 实战：接进真实场景</a></span>
+  <span class="prev">← 上一期：Redis 实战：接进真实场景</span>
   <span class="next" style="opacity:.55">Redis 系列 5/5 · 收官</span>
 </nav>
 

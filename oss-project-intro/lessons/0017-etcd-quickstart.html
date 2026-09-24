@@ -11,7 +11,7 @@
 
 <header class="lesson-head">
   <span class="num">OSS PROJECT INTRO · 0017</span>
-  <span><a href="../index.html">课程目录</a> · <a href="0016-etcd-what-and-why.html">上一期：0016</a> · etcd 系列第 2 期 / 共 5 期 · <a href="https://etcd.io" target="_blank" rel="noopener">etcd.io ↗</a></span>
+  <span><a href="../index.html">课程目录</a> · 上一期：0016 · etcd 系列第 2 期 / 共 5 期 · <a href="https://etcd.io" target="_blank" rel="noopener">etcd.io ↗</a></span>
 </header>
 
 <div class="hero">
@@ -330,7 +330,7 @@ docker exec etcd-gcr-${ETCD_VER} /usr/local/bin/etcdctl get foo</code></pre>
       <li>跑通判定＝健康检查通过：健康＝能提交提案、参与共识，不是端口应答；ETCDCTL_API 版本坑与连接被拒先查速查表。</li>
     </ul>
   </div>
-  <p><strong>下期预告：</strong>第 3 期《核心概念与整体架构》——键值模型的术语体系（revision、lease、watch 三件套怎么咬合）、Raft 共识入门，以及一条写请求从 etcdctl 到落盘的完整旅程：今天那个 <code>OK</code>，到底是怎么被"点头"的。Primary source：<a href="https://etcd.io/docs/v3.7/quickstart/" target="_blank" rel="noopener">etcd 官方文档 · Quickstart（v3.7）</a>——本期主线路线与全部命令出处；安装细节见 <a href="https://etcd.io/docs/v3.7/install/" target="_blank" rel="noopener">Install（v3.7）</a>，命令行读写、watch 与 lease 见 <a href="https://etcd.io/docs/v3.7/dev-guide/interacting_v3/" target="_blank" rel="noopener">Interacting with etcd（v3.7）</a>，平台分层与硬件口径分别见 <a href="https://etcd.io/docs/v3.7/op-guide/supported-platform/" target="_blank" rel="noopener">Supported platforms</a> 与 <a href="https://etcd.io/docs/v3.7/op-guide/hardware/" target="_blank" rel="noopener">Hardware recommendations</a>，版本与下载脚本见 <a href="https://github.com/etcd-io/etcd/releases" target="_blank" rel="noopener">GitHub Releases</a>。锁与选主这类延伸场景的原理对照，可读每日微课程线 <a href="../../daily-tech-course/lessons/0009-redis-distributed-lock.html">第 0009 期 · Redis 分布式锁</a>。</p>
+  <p><strong>下期预告：</strong>第 3 期《核心概念与整体架构》——键值模型的术语体系（revision、lease、watch 三件套怎么咬合）、Raft 共识入门，以及一条写请求从 etcdctl 到落盘的完整旅程：今天那个 <code>OK</code>，到底是怎么被"点头"的。Primary source：<a href="https://etcd.io/docs/v3.7/quickstart/" target="_blank" rel="noopener">etcd 官方文档 · Quickstart（v3.7）</a>——本期主线路线与全部命令出处；安装细节见 <a href="https://etcd.io/docs/v3.7/install/" target="_blank" rel="noopener">Install（v3.7）</a>，命令行读写、watch 与 lease 见 <a href="https://etcd.io/docs/v3.7/dev-guide/interacting_v3/" target="_blank" rel="noopener">Interacting with etcd（v3.7）</a>，平台分层与硬件口径分别见 <a href="https://etcd.io/docs/v3.7/op-guide/supported-platform/" target="_blank" rel="noopener">Supported platforms</a> 与 <a href="https://etcd.io/docs/v3.7/op-guide/hardware/" target="_blank" rel="noopener">Hardware recommendations</a>，版本与下载脚本见 <a href="https://github.com/etcd-io/etcd/releases" target="_blank" rel="noopener">GitHub Releases</a>。锁与选主这类延伸场景的原理对照，见<a href="https://redis.io/docs/latest/develop/clients/patterns/distributed-locks/" target="_blank" rel="noopener">官方文档 · Redis 分布式锁</a>。</p>
 </section>
 
 <nav class="lesson-nav">

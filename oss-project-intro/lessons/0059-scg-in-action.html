@@ -11,7 +11,7 @@
 
 <header class="lesson-head">
   <span class="num">OSS PROJECT INTRO · 0059</span>
-  <span><a href="../index.html">课程目录</a> · <a href="0058-scg-core-concepts-architecture.html">上一期:0058</a> · Spring Cloud Gateway 系列第 4 期 / 共 5 期 · <a href="0060-scg-source-reading.html">下一期:0060</a> · <a href="https://spring.io/projects/spring-cloud-gateway" target="_blank" rel="noopener">spring.io/spring-cloud-gateway ↗</a></span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0058 · Spring Cloud Gateway 系列第 4 期 / 共 5 期 · 下一期:0060 · <a href="https://spring.io/projects/spring-cloud-gateway" target="_blank" rel="noopener">spring.io/spring-cloud-gateway ↗</a></span>
 </header>
 
 <div class="hero">
@@ -63,7 +63,7 @@ spring.cloud.discovery.client.simple.instances.order-service[0].uri=http://local
 spring.cloud.gateway.server.webflux.discovery.locator.enabled=true</code></pre>
   <pre class="codeblock"><code>$ curl http://localhost:8080/user-service/me
 {"service":"user-service","ok":"true"}</code></pre>
-  <p>按服务名访问：网关自动生成的 <code>/user-service/**</code> 路由接住，剥掉前缀转发到 8081，客户端第一次<strong>只报服务名就拿到了响应</strong>。公司栈换成 Nacos 注册中心，走的也是同一个 DiscoveryClient 抽象——配置换成 Nacos 起步器即可，注册、配置与 Spring Cloud 集成的实战第 <a href="0004-nacos-spring-cloud-in-action.html">0004 期</a>已经带大家跑过，这里不重讲。</p>
+  <p>按服务名访问：网关自动生成的 <code>/user-service/**</code> 路由接住，剥掉前缀转发到 8081，客户端第一次<strong>只报服务名就拿到了响应</strong>。公司栈换成 Nacos 注册中心，走的也是同一个 DiscoveryClient 抽象——配置换成 Nacos 起步器即可，注册、配置与 Spring Cloud 集成的实战，Nacos 官方文档有完整示例，这里不重讲。</p>
 </section>
 
 <!-- ================= 03 第二步 限流 ================= -->
@@ -241,7 +241,7 @@ $ curl -s -H "X-Token: secret123" http://localhost:8080/order/list</code></pre>
 </section>
 
 <nav class="lesson-nav">
-  <span class="prev"><a href="0058-scg-core-concepts-architecture.html">← 上一期：核心概念与整体架构</a></span>
+  <span class="prev">← 上一期：核心概念与整体架构</span>
   <a class="next" href="0060-scg-source-reading.html">下一期：架构与源码导读 →</a>
 </nav>
 

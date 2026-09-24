@@ -10,13 +10,13 @@
 
 <header class="lesson-head">
   <span class="num">OSS PROJECT INTRO · 0037</span>
-  <span><a href="../index.html">课程目录</a> · <a href="0036-redis-source-reading.html">上一期:0036</a> · Elasticsearch 系列第 1 期 / 共 5 期 · <a href="0038-es-quickstart.html">下一期:0038</a> · <a href="https://www.elastic.co/elasticsearch/" target="_blank" rel="noopener">elastic.co ↗</a></span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0036 · Elasticsearch 系列第 1 期 / 共 5 期 · 下一期:0038 · <a href="https://www.elastic.co/elasticsearch/" target="_blank" rel="noopener">elastic.co ↗</a></span>
 </header>
 
 <div class="hero">
   <p class="issue">OSS PROJECT INTRO · ELASTICSEARCH 系列第 1 期：认识项目</p>
   <h1>Elasticsearch 是什么：分布式搜索与分析引擎</h1>
-  <p class="subtitle">开源项目入门系列的每个新项目，都从三个问题开始：它解决什么痛点、凭什么活下来、什么场景该选它。上一个项目我们聊完了 Redis，今天开启新项目 Elasticsearch——你在各大网站的站内搜索框后面、公司的日志平台里、安全告警系统里见过它的名字。官方定义一句话：<strong>an open source, distributed search and analytics engine</strong>，一台开源的分布式搜索与分析引擎，JSON 文档进、相关性排序的结果出。本期不装任何软件，素材全部来自官方文档与官方仓库，每张图都标出处；你带走四样东西：模糊检索的三堵墙、倒排索引这条心智模型的根、一份四方选型对比，外加许可证风波十五年的来龙去脉。</p>
+  <p class="subtitle">开源项目入门系列的每个新项目，都从三个问题开始：它解决什么痛点、凭什么活下来、什么场景该选它。今天开启新项目 Elasticsearch——你在各大网站的站内搜索框后面、公司的日志平台里、安全告警系统里见过它的名字。官方定义一句话：<strong>an open source, distributed search and analytics engine</strong>，一台开源的分布式搜索与分析引擎，JSON 文档进、相关性排序的结果出。本期不装任何软件，素材全部来自官方文档与官方仓库，每张图都标出处；你带走四样东西：模糊检索的三堵墙、倒排索引这条心智模型的根、一份四方选型对比，外加许可证风波十五年的来龙去脉。</p>
   <div class="lesson-meta">
     <span class="tag cat">🔍 搜索与分析引擎 · Java · AGPLv3/ELv2/SSPLv1 三许可</span>
     <span class="tag">📦 基于 9.5.4（GitHub Latest）</span>
@@ -35,7 +35,7 @@
     <li><strong>聚合分析弱：</strong>按词分组计数、按时间分桶统计、多维下钻，关系库要写复杂 SQL 慢慢跑，日志场景还要求写入后秒级可查。</li>
   </ul>
   <p>三堵墙的根源是同一句错配：<strong>B+ 树为"精确值查找"而生，文本搜索要的是"词级匹配 + 相关性排序"</strong>。解法是把文本拆成词、给每个词建一张"词到文档"的目录——这就是<strong>倒排索引</strong>。2010 年，Shay Banon 在 Lucene 之上包出一层分布式的 JSON 服务，取名 Elasticsearch，后来它成了这个位置的事实标准。</p>
-  <p class="note">延伸一点：B+ 树为什么救不了 <code>LIKE '%词%'</code>，在每日微课程线的 MySQL 索引专题里有执行计划层面的展开，见文末延伸阅读。</p>
+  <p class="note">延伸一点：B+ 树为什么救不了 <code>LIKE '%词%'</code>，在 MySQL 官方文档的索引与 EXPLAIN 章节有执行计划层面的展开，见文末延伸阅读。</p>
 </section>
 
 <!-- ================= 02 是什么 ================= -->
@@ -177,12 +177,12 @@ GET books/_search
       <li><strong>小数据量的单表查询：</strong>百万行以下的搜索框，MySQL 一个 FULLTEXT 索引或普通索引就够，为它养一套 JVM 集群是杀鸡用牛刀。</li>
     </ul>
   </div>
-  <p>一条判断捷径：<strong>查询形状是"包含某词 + 按相关性排序 + 大规模聚合"的，ES 进候选；查询形状是"精确匹配 + 事务 + 关联"的，留在关系数据库。</strong>两个相关主题，每日微课程线已有专题，本系列不换皮重讲，选两篇最相关的作为延伸阅读：</p>
+  <p>一条判断捷径：<strong>查询形状是"包含某词 + 按相关性排序 + 大规模聚合"的，ES 进候选；查询形状是"精确匹配 + 事务 + 关联"的，留在关系数据库。</strong>两个相关主题，相关主题官方文档均有专章，本系列不换皮重讲，选两篇最相关的作为延伸阅读：</p>
   <div class="note">
-    <p><strong>延伸阅读（每日微课程线，原理与选型不重讲）：</strong></p>
+    <p><strong>延伸阅读（官方文档）：</strong></p>
     <ul>
-      <li><a href="../../daily-tech-course/lessons/0003-mysql-index-explain.html">第 0003 期 · MySQL 索引优化与执行计划</a>——LIKE 前缀通配为什么失效，EXPLAIN 层面的展开；</li>
-      <li><a href="../../daily-tech-course/lessons/0026-embedding-vector-store.html">第 0026 期 · Embedding 与向量库选型</a>——ES 向量检索在向量数据库版图中的位置。</li>
+      <li><a href="https://dev.mysql.com/doc/refman/8.0/en/explain.html" target="_blank" rel="noopener">官方文档 · MySQL 索引优化与执行计划</a>——LIKE 前缀通配为什么失效，EXPLAIN 层面的展开；</li>
+      <li>Embedding 与向量库选型——ES 向量检索在向量数据库版图中的位置。</li>
     </ul>
   </div>
 </section>
@@ -266,7 +266,7 @@ GET books/_search
 </section>
 
 <nav class="lesson-nav">
-  <span class="prev"><a href="0036-redis-source-reading.html">← 上一期：Redis 架构与源码导读</a></span>
+  <span class="prev">← 上一期：Redis 架构与源码导读</span>
   <a class="next" href="0038-es-quickstart.html">下一期：5 分钟跑起来 Elasticsearch →</a>
 </nav>
 

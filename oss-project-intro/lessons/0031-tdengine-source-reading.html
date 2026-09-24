@@ -11,7 +11,7 @@
 
 <header class="lesson-head">
   <span class="num">OSS PROJECT INTRO · 0031</span>
-  <span><a href="../index.html">课程目录</a> · <a href="0030-tdengine-in-action.html">上一期:0030</a> · TDengine 系列第 5 期 / 共 5 期 · <a href="https://www.taosdata.com" target="_blank" rel="noopener">taosdata.com ↗</a></span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0030 · TDengine 系列第 5 期 / 共 5 期 · <a href="https://www.taosdata.com" target="_blank" rel="noopener">taosdata.com ↗</a></span>
 </header>
 
 <div class="hero">
@@ -39,7 +39,7 @@
   <h2><span class="sec-num">02</span>设计决策一:标签与数据分家,各自住进最合适的房子</h2>
   <p>第 2 期建子表时你敲过 <code>CREATE TABLE d1001 USING meters TAGS ('北京.厂区A', 2)</code>——标签只在建表那一刻出现,之后一万次写入都不用再管它。这不是语法糖,是存储层的分家:<strong>标签进了 vnode 的元数据,由 meta 模块管理;时序数据进了 tsdb,按列存文件落盘</strong>。第 3 期从文档角度说过"标签信息与标签索引都在 vnode 元数据里,用 B+ 树管理",现在补上源码坐标:元数据实现在 <code>source/dnode/vnode/src/meta/</code>(metaTable.c 管表的登记与查询),底下垫的是 <code>source/libs/tdb/</code>——TDengine 自研的 B+ 树存储引擎,事务接口在 <code>tdb.h</code>。</p>
   <p>分家的红利第 3 期量过一个:官方样例压缩率 <strong>23.98%</strong>——数据文件每行只有时间戳和采集列,设备属性一个字节不占,单设备读数缓变,列存压缩吃得更饱。另一个常被忽略:<strong>改模板立即生效</strong>。超级表加一列,元数据里改一份 schema,一万张子表同时"长出"新列,数据文件一行不用动——schema 与数据解耦,是模板化建模的存储底气。</p>
-  <p>源码里还有个值得驻足的细节:每条写入落到 vnode 时,<code>vnodeHandleDataWrite</code>(vnodeSvr.c:2432)先用 <code>metaGetInfo</code> 查子表登记信息,核对所属超级表和 schema 版本,对不上直接拒写。<strong>标签分家没让写入变松,反而多了一道免费的合法性闸门</strong>。建模方法论(标签怎么选、宽表怎么拆)第 3 期已链到每日课程线 <a href="../../daily-tech-course/lessons/0015-tdengine-supertable.html">0015 期</a>,不换皮重讲。</p>
+  <p>源码里还有个值得驻足的细节:每条写入落到 vnode 时,<code>vnodeHandleDataWrite</code>(vnodeSvr.c:2432)先用 <code>metaGetInfo</code> 查子表登记信息,核对所属超级表和 schema 版本,对不上直接拒写。<strong>标签分家没让写入变松,反而多了一道免费的合法性闸门</strong>。建模方法论(标签怎么选、宽表怎么拆)第 3 期已链到每日课程线 <a href="https://docs.taosdata.com/" target="_blank" rel="noopener">官方文档 · 0015 期</a>,不换皮重讲。</p>
 </section>
 
 <!-- ================= 03 看点二 ================= -->
@@ -140,7 +140,7 @@ vnodeCommit.c: vnodeCommit(322)
   <p><strong>第一套:最新值缓存。</strong>建库参数 <code>CACHEMODEL</code>(官方取值 none/last_row/last_value/both):last_row 缓存每张子表最近一行,last_value 缓存每列最近的非 NULL 值——正好对上 <code>LAST_ROW</code> 与 <code>LAST</code> 两个函数。实现在 <code>source/dnode/vnode/src/tsdb/tsdbCache.c</code>(四千余行):内存里是 LRU 缓存,底下垫一层持久化键值引擎(RocksDB)——<code>tsdbCachePutToLRU</code>(1410)管内存命中,<code>tsdbCachePutToRocksdb</code>(1388)管持久化,重启后不必重建;<code>tsdbCacheCommit</code>(775)在提交时把脏项刷下去。查询侧入口在 <code>tsdbCacheRead.c</code>:<code>tsdbCacherowsReaderOpen</code>(280)打开缓存读游标,<code>tsdbRetrieveCacheRows</code>(441)按表批量取回最新值,内部调 <code>tsdbCacheGetBatch</code>(tsdbCache.c:2686)。</p>
   <p>精髓在更新时机:<strong>缓存更新挂在写入路径上</strong>(写入流程顺带调 <code>tsdbCacheRowFormatUpdate</code>,tsdbCache.c:1620),不是查询未命中才回填。于是"读最新值"永远不打扰数据文件——写入时多付一次内存写,换来监控大屏类查询的常数时间应答。官方文档也诚实提醒:频繁切换 CACHEMODEL 可能导致 LAST/LAST_ROW 结果短期不准——缓存与数据是最终一致,这是这套设计的代价。</p>
   <p><strong>第二套:降采样交给流计算与预聚合。</strong>"每 10 分钟一个均值"这类连续聚合,答案是<strong>写入时就算好</strong>:流计算由 snode 承载(<code>source/dnode/snode/src/snode.c</code> 是入口,3.4 把流处理主体重构成 <code>source/libs/new-stream/</code>),vnode 侧的触发装配在 <code>vnd/vnodeStream.c</code>;另一路是超级表上的 rollup 预聚合(<code>source/dnode/vnode/src/sma/</code>,tsdb 文件族里能看到 tsdbFSet2.c 的 rollup sma 提交记录)。聚合结果随数据一起落地,<strong>查询读的是算好的结果,不是现场扫原始数据</strong>。两条机制合起来,才是第 1 期"内建缓存、流式计算"的完整含义。</p>
-  <p class="note"><span class="h">核对说明</span>CACHEMODEL/CACHESIZE 的取值与语义对照官方文档《数据库管理》页(3.4 文档站,2026-09-19 截图留档于本期素材);写入性能调优见每日课程线 <a href="../../daily-tech-course/lessons/0022-tdengine-write-read-performance.html">0022 期</a>。</p>
+  <p class="note"><span class="h">核对说明</span>CACHEMODEL/CACHESIZE 的取值与语义对照官方文档《数据库管理》页(3.4 文档站,2026-09-19 截图留档于本期素材);写入性能调优见每日课程线 <a href="https://docs.taosdata.com/" target="_blank" rel="noopener">官方文档 · 0022 期</a>。</p>
 </section>
 
 <!-- ================= 05 读码路线图 ================= -->

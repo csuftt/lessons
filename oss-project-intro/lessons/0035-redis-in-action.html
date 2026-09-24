@@ -11,7 +11,7 @@
 
 <header class="lesson-head">
   <span class="num">OSS PROJECT INTRO · 0035</span>
-  <span><a href="../index.html">课程目录</a> · <a href="0034-redis-core-concepts-architecture.html">上一期:0034</a> · Redis 系列第 4 期 / 共 5 期 · <a href="https://redis.io" target="_blank" rel="noopener">redis.io ↗</a></span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0034 · Redis 系列第 4 期 / 共 5 期 · <a href="https://redis.io" target="_blank" rel="noopener">redis.io ↗</a></span>
 </header>
 
 <div class="hero">
@@ -272,12 +272,12 @@ redis.opsForStream().read(
   </div>
   <p>这个场景你已经能照着搭出来。下一期我们进源码,看看这些结构是怎么实现的——跳表的层数怎么长、字符串为什么不用 C 原生字符数组、单线程模型里网络 IO 多线程补在哪。Primary source:<a href="https://docs.spring.io/spring-data/redis/reference/" target="_blank" rel="noopener">Spring Data Redis 官方参考文档(4.1.1)</a>——StringRedisTemplate 与配置口径出处;五组命令的 Example 分别见 <a href="https://redis.io/commands/incr/" target="_blank" rel="noopener">INCR</a>、<a href="https://redis.io/commands/hset/" target="_blank" rel="noopener">HSET</a>、<a href="https://redis.io/commands/zincrby/" target="_blank" rel="noopener">ZINCRBY</a>、<a href="https://redis.io/docs/latest/develop/data-types/strings/bitmaps/" target="_blank" rel="noopener">官方 bitmaps 教程</a>、<a href="https://redis.io/commands/xadd/" target="_blank" rel="noopener">XADD</a> 官方页面,依赖坐标见 <a href="https://central.sonatype.com/artifact/org.springframework.boot/spring-boot-starter-data-redis/4.1.1" target="_blank" rel="noopener">Maven Central</a>。</p>
   <div class="note">
-    <p><strong>延伸阅读(每日微课程线,理论专题不重讲):</strong></p>
+    <p><strong>延伸阅读（官方文档）：</strong></p>
     <ul>
-      <li><a href="../../daily-tech-course/lessons/0005-redis-data-structures.html">第 0005 期 · Redis 数据结构</a>——五大结构的命令面与适用场景在那边讲透;</li>
-      <li><a href="../../daily-tech-course/lessons/0008-redis-cache-patterns.html">第 0008 期 · 缓存模式</a>——穿透、击穿、雪崩的理论与解法,见该课;</li>
-      <li><a href="../../daily-tech-course/lessons/0009-redis-distributed-lock.html">第 0009 期 · Redis 分布式锁</a>——业务长到要互斥时再看;</li>
-      <li><a href="../../daily-tech-course/lessons/0020-cache-db-consistency.html">第 0020 期 · 缓存与数据库一致性</a>——这套活动数据要落库时的同步策略,见该课。</li>
+      <li><a href="https://redis.io/docs/latest/develop/data-types/" target="_blank" rel="noopener">官方文档 · Redis 数据结构</a>——五大结构的命令面与适用场景在那边讲透;</li>
+      <li>缓存模式——穿透、击穿、雪崩的理论与解法,见该课;</li>
+      <li><a href="https://redis.io/docs/latest/develop/clients/patterns/distributed-locks/" target="_blank" rel="noopener">官方文档 · Redis 分布式锁</a>——业务长到要互斥时再看;</li>
+      <li>缓存与数据库一致性——这套活动数据要落库时的同步策略,见该课。</li>
     </ul>
   </div>
 </section>

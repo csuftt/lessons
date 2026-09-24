@@ -10,7 +10,7 @@
 
 <header class="lesson-head">
   <span class="num">OSS PROJECT INTRO · 0065</span>
-  <span><a href="../index.html">课程目录</a> · <a href="0064-kafka-in-action.html">上一期:0064</a> · Apache Kafka 系列第 5 期 / 共 5 期 · <a href="https://kafka.apache.org/" target="_blank" rel="noopener">kafka.apache.org ↗</a></span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0064 · Apache Kafka 系列第 5 期 / 共 5 期 · <a href="https://kafka.apache.org/" target="_blank" rel="noopener">kafka.apache.org ↗</a></span>
 </header>
 
 <div class="hero">
@@ -170,7 +170,7 @@ def maybeShrinkIsr(): Unit = {                               // L1089
 <!-- ================= 10 对照 Pulsar ================= -->
 <section>
   <h2><span class="sec-num">10</span>对照 Pulsar：两种存储定价，没有对错</h2>
-  <p>Pulsar 系列第 0015 期源码导读我们看过<strong>存算分离</strong>：broker 无状态，消息与进度全在 BookKeeper，扩容即起进程，封卷的账本还能整体搬去对象存储。Kafka 反着来，<strong>存算一体</strong>：日志段文件就放在 broker 本地盘，读写压在页缓存上，路径最短、组件最少——一个进程同时是计算与存储。代价也清楚：扩缩容与再均衡要搬分区，Topic 数量大了 broker 自己扛。</p>
+  <p>Pulsar 的<strong>存算分离</strong>设计：broker 无状态，消息与进度全在 BookKeeper，扩容即起进程，封卷的账本还能整体搬去对象存储。Kafka 反着来，<strong>存算一体</strong>：日志段文件就放在 broker 本地盘，读写压在页缓存上，路径最短、组件最少——一个进程同时是计算与存储。代价也清楚：扩缩容与再均衡要搬分区，Topic 数量大了 broker 自己扛。</p>
   <p>一个用路径换弹性，一个用弹性换路径，<strong>这是两种定价，不是两个对错</strong>。读两边源码的体验也对仗：Pulsar 的写入链要跨 broker 与 bookie 两层进程，Kafka 的写入链在一个进程里从套接字一路走到文件通道。</p>
 </section>
 
@@ -287,7 +287,7 @@ def maybeShrinkIsr(): Unit = {                               // L1089
 </section>
 
 <nav class="lesson-nav">
-  <span class="prev"><a href="0064-kafka-in-action.html">← 上一期：Kafka 实战场景：Spring Boot 集成</a></span>
+  <span class="prev">← 上一期：Kafka 实战场景：Spring Boot 集成</span>
   <a class="next" href="../index.html">课程目录 · Kafka 系列完 →</a>
 </nav>
 

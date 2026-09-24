@@ -11,7 +11,7 @@
 
 <header class="lesson-head">
   <span class="num">OSS PROJECT INTRO · 0019</span>
-  <span><a href="../index.html">课程目录</a> · <a href="0018-etcd-core-concepts-architecture.html">上一期：0018</a> · etcd 系列第 4 期 / 共 5 期 · <a href="https://etcd.io" target="_blank" rel="noopener">etcd.io ↗</a></span>
+  <span><a href="../index.html">课程目录</a> · 上一期：0018 · etcd 系列第 4 期 / 共 5 期 · <a href="https://etcd.io" target="_blank" rel="noopener">etcd.io ↗</a></span>
 </header>
 
 <div class="hero">
@@ -110,7 +110,7 @@
       <li>④ <strong>热更新：</strong>改一条配置，订阅实例即时收到推送，对比轮询的延迟差距。</li>
     </ul>
   </div>
-  <p class="note"><span class="h">分工提醒</span>本期只演示"用 etcd 怎么做"。租约续约语义在分布式锁场景的同源用法属于跨场景话题，延伸阅读见第 05 节与每日微课程线，原理不换皮重讲。</p>
+  <p class="note"><span class="h">分工提醒</span>本期只演示"用 etcd 怎么做"。租约续约语义在分布式锁场景的同源用法属于跨场景话题，延伸阅读见第 05 节，原理不换皮重讲。</p>
 </section>
 
 <!-- ================= 02 客户端选型与版本 ================= -->
@@ -240,7 +240,7 @@ $ etcdctl get --prefix /services/
     </div>
   </div>
   <div class="warn">
-    <p><strong>TTL 不是越短越好：</strong>官方文档说明租约有最小 TTL、由应用在 grant 时指定，实际 TTL 不低于该最小值、由 etcd 集群选择，页面上并没有给出具体下限数值（Grant leases 示例注释原文：# grant a lease with 60 second TTL）。演示用 15 秒；生产按"心跳周期 × 容忍次数"定，一次网络抖动就误摘半活的实例。租约续约语义在分布式锁场景是同一套原理的延伸，对照阅读见 <a href="../../daily-tech-course/lessons/0009-redis-distributed-lock.html">每日微课程线第 0009 期 · Redis 分布式锁</a>。目标③达成。</p>
+    <p><strong>TTL 不是越短越好：</strong>官方文档说明租约有最小 TTL、由应用在 grant 时指定，实际 TTL 不低于该最小值、由 etcd 集群选择，页面上并没有给出具体下限数值（Grant leases 示例注释原文：# grant a lease with 60 second TTL）。演示用 15 秒；生产按"心跳周期 × 容忍次数"定，一次网络抖动就误摘半活的实例。租约续约语义在分布式锁场景是同一套原理的延伸，对照阅读见 <a href="https://redis.io/docs/latest/develop/clients/patterns/distributed-locks/" target="_blank" rel="noopener">官方文档 · Redis 分布式锁</a>。目标③达成。</p>
   </div>
 </section>
 

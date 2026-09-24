@@ -10,7 +10,7 @@
 
 <header class="lesson-head">
   <span class="num">OSS PROJECT INTRO · 0013</span>
-  <span><a href="../index.html">课程目录</a> · <a href="0012-pulsar-quickstart.html">上一期：0012</a> · Pulsar 系列第 3 期 / 共 5 期 · <a href="https://pulsar.apache.org" target="_blank" rel="noopener">pulsar.apache.org ↗</a></span>
+  <span><a href="../index.html">课程目录</a> · 上一期：0012 · Pulsar 系列第 3 期 / 共 5 期 · <a href="https://pulsar.apache.org" target="_blank" rel="noopener">pulsar.apache.org ↗</a></span>
 </header>
 
 <div class="hero">
@@ -112,7 +112,7 @@
     </tbody>
   </table>
   </div>
-  <p class="warn"><span class="h">跨线提示</span>四种模式内部的分发算法、游标与 Key_Shared 的哈希保序原理，属于"原理视角"，本系列不换皮重讲——想抠原理直接读 <a href="../../daily-tech-course/lessons/0013-pulsar-subscription-models.html">《Apache Pulsar 订阅模型：四种订阅、游标与 Key_Shared 保序》</a>（每日微课程线）。本期你只需记住使用层的选型口诀：<strong>默认独占要排他，主备 Failover，堆吞吐 Shared，按 key 保序 Key_Shared</strong>。</p>
+  <p class="warn"><span class="h">跨线提示</span>四种模式内部的分发算法、游标与 Key_Shared 的哈希保序原理，属于"原理视角"，本系列不换皮重讲——想抠原理直接读 <a href="https://pulsar.apache.org/docs/next/concepts-messaging/" target="_blank" rel="noopener">官方文档 · 《Apache Pulsar 订阅模型：四种订阅、游标与 Key_Shared 保序》</a>。本期你只需记住使用层的选型口诀：<strong>默认独占要排他，主备 Failover，堆吞吐 Shared，按 key 保序 Key_Shared</strong>。</p>
 </section>
 
 <!-- ================= 04 整体架构 ================= -->
@@ -224,7 +224,7 @@
       <p>一个 ledger 不是写死在一块盘上，而是<strong>摊在多台 bookie 组成的集合（ensemble）上</strong>：每条消息写 W 份（write quorum），收到 A 份成功确认才算写成功（ack quorum），满足 A ≤ W ≤ 集合大小 E——官方文档默认数据存 3 份。更妙的是故障处理方式：<strong>某台 bookie 坏了，不修复坏卷，直接封卷换新卷</strong>——新消息滚动（rollover）到健康 bookie 上开的新 ledger，坏卷里已写的部分只要凑得够读就行。旧账不翻新账接着记，写入路径永远不打断。</p>
     </div>
   </div>
-  <p class="note"><span class="h">分层存储一笔带过</span>封卷后的 ledger 不可变，所以还能整体搬到对象存储（S3 等）给热数据腾地方，读的时候对消费者透明——这套"冷热分离"的设计决策是第 5 期源码导读的主角之一。与 Kafka 存算一体的架构对比，同样属于原理视角，可见 <a href="../../daily-tech-course/lessons/0012-pulsar-vs-kafka.html">《Pulsar 存算分离架构与 Kafka 对比》</a>。</p>
+  <p class="note"><span class="h">分层存储一笔带过</span>封卷后的 ledger 不可变，所以还能整体搬到对象存储（S3 等）给热数据腾地方，读的时候对消费者透明——这套"冷热分离"的设计决策是第 5 期源码导读的主角之一。与 Kafka 存算一体的架构对比，同样属于原理视角，可见 <a href="https://pulsar.apache.org/docs/next/concepts-architecture-overview/" target="_blank" rel="noopener">官方文档 · 《Pulsar 存算分离架构与 Kafka 对比》</a>。</p>
 </section>
 
 <!-- ================= 05 源码仓库模块地图 ================= -->
@@ -328,7 +328,7 @@
     </ul>
   </div>
   <p><strong>下期预告：</strong>第 4 期《实战场景：把 Pulsar 接进 Spring Boot 应用》——在今天的术语地图上动真格：引入客户端 starter、配置 service URL 与租户/命名空间、生产者发消息、消费者按订阅模式接消息，跑通一个端到端小例子。本期每个名词都会变成配置文件里实实在在的一行。</p>
-  <p><strong>延伸阅读：</strong>Primary source 官方资料两份：<a href="https://pulsar.apache.org/docs/4.2.x/concepts-messaging/" target="_blank" rel="noopener">Pulsar 4.2.x · Messaging 概念页</a>（topic 命名、订阅四模式、游标与确认的一手出处）与 <a href="https://pulsar.apache.org/docs/4.2.x/concepts-architecture-overview/" target="_blank" rel="noopener">Pulsar 4.2.x · Architecture Overview</a>（broker 无状态、BookKeeper ledger、元数据存储的权威定义）；订阅模型原理深入见每日微课程线 <a href="../../daily-tech-course/lessons/0013-pulsar-subscription-models.html">《Apache Pulsar 订阅模型》</a>。</p>
+  <p><strong>延伸阅读：</strong>Primary source 官方资料两份：<a href="https://pulsar.apache.org/docs/4.2.x/concepts-messaging/" target="_blank" rel="noopener">Pulsar 4.2.x · Messaging 概念页</a>（topic 命名、订阅四模式、游标与确认的一手出处）与 <a href="https://pulsar.apache.org/docs/4.2.x/concepts-architecture-overview/" target="_blank" rel="noopener">Pulsar 4.2.x · Architecture Overview</a>（broker 无状态、BookKeeper ledger、元数据存储的权威定义）；订阅模型原理见<a href="https://pulsar.apache.org/docs/next/concepts-messaging/" target="_blank" rel="noopener">官方文档 · 《Apache Pulsar 订阅模型》</a>。</p>
 </section>
 
 <nav class="lesson-nav">

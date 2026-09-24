@@ -10,13 +10,13 @@
 
 <header class="lesson-head">
   <span class="num">OSS PROJECT INTRO · 0061</span>
-  <span><a href="../index.html">课程目录</a> · <a href="0060-scg-source-reading.html">上一期:0060</a> · Apache Kafka 系列第 1 期 / 共 5 期 · <a href="0062-kafka-quickstart.html">下一期:0062</a> · <a href="https://kafka.apache.org/" target="_blank" rel="noopener">kafka.apache.org ↗</a></span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0060 · Apache Kafka 系列第 1 期 / 共 5 期 · 下一期:0062 · <a href="https://kafka.apache.org/" target="_blank" rel="noopener">kafka.apache.org ↗</a></span>
 </header>
 
 <div class="hero">
   <p class="issue">OSS PROJECT INTRO · APACHE KAFKA 系列第 1 期：认识项目</p>
   <h1>Apache Kafka 是什么：分布式提交日志，不只是消息队列</h1>
-  <p class="subtitle">上一个项目我们聊完了 Spring Cloud Gateway，今天开启新项目 Apache Kafka。系统之间直接调用久了，你一定见过这些场面：流量洪峰一来下游被打垮、加一个消费方就得改一次生产方代码、想让两个系统用同一份数据只能各拉各的。Kafka 的答案是在系统中间放一个<strong>数据中转站</strong>——官方定义一句话：<strong>an open-source distributed event streaming platform</strong>，开源的分布式事件流平台。一句话心智模型：<strong>分布式提交日志——事件只能追加写，落在日志里可回放，消费方各拿各的指针按偏移量读</strong>。注意它不只是消息队列：数据管道、流式分析、数据集成都是它的主场。本期结束，你能答上四个问题：Kafka 是什么、它为什么快、和 Pulsar 怎么选、什么场景该选它。</p>
+  <p class="subtitle">今天开启新项目 Apache Kafka。系统之间直接调用久了，你一定见过这些场面：流量洪峰一来下游被打垮、加一个消费方就得改一次生产方代码、想让两个系统用同一份数据只能各拉各的。Kafka 的答案是在系统中间放一个<strong>数据中转站</strong>——官方定义一句话：<strong>an open-source distributed event streaming platform</strong>，开源的分布式事件流平台。一句话心智模型：<strong>分布式提交日志——事件只能追加写，落在日志里可回放，消费方各拿各的指针按偏移量读</strong>。注意它不只是消息队列：数据管道、流式分析、数据集成都是它的主场。本期结束，你能答上四个问题：Kafka 是什么、它为什么快、和 Pulsar 怎么选、什么场景该选它。</p>
   <div class="lesson-meta">
     <span class="tag cat">📨 事件流平台 · Scala/Java · Apache-2.0（Apache 顶级项目）</span>
     <span class="tag">📦 基于 4.3.1（官方最新稳定版）</span>
@@ -168,7 +168,7 @@ This is my second event</code></pre>
     </tbody>
   </table>
   </div>
-  <p>怎么选一句话：<strong>偏流式管道与流计算选 Kafka；偏海量多租户与弹性扩缩看 Pulsar；偏事务与定时消息看 RocketMQ；偏灵活路由与轻量队列用 RabbitMQ</strong>。Kafka 与 Pulsar 的架构差异是本系列刻意安排的对照实验——本线 <a href="0011-pulsar-what-and-why.html">Pulsar 系列第 0011 期</a>起五连讲拆过它的计算存储分层，daily 线也有一篇正面对比：Pulsar 的存算分离到底解决了 Kafka 的什么问题，原理深入见 <a href="../../daily-tech-course/lessons/0012-pulsar-vs-kafka.html">daily 系列 0012 期</a>，两边对照着读收获最大。</p>
+  <p>怎么选一句话：<strong>偏流式管道与流计算选 Kafka；偏海量多租户与弹性扩缩看 Pulsar；偏事务与定时消息看 RocketMQ；偏灵活路由与轻量队列用 RabbitMQ</strong>。Kafka 与 Pulsar 的架构差异是本系列刻意安排的对照实验——Pulsar <a href="https://pulsar.apache.org/docs/next/concepts-architecture-overview/" target="_blank" rel="noopener">官方文档</a>系统拆解过它的计算存储分层，Pulsar 的存算分离到底解决了 Kafka 的什么问题，原理深入见 <a href="https://pulsar.apache.org/docs/next/concepts-architecture-overview/" target="_blank" rel="noopener">官方文档 · daily 系列 0012 期</a>，两边对照着读收获最大。</p>
 </section>
 
 <!-- ================= 09 钩子二 ================= -->
@@ -273,7 +273,7 @@ This is my second event</code></pre>
 </section>
 
 <nav class="lesson-nav">
-  <span class="prev"><a href="0060-scg-source-reading.html">← 上一期：Spring Cloud Gateway 架构与源码导读</a></span>
+  <span class="prev">← 上一期：Spring Cloud Gateway 架构与源码导读</span>
   <a class="next" href="0062-kafka-quickstart.html">下一期：5 分钟跑起来 Apache Kafka →</a>
 </nav>
 

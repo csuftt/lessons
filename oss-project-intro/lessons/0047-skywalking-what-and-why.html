@@ -10,13 +10,13 @@
 
 <header class="lesson-head">
   <span class="num">OSS PROJECT INTRO · 0047</span>
-  <span><a href="../index.html">课程目录</a> · <a href="0046-prom-source-reading.html">上一期:0046</a> · SkyWalking 系列第 1 期 / 共 5 期 · <a href="0048-skywalking-quickstart.html">下一期:0048</a> · <a href="https://skywalking.apache.org" target="_blank" rel="noopener">skywalking.apache.org ↗</a></span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0046 · SkyWalking 系列第 1 期 / 共 5 期 · 下一期:0048 · <a href="https://skywalking.apache.org" target="_blank" rel="noopener">skywalking.apache.org ↗</a></span>
 </header>
 
 <div class="hero">
   <p class="issue">OSS PROJECT INTRO · SKYWALKING 系列第 1 期：认识项目</p>
   <h1>SkyWalking 是什么：无侵入的链路追踪 APM</h1>
-  <p class="subtitle">开源项目入门系列的每个新项目，都从三个问题开始：它解决什么痛点、凭什么活下来、什么场景该选它。上一个项目我们聊完了 Prometheus，今天开启新项目 SkyWalking——上一个系列的选型清单里写过"调用链归 APM"，说的就是它。官方定义一句话：<strong>an open source observability platform…a modern APM, specially designed for cloud native, container based distributed systems</strong>，一个开源的可观测平台、面向云原生分布式系统的现代 APM。一句话心智模型：<strong>Java agent 字节码增强，应用一行代码不改，调用链自动上网</strong>。本期不装任何软件，素材全部来自官方文档与官方仓库，每张图都标出处；你带走四样东西："慢在哪一跳"的痛点、无侵入链路追踪这个心智模型、手动埋点与自动增强的本质差别，外加一份五方选型对比。</p>
+  <p class="subtitle">开源项目入门系列的每个新项目，都从三个问题开始：它解决什么痛点、凭什么活下来、什么场景该选它。今天开启新项目 SkyWalking——可观测版图里"调用链归 APM"那一栏，说的就是它。官方定义一句话：<strong>an open source observability platform…a modern APM, specially designed for cloud native, container based distributed systems</strong>，一个开源的可观测平台、面向云原生分布式系统的现代 APM。一句话心智模型：<strong>Java agent 字节码增强，应用一行代码不改，调用链自动上网</strong>。本期不装任何软件，素材全部来自官方文档与官方仓库，每张图都标出处；你带走四样东西："慢在哪一跳"的痛点、无侵入链路追踪这个心智模型、手动埋点与自动增强的本质差别，外加一份五方选型对比。</p>
   <div class="lesson-meta">
     <span class="tag cat">📡 链路追踪与 APM · Java · Apache-2.0（Apache 顶级项目）</span>
     <span class="tag">📦 基于 v11.0.0（GitHub Latest）</span>
@@ -283,7 +283,7 @@ java -javaagent:/path/to/skywalking-agent/skywalking-agent.jar \
 </section>
 
 <nav class="lesson-nav">
-  <span class="prev"><a href="0046-prom-source-reading.html">← 上一期：Prometheus 架构与源码导读</a></span>
+  <span class="prev">← 上一期：Prometheus 架构与源码导读</span>
   <a class="next" href="0048-skywalking-quickstart.html">下一期：5 分钟跑起来 SkyWalking →</a>
 </nav>
 

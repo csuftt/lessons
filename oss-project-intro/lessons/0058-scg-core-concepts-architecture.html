@@ -11,7 +11,7 @@
 
 <header class="lesson-head">
   <span class="num">OSS PROJECT INTRO · 0058</span>
-  <span><a href="../index.html">课程目录</a> · <a href="0057-scg-quickstart.html">上一期:0057</a> · Spring Cloud Gateway 系列第 3 期 / 共 5 期 · <a href="0059-scg-in-action.html">下一期:0059</a> · <a href="https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux/how-it-works.html" target="_blank" rel="noopener">官方文档 ↗</a></span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0057 · Spring Cloud Gateway 系列第 3 期 / 共 5 期 · 下一期:0059 · <a href="https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux/how-it-works.html" target="_blank" rel="noopener">官方文档 ↗</a></span>
 </header>
 
 <div class="hero">
@@ -87,7 +87,7 @@ public RouteLocator customRouteLocator(RouteLocatorBuilder builder) {
             .uri("http://httpbin.org:80"))
         .build();
 }</code></pre>
-  <p>两条路底层是同一个模型：yml 走 <code>PropertiesRouteDefinitionLocator</code> 读进 RouteDefinition（路由定义对象），编程式直接产出 Route。这个"定义"抽象正是动态路由的钩子——官方还提供 <code>DiscoveryClientRouteDefinitionLocator</code>，从注册中心自动生成路由；配置中心改了配置，发一个 <code>RefreshRoutesEvent</code> 事件，路由缓存就刷新。<strong>路由来源可以有很多种，匹配引擎只认统一的 Locator 接口</strong>——与 Nacos 配置中心联动做动态路由，第 4 期实战展开（公司主栈 Spring Cloud Alibaba 的常见组合），Nacos 本身的入门见本系列 <a href="0001-nacos-what-and-why.html">0001~0005 期</a>。</p>
+  <p>两条路底层是同一个模型：yml 走 <code>PropertiesRouteDefinitionLocator</code> 读进 RouteDefinition（路由定义对象），编程式直接产出 Route。这个"定义"抽象正是动态路由的钩子——官方还提供 <code>DiscoveryClientRouteDefinitionLocator</code>，从注册中心自动生成路由；配置中心改了配置，发一个 <code>RefreshRoutesEvent</code> 事件，路由缓存就刷新。<strong>路由来源可以有很多种，匹配引擎只认统一的 Locator 接口</strong>——与 Nacos 配置中心联动做动态路由，第 4 期实战展开（公司主栈 Spring Cloud Alibaba 的常见组合），Nacos 本身的入门见其官方文档。</p>
 </section>
 
 <!-- ================= 04 处理流程 ================= -->
@@ -218,11 +218,11 @@ public RouteLocator customRouteLocator(RouteLocatorBuilder builder) {
       <p>算一笔账就清楚了。事件循环线程是<strong>全体连接共享</strong>的：8 核机器上 Netty 事件循环默认也就 8 根线程（与 CPU 核数相关），但瞬时并发可能是几千个连接。你在 pre 过滤器里同步等 50 毫秒，这根线程上的<strong>所有其他请求陪停 50 毫秒</strong>；假设鉴权接口平均 50 毫秒，一根线程每秒最多处理 20 个请求，8 根线程的吞吐天花板就是每秒 160 次——而且这 160 次里还包括所有不需要鉴权的正常转发。更糟的是抖动：鉴权服务一旦慢到 2 秒，网关线程被成批按住 2 秒，入口吞吐瞬间归零，<strong>下游没事、网关先死</strong>，故障面反而被网关放大。对照 正确姿势：换成 WebClient 发起异步调用，发起后立刻归还线程，响应到达时再回到过滤器继续跑——同样的 8 根线程，等待期间能服务成千上万个其他请求。这正是"线程数与连接数解耦"的全部意义：响应式不是为快，是<strong>为等待期间不浪费线程</strong>。所以那条红线不是风格洁癖，是这类网关的生死线。</p>
     </div>
   </details>
-  <p class="note">本期 primary source：<a href="https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux/how-it-works.html" target="_blank" rel="noopener">Spring Cloud Gateway Reference · How it works（v5.0.3）</a>；延伸阅读：网关要对接的注册与配置中心，见本系列 <a href="0001-nacos-what-and-why.html">Nacos 系列五连讲（0001~0005 期）</a>。</p>
+  <p class="note">本期 primary source：<a href="https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux/how-it-works.html" target="_blank" rel="noopener">Spring Cloud Gateway Reference · How it works（v5.0.3）</a>；延伸阅读：网关要对接的注册与配置中心，见 Nacos 官方文档。</p>
 </section>
 
 <nav class="lesson-nav">
-  <span class="prev"><a href="0057-scg-quickstart.html">← 上一期：5 分钟跑起来 Spring Cloud Gateway</a></span>
+  <span class="prev">← 上一期：5 分钟跑起来 Spring Cloud Gateway</span>
   <a class="next" href="0059-scg-in-action.html">下一期：把限流、鉴权装进网关（实战）→</a>
 </nav>
 

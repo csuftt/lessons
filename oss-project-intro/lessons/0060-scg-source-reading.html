@@ -10,7 +10,7 @@
 
 <header class="lesson-head">
   <span class="num">OSS PROJECT INTRO · 0060</span>
-  <span><a href="../index.html">课程目录</a> · <a href="0059-scg-in-action.html">上一期:0059</a> · Spring Cloud Gateway 系列第 5 期 / 共 5 期 · <a href="https://spring.io/projects/spring-cloud-gateway" target="_blank" rel="noopener">spring.io ↗</a></span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0059 · Spring Cloud Gateway 系列第 5 期 / 共 5 期 · <a href="https://spring.io/projects/spring-cloud-gateway" target="_blank" rel="noopener">spring.io ↗</a></span>
 </header>
 
 <div class="hero">
@@ -136,7 +136,7 @@ protected List&lt;GatewayFilter&gt; getAllFilters(Route route) {
   <pre class="codeblock"><code>return responseFlux.then(chain.filter(exchange));
 // responseFlux：把请求发往下游、拿到响应头（pre 阶段的终点）
 // .then(...)  ：下游响应就绪后，才继续执行链上剩下的过滤器（post 阶段的起点）</code></pre>
-  <p>响应式链里没有"调用返回"这回事，所谓 post 逻辑，就是写在 <code>chain.filter(exchange).then(...)</code> 后面的那段 Mono——<strong>pre 和 post 是同一条链的两半，中间隔着一次真正的网络转发</strong>。过滤器想加工响应头，把代码放在 then 后面即可；想加工请求，放在 chain.filter 调用之前即可。这跟第 0006~0010 期读过的 Netty Pipeline 是同族思路：一条双向链，出站入站各走各的半程，但共享同一个上下文。</p>
+  <p>响应式链里没有"调用返回"这回事，所谓 post 逻辑，就是写在 <code>chain.filter(exchange).then(...)</code> 后面的那段 Mono——<strong>pre 和 post 是同一条链的两半，中间隔着一次真正的网络转发</strong>。过滤器想加工响应头，把代码放在 then 后面即可；想加工请求，放在 chain.filter 调用之前即可。这跟 Netty 的 Pipeline 是同族思路：一条双向链，出站入站各走各的半程，但共享同一个上下文。</p>
 </section>
 
 <!-- ================= 05 决策三 ================= -->
@@ -177,7 +177,7 @@ public static final String GATEWAY_PREDICATE_ROUTE_ATTR = qualify("gatewayPredic
       <li><strong>响应式红线意识：</strong>pre 与 post 靠 <code>then()</code> 衔接，链上任何一环写了阻塞调用（同步数据库、Thread.sleep），堵住的不是自己一个请求，而是整个事件循环的 Worker 线程——用响应式网关，全链路的依赖都得是非阻塞的，这是第 2 期"加了 starter-web 网关就失效"那条红线的深层原因。</li>
     </ul>
   </div>
-  <p>读码路线图收个尾：想继续深挖，就从 <code>handler/RoutePredicateHandlerMapping</code> 进，顺 <code>lookupRoute → convertToRoute → handle → DefaultGatewayFilterChain</code> 走一遍，再按兴趣分叉——限流看 <code>filter/ratelimit/</code>（<a href="0059-scg-in-action.html">第 0059 期实战</a>里配的 Redis 令牌桶，实现就是 <code>RedisRateLimiter</code>），动态路由看 <code>route/InMemoryRouteDefinitionRepository</code>，WebMVC 形态的差异看 <code>spring-cloud-gateway-server-webmvc</code> 模块——同一套路由模型在 Servlet 世界的对应物。</p>
+  <p>读码路线图收个尾：想继续深挖，就从 <code>handler/RoutePredicateHandlerMapping</code> 进，顺 <code>lookupRoute → convertToRoute → handle → DefaultGatewayFilterChain</code> 走一遍，再按兴趣分叉——限流看 <code>filter/ratelimit/</code>（第 4 期实战里配的 Redis 令牌桶，实现就是 <code>RedisRateLimiter</code>），动态路由看 <code>route/InMemoryRouteDefinitionRepository</code>，WebMVC 形态的差异看 <code>spring-cloud-gateway-server-webmvc</code> 模块——同一套路由模型在 Servlet 世界的对应物。</p>
 </section>
 
 <!-- ================= 08 quiz ================= -->
@@ -259,7 +259,7 @@ public static final String GATEWAY_PREDICATE_ROUTE_ATTR = qualify("gatewayPredic
 </section>
 
 <nav class="lesson-nav">
-  <span class="prev"><a href="0059-scg-in-action.html">← 上一期：统一入口三板斧实战</a></span>
+  <span class="prev">← 上一期：统一入口三板斧实战</span>
 </nav>
 
 <script>

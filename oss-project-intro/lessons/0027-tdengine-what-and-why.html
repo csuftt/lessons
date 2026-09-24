@@ -16,7 +16,7 @@
 <div class="hero">
   <p class="issue">OSS PROJECT INTRO · TDENGINE 系列第 1 期：认识项目</p>
   <h1>TDengine 是什么：为时序数据而生的数据库</h1>
-  <p class="subtitle">开源项目入门系列的每个新项目，都从三个问题开始：它解决什么痛点、凭什么活下来、什么场景该选它。上两个系列我们聊完了 etcd 和 Kubernetes，今天开启新项目 TDengine——官方自我定义是"高性能、集群开源、云原生的时序数据库"，最特别的地方不在"又一个数据库"，而在数据模型：<strong>一个数据采集点一张表，超级表管一类设备</strong>。这条建模思路贯穿全系列，也是它敢把缓存、流式计算、数据订阅内建进内核的底气。公司主栈也在用它，本期带你把它认清楚。</p>
+  <p class="subtitle">开源项目入门系列的每个新项目，都从三个问题开始：它解决什么痛点、凭什么活下来、什么场景该选它。今天开启新项目 TDengine——官方自我定义是"高性能、集群开源、云原生的时序数据库"，最特别的地方不在"又一个数据库"，而在数据模型：<strong>一个数据采集点一张表，超级表管一类设备</strong>。这条建模思路贯穿全系列，也是它敢把缓存、流式计算、数据订阅内建进内核的底气。公司主栈也在用它，本期带你把它认清楚。</p>
   <div class="lesson-meta">
     <span class="tag cat">🧩 时序数据库 · C · AGPL-3.0</span>
     <span class="tag">📦 基于 3.4.1.6（GitHub Latest）</span>
@@ -163,12 +163,12 @@ CREATE TABLE d1001 USING meters TAGS ('北京.厂区A', 2);</code></pre>
       <li><strong>深度依赖 PG 生态：</strong>已有大量 PostgreSQL 工具链与 DBA 积累的团队，TimescaleDB 的迁移成本低得多。</li>
     </ul>
   </div>
-  <p>一条判断捷径：<strong>先看数据形状——本质是"设备按时间追加、读时按窗口聚合"的量测值，TDengine 进候选；"既要写又要改还要连表事务"，留在通用数据库。</strong>建模方法的细节与写读性能调优，每日微课程线已有两期专题，本系列不重复展开：</p>
+  <p>一条判断捷径：<strong>先看数据形状——本质是"设备按时间追加、读时按窗口聚合"的量测值，TDengine 进候选；"既要写又要改还要连表事务"，留在通用数据库。</strong>建模方法的细节与写读性能调优，官方文档有对应专题，本系列不重复展开：</p>
   <div class="note">
-    <p><strong>延伸阅读（每日微课程线，建模与调优不重讲）：</strong></p>
+    <p><strong>延伸阅读（官方文档）：</strong></p>
     <ul>
-      <li><a href="../../daily-tech-course/lessons/0015-tdengine-supertable.html">第 0015 期 · TDengine 超级表与子表数据建模</a>——建模方法与四条架构权衡，从使用视角讲；</li>
-      <li><a href="../../daily-tech-course/lessons/0022-tdengine-write-read-performance.html">第 0022 期 · TDengine 时序数据写入与查询性能优化</a>——建库参数、攒批写入与查询改造。</li>
+      <li><a href="https://docs.taosdata.com/" target="_blank" rel="noopener">官方文档 · TDengine 超级表与子表数据建模</a>——建模方法与四条架构权衡，从使用视角讲；</li>
+      <li><a href="https://docs.taosdata.com/" target="_blank" rel="noopener">官方文档 · TDengine 时序数据写入与查询性能优化</a>——建库参数、攒批写入与查询改造。</li>
     </ul>
   </div>
 </section>

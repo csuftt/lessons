@@ -34,7 +34,7 @@
     <li><strong>Topic 一多就开始抖：</strong>存算一体架构里每个分区都是“长在具体节点上的有状态实体”，Topic 数量涨到几十万级别，集群要维护的分区元数据、副本同步关系跟着线性膨胀，元数据服务与重均衡的压力都会成为瓶颈。而在云原生场景，“一个微服务一个 Topic、一个 IoT 设备一个 Topic”的百万级需求是真实存在的。</li>
     <li><strong>多租户靠约定不靠架构：</strong>几十个业务团队共用一个集群，隔离只能靠 Topic 命名规范、配额和运维纪律来“约”，一个团队的流量打爆集群，邻队跟着遭殃。想要硬隔离，就得再建一套集群，运维成本翻倍。</li>
   </ul>
-  <p>这三笔账指向同一个病根：<strong>计算和存储互相锁死，谁也动不了谁。</strong>Pulsar 的答案就一句话——把这两层拆开。原理视角的深挖不在本期展开，每日微课程线有一期专门对比这两种架构（见第 05 节延伸阅读），我们从“上手与选型”的角度往下走。</p>
+  <p>这三笔账指向同一个病根：<strong>计算和存储互相锁死，谁也动不了谁。</strong>Pulsar 的答案就一句话——把这两层拆开。原理视角的深挖不在本期展开，两种架构的原理级对比见第 05 节延伸阅读，我们从“上手与选型”的角度往下走。</p>
 </section>
 
 <!-- ================= 02 Pulsar 是什么 ================= -->
@@ -135,7 +135,7 @@
       <li><strong>分层存储冷热分离：</strong>老消息可以从 BookKeeper 卸到 S3/MinIO 这类对象存储上，热数据留本地——公司主栈里正好有 MinIO，第 5 期源码导读会展开这一段。</li>
     </ul>
   </div>
-  <p>订阅模式（Exclusive、Shared、Failover、Key_Shared 四种）、分层存储的读写细节这些“原理深水区”，每日微课程线已经讲过，本系列不换皮重讲：本期把注意力放在<strong>“这套架构对你上手和选型意味着什么”</strong>。</p>
+  <p>订阅模式（Exclusive、Shared、Failover、Key_Shared 四种）、分层存储的读写细节这些“原理深水区”，属于原理深水区，本系列不换皮重讲：本期把注意力放在<strong>“这套架构对你上手和选型意味着什么”</strong>。</p>
 </section>
 
 <!-- ================= 05 什么场景选它 ================= -->
@@ -158,12 +158,12 @@
   </div>
   <p>一条判断捷径：<strong>Topic 是海量的、租户是多个的、流量是弹性的、机房是跨地域的——四条占其二，就该认真评估 Pulsar；全不占，Kafka 或更轻的方案反而是对的。</strong>想看两种架构逐项对比与容量速算的原理分析，见下方延伸阅读第 1 条。</p>
   <div class="note">
-    <p><strong>延伸阅读（原理视角，每日微课程线）：</strong></p>
+    <p><strong>延伸阅读（原理视角，官方文档）：</strong></p>
     <ul>
-      <li><a href="../../daily-tech-course/lessons/0012-pulsar-vs-kafka.html">第 0012 期 · Pulsar 存算分离架构与 Kafka 对比</a>——两种架构的原理深挖与选型对照；</li>
-      <li><a href="../../daily-tech-course/lessons/0013-pulsar-subscription-models.html">第 0013 期 · Pulsar 订阅模型：四种订阅、游标与 Key_Shared 保序</a>——订阅模式原理；</li>
-      <li><a href="../../daily-tech-course/lessons/0014-pulsar-prod-cons-tuning.html">第 0014 期 · Pulsar 生产者/消费者调优</a>——吞吐与延迟调优参数；</li>
-      <li><a href="../../daily-tech-course/lessons/0021-pulsar-message-reliability.html">第 0021 期 · Pulsar 消息可靠性全链路</a>——一条都不丢的正确姿势。</li>
+      <li><a href="https://pulsar.apache.org/docs/next/concepts-architecture-overview/" target="_blank" rel="noopener">官方文档 · Pulsar 存算分离架构与 Kafka 对比</a>——两种架构的原理深挖与选型对照；</li>
+      <li><a href="https://pulsar.apache.org/docs/next/concepts-messaging/" target="_blank" rel="noopener">官方文档 · Pulsar 订阅模型：四种订阅、游标与 Key_Shared 保序</a>——订阅模式原理；</li>
+      <li>Pulsar 生产者/消费者调优——吞吐与延迟调优参数；</li>
+      <li><a href="https://pulsar.apache.org/docs/next/concepts-messaging/" target="_blank" rel="noopener">官方文档 · Pulsar 消息可靠性全链路</a>——一条都不丢的正确姿势。</li>
     </ul>
   </div>
 </section>

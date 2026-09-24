@@ -16,7 +16,7 @@
 <div class="hero">
   <p class="issue">OSS PROJECT INTRO · ETCD 系列第 1 期：认识项目</p>
   <h1>etcd 是什么：K8s 的元数据心脏</h1>
-  <p class="subtitle">开源项目入门系列的每个新主题，都从三个问题开始：它解决什么痛点、凭什么活下来、什么场景该选它。etcd 官网的自我定义是"为分布式系统最关键数据而生的可靠键值存储"，它最大的标签是<strong>强一致</strong>：一次写入要集群多数节点点头才生效，任何时刻任何客户端读到的都是同一份最新状态。上一个项目我们聊完了 Pulsar，今天开启新项目 etcd——它是 Kubernetes 官方文档点名的"全部集群数据的后备存储"，本期带走一个能贯穿全系列的心智模型：<strong>API Server 是门面，etcd 是心脏，集群状态的唯一可信源只有一份</strong>。</p>
+  <p class="subtitle">开源项目入门系列的每个新主题，都从三个问题开始：它解决什么痛点、凭什么活下来、什么场景该选它。etcd 官网的自我定义是"为分布式系统最关键数据而生的可靠键值存储"，它最大的标签是<strong>强一致</strong>：一次写入要集群多数节点点头才生效，任何时刻任何客户端读到的都是同一份最新状态。今天开启新项目 etcd——它是 Kubernetes 官方文档点名的"全部集群数据的后备存储"，本期带走一个能贯穿全系列的心智模型：<strong>API Server 是门面，etcd 是心脏，集群状态的唯一可信源只有一份</strong>。</p>
   <div class="lesson-meta">
     <span class="tag cat">🧩 分布式键值存储 · Go · Apache-2.0</span>
     <span class="tag">📦 基于 etcd 3.7.x（主线 3.7.1）</span>
@@ -164,9 +164,9 @@
   </div>
   <p>一条判断捷径：<strong>需要"强一致 + watch + lease"三件套、或要与 K8s 生态对齐——占一条就该认真评估 etcd；要的是大容量存储或纯服务发现，另有更合适的工具。</strong></p>
   <div class="note">
-    <p><strong>延伸阅读（每日微课程线，相关场景）：</strong></p>
+    <p><strong>延伸阅读（官方文档）：</strong></p>
     <ul>
-      <li><a href="../../daily-tech-course/lessons/0009-redis-distributed-lock.html">第 0009 期 · Redis 分布式锁</a>——文中对比过 ZooKeeper/etcd 临时节点方案在正确性敏感场景的位置，可对照阅读。</li>
+      <li><a href="https://redis.io/docs/latest/develop/clients/patterns/distributed-locks/" target="_blank" rel="noopener">官方文档 · Redis 分布式锁</a>——文中对比过 ZooKeeper/etcd 临时节点方案在正确性敏感场景的位置，可对照阅读。</li>
     </ul>
   </div>
 </section>

@@ -11,7 +11,7 @@
 
 <header class="lesson-head">
   <span class="num">OSS PROJECT INTRO · 0030</span>
-  <span><a href="../index.html">课程目录</a> · <a href="0029-tdengine-core-concepts-architecture.html">上一期:0029</a> · TDengine 系列第 4 期 / 共 5 期 · <a href="https://www.taosdata.com" target="_blank" rel="noopener">taosdata.com ↗</a></span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0029 · TDengine 系列第 4 期 / 共 5 期 · <a href="https://www.taosdata.com" target="_blank" rel="noopener">taosdata.com ↗</a></span>
 </header>
 
 <div class="hero">
@@ -86,7 +86,7 @@
       <li>④ <strong>窗口聚合:</strong>INTERVAL 按分钟聚合平均电流,趋势线数据一句话出来;最后用 schemaless 做一次"协议直连"对照。</li>
     </ul>
   </div>
-  <p class="note">怎么设计标签、怎么划分超级表这类<strong>建模方法论</strong>,每日微课程线<a href="../../daily-tech-course/lessons/0015-tdengine-supertable.html">第 0015 期 · TDengine 超级表与子表数据建模</a>已讲透;写入与查询的<strong>性能调优</strong>见 <a href="../../daily-tech-course/lessons/0022-tdengine-write-read-performance.html">第 0022 期 · TDengine 写读性能实践</a>。本期只讲"用 Java 把链路跑通",不换皮重讲。</p>
+  <p class="note">怎么设计标签、怎么划分超级表这类<strong>建模方法论</strong>,<a href="https://docs.taosdata.com/" target="_blank" rel="noopener">官方文档 · TDengine 数据建模</a>已讲透;写入与查询的<strong>性能调优</strong>见 <a href="https://docs.taosdata.com/" target="_blank" rel="noopener">官方文档 · TDengine 写读性能实践</a>。本期只讲"用 Java 把链路跑通",不换皮重讲。</p>
 </section>
 
 <!-- ================= 02 依赖与版本 ================= -->
@@ -163,7 +163,7 @@ System.out.println("insert " + rows + " rows.");   // 官方 JDBCDemo 同款回�
   </table>
   </div>
   <div class="card card-tip">
-    <p><strong>为什么"多 values 拼接"赢在交互次数:</strong>对 TDengine 这种写入极快的服务端,Java 端一次 <code>executeUpdate</code> 的耗时大头在网络往返和语句解析上。100 条心跳逐条发 = 100 次往返;拼成一条 = 1 次。参数绑定的 <code>addBatch</code> 在 taos-jdbcdriver 3.x 的 WebSocket 连接下则走预编译语句复用(3.9.1 起还支持 stmtCacheSize 缓存),同样是"少交互"思路——两条路殊途同归,想深挖见 daily 线 0022 期。</p>
+    <p><strong>为什么"多 values 拼接"赢在交互次数:</strong>对 TDengine 这种写入极快的服务端,Java 端一次 <code>executeUpdate</code> 的耗时大头在网络往返和语句解析上。100 条心跳逐条发 = 100 次往返;拼成一条 = 1 次。参数绑定的 <code>addBatch</code> 在 taos-jdbcdriver 3.x 的 WebSocket 连接下则走预编译语句复用(3.9.1 起还支持 stmtCacheSize 缓存),同样是"少交互"思路——两条路殊途同归,想深挖见官方文档性能一章。</p>
   </div>
 </section>
 
@@ -189,7 +189,7 @@ taos&gt; SELECT _wstart, AVG(current) FROM d1001 INTERVAL(1m);
  2026-09-19 10:29:00.000     |             11.73333 |
  2026-09-19 10:30:00.000     |             13.40000 |
 Query OK, 2 row(s) in set (0.008816s)</code></pre>
-  <p>目标③④达成。注意这两条查询的执行形态正好是第 3 期架构图的"查询回路":mnode 给路由,各 vnode 并行扫,taosc 做最后一级聚合——设备越多,这条回路摊得越开,大屏轮询越敢写。最近值查询还有一类进阶用法(结合缓存 last_row 与流计算持续输出),属于性能与建模话题,daily 线 0022 期已覆盖。</p>
+  <p>目标③④达成。注意这两条查询的执行形态正好是第 3 期架构图的"查询回路":mnode 给路由,各 vnode 并行扫,taosc 做最后一级聚合——设备越多,这条回路摊得越开,大屏轮询越敢写。最近值查询还有一类进阶用法(结合缓存 last_row 与流计算持续输出),属于性能与建模话题,官方文档性能一章已覆盖。</p>
 </section>
 
 <!-- ================= 06 schemaless 对照 ================= -->

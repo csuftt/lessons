@@ -11,7 +11,7 @@
 
 <header class="lesson-head">
   <span class="num">OSS PROJECT INTRO · 0041</span>
-  <span><a href="../index.html">课程目录</a> · <a href="0040-es-in-action.html">上一期:0040</a> · Elasticsearch 系列第 5 期 / 共 5 期 · <a href="https://www.elastic.co/docs" target="_blank" rel="noopener">elastic.co/docs ↗</a></span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0040 · Elasticsearch 系列第 5 期 / 共 5 期 · <a href="https://www.elastic.co/docs" target="_blank" rel="noopener">elastic.co/docs ↗</a></span>
 </header>
 
 <div class="hero">
@@ -209,7 +209,7 @@ if (mode == Mode.CANDIDATE) {
 
   <p class="note">Coordinator.java @ tag v9.5.4 字段区实拍：preVoteCollector、electionSchedulerFactory、publicationHandler、leaderChecker、followersChecker——一张依赖清单就是一张职责分工表（来源：github.com/elastic/elasticsearch，2026-09-19 实拍）</p>
 
-  <p>这个决策的取舍在哪？外包的代价是<strong>部署面翻倍</strong>：多一套要部署、升级、监控的组件，故障排查跨系统，小集群起步门槛抬高。内置的代价是<strong>协调代码长在自己家</strong>，写对它责任自负——7.0 之前老一代选主的脑裂教训就是学费，Zen2 用预投票和投票配置把它修成了同类里的上乘之作。与 etcd 系列（第 20 期）呼应一句：同样是多数派加任期加日志复制的思路，区别只在 etcd 把 Raft 做成产品，ES 把它做成地基。</p>
+  <p>这个决策的取舍在哪？外包的代价是<strong>部署面翻倍</strong>：多一套要部署、升级、监控的组件，故障排查跨系统，小集群起步门槛抬高。内置的代价是<strong>协调代码长在自己家</strong>，写对它责任自负——7.0 之前老一代选主的脑裂教训就是学费，Zen2 用预投票和投票配置把它修成了同类里的上乘之作。顺带一句：同样是多数派加任期加日志复制的思路，区别只在 etcd 把 Raft 做成产品，ES 把它做成地基。</p>
 </section>
 
 <!-- ================= 07 决策三：refresh 与 merge 的调度面 ================= -->
@@ -277,11 +277,11 @@ iwc.setMergeScheduler(mergeScheduler.getMergeScheduler());  /* 合并调度器�
 <section>
   <h2><span class="sec-num">11</span>系列收官</h2>
   <p><strong>Elasticsearch 的入门系列就聊到这里</strong>：五期一条线——认识它、跑起来、看懂架构、端到端实战、读进源码。留个作业：切到 tag v9.5.4，顺着第 04 节的路线图，亲手把一条写请求从 REST 层走到 translog。最新版本和完整文档认准官方文档 <a href="https://www.elastic.co/" target="_blank" rel="noopener">elastic.co</a>。课程目录里还有其他开源项目的入门系列，感兴趣可以按需点开。</p>
-  <p><strong>Primary source：</strong><a href="https://www.elastic.co/docs/manage-data/data-store/near-real-time-search" target="_blank" rel="noopener">Elastic 官方文档 · Near real-time search</a>——近实时与 refresh 的官方口径都在这页；源码入口：<a href="https://github.com/elastic/elasticsearch/tree/v9.5.4" target="_blank" rel="noopener">elasticsearch tag v9.5.4 仓库树</a>（本期引用类：<code>index/shard/IndexShard</code> · <code>index/engine/InternalEngine</code> · <code>index/translog/Translog</code> · <code>cluster/coordination/Coordinator</code>，路径核对自 tag v9.5.4）。前情回看：<a href="0039-es-core-concepts-architecture.html">第 3 期 · 核心概念与架构</a> · <a href="0040-es-in-action.html">第 4 期 · 端到端实战</a>。</p>
+  <p><strong>Primary source：</strong><a href="https://www.elastic.co/docs/manage-data/data-store/near-real-time-search" target="_blank" rel="noopener">Elastic 官方文档 · Near real-time search</a>——近实时与 refresh 的官方口径都在这页；源码入口：<a href="https://github.com/elastic/elasticsearch/tree/v9.5.4" target="_blank" rel="noopener">elasticsearch tag v9.5.4 仓库树</a>（本期引用类：<code>index/shard/IndexShard</code> · <code>index/engine/InternalEngine</code> · <code>index/translog/Translog</code> · <code>cluster/coordination/Coordinator</code>，路径核对自 tag v9.5.4）。前情回看：第 3 期 · 核心概念与架构 · 第 4 期 · 端到端实战。</p>
 </section>
 
 <nav class="lesson-nav">
-  <span class="prev"><a href="0040-es-in-action.html">← 上一期：Elasticsearch 实战：端到端小场景</a></span>
+  <span class="prev">← 上一期：Elasticsearch 实战：端到端小场景</span>
   <a class="next" href="../index.html">课程目录 · Elasticsearch 系列完 →</a>
 </nav>
 

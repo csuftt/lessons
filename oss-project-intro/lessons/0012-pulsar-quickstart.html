@@ -10,7 +10,7 @@
 
 <header class="lesson-head">
   <span class="num">OSS PROJECT INTRO · 0012</span>
-  <span><a href="../index.html">课程目录</a> · <a href="0011-pulsar-what-and-why.html">上一期：0011</a> · Pulsar 系列第 2 期 / 共 5 期 · <a href="https://pulsar.apache.org" target="_blank" rel="noopener">pulsar.apache.org ↗</a></span>
+  <span><a href="../index.html">课程目录</a> · <a href="https://pulsar.apache.org/docs/next/concepts-architecture-overview/" target="_blank" rel="noopener">官方文档 · 上一期：0011</a> · Pulsar 系列第 2 期 / 共 5 期 · <a href="https://pulsar.apache.org" target="_blank" rel="noopener">pulsar.apache.org ↗</a></span>
 </header>
 
 <div class="hero">
@@ -105,7 +105,7 @@ key:[null], properties:[], content:Hello Pulsar!</code></pre>
   <p>看到这两行，端到端就通了：消息经 Broker 写进 BookKeeper 落库，再被你的订阅取走。<code>consume</code> 的参数拆开看：<code>-s</code> 是订阅名（同一个名字记住上次读到的位置，就是上期说的"游标"）；<code>-p Earliest</code> 表示从该订阅最早的消息读起，避免"明明发了却收不到"；<code>-n 0</code> 表示不限条数、一直挂着等新消息。</p>
   <p>顺手玩一把批量发送（官方示例，逗号分隔多条消息一次发出）：</p>
   <pre><code>bin/pulsar-client produce my-topic --messages "$(seq -s, -f 'Message NO.%g' 1 10)"</code></pre>
-  <p class="note">订阅名与游标背后的四种订阅模式、消息怎么确认不丢，是概念与原理深水区——延伸阅读：<a href="../../daily-tech-course/lessons/0013-pulsar-subscription-models.html">每日微课程线《Pulsar 订阅模型：四种订阅、游标与 Key_Shared 保序》</a>、<a href="../../daily-tech-course/lessons/0021-pulsar-message-reliability.html">《Pulsar 消息可靠性全链路》</a>。</p>
+  <p class="note">订阅名与游标背后的四种订阅模式、消息怎么确认不丢，是概念与原理深水区——延伸阅读：<a href="https://pulsar.apache.org/docs/next/concepts-messaging/" target="_blank" rel="noopener">官方文档 · 《Pulsar 订阅模型：四种订阅、游标与 Key_Shared 保序》</a>、<a href="https://pulsar.apache.org/docs/next/concepts-messaging/" target="_blank" rel="noopener">官方文档 · 《Pulsar 消息可靠性全链路》</a>。</p>
 </section>
 
 <!-- ================= 06 三板斧 ================= -->

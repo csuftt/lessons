@@ -10,13 +10,13 @@
 
 <header class="lesson-head">
   <span class="num">OSS PROJECT INTRO · 0042</span>
-  <span><a href="../index.html">课程目录</a> · <a href="0041-es-source-reading.html">上一期:0041</a> · Prometheus 系列第 1 期 / 共 5 期 · <a href="0043-prom-quickstart.html">下一期:0043</a> · <a href="https://prometheus.io" target="_blank" rel="noopener">prometheus.io ↗</a></span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0041 · Prometheus 系列第 1 期 / 共 5 期 · 下一期:0043 · <a href="https://prometheus.io" target="_blank" rel="noopener">prometheus.io ↗</a></span>
 </header>
 
 <div class="hero">
   <p class="issue">OSS PROJECT INTRO · PROMETHEUS 系列第 1 期：认识项目</p>
   <h1>Prometheus 是什么：指标监控与告警工具集</h1>
-  <p class="subtitle">开源项目入门系列的每个新项目，都从三个问题开始：它解决什么痛点、凭什么活下来、什么场景该选它。上一个项目我们聊完了 Elasticsearch，今天开启新项目 Prometheus——你在公司的监控大屏里、Kubernetes 集群的告警链路里、Grafana 的数据源列表里见过它的名字。官方定义一句话：<strong>an open-source systems monitoring and alerting toolkit</strong>，一套开源的系统监控与告警工具集，把"什么时候坏、坏了多久、影响谁"变成一次曲线查询。本期不装任何软件，素材全部来自官方文档与官方仓库，每张图都标出处；你带走四样东西：故障三连问的痛点、指标时序"采集-存储-查询一体机"这个心智模型、拉取式采集反直觉却是对的原理，外加一份五方选型对比。</p>
+  <p class="subtitle">开源项目入门系列的每个新项目，都从三个问题开始：它解决什么痛点、凭什么活下来、什么场景该选它。今天开启新项目 Prometheus——你在公司的监控大屏里、Kubernetes 集群的告警链路里、Grafana 的数据源列表里见过它的名字。官方定义一句话：<strong>an open-source systems monitoring and alerting toolkit</strong>，一套开源的系统监控与告警工具集，把"什么时候坏、坏了多久、影响谁"变成一次曲线查询。本期不装任何软件，素材全部来自官方文档与官方仓库，每张图都标出处；你带走四样东西：故障三连问的痛点、指标时序"采集-存储-查询一体机"这个心智模型、拉取式采集反直觉却是对的原理，外加一份五方选型对比。</p>
   <div class="lesson-meta">
     <span class="tag cat">📈 监控与告警 · Go · Apache-2.0（CNCF 毕业项目）</span>
     <span class="tag">📦 基于 3.14.0（GitHub Latest）</span>
@@ -186,11 +186,11 @@ http_requests_total{method="post",code="400"}    3</code></pre>
       <li><strong>海量长周期历史数据的离线分析：</strong>本地时序库留存有限，长期归档要配 Thanos 类方案或专用时序库。</li>
     </ul>
   </div>
-  <p>一条判断捷径：<strong>问"现在/过去一段时间系统表现如何"的数值型问题，找 Prometheus；问"某次请求经历了什么"的明细型问题，去日志与链路系统。</strong>指标驱动自动化（比如按负载扩缩容）与它也天然互补，每日微课程线已有一期从消费端视角展开，见文末延伸阅读。</p>
+  <p>一条判断捷径：<strong>问"现在/过去一段时间系统表现如何"的数值型问题，找 Prometheus；问"某次请求经历了什么"的明细型问题，去日志与链路系统。</strong>指标驱动自动化（比如按负载扩缩容）与它也天然互补，官方文档有从消费端视角的说明，见文末延伸阅读。</p>
   <div class="note">
-    <p><strong>延伸阅读（每日微课程线）：</strong></p>
+    <p><strong>延伸阅读（官方文档）：</strong></p>
     <ul>
-      <li><a href="../../daily-tech-course/lessons/0016-k8s-hpa.html">第 0016 期 · Kubernetes HPA 弹性伸缩</a>——指标数据的下游消费者：HPA 拿什么指标决定扩缩容。</li>
+      <li><a href="https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/" target="_blank" rel="noopener">官方文档 · Kubernetes HPA 弹性伸缩</a>——指标数据的下游消费者：HPA 拿什么指标决定扩缩容。</li>
     </ul>
   </div>
 </section>
@@ -274,7 +274,7 @@ http_requests_total{method="post",code="400"}    3</code></pre>
 </section>
 
 <nav class="lesson-nav">
-  <span class="prev"><a href="0041-es-source-reading.html">← 上一期：Elasticsearch 架构与源码导读</a></span>
+  <span class="prev">← 上一期：Elasticsearch 架构与源码导读</span>
   <a class="next" href="0043-prom-quickstart.html">下一期：5 分钟跑起来 Prometheus →</a>
 </nav>
 

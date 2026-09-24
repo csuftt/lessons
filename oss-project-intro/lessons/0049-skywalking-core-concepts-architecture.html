@@ -10,7 +10,7 @@
 
 <header class="lesson-head">
   <span class="num">OSS PROJECT INTRO · 0049</span>
-  <span><a href="../index.html">课程目录</a> · <a href="0048-skywalking-quickstart.html">上一期:0048</a> · SkyWalking 系列第 3 期 / 共 5 期 · <a href="0050-skywalking-in-action.html">下一期:0050</a> · <a href="https://skywalking.apache.org" target="_blank" rel="noopener">skywalking.apache.org ↗</a></span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0048 · SkyWalking 系列第 3 期 / 共 5 期 · 下一期:0050 · <a href="https://skywalking.apache.org" target="_blank" rel="noopener">skywalking.apache.org ↗</a></span>
 </header>
 
 <div class="hero">
@@ -91,7 +91,7 @@ service_sla = from(Service.*).percent(status == true);    // 成功率：成功�
 service_cpm = from(Service.*).cpm();                      // 每分钟调用数：计数</code></pre>
   <p>上期服务面板上的每张 KPI 卡片，都对应这里的一行。更关键的是文档里另一句：<strong>拓扑/依赖关系不需要写任何脚本，由 OAP 内核自动从调用明细构建</strong>——Span 里天然带着"谁调了谁"，聚合引擎把 RPC 调用折算成服务间的输入/输出流量，边就算出来了。这就是"拓扑图是算出来的"的完整含义。</p>
   <div class="callout">
-    <p><strong>和 Prometheus 的分工一句话说清</strong>：Prometheus 是 Pull 模型，上门<strong>抓原始样本</strong>，先存后算，查询时现场聚合（详见 <a href="0044-prom-core-concepts-architecture.html">Prometheus 系列第 3 期</a>）；SkyWalking 是 Push 模型，agent <strong>推调用明细</strong>，后端收到即流式聚合。一个存样本后算账，一个收明细即算账——所以 SkyWalking 同一份明细既能看逐笔瀑布，又有聚合面板，还能互相跳转；而纯指标系统里，调用关系根本不在样本里。</p>
+    <p><strong>和 Prometheus 的分工一句话说清</strong>：Prometheus 是 Pull 模型，上门<strong>抓原始样本</strong>，先存后算，查询时现场聚合（详见 <a href="https://prometheus.io/docs/introduction/overview/" target="_blank" rel="noopener">官方文档 · Prometheus 系列第 3 期</a>）；SkyWalking 是 Push 模型，agent <strong>推调用明细</strong>，后端收到即流式聚合。一个存样本后算账，一个收明细即算账——所以 SkyWalking 同一份明细既能看逐笔瀑布，又有聚合面板，还能互相跳转；而纯指标系统里，调用关系根本不在样本里。</p>
   </div>
 </section>
 
@@ -274,7 +274,7 @@ webhook:                                         # 触发后 HTTP POST JSON 通�
 </section>
 
 <nav class="lesson-nav">
-  <span class="prev"><a href="0048-skywalking-quickstart.html">← 上一期：5 分钟跑起来</a></span>
+  <span class="prev">← 上一期：5 分钟跑起来</span>
   <a class="next" href="0050-skywalking-in-action.html">下一期：实战场景 →</a>
 </nav>
 

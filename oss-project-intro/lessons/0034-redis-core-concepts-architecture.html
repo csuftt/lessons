@@ -10,7 +10,7 @@
 
 <header class="lesson-head">
   <span class="num">OSS PROJECT INTRO · 0034</span>
-  <span><a href="../index.html">课程目录</a> · <a href="0033-redis-quickstart.html">上一期:0033</a> · Redis 系列第 3 期 / 共 5 期 · <a href="0035-redis-in-action.html">下一期:0035</a> · <a href="https://redis.io" target="_blank" rel="noopener">redis.io ↗</a></span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0033 · Redis 系列第 3 期 / 共 5 期 · 下一期:0035 · <a href="https://redis.io" target="_blank" rel="noopener">redis.io ↗</a></span>
 </header>
 
 <div class="hero">
@@ -115,7 +115,7 @@
     </tbody>
   </table>
   </div>
-  <p class="note">这批名字就是第 5 期源码导读的主演名单：SDS（简单动态字符串，embstr/raw 的底层）、listpack、quicklist、intset、skiplist 都在 src/ 下有同名文件。数据结构怎么选型、编码何时切换的原理深入见：<a href="../../daily-tech-course/lessons/0005-redis-data-structures.html">daily 线第 0005 期《Redis 数据结构与选型》</a>，本线不换皮重讲。</p>
+  <p class="note">这批名字就是第 5 期源码导读的主演名单：SDS（简单动态字符串，embstr/raw 的底层）、listpack、quicklist、intset、skiplist 都在 src/ 下有同名文件。数据结构怎么选型、编码何时切换的原理深入见：<a href="https://redis.io/docs/latest/develop/data-types/" target="_blank" rel="noopener">官方文档 · 《Redis 数据结构与选型》</a>，本线不换皮重讲。</p>
 </section>
 
 <!-- ================= 04 键的生命周期 ================= -->
@@ -139,7 +139,7 @@
     </tbody>
   </table>
   </div>
-  <p>两句话记要点：LRU/LFU 都是<strong>近似算法</strong>——不维护全局链表，驱逐时随机抽 <code>maxmemory-samples</code>（默认 5）个候选，省内存省到极致；volatile 族在没有任何键带 TTL 时<strong>退化为 noeviction</strong>（触顶直接报错，宁可拒绝写入也不丢数据）。策略怎么选、缓存命中率怎么算：原理深入见 <a href="../../daily-tech-course/lessons/0011-redis-memory-management.html">daily 线第 0011 期《Redis 内存管理》</a>。</p>
+  <p>两句话记要点：LRU/LFU 都是<strong>近似算法</strong>——不维护全局链表，驱逐时随机抽 <code>maxmemory-samples</code>（默认 5）个候选，省内存省到极致；volatile 族在没有任何键带 TTL 时<strong>退化为 noeviction</strong>（触顶直接报错，宁可拒绝写入也不丢数据）。策略怎么选、缓存命中率怎么算：原理见官方文档内存管理一章。</p>
 </section>
 
 <!-- ================= 05 持久化两制式 ================= -->
@@ -151,7 +151,7 @@
     <li><strong>AOF（Append Only File）：</strong>每条写命令执行后追加进日志，重启时回放重建数据。落盘节奏由 <code>appendfsync</code> 决定：always（每条）、everysec（每秒，默认，最多丢一秒）、no（交给操作系统）。日志越写越大，Redis 会在后台<strong>自动重写</strong>——用重建当前数据集所需的最小命令集生成新日志。7.0 起采用多文件形态：base 文件（重写产物）+ incr 增量文件 + manifest 清单；</li>
     <li><strong>两者同开</strong>是官方推荐姿态：AOF 保证数据更完整（重启时优先用它重建），RDB 兜底做备份与快速恢复。8.10 又给了新工具：<code>BACKUP</code> 命令族，不停写产出可直接恢复的备份。</li>
   </ul>
-  <p class="note">概念先到"两制式 + 取舍"为止：RDB 换性能与紧凑、AOF 换数据安全窗口。参数细节、故障排障与容量规划见：<a href="../../daily-tech-course/lessons/0006-redis-persistence.html">daily 线第 0006 期《Redis 持久化机制：RDB vs AOF 的架构权衡》</a>。</p>
+  <p class="note">概念先到"两制式 + 取舍"为止：RDB 换性能与紧凑、AOF 换数据安全窗口。参数细节、故障排障与容量规划见：<a href="https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/" target="_blank" rel="noopener">官方文档 · 《Redis 持久化机制：RDB vs AOF 的架构权衡》</a>。</p>
 </section>
 
 <!-- ================= 06 复制三件套 ================= -->
@@ -163,7 +163,7 @@
     <li><strong>哨兵（Sentinel）：</strong>一组独立进程（至少三个，互为多数派）盯着主从，官方列的四件事：<strong>监控</strong>主从健康、<strong>通知</strong>运维或程序、主挂了挑一个副本<strong>自动故障转移</strong>升主、充当客户端的<strong>配置提供者</strong>（问它"当前主节点是谁"）。多个哨兵对故障达成一致才行动，避免单点误判；</li>
     <li><strong>集群（Cluster）：</strong>数据量大到一台装不下时用。数据按<strong>哈希槽</strong>分片：每个键属于 16384 个槽之一（CRC16 对键取模），槽分给多个主节点，每个主节点再挂副本。客户端访问错节点会被重定向到对的节点。</li>
   </ul>
-  <p class="note">三者选型与脑裂、数据丢失窗口的分析见：<a href="../../daily-tech-course/lessons/0007-redis-sentinel-vs-cluster.html">daily 线第 0007 期《Redis 集群方案：哨兵 vs Cluster》</a>；本期只立住"主从管复制、哨兵管高可用、集群管分片"这根总纲。</p>
+  <p class="note">三者选型与脑裂、数据丢失窗口的分析见：<a href="https://redis.io/docs/latest/operate/oss_and_stack/management/sentinel/" target="_blank" rel="noopener">官方文档 · 《Redis 集群方案：哨兵 vs Cluster》</a>；本期只立住"主从管复制、哨兵管高可用、集群管分片"这根总纲。</p>
 </section>
 
 <!-- ================= 07 单线程口径 ================= -->
@@ -174,7 +174,7 @@
     <li><strong>执行串行的收益：</strong>所有命令逐条跑，没有锁、没有竞态，INCR 天然原子——快的前提是操作全在内存（微秒级），串行成本可以忽略；</li>
     <li><strong>6.0 起 IO 可多线程：</strong>网络读写与协议解析从主线程拆了出去。官方 redis.conf 注释原话：开启 IO 线程后"不仅写回用线程，读取与协议解析也用线程"。8.0 把 IO 线程重新实现，吞吐进一步提升；</li>
     <li><strong>要多核怎么办：</strong>官方口径是<strong>一台机器起多个实例</strong>横向扩展，而不是指望单实例吃满多核；</li>
-    <li><strong>代价：</strong>一条慢命令（如超大集合的全量遍历）会阻塞后面所有命令——延迟排查先查慢查询，见 <a href="../../daily-tech-course/lessons/0010-redis-performance-tuning.html">daily 线第 0010 期《Redis 性能调优》</a>。</li>
+    <li><strong>代价：</strong>一条慢命令（如超大集合的全量遍历）会阻塞后面所有命令——延迟排查先查慢查询，见 <a href="https://redis.io/docs/latest/operate/oss_and_stack/management/optimization/" target="_blank" rel="noopener">官方文档 · 《Redis 性能调优》</a>。</li>
   </ul>
   <p>所以准确说法是：<strong>命令执行单线程，IO 读写与解析可多线程，后台任务（持久化、过期抽查、AOF 落盘）各有线程或子进程</strong>。"Redis 是单线程的"这句话省略的主语，正是理解它并发模型的关键。</p>
 </section>
@@ -361,13 +361,13 @@
       <li>单线程的准确口径：命令执行单线程串行，IO 读写与协议解析 6.0 起可多线程，8.0 重写加强，多核靠多实例。</li>
     </ul>
   </div>
-  <p><strong>延伸阅读（daily 线已讲过原理的主题，本期不重讲）：</strong><a href="../../daily-tech-course/lessons/0005-redis-data-structures.html">数据结构与选型</a> · <a href="../../daily-tech-course/lessons/0006-redis-persistence.html">持久化 RDB vs AOF 权衡</a> · <a href="../../daily-tech-course/lessons/0007-redis-sentinel-vs-cluster.html">哨兵 vs Cluster 选型</a> · <a href="../../daily-tech-course/lessons/0011-redis-memory-management.html">内存管理：淘汰与过期</a> · <a href="../../daily-tech-course/lessons/0010-redis-performance-tuning.html">性能调优与慢命令排查</a></p>
+  <p><strong>延伸阅读（官方文档对应章节，本期不重讲）：</strong><a href="https://redis.io/docs/latest/develop/data-types/" target="_blank" rel="noopener">官方文档 · 数据结构与选型</a> · <a href="https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/" target="_blank" rel="noopener">官方文档 · 持久化 RDB vs AOF 权衡</a> · <a href="https://redis.io/docs/latest/operate/oss_and_stack/management/sentinel/" target="_blank" rel="noopener">官方文档 · 哨兵 vs Cluster 选型</a> · 内存管理：淘汰与过期 · <a href="https://redis.io/docs/latest/operate/oss_and_stack/management/optimization/" target="_blank" rel="noopener">官方文档 · 性能调优与慢命令排查</a></p>
   <p><strong>下期预告：</strong>概念地图在你脑子里了。下一期我们把它用起来——端到端做一个真实小场景：从需求出发把缓存、计数与排行榜接进一个 Spring Cloud 服务，看看今天这些名词怎么变成实打实的配置与代码。</p>
   <p><strong>Primary source：</strong><a href="https://redis.io/docs/latest/develop/" target="_blank" rel="noopener">Redis 官方文档 · Develop 入口</a>——本期全部概念（数据类型、持久化、复制、哨兵、集群、淘汰）的官方定义都在这条文档树里，与 8.10 版本匹配的具体页面：<a href="https://redis.io/docs/latest/develop/data-types/" target="_blank" rel="noopener">data types</a> · <a href="https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/" target="_blank" rel="noopener">persistence</a> · <a href="https://redis.io/docs/latest/operate/oss_and_stack/management/replication/" target="_blank" rel="noopener">replication</a> · <a href="https://redis.io/docs/latest/operate/oss_and_stack/management/sentinel/" target="_blank" rel="noopener">sentinel</a> · <a href="https://redis.io/docs/latest/operate/oss_and_stack/management/scaling/" target="_blank" rel="noopener">cluster</a> · <a href="https://redis.io/docs/latest/develop/reference/eviction/" target="_blank" rel="noopener">key eviction</a>；源码模块名核对于 <a href="https://github.com/redis/redis/tree/8.10.2/src" target="_blank" rel="noopener">redis/redis tag 8.10.2 · src/</a>。</p>
 </section>
 
 <nav class="lesson-nav">
-  <span class="prev"><a href="0033-redis-quickstart.html">← 上一期：5 分钟跑起来 Redis</a></span>
+  <span class="prev">← 上一期：5 分钟跑起来 Redis</span>
   <a class="next" href="0035-redis-in-action.html">下一期：Redis 实战：接进真实场景 →</a>
 </nav>
 

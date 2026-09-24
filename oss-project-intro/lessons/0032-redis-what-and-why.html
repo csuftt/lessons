@@ -10,7 +10,7 @@
 
 <header class="lesson-head">
   <span class="num">OSS PROJECT INTRO · 0032</span>
-  <span><a href="../index.html">课程目录</a> · <a href="0031-tdengine-source-reading.html">上一期:0031</a> · Redis 系列第 1 期 / 共 5 期 · <a href="0033-redis-quickstart.html">下一期:0033</a> · <a href="https://redis.io" target="_blank" rel="noopener">redis.io ↗</a></span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0031 · Redis 系列第 1 期 / 共 5 期 · 下一期:0033 · <a href="https://redis.io" target="_blank" rel="noopener">redis.io ↗</a></span>
 </header>
 
 <div class="hero">
@@ -166,13 +166,13 @@ OK
       <li><strong>当主存储却没配持久化与容灾：</strong>内存库怕断电，持久化、复制与哨兵是"当存储用"的前置条件。</li>
     </ul>
   </div>
-  <p>一条判断捷径：<strong>数据是"热的、结构简单的、要求延迟低的"，Redis 进候选；数据是"冷的、关系复杂的、要求绝对不丢的"，留在磁盘数据库。</strong>数据结构用法、缓存三大问题、分布式锁与性能调优这些"怎么用好"的主题，每日微课程线已有七期专题，本系列不换皮重讲，选三篇最相关的作为延伸阅读：</p>
+  <p>一条判断捷径：<strong>数据是"热的、结构简单的、要求延迟低的"，Redis 进候选；数据是"冷的、关系复杂的、要求绝对不丢的"，留在磁盘数据库。</strong>数据结构用法、缓存三大问题、分布式锁与性能调优这些"怎么用好"的主题，这些主题官方文档均有专章，本系列不换皮重讲，选三篇最相关的作为延伸阅读：</p>
   <div class="note">
-    <p><strong>延伸阅读（每日微课程线，使用与调优不重讲）：</strong></p>
+    <p><strong>延伸阅读（官方文档）：</strong></p>
     <ul>
-      <li><a href="../../daily-tech-course/lessons/0005-redis-data-structures.html">第 0005 期 · Redis 数据结构与选型</a>——五大数据结构的命令级用法与场景匹配；</li>
-      <li><a href="../../daily-tech-course/lessons/0008-redis-cache-patterns.html">第 0008 期 · Redis 缓存设计模式</a>——穿透、击穿、雪崩的系统化治理；</li>
-      <li><a href="../../daily-tech-course/lessons/0010-redis-performance-tuning.html">第 0010 期 · Redis 性能调优</a>——慢查询、大 Key、热 Key 与全链路延迟排查。</li>
+      <li><a href="https://redis.io/docs/latest/develop/data-types/" target="_blank" rel="noopener">官方文档 · Redis 数据结构与选型</a>——五大数据结构的命令级用法与场景匹配；</li>
+      <li>Redis 缓存设计模式——穿透、击穿、雪崩的系统化治理；</li>
+      <li><a href="https://redis.io/docs/latest/operate/oss_and_stack/management/optimization/" target="_blank" rel="noopener">官方文档 · Redis 性能调优</a>——慢查询、大 Key、热 Key 与全链路延迟排查。</li>
     </ul>
   </div>
 </section>
@@ -256,7 +256,7 @@ OK
 </section>
 
 <nav class="lesson-nav">
-  <span class="prev"><a href="0031-tdengine-source-reading.html">← 上一期：TDengine 架构与源码导读</a></span>
+  <span class="prev">← 上一期：TDengine 架构与源码导读</span>
   <a class="next" href="0033-redis-quickstart.html">下一期：5 分钟跑起来 Redis →</a>
 </nav>
 
