@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · MySQL 行锁与 MVCC | 2026-09-26</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0034</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0033-mysql-ha-failover.html">上一期：MySQL 高可用与故障切换架构</a> · <a href="https://www.bilibili.com/video/BV1dkhQ6WEy6" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">MYSQL · MySQL 系列第 3 讲（存储引擎篇 · 并发控制）</p>
+  <h1>MySQL 行锁与 MVCC：并发控制的两只手</h1>
+  <p class="subtitle">上一讲聊了<a href="0033-mysql-ha-failover.html">主库挂了之后的故障切换</a>，这期继续 MySQL 主线，回到每一秒都在发生的问题：几百个连接同时读写同一张表，数据为什么没乱？答案藏在 InnoDB 的两只手里——<strong>写与写的冲突，靠行锁 pessimistic 地串行化；读与写的并发，靠 MVCC 多版本乐观地互不阻塞</strong>。这一讲从一次大促压测的"三个现象"复盘讲起：锁等待飙高、死锁偶发、大报表却零干扰；然后拆开行锁三件套（记录锁/间隙锁/Next-Key Lock）与 MVCC 三件套（隐藏列/undo 版本链/ReadView），讲清"快照读"与"当前读"并存带来的经典陷阱，最后给出热点行改造的方案梯子与死锁治理的工程清单。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🐬 MySQL</span>
+    <span class="tag-date">📅 2026-09-26 · 第 34 期</span>
+    <span class="tag time">⏱ 预计阅读 10 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>一次大促压测的"三个现象"</h2>
+  <p>某电商订单库做秒杀链路压测，目标 2000 QPS 扣库存。压到 800 QPS 时出现了三个现象：<strong>现象一，锁等待飙高</strong>——扣减接口 P99 延迟从 2 毫秒飙到 80 毫秒，慢日志里没有慢 SQL，<code>Innodb_row_lock_time_avg</code> 每分钟涨几千毫秒，等待全堆在热点 SKU 那一行上；<strong>现象二，偶发死锁</strong>——应用日志里冒出 <code>ERROR 1213: Deadlock found</code>，重试后成功，频率不高但压测曲线一抖一抖；<strong>现象三，大报表零干扰</strong>——同一时间 BI 有一张 40 秒的全表扫描大查询在跑，业务侧完全无感，读写互不影响。</p>
+  <p>复盘的结论：<strong>现象一和现象二是同一件事——写与写的冲突，InnoDB 用行锁把并发更新串行化，热点行就是单点排队队列</strong>；两个事务以相反顺序改同一批行（T1 先改 id=1001 再改 1002，T2 先 1002 后 1001），队列交叉成环就是死锁。<strong>现象三是另一件事——普通 SELECT 走 MVCC 快照读，不加锁、不阻塞也不被阻塞</strong>，所以大查询和扣减互不干扰。但"SELECT 不加锁"只对了一半：<strong>UPDATE / DELETE / SELECT ... FOR UPDATE 是"当前读"，读最新版本并加锁</strong>——同一行数据，普通读和锁定读看到的可能不是同一个版本。InnoDB 里两套读规则并存，是大多数"灵异现象"的根源，也是这一讲的主线。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：行锁三件套 + MVCC 三件套</h2>
+
+  <h3>行锁：加在索引上的悲观串行</h3>
+  <p>InnoDB 的行级锁不是"锁住某行数据"这么简单，它是一个家族：<strong>记录锁（Record Lock）</strong>锁索引上的单条记录；<strong>间隙锁（Gap Lock）</strong>锁两条索引记录之间的"空隙"，挡住插入；<strong>Next-Key Lock = 记录锁 + 前面的间隙</strong>，左开右闭区间，是 RR 隔离级别下范围读防幻读的主力。模式上分共享（S）与排他（X）：读锁彼此兼容、读写互斥、写写互斥；表级的意向锁（IS/IX）只是"这张表里有行锁"的声明，让外层的表锁判断不用逐行扫，<strong>不参与行与行之间的阻塞</strong>。</p>
+  <p>最容易被忽略的一条：<strong>行锁加在索引记录上，不是加在"行"上</strong>。UPDATE 的 WHERE 条件走不了索引，就沿聚簇索引全表扫描，扫到的记录全部加锁——等价于锁全表（实际更糟：还伴随 RR 下的间隙锁）。这也是<a href="0019-mysql-explain-index-failure.html">第 19 期索引失效</a>的另一个代价维度：索引不只是性能问题，更是<strong>锁范围问题</strong>。另外 RR 下即便走索引，范围条件也会把扫描区间用 Next-Key Lock 罩住——别人往这个区间插入行会被挡住，防的就是幻读，代价是并发面收窄、死锁面变大。</p>
+
+  <h3>MVCC：用版本链换"读写不互斥"</h3>
+  <div class="diagram">
+  <svg viewBox="0 0 760 400" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar34" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <text x="380" y="22" text-anchor="middle" fill="var(--muted)" font-size="13">一行数据的版本链：每行两个隐藏列，旧版本躺在 undo log 里</text>
+
+    <!-- current row -->
+    <rect x="470" y="44" width="250" height="104" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="595" y="66" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">当前版本（表内）stock=95</text>
+    <text x="482" y="88" fill="var(--muted)" font-size="10">DB_TRX_ID = 102（最后改它的事务）</text>
+    <text x="482" y="106" fill="var(--muted)" font-size="10">DB_ROLL_PTR → 指向上一版本</text>
+    <text x="482" y="128" fill="var(--ink)" font-size="10">事务 102：UPDATE stock=95 已提交</text>
+
+    <!-- undo chain -->
+    <rect x="470" y="180" width="250" height="70" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="595" y="202" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">undo 版本：stock=100</text>
+    <text x="482" y="222" fill="var(--muted)" font-size="10">DB_TRX_ID = 88 · 已提交</text>
+    <text x="482" y="238" fill="var(--muted)" font-size="10">事务 88：UPDATE stock=100</text>
+
+    <rect x="470" y="282" width="250" height="70" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="595" y="304" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">undo 版本：stock=初始 120</text>
+    <text x="482" y="324" fill="var(--muted)" font-size="10">DB_TRX_ID = 50 · 已提交</text>
+    <text x="482" y="340" fill="var(--muted)" font-size="10">INSERT 版本（链尾）</text>
+
+    <line x1="595" y1="148" x2="595" y2="178" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar34)"/>
+    <line x1="595" y1="250" x2="595" y2="280" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar34)"/>
+    <text x="612" y="168" fill="var(--muted)" font-size="9">ROLL_PTR</text>
+
+    <!-- readers -->
+    <rect x="30" y="60" width="380" height="88" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-dasharray="5 3"/>
+    <text x="220" y="84" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">事务 A（RR，快照读）→ 读到 100</text>
+    <text x="42" y="106" fill="var(--muted)" font-size="10">ReadView 建于事务 88 提交后、102 提交前</text>
+    <text x="42" y="124" fill="var(--muted)" font-size="10">可见性： trx_id 102 &gt; 快照高水位 → 不可见</text>
+    <text x="42" y="140" fill="var(--muted)" font-size="10">顺 ROLL_PTR 回溯 → 取 stock=100</text>
+
+    <rect x="30" y="180" width="380" height="88" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="220" y="204" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">事务 B（RR，后开的快照）→ 读到 95</text>
+    <text x="42" y="226" fill="var(--muted)" font-size="10">ReadView 建于 102 提交之后 → 102 可见</text>
+    <text x="42" y="244" fill="var(--muted)" font-size="10">直接读当前版本，不用回溯</text>
+    <text x="42" y="260" fill="var(--muted)" font-size="10">同一行、同一时刻，两个事务各读各的版本</text>
+
+    <rect x="30" y="296" width="380" height="66" rx="10" fill="var(--bad-soft, rgba(220,60,60,.08))" stroke="var(--bad)"/>
+    <text x="220" y="318" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">当前读（UPDATE / FOR UPDATE）→ 永远读最新 95 并加锁</text>
+    <text x="42" y="338" fill="var(--muted)" font-size="10">不走版本回溯，直奔最新已提交版本，X 锁排队</text>
+    <text x="42" y="354" fill="var(--muted)" font-size="10">这就是"读到的"和"改的"可能不是一个版本的根源</text>
+
+    <line x1="410" y1="104" x2="468" y2="104" stroke="var(--accent)" stroke-width="1.5" marker-end="url(#ar34)"/>
+    <line x1="410" y1="224" x2="468" y2="96" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar34)"/>
+    <line x1="410" y1="329" x2="468" y2="329" stroke="var(--bad)" stroke-width="1.5" marker-end="url(#ar34)"/>
+  </svg>
+  </div>
+
+  <p>MVCC 三件套：<strong>每行两个隐藏列</strong>——DB_TRX_ID 记最后修改它的事务号，DB_ROLL_PTR 指向 undo log 里的旧版本；<strong>undo 版本链</strong>——每次修改都把旧版本留在 undo 里，链头是表内的当前版本；<strong>ReadView（读视图）</strong>——事务做快照读时给全库事务拍一张"合影"：哪些事务还活跃、哪些已提交。可见性规则可以概括成三句话：<strong>自己改的自己看得见；快照建立前已提交的看得见；快照建立时还活跃的、之后才提交的看不见</strong>——看不见就顺着 ROLL_PTR 回溯版本链，找到第一个可见的版本。RR 与 RC 的全部区别就在 ReadView 的生命周期：<strong>RR 在事务第一个快照读时建一次、全程复用</strong>（所以叫可重复读）；<strong>RC 每次快照读都新建</strong>（所以能读到别人新提交的）。</p>
+
+  <div class="tbl-wrap">
+  <table>
+    <tr><th></th><th>快照读（普通 SELECT）</th><th>当前读（UPDATE / DELETE / FOR UPDATE / LOCK IN SHARE MODE）</th></tr>
+    <tr><td>读哪个版本</td><td>ReadView 可见性判定的历史版本</td><td>最新已提交版本（锁释放后）</td></tr>
+    <tr><td>加锁吗</td><td>不加锁（靠 undo 多版本）</td><td>加 X 或 S 锁，RR 下还带 Next-Key Lock</td></tr>
+    <tr><td>被写阻塞吗</td><td>不阻塞也不被阻塞</td><td>写写互斥，排队等待</td></tr>
+    <tr><td>典型陷阱</td><td>读到旧值做业务决策</td><td>锁范围大于预期（无索引/间隙锁）</td></tr>
+  </table>
+  </div>
+
+  <div class="callout">
+    <p class="callout-title">一个必须刻进肌肉记忆的推论</p>
+    <p>RR 下"事务里先普通 SELECT 再 UPDATE 同一行"，<strong>SELECT 读到的和 UPDATE 修改的可能不是同一个版本</strong>：SELECT 看快照（可能是旧值），UPDATE 当前读直奔最新已提交版本。业务上"读出来 → 代码里算 → 写回去"的 check-then-act 模式，天然踩在这个裂缝上——正确姿势见第 04 节。另一个隐性代价：<strong>长事务持有旧 ReadView，意味着 undo 版本链不能回收</strong>——长事务不只是锁问题，还是 undo 表空间的"垃圾站"，跑几天的报表事务能把 undo 撑爆（回看第 22 期 TDengine 的 KEEP 窗口，思想同源：旧数据的保留期都要有人买单）。</p>
+  </div>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：隔离级别选型与热点行方案梯子</h2>
+
+  <h3>RR 还是 RC：一次显式决策</h3>
+  <p>InnoDB 默认 RR，但互联网团队大量生产库跑在 RC 上，理由都在锁上：<strong>RC 砍掉了普通搜索与索引扫描的间隙锁</strong>（仅在外键约束检查、唯一键冲突检查时保留），锁的粒度更小、持锁更短；<strong>UPDATE 只锁真正匹配的行</strong>（评估 WHERE 后非匹配行的锁随即释放）；配合<strong>半一致读（semi-consistent read）</strong>——UPDATE 遇到已上锁的行时先读最新已提交版本判断是否匹配，不匹配就不等锁。三者叠加：死锁概率与锁等待显著下降。代价是可重复读没了（同一事务两次 SELECT 可能不同）与幻读（业务上大多无感），以及<strong>binlog 必须是 ROW 格式</strong>（8.0 起默认就是 ROW，这条约束在现代版本几乎免费满足，但升级存量库时要显式核对）。给架构师的建议：<strong>把隔离级别当显式决策写进规范</strong>——不是"默认不动"，也不是"跟风改 RC"，而是按业务一致性需求与死锁面现状拍板，并在变更时核对 binlog 格式与主从复制兼容性。</p>
+
+  <h3>热点行：从便宜到贵的五级梯子</h3>
+  <p>热点行的吞吐天花板是一条物理定律：<strong>单行更新串行执行，理论吞吐 = 1 / 单次持锁时长</strong>。持锁 0.5 毫秒就是约 2000 QPS 顶格，超了就是排队、超时、雪崩。改造按成本递增走梯子，能停在低层就不上高层：</p>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>层级</th><th>手段</th><th>量级效果</th><th>代价 / 适用边界</th></tr>
+    <tr><td>L1</td><td>统一多行更新顺序（按主键升序）+ 事务瘦身（事务内禁 HTTP/RPC）</td><td>消掉大部分死锁与长等待</td><td>几乎零成本，先做；纪律问题不是技术问题</td></tr>
+    <tr><td>L2</td><td>索引到位，UPDATE 精确命中</td><td>锁范围从"全表"收敛到"单记录"</td><td>与第 19 期索引失效治理同一件事</td></tr>
+    <tr><td>L3</td><td>FOR UPDATE NOWAIT / SKIP LOCKED 改排队语义</td><td>锁等待变快速失败/跳过</td><td>8.0+；业务要能接受"抢不到"的分支</td></tr>
+    <tr><td>L4</td><td>单行拆 N 桶（分桶行），随机桶扣减 + 汇总</td><td>吞吐 × N</td><td>库存量要撑得起拆分；补货/借桶逻辑复杂化</td></tr>
+    <tr><td>L5</td><td>换并发单元：Redis 原子预扣 + 异步落库 + 对账，或 MQ 队列串行化</td><td>十万 QPS 级</td><td>引入新组件与一致性窗口（关联第 20 期缓存一致性的对账思想）</td></tr>
+  </table>
+  </div>
+
+  <h3>死锁治理与参数基调</h3>
+  <p>死锁不是故障是常态——两个事务交叉等锁，InnoDB <strong>死锁检测（innodb_deadlock_detect，默认 ON）</strong>发现环路后回滚代价小的一方，另一方继续。工程上三板斧：<strong>观测</strong>——<code>innodb_print_all_deadlocks=ON</code> 把每次死锁写进错误日志（SHOW ENGINE INNODB STATUS 只保留最近一次，排障远远不够），死锁频率进监控周报；<strong>预防</strong>——固定加锁顺序、索引到位、事务够短、评估 RC；<strong>兜底</strong>——应用侧对死锁回滚方做幂等重试（被回滚的事务整个重来，不是续跑）。两个参数基调：<code>innodb_lock_wait_timeout</code> 默认 50 秒，线上普遍调到 2~5 秒——锁等待快速失败交给重试，比挂 50 秒拖垮连接池健康得多；极致热点行场景（如秒杀单行）8.0 起可以评估<strong>关闭死锁检测换吞吐</strong>（热点行排队会让检测本身成为 CPU 热点），前提是死锁概率已被 L1 手段压到极低，靠锁超时 + 重试兜底——这是一个"用可用性换吞吐"的高级选项，默认别动。</p>
+
+  <div class="callout">
+    <p class="callout-title">容量三笔账（并发控制视角）</p>
+    <p><strong>吞吐账：</strong>热点行 QPS 上限 = 1000 / 持锁毫秒数；持锁时长 = SQL 执行 + 事务提交路径，事务里每多一次 RPC 就是几十毫秒的持锁放大。<strong>锁等待账：</strong>连接池大小 ÷ 热点行数 = 每行平均排队深度，排队深度 × 持锁时长 = 队尾等待时间——P99 飙高的乘法就在这里。<strong>undo 账：</strong>最长事务时长 × 写入速率 ≈ undo 保留量下界，几小时的长事务在高峰写入期意味着几十 GB 的 undo 悬挂——监控 <code>information_schema.innodb_trx</code> 里超过 5 秒的事务，比事后收缩 undo 表空间便宜得多。</p>
+  </div>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：复现死锁、查锁等待、改造热点扣减</h2>
+
+  <h3>五分钟复现一次死锁并读懂日志</h3>
+  <pre><code><span class="c-com"># 会话 1 与会话 2 同时执行，各开事务后"交叉"更新两行：</span>
+<span class="c-com"># 会话1: UPDATE stock SET n=n-1 WHERE id=1001;  -- 先锁 1001</span>
+<span class="c-com"># 会话2: UPDATE stock SET n=n-1 WHERE id=1002;  -- 先锁 1002</span>
+<span class="c-com"># 会话1: UPDATE stock SET n=n-1 WHERE id=1002;  -- 等 1002 → 阻塞</span>
+<span class="c-com"># 会话2: UPDATE stock SET n=n-1 WHERE id=1001;  -- 等 1001 → 环路，死锁！</span>
+
+SET GLOBAL innodb_print_all_deadlocks = ON;   <span class="c-com"># 每次死锁都进错误日志，不只留最后一次</span>
+SHOW ENGINE INNODB STATUS\G                    <span class="c-com"># 看 LATEST DETECTED DEADLOCK 段</span>
+<span class="c-com"># 日志关键三行：TRANSACTION 1 HOLDS THE LOCK(S)（已持有）</span>
+<span class="c-com">#              TRANSACTION 1 WAITING FOR（在等谁）→ 交叉即环</span>
+<span class="c-com">#              WE ROLL BACK TRANSACTION 2（被选为牺牲品：改动更少）</span></code></pre>
+
+  <h3>锁等待排查：8.0+ 的正确姿势</h3>
+  <pre><code><span class="c-com"># 一行 SQL 找到"谁堵谁"（sys 视图封装了 performance_schema 两张锁表）</span>
+SELECT waiting_pid, waiting_query, blocking_pid, blocking_query
+FROM sys.innodb_lock_waits;
+
+<span class="c-com"># 需要细节时直查底表（8.0 用 data_locks / data_lock_waits，替代 5.7 的 innodb_locks）</span>
+SELECT ENGINE_TRANSACTION_ID, LOCK_TYPE, LOCK_MODE, LOCK_DATA
+FROM performance_schema.data_locks
+WHERE OBJECT_NAME = 'stock';
+
+<span class="c-com"># 长事务巡检（每小时跑一次，超 5 秒的抓出来）</span>
+SELECT trx_id, trx_started, TIMESTAMPDIFF(SECOND, trx_started, NOW()) AS sec,
+       trx_rows_locked, trx_query
+FROM information_schema.innodb_trx
+WHERE TIMESTAMPDIFF(SECOND, trx_started, NOW()) &gt; 5;</code></pre>
+
+  <h3>热点扣减的三段改造（L3 + L4）</h3>
+  <pre><code><span class="c-com"># L3：NOWAIT 抢占——抢不到锁立刻失败，业务走"稍后重试"分支，不排队</span>
+<span class="c-com">#（要求 8.0+；SKIP LOCKED 同理，适合任务表抢占场景）</span>
+SELECT stock FROM sku WHERE id = 1001 FOR UPDATE NOWAIT;
+
+<span class="c-com"># L4：分桶——把 1 行拆成 16 桶，扣减随机选桶，库存量大的 SKU 才值得</span>
+CREATE TABLE sku_bucket (
+  sku_id BIGINT, bucket SMALLINT, stock INT NOT NULL DEFAULT 0,
+  PRIMARY KEY (sku_id, bucket)               <span class="c-com"># 复合主键，桶各自独立行锁</span>
+) ENGINE=InnoDB;
+<span class="c-com"># 扣减：应用按随机数挑桶，原子扣减 + 余量校验一行完成：</span>
+UPDATE sku_bucket SET stock = stock - 1
+ WHERE sku_id = 1001 AND bucket = 7 AND stock &gt;= 1;
+<span class="c-com"># 影响行数 = 0 说明该桶空了：换桶重试或触发"借桶"；汇总 = SUM(stock)</span>
+
+<span class="c-com"># check-then-act 的正确化：读算写三选一，别裸奔</span>
+<span class="c-com"># ① 当前读锁定：SELECT stock FROM sku WHERE id=1001 FOR UPDATE;（读到最新并加锁）</span>
+<span class="c-com"># ② 原子条件更新：UPDATE sku SET stock=stock-1 WHERE id=1001 AND stock&gt;=1; 判影响行数</span>
+<span class="c-com"># ③ 乐观锁：UPDATE sku SET stock=stock-1, version=version+1</span>
+<span class="c-com">#            WHERE id=1001 AND version=?;  影响行数=0 即并发冲突，重读重算</span></code></pre>
+
+  <div class="warn">
+    <p><strong>五个必踩的坑：</strong>① <strong>无索引 UPDATE 锁全表</strong>——WHERE 列没索引，全表扫描逐行加锁，"锁住了整张表"的灵异现场多半是它；② <strong>RR 下范围更新带间隙锁</strong>——<code>UPDATE ... WHERE create_time &gt; ?</code> 会锁住扫描区间的间隙，挡住别人插入，死锁面陡增，范围写密集的表评估 RC；③ <strong>事务里调外部接口</strong>——一次 200 毫秒的 HTTP 调用让持锁时长放大百倍，热点行排队的队尾就是这么长起来的；④ <strong>死锁只看 SHOW ENGINE INNODB STATUS</strong>——它只保留最近一次，没有全量日志的死锁治理是盲人摸象；⑤ <strong>锁超时 50 秒默认值上生产</strong>——一个拿不到锁的请求挂 50 秒，连接池先死给你看，调到 2~5 秒快速失败 + 幂等重试才是正解。</p>
+  </div>
+
+  <div class="card card-tip">
+    <h4>✅ 上线体检清单</h4>
+    <p>☐ 高频 UPDATE 的 WHERE 列有索引，EXPLAIN 无全表扫描　☐ 多行更新的加锁顺序全局统一（按主键升序写进代码规范）　☐ 事务内无 HTTP / RPC / sleep，事务时长 P99 &lt; 50ms　☐ <code>innodb_print_all_deadlocks=ON</code> 且死锁频率进监控周报　☐ <code>innodb_lock_wait_timeout</code> 调至 2~5s（默认 50s 不上生产）　☐ 死锁与锁超时的幂等重试已实现（回滚方整体重跑）　☐ 隔离级别是显式决策：RC 库已核对 <code>binlog_format=ROW</code>　☐ check-then-act 已改造（FOR UPDATE / 原子 UPDATE / 乐观锁三选一）　☐ 长事务监控：innodb_trx 超 5 秒告警，undo 膨胀有基线　☐ 热点行有容量预案：分桶 / 缓存预扣 / 队列串行化的触发阈值写进预案</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>两只手分工明确：</strong>写写冲突靠行锁悲观串行，读写并发靠 MVCC 多版本乐观隔离——InnoDB 高并发的根基是"普通读不加锁、不被阻塞"，大报表与热更新互不干扰不是运气是设计。</li>
+    <li><strong>行锁加在索引上：</strong>UPDATE 走不了索引就是全表记录锁；RR 下范围读还叠 Next-Key Lock 防幻读——索引不只是性能问题，更是锁范围问题，这是索引治理的第二重收益。</li>
+    <li><strong>快照读与当前读并存是陷阱之源：</strong>普通 SELECT 读 ReadView 判定的历史版本，UPDATE / FOR UPDATE 直奔最新并加锁——"读到的"和"改的"可能不是一个版本，check-then-act 必须显式选边（锁定读 / 原子更新 / 乐观锁）。</li>
+    <li><strong>RC 是被低估的显式选项：</strong>砍间隙锁、只锁匹配行、半一致读，死锁面显著收窄；代价是不可重复读与 binlog 必须 ROW（8.0 默认满足）——隔离级别要拍板写进规范，不要"默认不动"也不要"跟风改"。</li>
+    <li><strong>热点行吞吐 = 1 / 持锁时长：</strong>治理按 L1 顺序纪律 → L2 索引 → L3 NOWAIT/SKIP LOCKED → L4 分桶 → L5 缓存预扣/队列串行的梯子上行；死锁靠观测（print_all_deadlocks）+ 预防（顺序/短事务）+ 兜底（幂等重试）三板斧，是常态治理不是故障处理。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目一：RR 隔离级别下，事务 T1 执行 <code>SELECT stock FROM sku WHERE id=1001</code>（普通读）读到 5；此时事务 T2 把库存扣到 4 并提交；T1 随后执行 <code>UPDATE sku SET stock=stock-3 WHERE id=1001</code> 并成功提交。① 这次扣减以 5 还是以 4 为基数？最终库存多少？② T1 在 UPDATE 之后、提交之前再执行一次同样的普通 SELECT，读到多少？为什么？③ "先读库存、代码里判断够不够、再扣减"的业务代码在 RR 下错在哪，给出三种正确写法。<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>以 4 为基数，最终库存 1。</strong>UPDATE 是当前读：不走版本链回溯，直奔该行最新已提交版本（T2 提交后的 4），并加 X 锁。T1 第一次 SELECT 读到的 5 只是它事务开始时建立的 ReadView 里的快照值——<strong>那个 5 从被读到的瞬间起就注定只是"参考历史"</strong>，用它做的业务判断（比如"库存足够"）建立在一个可能已经过期的世界上。</p>
+      <p>② <strong>读到 1。</strong>可见性规则第一条：自己修改的版本对自己可见（版本链上该版本的 trx_id 就是自己的事务号），不需要回溯。于是 T1 事务内的读数序列是 5 → 1，中间的 4 它从头到尾没看见过——这就是"快照读 + 当前读"混用时事务内时间线的不直观之处：两次普通 SELECT 结果"跳变"，但都符合规则。</p>
+      <p>③ <strong>错误本质是 check-then-act 的"读"选错了模式：</strong>判断用快照（旧值），生效用当前读（新值），两步之间世界变了。三种正确写法：<strong>① 锁定读</strong>——<code>SELECT stock FROM sku WHERE id=1001 FOR UPDATE</code>，读到最新且加 X 锁，别人进不来，读到的值在事务内被"冻结"，适合后续还有复杂计算的场景；<strong>② 原子条件更新</strong>——<code>UPDATE sku SET stock=stock-3 WHERE id=1001 AND stock&gt;=3</code>，把"判断 + 扣减"压缩成一条原子语句，看影响行数（0 就是不足），无热点锁语义时最简洁；<strong>③ 乐观锁</strong>——加 version 列，<code>UPDATE ... WHERE id=1001 AND version=?</code>，冲突（影响行数 0）就重读重算，适合冲突率低的场景。选型直觉：热点高冲突用①把排队显式化，低冲突用③避免排队，中间态用②让数据库替你原子化。</p>
+    </div>
+  </details>
+
+  <details class="q-card">
+    <summary>题目二：单 SKU 秒杀，10 万 QPS 扣减请求打向一条库存行（库存 10 万件）。① 直接行锁 UPDATE，理论上最多扛多少？瓶颈的数学表达式是什么？② 团队选了"Redis 原子预扣 + 异步落库 + 对账"，超卖窗口在哪、Redis 宕机时怎么办？③ 如果改用分桶拆 64 行，桶怎么扣、什么时候需要"借桶"、哪些商品不适合分桶？④ 什么信号出现时，架构师应该放弃在数据库层做优化、上队列串行化？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>吞吐 = 1000 / 持锁毫秒数。</strong>持锁 0.5ms（含语句执行 + 提交路径）单行约 2000 QPS 顶格；10 万 QPS 需要 0.01ms 的持锁——物理上不可能。且超过上限后不是"变慢"而是<strong>排队雪崩</strong>：队列深度 = 到达率 × 持锁时长，队尾等待时间线性恶化，连接池被等待请求占满，整库陪葬。识别信号就是 01 节的现象一：SQL 不慢但 P99 飙高、<code>Innodb_row_lock_time_avg</code> 暴涨。</p>
+      <p>② <strong>超卖窗口 = "Redis 预扣成功"与"落库成功"之间的裂缝</strong>：预扣成功但异步落库失败（进程崩溃、消息丢失），Redis 里已减、库里没减——Redis 计数从此比真实库存"乐观"，多卖风险由此产生。防线：预扣结果走可靠消息（关联第 21 期 at-least-once + 幂等消费），失败回补 Redis（DECR 失败的逆操作），外加<strong>周期对账</strong>（Redis 计数 vs 库存流水 SUM，差异告警人工裁决）——与第 20 期"缓存与数据库一致性"是同一套对账思想换了个场景。<strong>Redis 宕机</strong>是可用性换一致性的经典决策点：预扣不可用时应<code>降级限流拒卖</code>（宁可少卖不能超卖），而不是"临时改回直扣数据库"——后者会把 10 万 QPS 灌进刚才算过只有 2000 QPS 的行锁里，两边一起死。</p>
+      <p>③ <strong>分桶的本质是把一把锁拆成 64 把。</strong>扣减按随机数（或用户哈希）选桶，原子条件更新 <code>UPDATE sku_bucket SET stock=stock-1 WHERE sku_id=? AND bucket=? AND stock&gt;=1</code>；某桶影响行数为 0 说明桶空，<strong>触发借桶</strong>：从剩余最多的桶"划拨"一批过来（一条转账式 UPDATE，两个桶行锁按固定顺序加防死锁），或者应用层换桶重试。<strong>不适合分桶的商品：</strong>库存个位数~百位的秒杀品（10 件库存拆 64 桶，62 个桶常年是 0，借桶风暴比排队还糟）、以及需要精确全局顺序的库存语义。分桶适合"库存大、允许近似均匀、汇总查询能接受 SUM"的场景（普通商品售卖、优惠券发放）。</p>
+      <p>④ <strong>认怂信号有三条：</strong>一是<strong>并发单元错位</strong>——业务流量是十万级而数据天然单行（单 SKU、单直播间、单账户），继续在行锁上做局部优化是错维度，要换并发单元（缓存计数器、队列偏移量、桶行）；二是<strong>延迟预算失守</strong>——用户侧要求 P99 &lt; 200ms 而排队深度 × 持锁时长的乘法已经证明给不起；三是<strong>改造 ROI 反转</strong>——L1~L4 都做完仍然靠"重试风暴"硬扛，重试流量本身开始放大 primaries 压力（与第 31 期"重试是止痛药对过载是兴奋剂"同一判断）。此时上队列串行化：请求进 MQ、消费端按 SKU 哈希到单分区顺序消费、用户侧转"排队中"轮询——<strong>把"数据库行"这个并发单元换成"分区偏移量"</strong>，吞吐上限从锁的物理定律换成消息队列的水平扩展能力。架构师的终极判断：数据库的行是很好的持久化单元，但从来没人规定它必须同时做十万 QPS 的并发裁决单元。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>MySQL 官方文档 · InnoDB Locking（记录锁/间隙锁/Next-Key Lock/意向锁的权威定义与示例，本期锁体系的口径依据）：<br>
+    <a href="https://dev.mysql.com/doc/refman/8.4/en/innodb-locking.html" target="_blank" rel="noopener">https://dev.mysql.com/doc/refman/8.4/en/innodb-locking.html</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>锁为什么加在索引上，底子是<a href="0003-mysql-index-explain.html">第 3 期索引原理</a>；判断 UPDATE 有没有走索引回看<a href="0019-mysql-explain-index-failure.html">第 19 期执行计划判读</a>；本期的同栈前作是<a href="0033-mysql-ha-failover.html">第 33 期高可用与故障切换</a>；乐观锁与对账兜底的思想与<a href="0020-cache-db-consistency.html">第 20 期缓存一致性</a>同源；换一种串行化手段见<a href="0009-redis-distributed-lock.html">第 9 期 Redis 分布式锁</a>，顺序消费的底子见<a href="0021-pulsar-message-reliability.html">第 21 期 Pulsar 消息可靠性</a>。下一期轮换到 Redis 主线，讲大 Key 与热 Key 的治理。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0033-mysql-ha-failover.html">← 上一期：MySQL 高可用与故障切换架构</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 34 期 · MySQL 系列（连 2 期）· 下一期预告：Redis——大 Key 与热 Key 治理</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
