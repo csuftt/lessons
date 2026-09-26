@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · Redis 大 Key 与热 Key 治理 | 2026-09-27</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0035</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0034-mysql-row-lock-mvcc.html">上一期：MySQL 行锁与 MVCC</a> · <a href="https://www.bilibili.com/video/BV1gqa46yEB7" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">REDIS · Redis 系列第 5 讲（数据治理篇 · 畸形 Key）</p>
+  <h1>Redis 大 Key 与热 Key 治理：两种"畸形"，一套生命周期</h1>
+  <p class="subtitle">上一讲聊了 <a href="0034-mysql-row-lock-mvcc.html">MySQL 的行锁与 MVCC</a>，把"热点行吞吐 = 1/持锁时长"这条物理定律拆开看完了。这一讲开启 Redis 主线，聊一个同构但反方向的问题：<strong>数据库怕"行太热"，Redis 怕"Key 太大、太热"</strong>——大 Key 是<strong>单次操作代价畸形</strong>（一条命令几十毫秒，卡住单线程里所有请求），热 Key 是<strong>聚合流量畸形</strong>（一个 Key 吃掉整个分片的 CPU 与带宽，加分片也救不了）。两者一个是"空间病"一个是"流量病"，但治理是同一套方法论：<strong>发现要有雷达，拆解要有方案，删除要有姿势，架构要有防线</strong>。这一讲从一次大促凌晨的连环事故讲起，把四个环节一次讲透。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🟥 Redis</span>
+    <span class="tag-date">📅 2026-09-27 · 第 35 期</span>
+    <span class="tag time">⏱ 预计阅读 10 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>一次大促凌晨的连环事故</h2>
+  <p>某电商平台的 Redis Cluster（12 分片）撑日常交易。大促当天凌晨两点，连环出了三件事：<strong>第一件，商品详情接口 P99 从 3 毫秒飙到 120 毫秒</strong>——排查发现运营提前把 800 个商品的详情预热进了缓存，其中 30 个"爆品"的详情 JSON 被整包塞进了单个 String，每个 2MB；一次 <code>GET</code> 就要在网络上传 2MB，千兆网卡被打到 90%，同分片所有 Key 陪跑。<strong>第二件，主库周期性"卡死"几十毫秒</strong>——一个大 Hash（120 万 field 的粉丝列表）恰好在整点过期，同步删除 120 万个 field 的内存，主线程直接停顿，慢日志里出现 <code>DEL</code> 开头的"慢命令"。<strong>第三件，秒杀开始的 10 秒内某分片 CPU 100%</strong>——秒杀库存 Key 只有 1 个，十万 QPS 的 <code>DECR</code> 全砸在一个分片上，其余 11 个分片围观。</p>
+  <p>复盘的结论让人清醒：<strong>三件事分别是大 Key 的两张面孔和热 Key 的一张面孔</strong>。2MB 的详情 Key 是"读放大"——单次操作传输量畸形；120 万 field 的粉丝 Hash 是"删放大"——回收代价畸形；秒杀库存是热 Key——流量聚合畸形。共同根源是：<strong>Redis 的单线程命令执行模型</strong>（命令执行单线程，持久化与异步删除等才走后台线程）把"任何一个 Key 的操作代价"变成了"整个实例所有请求的代价"。这个模型换来了极致的简单与低延迟，代价就是——<strong>Key 的形态纪律，就是 Redis 的生命线</strong>。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：单线程模型下的两种代价畸形</h2>
+
+  <h3>大 Key：一次操作，三方买单</h3>
+  <p>多大算大？行业通行的参考线：<strong>String 类型 value 超过 10KB、集合类型元素超过 5000 个（阿里云口径 1 万）即预警</strong>，超过 1MB / 10 万元素进入治理红线。但比数字更重要的是机理——大 Key 的一次操作，有三方买单：<strong>主线程买单</strong>（遍历、序列化、内存回收都是 CPU 时间，O(N) 命令的 N 就是停顿时长的分子）；<strong>网络买单</strong>（2MB 的 GET 占用的带宽，挤占同实例所有 Key 的传输）；<strong>复制与持久化买单</strong>（主从全量同步时 RDB 快照变大、AOF 重写时fork 子进程页表膨胀，大 Key 越多 COW 压力越大——回看<a href="0006-redis-persistence.html">第 6 期持久化</a>的 fork 停顿）。同理，危险命令不止 <code>DEL</code>：<code>HGETALL</code>、<code>SMEMBERS</code>、<code>LRANGE 0 -1</code>、<code>KEYS</code> 都是大 Key 的"雷管"——Key 本身大不可怕，可怕的是一条命令把"大"整体引爆。</p>
+
+  <h3>热 Key：流量聚合，分片无效</h3>
+  <p>热 Key 的定义是相对的：<strong>单个 Key 的流量在实例总流量中占比畸高</strong>（参考线：单 Key QPS 超过 5000，或单分片流量是均值的 5 倍以上）。机理上它是 Cluster 架构的宿命：<strong>一个 Key 通过 CRC16 哈希只落在一个 slot、一个分片上</strong>，加分片加的是"并行度"，不是"单 Key 容量"——十万 QPS 打一个 Key，12 分片与 120 分片没有区别。Redis Software 8.0.20-44 的发行说明里专门有一句：为修复"海量流量打向单个热 Key 导致高延迟与 OOM"的问题，默认启用了 client_eviction（按客户端缓冲内存驱逐）——<strong>热 Key 打爆输出缓冲区把实例拖进 OOM，是官方都认账的坑</strong>。此外还有一层隐秘的连带：<strong>大 Key 往往同时是热 Key</strong>（爆品详情既大又高频读），两种畸形叠加，是最危险的组合。</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar35" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <text x="380" y="22" text-anchor="middle" fill="var(--muted)" font-size="13">两种畸形的买单路径：大 Key 三方买单（左），热 Key 分片免疫（右）</text>
+
+    <!-- Left: big key -->
+    <rect x="30" y="48" width="330" height="120" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="195" y="72" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">大 Key：一次操作三方买单</text>
+    <text x="46" y="96" fill="var(--muted)" font-size="10.5">主线程：O(N) 命令的 N = 停顿分子（GET/DEL/HGETALL）</text>
+    <text x="46" y="116" fill="var(--muted)" font-size="10.5">网络：2MB value 挤占同实例所有 Key 的带宽</text>
+    <text x="46" y="136" fill="var(--muted)" font-size="10.5">复制/持久化：RDB 变大 · fork COW 压力 · 同步变慢</text>
+    <text x="46" y="158" fill="var(--ink)" font-size="10.5">Key 大不可怕，一条命令整体引爆才可怕</text>
+
+    <rect x="30" y="196" width="330" height="116" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="195" y="220" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">治本：把"大"切碎</text>
+    <text x="46" y="244" fill="var(--muted)" font-size="10.5">String → 压缩 / 拆字段 / 转存对象存储</text>
+    <text x="46" y="264" fill="var(--muted)" font-size="10.5">Hash → 按 field 分片 + 7.4+ field 级 TTL</text>
+    <text x="46" y="284" fill="var(--muted)" font-size="10.5">读侧禁 O(N) 全量命令，按需 HMGET</text>
+    <text x="46" y="304" fill="var(--muted)" font-size="10.5">删侧 UNLINK + lazyfree 四开关</text>
+
+    <!-- Right: hot key -->
+    <rect x="410" y="48" width="320" height="120" rx="10" fill="var(--bad-soft, rgba(220,60,60,.08))" stroke="var(--bad)"/>
+    <text x="570" y="72" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">热 Key：加分片无效</text>
+    <text x="426" y="96" fill="var(--muted)" font-size="10.5">CRC16(key) mod 16384 → 单 slot → 单分片</text>
+    <text x="426" y="116" fill="var(--muted)" font-size="10.5">十万 QPS 打一个 Key：12 分片 = 120 分片</text>
+    <text x="426" y="136" fill="var(--muted)" font-size="10.5">官方案例：热 Key 打爆输出缓冲 → 高延迟 + OOM</text>
+    <text x="426" y="158" fill="var(--ink)" font-size="10.5">大 Key 常同时是热 Key —— 双重畸形最危险</text>
+
+    <rect x="410" y="196" width="320" height="116" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="570" y="220" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">治本：把"热"摊薄</text>
+    <text x="426" y="244" fill="var(--muted)" font-size="10.5">本地缓存挡读（毫秒级 TTL）</text>
+    <text x="426" y="264" fill="var(--muted)" font-size="10.5">读多副本随机打散 · 写集中更新 + 短随机 TTL</text>
+    <text x="426" y="284" fill="var(--muted)" font-size="10.5">读写分离读 replica / 只读节点</text>
+    <text x="426" y="304" fill="var(--muted)" font-size="10.5">热点账必须进容量规划，不靠事后救</text>
+
+    <line x1="360" y1="108" x2="408" y2="108" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar35)"/>
+    <line x1="360" y1="254" x2="408" y2="254" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar35)"/>
+  </svg>
+  </div>
+
+  <div class="callout">
+    <p class="callout-title">为什么"单线程"反而是理解一切的那把钥匙</p>
+    <p>Redis 用一个线程串行执行所有客户端命令（持久化 fork、UNLINK 后台回收、AOF 刷盘走别的线程）。这个设计换来的是无锁、无上下文切换、缓存友好的极致低延迟——代价是<strong>任何一个命令慢，所有命令排队</strong>。所以大 Key 治理的本质是"控制单次操作的代价上限"，热 Key 治理的本质是"控制单 Key 的流量占比上限"。两条纪律，同一个出发点。理解了这一点，后面所有方案（拆分、异步删除、本地缓存、副本打散）都不再是零散技巧，而是同一条原理的推论。</p>
+  </div>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：发现 → 拆解 → 删除 → 防线</h2>
+
+  <h3>发现：三代雷达</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>工具</th><th>版本</th><th>原理与适用</th><th>局限</th></tr>
+    <tr><td><code>redis-cli --bigkeys / --memkeys</code></td><td>全版本</td><td>SCAN 采样扫描，线上安全（配 <code>-i 0.1</code> 限速）；日常巡检首选</td><td>元素数口径（bigkeys）≠ 内存口径（memkeys），两者都要跑</td></tr>
+    <tr><td><code>MEMORY USAGE key SAMPLES N</code></td><td>4.0+</td><td>单 Key 精确估值（集合抽样估算）；嫌疑 Key 复核</td><td>抽样有误差，大集合多抽几轮</td></tr>
+    <tr><td><code>--hotkeys</code> / <code>OBJECT FREQ</code></td><td>4.0+</td><td>读 LFU 对数计数器排序输出热 Key</td><td><strong>必须 maxmemory-policy 为 LFU 系</strong>；刚切策略需预热 5~10 分钟</td></tr>
+    <tr><td><code>HOTKEYS START/GET</code></td><td><strong>8.6+ 新命令</strong></td><td>top-k 采样按 <strong>CPU 毫秒 / 网络字节</strong>归因热 Key，支持 SAMPLE 抽样与 SLOTS 圈定分片</td><td>概率结构有界误差；采集本身有开销（SAMPLE 100 可 24 小时长期跑）</td></tr>
+    <tr><td>客户端埋点 / 代理统计</td><td>自建</td><td>在 SDK 或 Proxy 层按 Key 聚合计数，业务视角最准</td><td>有侵入；与缓存中间件团队共建才划算</td></tr>
+  </table>
+  </div>
+  <p>8.6 的 <code>HOTKEYS</code> 命令是热 Key 发现的分水岭：老 <code>--hotkeys</code> 只能看到"LFU 频次的相对排名"，新命令直接回答<strong>"这个分片的 CPU 到底被哪些 Key 吃掉的、网络字节被谁占了"</strong>——从"猜"到"归因"。版本不够也别慌，客户端埋点 + <code>--hotkeys</code> 的组合在 7.x 上依然是主力。</p>
+
+  <h3>大 Key 拆解：按结构下药</h3>
+  <p><strong>大 String</strong>：先压缩（JSON 开启 GZIP/Snappy，长文本常省 60~80%），压完还大就说明它不该住在 Redis——转存对象存储（关联<a href="0023-minio-erasure-coding.html">第 23 期 MinIO</a>），Redis 只留元数据与小指纹。<strong>大 Hash</strong>：按 field 哈希拆成 N 个子 Key（<code>user:1001:0 ~ N-1</code>，field 上带路由位）；Redis 7.4+ 的 <strong>field 级 TTL（<code>HEXPIRE</code></strong>）让"粉丝列表里失效的关注"能自动过期，从源头防堆积。<strong>大 ZSet/List</strong>：按时间窗或分值区间分片；List 型 feed 用 <code>LPUSH + LTRIM</code> 截断成有界队列，或直接换 Stream 的 <code>MAXLEN ~</code> 近似裁剪。所有拆分的公共心法：<strong>读路径改成"先算路由再定向读"</strong>（HMGET 指定 field、ZRange 限定区间），全量读命令从代码里清出去。</p>
+
+  <h3>删除的姿势：UNLINK 与 lazyfree 四开关</h3>
+  <p>大 Key 的删除是事故高发位：同步 <code>DEL</code> 一个百万 field 的 Hash，主线程停顿以百毫秒计。正确姿势是<strong>4.0+ 一律用 <code>UNLINK</code></strong>——逻辑删除在主线程原子完成，内存回收交给 bio 后台线程，返回即完成。更隐蔽的是"被动删除"：过期清理与内存淘汰默认也是同步路径，<code>lazyfree-lazy-expire</code> / <code>lazyfree-lazy-eviction</code> 两个开关把它们也改成后台异步；再配 <code>lazyfree-lazy-server-del</code>（RENAME 等服务端隐式删除）与 <code>replica-lazy-flush</code>（从库全量同步前清库）。<strong>四个开关全开</strong>是现代部署的基线（7.0 起还可用 <code>lazyfree-lazy-user-del</code> 让代码里的 DEL 也自动走异步路径）。超大的存量 Key（千万 field 级）连 UNLINK 都嫌重时，用 <code>HSCAN + HDEL</code> 分批啃，最后 UNLINK 收尾。<code>lazyfree_pending_objects</code> 指标进监控——后台回收队列堆积说明"删得比生得快"，那是另一级警报。</p>
+
+  <h3>热 Key 防线：四层递进</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>层级</th><th>手段</th><th>量级效果</th><th>代价 / 边界</th></tr>
+    <tr><td>L1</td><td>本地缓存（Caffeine + 毫秒~秒级 TTL）</td><td>热读 QPS 的 90%+ 消化在 JVM 内</td><td>极短 TTL 换弱一致，业务要能接受；与<a href="0020-cache-db-consistency.html">第 20 期一致性</a>同源权衡</td></tr>
+    <tr><td>L2</td><td>读写分离：读 replica / 只读节点</td><td>读吞吐随副本数水平扩展</td><td>复制延迟的一致性窗口；写仍集中在主</td></tr>
+    <tr><td>L3</td><td>Key 复制打散：写 N 份副本随机读</td><td>单 Key 流量 ÷ N</td><td>更新要广播全部副本；一致窗口 = 副本 TTL，适合读极多写少的配置类</td></tr>
+    <tr><td>L4</td><td>重新路由：按业务维度拆 Key / 上本地全量快照</td><td>根治：热源消失</td><td>改数据模型，成本最高；秒杀级热点才动用</td></tr>
+  </table>
+  </div>
+  <p>选型顺序永远是 L1 → L4 能低不高：本地缓存的性价比断档领先，只有当<strong>热点本身是设计错误</strong>（全局配置 Key 人为造热、爆品打榜未预热）时才直奔 L4。还有一个容易忽略的组合拳：<strong>热 Key + 淘汰策略</strong>——热点被打到 <code>maxmemory</code> 水位触发淘汰时，LRU 系策略可能把真热点逐出去（回看<a href="0011-redis-memory-management.html">第 11 期</a>的缓存污染），LFU 系靠频次计数天然免疫，这也是缓存实例推荐 <code>allkeys-lfu</code> 的又一重理由。</p>
+
+  <div class="callout">
+    <p class="callout-title">容量三笔账（畸形 Key 视角）</p>
+    <p><strong>大 Key 网络账：</strong>2MB value × 每秒 50 次读 = 100MB/s 出网流量，千兆网卡（125MB/s）到 80%——一个 Key 决定整个实例的网卡水位。<strong>热 Key CPU 账：</strong>十万 QPS × 单命令 2μs 朴素估算 = 20% CPU 听起来不高，但叠加输出缓冲排队、TLS、大 value 序列化后轻松翻几倍；官方用 client_eviction 兜 OOM 说明真实曲线远比朴素估算陡。<strong>淘汰连带账：</strong>大 Key 被淘汰或过期瞬间释放的内存，会触发分配器归还（可能伴随 <code>madvice</code> 系统调用），在低碎片阈值下引发延迟毛刺——删除姿势不只是"删得掉"，还要"删得安静"。</p>
+  </div>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：巡检、异步删除、热 Key 打散</h2>
+
+  <h3>大 Key 巡检与精确复核</h3>
+  <pre><code><span class="c-com"># 日常巡检：SCAN 采样（-i 0.1 每次扫描间隔 0.1s 限速，低峰执行）</span>
+redis-cli --bigkeys -i 0.1          <span class="c-com"># 按元素数口径找最大 Key（每种结构输出 Top1）</span>
+redis-cli --memkeys -i 0.1          <span class="c-com"># 按内存口径（两者结论可能不同，都要跑）</span>
+
+<span class="c-com"># 嫌疑 Key 精确复核：内存估值 + 元素计数</span>
+redis-cli MEMORY USAGE detail:1001 SAMPLES 8
+redis-cli HLEN fans:1001            <span class="c-com"># Hash：field 数；LLEN/SCARD/ZCARD 同理</span>
+
+<span class="c-com"># 8.6+ 热 Key 归因：按 CPU 与网络字节采样 30 秒（老版本用 --hotkeys，需 LFU 策略）</span>
+redis-cli HOTKEYS START METRICS 2 CPU NET COUNT 10 DURATION 30000
+redis-cli HOTKEYS GET               <span class="c-com"># 输出 top-k：CPU 毫秒归因 + 网络字节归因</span>
+redis-cli HOTKEYS RESET             <span class="c-com"># 用完释放采样状态</span></code></pre>
+
+  <h3>删除姿势：四开关 + 分批啃</h3>
+  <pre><code><span class="c-com"># redis.conf / CONFIG SET —— lazyfree 四开关全开（现代部署基线）</span>
+lazyfree-lazy-eviction yes      <span class="c-com"># 内存淘汰走后台线程</span>
+lazyfree-lazy-expire yes        <span class="c-com"># 过期清理走后台线程（治"整点过期卡死"）</span>
+lazyfree-lazy-server-del yes    <span class="c-com"># RENAME 等隐式删除走后台</span>
+replica-lazy-flush yes          <span class="c-com"># 从库全量同步前清库走后台</span>
+lazyfree-lazy-user-del yes      <span class="c-com"># 7.0+：代码里的 DEL 也自动转 UNLINK（兜底）</span>
+
+<span class="c-com"># 应用代码：删除一律 UNLINK；千万 field 级超大 Key 分批啃</span>
+redis-cli UNLINK fans:1001
+<span class="c-com"># 超大 Hash 渐进删除：每批 1000 个 field，批次间 sleep，最后 UNLINK 收尾</span>
+<span class="c-com"># for: cursor, fields = HSCAN fans:big $cursor COUNT 1000 → HDEL fans:big $fields</span>
+
+<span class="c-com"># 监控后台回收队列是否堆积（持续 > 0 说明删不过来）</span>
+redis-cli INFO stats | grep -E "lazyfree_pending|lazyfreed"</code></pre>
+
+  <h3>热 Key 打散：副本随机读（Java）</h3>
+  <pre><code><span class="c-com">// L3：热点配置 Key 复制 N 份，读随机打散、写广播 + 短随机 TTL（1~5s 内随机）</span>
+public String hotGet(JedisPool pool, String key, int n) {
+    int i = ThreadLocalRandom.current().nextInt(n);
+    String v = pool.getResource().get(key + ":" + i);   <span class="c-com">// 读随机副本</span>
+    if (v != null) return v;
+    v = db.load(key);                                    <span class="c-com">// 回源数据库</span>
+    String ttl = 1 + ThreadLocalRandom.current().nextInt(4) + "s";  <span class="c-com">// 短随机 TTL</span>
+    for (int k = 0; k &lt; n; k++) pool.getResource().setex(key + ":" + k, ttl, v); <span class="c-com">// 写广播</span>
+    return v;
+}
+<span class="c-com">// L1（更优先）：Caffeine 本地缓存挡在 Redis 前面，TTL 100ms~5s 按 staleness 预算配</span></code></pre>
+
+  <div class="warn">
+    <p><strong>五个必踩的坑：</strong>① <strong>DEL 上生产</strong>——4.0+ 仍写 DEL 的代码，遇到大 Key 就是"整点卡死"的定时炸弹，UNLINK + <code>lazyfree-lazy-user-del</code> 双保险；② <strong>大批量 Key 同一时刻过期</strong>——同一秒几万个 Key 到期，过期清理本身成为 CPU 尖峰，TTL 一律加随机抖动（±20%）；③ <strong>把 <code>--bigkeys</code> 当精确工具</strong>——它是 SCAN 采样，采样就会漏，重大治理前用 <code>MEMORY USAGE</code> 逐个复核；④ <strong>热 Key 只靠加从库</strong>——写热点（DECR、INCR）在从库上根本不存在分担，读写分离只治读热；⑤ <strong>拆完大 Key 不改读代码</strong>——数据拆成 8 片了，<code>HGETALL</code> 循环 8 片再合并，网络往返 ×8，"治大治出个治热"，拆分方案必须与读路径改造同批上线。</p>
+  </div>
+
+  <div class="card card-tip">
+    <h4>✅ 上线体检清单</h4>
+    <p>☐ 大 Key 巡检常态化：<code>--bigkeys/--memkeys</code> 每日低峰跑，超阈值（10KB/5000 元素）进工单　☐ 8.6+ 实例启用 <code>HOTKEYS</code> 定期归因，7.x 用 LFU + <code>--hotkeys</code> + 客户端埋点补位　☐ 代码规范：DEL 一律 UNLINK、O(N) 命令禁入高频路径、TTL 带随机抖动　☐ lazyfree 四开关全开，<code>lazyfree_pending_objects</code> 进监控　☐ 新 Key 上线评审含"形态审查"：预估大小、访问模式、TTL 策略　☐ 热点场景（大促/秒杀/打榜）有预案：本地缓存开关 + 副本打散脚本 + 限流兜底　☐ 淘汰策略与场景匹配：缓存 allkeys-lfu、存储 noeviction + 水位告警　☐ 大 value（&gt;1MB）走对象存储 + 元数据缓存，Redis 不当大文件仓库　☐ Cluster 容量规划含"热点账"：单分片 CPU 70% 告警，热点迁移演练过　☐ 删除演练进故障预案库：分批删除脚本 + 回收队列监控 + 网卡水位观测</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>两种畸形一个根源：</strong>大 Key 是单次操作代价畸形（主线程/网络/复制三方买单），热 Key 是聚合流量畸形（哈希单 slot 落位，加分片无效）——都踩在"单线程命令执行"这条生命线上，Key 的形态纪律就是 Redis 的稳定性预算。</li>
+    <li><strong>发现要靠雷达不要靠运气：</strong>大 Key 双口径巡检（bigkeys 元素数 + memkeys 内存），热 Key 从 LFU 频次排名（--hotkeys）进化到 8.6 的 CPU/字节归因（HOTKEYS 命令）——从"猜谁热"到"证明谁吃了资源"。</li>
+    <li><strong>删除的姿势比删除本身重要：</strong>UNLINK 替代 DEL 只是起点，lazyfree 四开关把过期/淘汰/隐式删除全改异步，大批量过期 TTL 加随机抖动，超大 Key 用 SCAN 系分批啃——"删得安静"是稳定性工程。</li>
+    <li><strong>拆解必须读写同改：</strong>String 压缩/转存、Hash 分片 + field 级 TTL（7.4+）、List 截断有界——数据拆碎的同时读路径改成定向读（HMGET/区间查询），只拆不改读等于把"大"病治成"热"病。</li>
+    <li><strong>热 Key 防线能低不高：</strong>本地缓存（毫秒级 TTL）性价比断档领先，读写分离治读不治写，副本打散适合读极多写少，重新设计是最后手段——热点账进容量规划，不靠事后救火。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目一：直播间 500 万人同时在线，礼物打赏接口每次都要读"直播间配置 Key"（String，约 50KB），实测该 Key 峰值 30 万 QPS，单分片 CPU 95%、P99 80ms。① 该 Key 同时是大 Key 还是热 Key？两种畸形在这里各自贡献了什么问题？② 团队提案三个方案：A 直接扩 Cluster 分片数 12→24；B 配置 Key 拆成 N 份副本随机读；C 应用侧本地缓存 500ms TTL。逐个评估能否解决、代价是什么。③ 如果产品再加需求"主播端改配置要 1 秒内生效"，C 方案的 TTL 还能设 500ms 吗？给出一致性预算的推理。<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>双重畸形叠加，且互相放大。</strong>50KB 超过 String 10KB 预警线，是大 Key——贡献<strong>网络账</strong>：30 万 QPS × 50KB = 15GB/s 的理论出网流量（实际有连接复用与压缩缓解，但网卡水位必然爆表），还贡献序列化 CPU；单 Key 30 万 QPS 远超 5000 参考线，是热 Key——贡献<strong>CPU 账</strong>：CRC16 把它钉死在一个分片，12 分片里 1 个 95%、11 个围观。最关键的乘法效应：<strong>大 Key 让每次热访问更贵，热 Key 让贵的访问更高频</strong>——50KB × 30 万 QPS 才是真实压力，两个病必须一起治。</p>
+      <p>② <strong>A 无效，B 有效但不优，C 最优。</strong>A 扩分片加的是并行度不是单 Key 容量——这个 Key 还落在一个 slot 上，24 分片里照样 1 个被打满（还多花了 12 个分片的成本），这是热 Key 的"分片免疫"铁律。<strong>B 副本打散</strong>：把流量 ÷ N，比如 8 副本单 Key 流量降到 3.75 万 QPS——但注意它是大 Key，每个副本都 50KB，读流量没有变小的只是摊开了，<strong>网卡总出水反而因副本广播写入略增</strong>；且写路径要广播 8 份，配置更新的一致窗口 = 副本 TTL。<strong>C 本地缓存</strong>：500ms TTL 下，500 万观众（假设 5000 个应用实例）每实例每 500ms 回源一次 = 回源 QPS 仅 1 万，挡掉 96%+ 的流量，且<strong>顺带把"大"的问题也治了</strong>——50KB 在 JVM 内命中，网络传输消失。C 的代价是 500ms 的 staleness 窗口与 JVM 内存占用（50KB × 热点 Key 数，可忽略）。结论：C 是正解，B 可作为 C 之前的紧急止血（不动应用代码，运维侧先加副本）。</p>
+      <p>③ <strong>一致性预算推演：TTL 必须 ≤ 1s 生效要求，但也不能贴着 1s 设。</strong>"1 秒内生效"的含义是最坏情况下观众在配置变更后 1 秒内看到新值——本地缓存的 staleness 上界就是 TTL（不含变更通知路径），所以 <strong>TTL 500ms 依然满足</strong>：最坏 500ms 后回源拿到新值。真正的风险在<strong>变更链路的额外延迟</strong>：主播端改配置 → 写数据库 → 失效广播到全部实例（或等 TTL 自然过期）——如果走"写后主动失效"（配置中心推送 / Redis Pub-Sub 通知），链路本身要预留几百毫秒，TTL 就要压到 200~300ms 或改推送模式；如果纯靠 TTL 自然过期，500ms 刚好在预算内但没有任何余量，建议 <strong>200~300ms + 变更主动失效</strong>的组合：平时靠 TTL 兜底，变更时推送加速收敛。这个推理过程就是"一致性预算"：把业务能接受的 staleness 拆成分配给缓存 TTL、变更传播、时钟误差三段，加起来不超过业务红线——与第 20 期"延迟双删取值 = 读 P99 + 主从延迟 + 缓冲"是同一个框架。</p>
+    </div>
+  </details>
+
+  <details class="q-card">
+    <summary>题目二：你们的社交 App 有个"好友列表"Hash，单用户最大 120 万 field（field=好友 ID，value=备注），运营抱怨"某些大 V 的好友列表加载超时"。团队决定拆分。① 给出拆分方案：路由怎么定、子 Key 怎么命名、field 级 TTL（7.4+）能帮上什么忙？② 拆分迁移怎么做才能不影响线上读？给出双写与切流顺序。③ 迁移完成后第二天，实例周期性出现 30ms 毛刺，<code>lazyfree_pending_objects</code> 偶发 5 万+——最可能的根因是什么？怎么治理？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>拆分方案三要素。</strong>路由：对 field（好友 ID）做一致性哈希或简单 <code>hash(friendId) % 8</code>——注意好友列表天然按用户隔离，用好友 ID 做路由位而不是用户 ID，这样同一用户的好友摊到 8 个子 Key；命名：<code>friends:{userId}:0 ~ friends:{userId}:7</code>（拆 8 片是元素数与路由复杂度的平衡点：120 万 ÷ 8 = 15 万/片仍偏大，大 V 可以按需 16 片——<strong>分片数进元数据</strong>（如 <code>friends:{userId}:meta</code> 存 {"shards":8}），未来扩片不用改代码约定）；field 级 TTL 的用武之地：好友关系的"失效"场景（拉黑、注销）——7.4 前只能 HDEL 主动删或整 Key 过期，现在给单个 field 设 <code>HEXPIRE friends:{userId}:0 2592000 FIELDS 1 friend123</code>（30 天无互动自动清理），<strong>把"清理逻辑"从应用层定时任务下沉到数据结构自带语义</strong>，从源头防 field 无限堆积——这是大 Hash 治理里最值得用的新武器。</p>
+      <p>② <strong>迁移四步：双写 → 影子读 → 切读 → 停写旧。</strong>第一步双写：新数据同时写老 Key 和新子 Key（写路径加开关，灰度放量）；第二步存量搬迁：低峰用 HSCAN 分批读老 Key、按路由规则写进子 Key（每批 1000 field，批间 sleep，<code>--memkeys</code> 确认老 Key 不再增长）；第三步影子读对账：切流前随机抽样 1% 请求"读新+读老"比对（新读生效但丢弃结果，记不一致率，趋零才切）；第四步切读：按百分比放量 1% → 10% → 50% → 100%（观察错误率与延迟），稳定一周后停写老 Key、<code>UNLINK</code> 回收——<strong>回收动作放在最后且用 UNLINK，120 万 field 的老 Key 用 DEL 收尾等于把迁移全程的谨慎一次性赌掉</strong>。读路径同步改造：列表页只取第一页（<code>HRANDFIELD</code> 或按时间排序的辅助 ZSet），详情按需单 field 读——迁移是读路径升级的最佳窗口，别拆完还按 HGETALL 全量读。</p>
+      <p>③ <strong>根因：删除速率超过了后台回收能力，"迁移后遗症 + TTL 集中到期"。</strong>线索链：迁移完成 → 老版本过期清理逻辑下线/调整 → 但 8 个子 Key 上的 field 级 TTL 大多在同一批迁移时写入、TTL 相同（迁移脚本忘了加抖动）→ 每天固定时刻集中到期 → <code>lazyfree-lazy-expire</code> 虽然把回收扔给了后台线程，<strong>百万级 field 的到期仍会在后台队列堆积</strong>（lazyfree_pending_objects 5 万+），bio 线程 CPU 冲高连带主线程调度毛刺；30ms 周期性毛刺与到期时刻对齐即可实锤。治理三板斧：<strong>先止血</strong>——把存量 field 的 TTL 用 HSCAN 批量重设为"原值 ± 20% 随机抖动"，打散到期时刻；<strong>再治本</strong>——迁移与批量写入脚本规范里固化"TTL 必带随机抖动"（与第 04 节坑 ② 同一条纪律的迁移版）；<strong>后观测</strong>——<code>lazyfree_pending_objects</code> 设阈值告警（如持续 &gt; 1 万），配合 <code>expired_keys</code> 速率曲线，到期尖峰与队列堆积提前可见。深层教训：<strong>lazyfree 是把同步停顿换成了异步背压，不是把代价变没了</strong>——后台队列的堆积水位，就是删除代价的"分期账单"，监控它才算真正管住了删除。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>Redis 官方文档 · Using Redis with big datasets / large keys（大 Key 的官方口径：发现工具、UNLINK 与 lazyfree 异步删除、拆分建议）：<br>
+    <a href="https://redis.io/docs/latest/develop/use/keyspace/" target="_blank" rel="noopener">https://redis.io/docs/latest/develop/use/keyspace/</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>大 Key/热 Key 排查工具的速查版在存档期 <a href="0010-redis-performance-tuning.html">第 10 期性能调优</a>（本期补全了生命周期治理视角）；lazyfree 治的"过期停顿"与 <a href="0006-redis-persistence.html">第 6 期持久化</a>的 fork 停顿同属主线程毛刺家族；热 Key 打散的本地缓存与 <a href="0020-cache-db-consistency.html">第 20 期缓存一致性</a>共用一致性预算框架；淘汰策略选型回看 <a href="0011-redis-memory-management.html">第 11 期内存管理</a>；大 value 转存对象存储的地基是 <a href="0023-minio-erasure-coding.html">第 23 期 MinIO</a>；上一讲的同族问题是 <a href="0034-mysql-row-lock-mvcc.html">第 34 期 MySQL 行锁与热点行</a>——数据库怕行热、Redis 怕 Key 大，治理同源。下一期继续 Redis 主线。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0034-mysql-row-lock-mvcc.html">← 上一期：MySQL 行锁与 MVCC</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 35 期 · Redis 系列 · 下一期预告：Redis 主线继续</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
