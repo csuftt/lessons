@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · 分布式锁服役工程：从可用锁到正确锁 | 2026-09-28</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0036</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0035-redis-bigkey-hotkey.html">上一期：Redis 大 Key 与热 Key 治理</a> · <a href="https://www.bilibili.com/video/BV1j6av6yENM" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">REDIS · Redis 系列第 6 讲（数据治理篇 · 分布式协调）</p>
+  <h1>分布式锁服役工程：从可用锁到正确锁</h1>
+  <p class="subtitle">上一讲聊了 <a href="0035-redis-bigkey-hotkey.html">Redis 的大 Key 与热 Key 治理</a>，把"Key 的形态纪律"讲成了稳定性预算。这一期继续 Redis 主线，聊一个每个用 Redis 的团队都写过、但大多数没写对的东西——分布式锁。入门课（<a href="0009-redis-distributed-lock.html">第 9 期</a>）讲过 SET NX 的四个陷阱与看门狗；这一讲站在架构师视角往前走一步：<strong>锁写出来只是开始，让它长期正确地"服役"才是工程</strong>。一条能背出来的加锁命令，和一套能在故障、时钟漂移、GC 停顿下仍然不出错的加锁体系，中间隔着三层：把互斥当概率（可用锁），把互斥当承诺（正确锁），把锁失败当常态设计业务（防御纵深）。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🟥 Redis</span>
+    <span class="tag-date">📅 2026-09-28 · 第 36 期</span>
+    <span class="tag time">⏱ 预计阅读 10 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>一次"锁明明加上了"的超卖事故</h2>
+  <p>某电商的营销系统用 Redisson 保护"优惠券发放"临界区：库存 1000 张，大促放量。上线半年没出过问题，直到某个周五晚高峰，<strong>同一个用户收到了 3 张券，库存账也对不上</strong>。排查链路让人后背发凉：日志显示 A 实例确实加锁成功、也确实执行完了发放逻辑；但同一时刻 B 实例的日志里也有同一张券的发放记录。锁没丢——<strong>是两个实例在同一毫秒都"认为"自己持有锁</strong>。</p>
+  <p>复盘结论分三层。<strong>第一层，GC 停顿</strong>：A 实例在持锁执行中撞上一次 8 秒的 Full GC，看门狗线程一起被冻结，续期停了，锁 TTL 到期自动释放；B 实例加锁成功开始发放；随后 A 从 GC 恢复——<strong>它不知道自己已经"裸奔"，继续执行临界区</strong>。<strong>第二层，主从切换</strong>：当晚锁所在分片恰好还赶上一次主从切换，A 的加锁写还没同步到从库，旧主下线，新主（原从库）上没有这把锁，B 实例畅通加锁——两个窗口叠加，互斥被击穿两次。<strong>第三层，也是根因</strong>：临界区末端的发放调用是发 HTTP 请求到券服务，<strong>没有任何 fencing 校验</strong>——券服务只认请求不认"谁还持有锁"。三层里任何一层堵住，事故都不会发生；一层都没堵，就是生产事故。</p>
+  <p>这单事故的教训浓缩成一句话：<strong>分布式锁的失效不是异常路径，是必然会发生的时间窗口问题——区别只在于窗口开多久、开的时候有没有人守着</strong>。架构师的工作不是消灭窗口，而是让窗口开启时系统仍然正确。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：锁的三个敌人与两道防线</h2>
+
+  <h3>三个敌人：停顿、漂移、脑裂</h3>
+  <p><strong>敌人一：客户端停顿（GC / CPU 抢占 / VM 迁移）。</strong>持锁进程被冻结——Java 里最常见的凶手是 stop-the-world GC。进程"自己觉得"还在临界区，世界已经往前走了：锁过期、别人加锁、旧持有者苏醒继续写。<strong>敌人二：时钟漂移。</strong>Redis 判断 key 过期用的是 gettimeofday 系统时钟（非单调时钟），NTP 校时或人工改时间会让 key 的存活时间比预期更长或更短；依赖"多个节点时钟大致同步"的锁算法，安全性建在沙子上。<strong>敌人三：主从切换的复制缺口。</strong>加锁写主库成功、异步复制还没到从库，主库宕机提升从库——锁凭空消失，第二个客户端加锁成功。注意这三个敌人的共同点：<strong>加锁命令本身全部成功返回 OK，没有任何报错——锁是在你不知道的时候丢的</strong>。</p>
+
+  <h3>2016 年那场著名争论的工程遗产</h3>
+  <p>Martin Kleppmann 的《How to do distributed locking》对 RedLock 的批判，核心不是"实现有 bug"，而是两个论断：<strong>① Redis 锁没有 fencing token（围栏令牌：锁服务发出的单调递增数字，资源端拒绝比已见过的最大值更旧的令牌），所以延迟到达的旧持有者无法被资源侧挡住；② RedLock 的安全性依赖时钟假设，在异步分布式模型里站不住</strong>。Antirez 回应：GC 停顿是所有分布式锁的共性问题；合理运维下时钟漂移有限；fencing 需要资源端配合，资源端若能校验令牌，或许根本不需要锁。这场争论没有输家——它把"锁的安全性到底由谁保证"这个问题钉在了台面上，<strong>工程遗产就是今天 Redisson 的两条防线</strong>。</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 350" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar36" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <text x="380" y="22" text-anchor="middle" fill="var(--muted)" font-size="13">锁失效的三种时态与两道防线：事前 WAIT 同步（左），事后 fencing 拒绝（右）</text>
+
+    <!-- Left: failover + WAIT -->
+    <rect x="30" y="48" width="330" height="150" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="195" y="72" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">敌人三：主从切换丢锁 → 防线一</text>
+    <text x="46" y="96" fill="var(--muted)" font-size="10.5">t1 客户端 SET NX PX 写主库 → 返回 OK</text>
+    <text x="46" y="116" fill="var(--muted)" font-size="10.5">t2 WAIT 1 1000：等 ≥1 个从库确认收到复制</text>
+    <text x="46" y="136" fill="var(--muted)" font-size="10.5">t3 未确认 → 主动释放锁，本次加锁失败</text>
+    <text x="46" y="156" fill="var(--muted)" font-size="10.5">已确认才继续 → 主从切换后新主仍有锁</text>
+    <text x="46" y="182" fill="var(--ink)" font-size="10.5">把"锁已复制"从概率变成前置条件</text>
+
+    <!-- Right: GC pause + fencing -->
+    <rect x="410" y="48" width="320" height="150" rx="10" fill="var(--bad-soft, rgba(220,60,60,.08))" stroke="var(--bad)"/>
+    <text x="570" y="72" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">敌人一：GC 停顿 → 防线二</text>
+    <text x="426" y="96" fill="var(--muted)" font-size="10.5">A 拿锁领令牌 token=33 → GC 停顿 8s</text>
+    <text x="426" y="116" fill="var(--muted)" font-size="10.5">锁过期 → B 拿锁领令牌 token=34 → 写入</text>
+    <text x="426" y="136" fill="var(--muted)" font-size="10.5">A 苏醒带 token=33 写入 → 资源端拒绝</text>
+    <text x="426" y="156" fill="var(--muted)" font-size="10.5">资源端只记住见过的最大 token 即可</text>
+    <text x="426" y="182" fill="var(--ink)" font-size="10.5">锁可以丢，正确性由资源端兜底</text>
+
+    <line x1="360" y1="123" x2="408" y2="123" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar36)"/>
+
+    <!-- Bottom band -->
+    <rect x="30" y="226" width="700" height="108" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="380" y="250" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">2026 年的正确姿势：Redisson 4.x 已经把争论收敛成产品答案</text>
+    <text x="46" y="274" fill="var(--muted)" font-size="10.5">RedissonRedLock 已标注 @Deprecated：多数派独立实例的运维成本 &gt; 收益，安全性保证又存疑</text>
+    <text x="46" y="294" fill="var(--muted)" font-size="10.5">替代一：RLock + checkLockSyncedSlaves（默认开）——加锁后校验从库同步，切换丢锁窗口收窄</text>
+    <text x="46" y="314" fill="var(--muted)" font-size="10.5">替代二：RFencedLock（3.23+）——每次加锁领单调递增 fencing token，资源端拒绝旧令牌</text>
+  </svg>
+  </div>
+
+  <div class="callout">
+    <p class="callout-title">锁的正确性分层：可用锁与正确锁是两个物种</p>
+    <p><strong>可用锁（efficiency lock）</strong>：目的省成本——防重复计算、防缓存击穿、任务去重。偶发互斥失效的代价是多算一次、多刷一次缓存，业务无感。<strong>正确锁（correctness lock）</strong>：目的保正确——超发、双写、双主。互斥失效一次就是资损或数据损坏。判断题只有一道：<strong>"这把锁失效一次，系统的损失是'浪费'还是'错误'？"</strong>是浪费，SET NX + 看门狗够用；是错误，必须上 fencing 或换共识系统（etcd/ZooKeeper）——这个二分法是 Kleppmann 文章里最值得抄进架构评审清单的工具。</p>
+  </div>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：服役体系四张表</h2>
+
+  <h3>锁选型表：先问正确性，再问性能</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>方案</th><th>互斥强度</th><th>适用</th><th>代价 / 边界</th></tr>
+    <tr><td>SET NX PX + Lua 释放</td><td>尽力而为</td><td>防重、去重、防击穿（可用锁）</td><td>主从切换窗口丢锁；无 fencing</td></tr>
+    <tr><td>Redisson RLock（+同步校验）</td><td>高（切换窗口收窄）</td><td>绝大多数业务临界区</td><td>checkLockSyncedSlaves 增加加锁延迟（默认 1s 超时）</td></tr>
+    <tr><td>Redisson RFencedLock</td><td>高 + 资源端兜底</td><td>写外部系统且资源可校验令牌（正确锁）</td><td>需要资源端配合改造；3.23+ 才有</td></tr>
+    <tr><td>etcd / ZooKeeper 锁</td><td>共识级</td><td>选主、双主零容忍（正确锁）</td><td>新基础设施；运维成本与容量规划</td></tr>
+    <tr><td>无锁（幂等设计）</td><td>不依赖互斥</td><td>"不该发生两次"类需求</td><td>很多时候比锁便宜、失败模式更优雅</td></tr>
+  </table>
+  </div>
+  <p>最后一行是提醒：<strong>评审时先问"这把锁防的是并发还是重复"</strong>——防重复用幂等键往往更便宜（回看第 27 期工具调用的幂等键设计、第 21 期消息消费的业务键幂等，同一思想）；真需要"时间窗内互斥"才上锁。为幂等问题上分布式锁，是用牛刀杀鸡还把鸡杀伤了。</p>
+
+  <h3>RedLock 存废决策：为什么 2026 年不该再新建</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>维度</th><th>Kleppmann 批判</th><th>Antirez 辩护</th><th>工程裁决（2026）</th></tr>
+    <tr><td>GC 停顿</td><td>持锁者冻结后苏醒，互斥已破</td><td>所有分布式锁共有</td><td>成立 → 用 fencing 兜底，而非多数派</td></tr>
+    <tr><td>时钟依赖</td><td>安全性建立在时钟假设上</td><td>合理运维下漂移有限</td><td>部分成立 → 别让正确性依赖时钟</td></tr>
+    <tr><td>fencing token</td><td>RedLock 无法生成</td><td>需资源端配合</td><td>成立 → RFencedLock 就是回答</td></tr>
+    <tr><td>运维成本</td><td>—</td><td>—</td><td>5 个独立实例的多数派，换来的保证存疑 → <strong>Redisson 已弃用</strong></td></tr>
+  </table>
+  </div>
+  <p>裁决落地成一句选型纪律：<strong>单主 + 从库同步校验（RLock）管住切换窗口，RFencedLock 管住停顿窗口，剩下的正确性硬需求交给共识系统</strong>——不要再为"多数派独立 Redis 实例"新建运维负担。存量 RedLock 代码迁移：多数场景直接降级为普通 RLock（同步校验默认开启），少数正确性场景升 RFencedLock 或 etcd。</p>
+
+  <h3>看门狗服役参数表</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>参数</th><th>默认值</th><th>服役含义</th></tr>
+    <tr><td><code>lockWatchdogTimeout</code></td><td>30000ms</td><td>进程崩溃后锁最长存活时间 = 故障恢复的等待上限；也是续期后的 TTL</td></tr>
+    <tr><td>续期间隔</td><td>TTL/3（约 10s）</td><td>10s 续期、30s 过期：容忍连续 2 次续期失败，第三次兜不住</td></tr>
+    <tr><td><code>lockWatchdogBatchSize</code></td><td>100</td><td>批量续期的单批锁数；同 JVM 锁多时关注（集群模式按 slot 分组续期）</td></tr>
+    <tr><td><code>checkLockSyncedSlaves</code></td><td>true</td><td>加锁后校验从库已同步（WAIT）；关掉=回到切换丢锁窗口</td></tr>
+    <tr><td><code>slavesSyncTimeout</code></td><td>1000ms</td><td>等待从库确认的超时；超时未确认 → 释放锁并判加锁失败</td></tr>
+  </table>
+  </div>
+  <p>两个最常被误解的点：<strong>① 指定 leaseTime 就没有看门狗</strong>——<code>lock.lock(10, TimeUnit.SECONDS)</code> 是"10 秒后强制释放"的幂等保护，不是"看门狗多看着点"；<strong>② 看门狗只保护"进程活着"的锁</strong>——进程冻结（GC）时续期线程一起冻住，这就是 01 节事故的第一层。看门狗解决"业务没跑完锁先过期"，解决不了"业务还在跑锁已经给了别人"。</p>
+
+  <div class="callout">
+    <p class="callout-title">容量三笔账（锁视角）</p>
+    <p><strong>RT 账：</strong>开启从库同步校验后，加锁 = SET + WAIT，多一次最多 1s 的往返——锁的 P99 直接加在业务链路上，秒级链路要把它算进预算。<strong>等锁账：</strong>高并发抢同一把锁时，排队等锁吞吐 ≈ 1/临界区时长（与第 34 期热点行物理定律同构——都是串行化点）；临界区 10ms，单锁上限 100 QPS，超了就要拆锁粒度或换并发单元。<strong>令牌账：</strong>fencing token 的资源端校验是 O(1)（记一个最大值），但要进存储路径——每次写多带一列、比对一次，可忽略；真正的成本是把"资源端校验"写进每一个被保护系统的合同。</p>
+  </div>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：Redisson 4.x 的三个服役片段</h2>
+
+  <h3>片段一：标准业务锁（RLock + 看门狗）</h3>
+  <pre><code><span class="c-com">// Redisson 4.x（当前 4.7.0，2026-08 发布；JDK 8+ 可用）</span>
+RLock lock = redisson.getLock("coupon:issue:" + activityId);
+<span class="c-com">// 不传 leaseTime → 看门狗接管：TTL 30s，每 10s 续期</span>
+if (lock.tryLock(2, TimeUnit.SECONDS)) {          <span class="c-com">// 最多等锁 2s</span>
+    try {
+        issueCoupon(activityId);                   <span class="c-com">// 临界区：快进快出，禁 RPC 长调用</span>
+    } finally {
+        if (lock.isHeldByCurrentThread()) lock.unlock();  <span class="c-com">// 只解自己的锁</span>
+    }
+}
+<span class="c-com">// tryLock 失败 ≠ 异常：走"已有实例在发放"分支，直接返回</span></code></pre>
+
+  <h3>片段二：正确性场景换 RFencedLock</h3>
+  <pre><code><span class="c-com">// 3.23+ 提供；每次加锁领单调递增令牌，替代已弃用的 RedissonRedLock</span>
+RFencedLock lock = redisson.getFencedLock("coupon:issue:" + activityId);
+Long token = lock.tryLockAndGetToken(2, TimeUnit.SECONDS);  <span class="c-com">// 拿锁+领令牌</span>
+if (token != null) {
+    try {
+        <span class="c-com">// 券服务必须校验：token &lt; 其已见最大值 → 拒绝（旧持有者的迟到写入）</span>
+        couponClient.issue(activityId, token);
+    } finally {
+        if (lock.isHeldByCurrentThread()) lock.unlock();
+    }
+}</code></pre>
+
+  <h3>片段三：一把"裸 Redis 锁"的最小正确实现</h3>
+  <pre><code><span class="c-com"># 加锁：随机 token + NX + PX，一条命令原子完成（官方模式）</span>
+SET lock:coupon:1001 "f8a3-9c2e-41d7-b6aa" NX PX 30000
+<span class="c-com"># 释放：Lua 校验 token 再删——判断与删除必须原子</span>
+<span class="c-com"># if redis.call("get", KEYS[1]) == ARGV[1]</span>
+<span class="c-com"># then return redis.call("del", KEYS[1]) else return 0 end</span>
+<span class="c-com"># 生存检查：释放前先确认锁还是自己的，GET 比对 token</span></code></pre>
+
+  <div class="warn">
+    <p><strong>五个必踩的坑：</strong>① <strong>把可用锁当正确锁用</strong>——超发、双写场景裸用 SET NX，主从切换一次就击穿；先做 03 节那道判断题。② <strong>锁内调长 RPC</strong>——临界区拖长 = 等锁吞吐下降 + 停顿窗口变宽，锁内只做本地计算与快速存储写。③ <strong>tryLock 失败当异常抛</strong>——抢锁失败是正常分支（别人在干），抛异常引发告警风暴与重试风暴；正确姿势是记录并走"处理中"响应。④ <strong>unlock 不判持有者</strong>——锁过期后 unlock 会抛 IllegalMonitorStateException，finally 里必须 <code>isHeldByCurrentThread()</code> 先判。⑤ <strong>手工实现续期线程</strong>——自己起线程 EXPIRE 续期没有"锁还是我的"校验，会续到别人的锁；要么不续期（短 TTL + 快临界区），要么用看门狗，别造第三种。</p>
+  </div>
+
+  <div class="card card-tip">
+    <h4>✅ 锁服役体检清单</h4>
+    <p>☐ 每把锁登记用途与正确性等级（可用/正确），正确锁必须有 fencing 或共识方案　☐ 临界区红线：禁外部 RPC、禁用户输入等待，P99 时长进监控　☐ 等锁队列长度与锁等待超时告警（等锁 &gt; 1s 的锁名 Top10）　☐ 看门狗参数复核：锁 TTL ≥ 临界区 P99×3，崩溃恢复 SLA ≥ TTL　☐ checkLockSyncedSlaves 保持默认开启，锁链路 RT 预算含同步校验　☐ 正确锁的资源端令牌校验有单测覆盖（旧令牌必拒绝）　☐ 锁 Key 命名规范 resource:action:id，粒度评审过（防全站一把锁）　☐ 锁失败分支业务化处理（返回处理中/入队重试），不抛异常不静默吞　☐ 主从切换演练含"锁行为"验收项：切换窗口内加锁必失败而非成功　☐ 无"手工续期线程"存量代码，巡检关键字 EXPIRE + 定时任务</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>锁失效不是异常是时间窗口：</strong>GC 停顿、时钟漂移、主从切换三个敌人都会让加锁命令"成功返回"之后锁悄悄丢失——架构师的工作不是消灭窗口，而是窗口开启时系统仍然正确。</li>
+    <li><strong>先做那道判断题：</strong>"锁失效一次，损失是浪费还是错误？"可用锁（防重去重）SET NX + 看门狗够用；正确锁（超发双写）必须 fencing 或共识系统——很多"锁需求"其实是幂等需求，幂等键更便宜。</li>
+    <li><strong>2026 的争论终局：</strong>RedissonRedLock 已弃用——多数派独立实例的运维成本买不来无争议的安全性；替代是 RLock + 从库同步校验（管切换窗口）与 RFencedLock（管停顿窗口）。</li>
+    <li><strong>看门狗的两个边界：</strong>指定 leaseTime 即关闭看门狗；看门狗只护"进程活着"——进程冻结时续期线程一起冻住。它解决"没跑完锁先过期"，不解决"还在跑锁已给别人"。</li>
+    <li><strong>fencing 是把正确性搬到资源端：</strong>锁服务发单调递增令牌，资源端拒绝比已见最大值更旧的写入——锁可以丢，迟到者的写入进不去。这一层需要资源端合同配合，是最值得提前设计的。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目一：你们的核心支付系统要保证"同一笔订单的出款请求全局最多执行一次"。目前方案是 Redisson RLock（默认配置）+ 出款服务幂等键。支付负责人说"加锁半年没出问题，不用动"。① 用"可用锁/正确锁"二分法评估当前方案，出款互斥失效一次的损失属于哪类？② 默认 RLock 的三个窗口（GC 停顿/时钟漂移/主从切换）各覆盖了哪个、没覆盖哪个？③ 设计改造方案：在"不动 Redis 基础设施"和"引入新基础设施"两个约束下分别给出最优解，并说明资源端为什么必须是防线最后一环。<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>典型正确锁，且是错付的那种。</strong>"最多执行一次"失效一次 = 重复出款 = 直接资损，不是浪费是错误——这道题没有第二答案。负责人的"半年没出问题"是幸存者偏差：三个窗口都是低频事件（分钟级 Full GC、分片级主从切换、秒级时钟步进），出问题的期望次数可能是"每年 0.3 次"——半年零事故与方案正确毫无关系。正确锁的验收标准不是"没出过事"，而是"失效路径是否存在且被兜住"。</p>
+      <p>② <strong>默认 RLock（checkLockSyncedSlaves=true）覆盖了主从切换窗口的大部分</strong>——加锁后 WAIT 从库确认，未同步不返回成功，切换后新主缺锁的窗口被压缩到"确认后、切换前"的极窄缝隙。<strong>没覆盖 GC 停顿</strong>——进程冻结时看门狗一起冻，锁过期后第二人加锁，旧持有者苏醒继续写，RLock 没有任何机制拦截。<strong>也没覆盖时钟漂移</strong>——Redis 用 gettimeofday 判过期，时钟跳变会让 TTL 失真，但这属于低概率环境因素。所以关键缺口就是停顿窗口：出款服务的幂等键（唯一约束/状态机）目前是唯一防线——它恰好也是"资源端校验"的一种，这就是为什么"半年没出事"其实靠的是幂等键在兜底，而不是锁。</p>
+      <p>③ <strong>不动基础设施：</strong>把幂等键从"隐防线"升格为"显合同"——出款请求携带 fencing token（RFencedLock 的 <code>tryLockAndGetToken</code> 领取，3.23+），出款网关侧用数据库行 <code>last_token</code> 列做条件更新（<code>UPDATE ... SET last_token=#{token} WHERE order_id=# AND last_token&lt;#{token}</code>，影响行数=0 即拒绝），旧持有者的迟到请求被原子拒绝。这就是"fencing 进资源端"的标准落法：一行条件更新，零新组件。<strong>引入新基础设施：</strong>出款这种双主零容忍场景上 etcd 锁（Raft 共识，线性一致）——令牌可以直接用 etcd 修订版（revision），天然单调递增；代价是新集群的运维与容量。<strong>资源端必须是最后一环的原因：</strong>无论锁服务多强，"持有者苏醒后继续写"发生在锁的管辖范围之外——只有资源端在写入路径上校验令牌，才能把最后一个窗口焊死。锁负责让正常路径不撞车，资源端负责撞了车不出事故——两层各司其职，缺一不可。</p>
+    </div>
+  </details>
+
+  <details class="q-card">
+    <summary>题目二：库存服务用"每 SKU 一把锁"保护本地扣减，大促压测发现某爆款 SKU 的下单接口 P99 从 80ms 涨到 1.2s，等锁日志显示该锁的等待队列峰值 800。① 用"串行化点吞吐"公式估算这把锁的吞吐上限，判断 1.2s 的构成。② 给出三个改造方向（拆细锁粒度 / 换并发单元 / 干脆不用锁），各自适合什么前提？③ 如果选"换并发单元到 Redis 原子扣减"，锁退役后原来防的"重复扣减"问题靠什么保证？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>锁是串行化点，吞吐上限 = 1/临界区时长</strong>（与第 34 期热点行物理定律同构）。临界区若 10ms（本地校验+扣减+写库），单锁吞吐上限 100 QPS；队列峰值 800 × 10ms ≈ 8s 的理论排队长——P99 1.2s 说明还有超时快速失败在截流，系统已经在雪崩前的爬坡段。1.2s 的构成：800ms 等锁 + 100ms 锁执行 + 300ms 锁外链路，等锁占 2/3——<strong>加机器解决不了</strong>：每个实例都在抢同一把锁，实例越多队列越长（这同时是第 35 期热 Key 的"单 slot 免疫"在锁维度的翻版）。</p>
+      <p>② <strong>方向一拆细粒度：</strong>把"每 SKU 一把锁"拆成"每 SKU×仓库/分区一把锁"（如 8 个分桶，随机桶扣减，扣空借桶）——吞吐 ×8，适合库存可物理分割且单分区够用的场景；改动集中在锁 Key 与扣减路由。<strong>方向二换并发单元：</strong>把裁决权从"分布式锁"换成"Redis 原子命令"——<code>DECR</code>/Lua 原子扣减把临界区压到 Redis 单线程内（微秒级），吞吐上限提高两个数量级，适合秒杀级热点；要处理 Redis 宕机降级（拒卖限流，不是回退直扣）与异步落库对账。<strong>方向三不用锁：</strong>若"防重复下单"才是本意，幂等键（订单唯一约束）+ 数据库原子 UPDATE（<code>stock=stock-1 WHERE stock&gt;0</code> 影响行数判空）就够了——适合并发中等、且临界区本来就是一条 SQL 的场景；单行 UPDATE 的行锁吞吐见第 34 期五级梯子，300~500 QPS 量级。<strong>选型顺序：先问是不是幂等问题（方向三），再问锁粒度能不能拆（方向一），热点真到秒杀级才换并发单元（方向二）</strong>。</p>
+      <p>③ <strong>锁退役≠互斥退役，是把互斥下沉到更便宜的机制里。</strong>Redis 原子扣减本身 guarantees 单线程串行——同一 SKU 的 DECR 天然互斥，不需要外层锁；"重复扣减"由三层兜住：<strong>原子性</strong>（扣减与校验在一条 Lua 里原子完成，不存在 check-then-act 裂缝）；<strong>幂等键</strong>（同一订单重复请求带相同幂等键，第二笔在扣减前被唯一约束拒绝）；<strong>对账</strong>（异步落库时以 Redis 扣减流水为准核对数据库，差异告警人工裁决——回看第 34 期 L5 梯子的完整论证）。这个迁移的架构含义：<strong>分布式锁只是实现互斥的工具之一，不是互斥本身</strong>——队列、原子命令、数据库约束、幂等键都是互斥的载体，架构师选的是"用哪个载体最便宜且失败模式最优雅"。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>Redis 官方文档 · Distributed Locks with Redis（SET NX PX + token + Lua 释放的官方模式与 RedLock 算法全文）：<br>
+    <a href="https://redis.io/docs/latest/develop/use/patterns/distributed-locks/" target="_blank" rel="noopener">https://redis.io/docs/latest/develop/use/patterns/distributed-locks/</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>入门四面阱与看门狗初见在存档期 <a href="0009-redis-distributed-lock.html">第 9 期分布式锁</a>（本期补全服役工程视角，页面互链）；Martin Kleppmann《How to do distributed locking》与 Antirez《Is Redlock safe?》原文是 02 节争论的一手材料；锁的串行化吞吐与第 <a href="0034-mysql-row-lock-mvcc.html">34 期热点行五级梯子</a>同一物理定律；锁 Key 的分片热点问题回看 <a href="0035-redis-bigkey-hotkey.html">第 35 期热 Key 治理</a>；主从切换丢锁的复制机理在 <a href="0033-mysql-ha-failover.html">第 33 期高可用切换</a>有同构展开（RPO 视角）；幂等键替代锁的思想与 <a href="0021-pulsar-message-reliability.html">第 21 期消费幂等</a>、<a href="0027-function-calling.html">第 27 期工具调用幂等</a>一脉相承。下一期 Redis 主线告一段落，回十三类循环。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0035-redis-bigkey-hotkey.html">← 上一期：Redis 大 Key 与热 Key 治理</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 36 期 · Redis 系列 · 下一期预告：轮换回十三类循环（下一栈：Apache Pulsar）</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
