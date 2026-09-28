@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · Pulsar 分层存储与冷数据下沉 | 2026-09-29</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0037</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0036-redis-lock-fencing.html">上一期：Redis 分布式锁服役工程</a> · <a href="https://www.bilibili.com/video/BV1uJaj6jEdN" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">APACHE PULSAR · Pulsar 系列第 5 讲（存储成本篇 · 分层存储）</p>
+  <h1>分层存储与冷数据下沉：让消息队列的保留期不再是磁盘预算</h1>
+  <p class="subtitle">上一讲聊了 <a href="0036-redis-lock-fencing.html">Redis 分布式锁的服役工程</a>，Redis 主线告一段落，今天回到十三类循环的下一站——Apache Pulsar。之前的 Pulsar 期（<a href="0012-pulsar-vs-kafka.html">架构对比</a>、<a href="0013-pulsar-subscription-models.html">订阅模型</a>、<a href="0014-pulsar-prod-cons-tuning.html">吞吐调优</a>、<a href="0021-pulsar-message-reliability.html">消息可靠性</a>）都在聊"跑得快、跑得对"，这一期聊"存得起"：<strong>消息越攒越多、审计要留三年、磁盘一年买三批——分层存储（Tiered Storage）就是把"保留多久"从磁盘预算问题变成策略问题</strong>。Pulsar 是市场上第一个原生支持分层存储的消息系统（2018 年，建立在 BookKeeper 存算分离的地基上），这也是很多团队从 Kafka 迁过来的头号理由。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🟪 Pulsar</span>
+    <span class="tag-date">📅 2026-09-29 · 第 37 期</span>
+    <span class="tag time">⏱ 预计阅读 10 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>一场"存储翻倍"的成本复盘</h2>
+  <p>某平台的风控事件主题，为了满足审计追溯要求把保留期从 7 天改成 180 天。当时的算术很简单：日增 300GB，180 天 ≈ 54TB，把 BookKeeper 集群的 NVMe 盘从 12 块加到 60 块，"一次到位"。三个月后复盘，三个扎心的事实：<strong>① 99% 的读取发生在最近 48 小时</strong>（消费积压、故障回放、近线分析），三个月前的数据整个季度被读了 4 次，全部来自审计抽查；<strong>② SSD 的钱花在了 SATA 都嫌贵的负载上</strong>——BookKeeper 的热数据价值来自低延迟读写，冷数据躺在那里只消费"容量"这一项；<strong>③ 半年后保留期要改 365 天</strong>，再翻一倍盘，采购流程走了六周，期间只能降副本硬扛，可靠性预算被容量问题透支。</p>
+  <p>这不是 BookKeeper 的问题，是<strong>"单一存储介质扛全生命周期"的架构问题</strong>。消息的价值密度随时间衰减：写后几分钟内被消费，是最热的数据；几天内可能被回放，是温数据；几个月只等一次审计，是纯冷数据。让三种温度的数据挤同一种 SSD，等于让冷链车拉三年前的档案。<strong>分层存储的思路：热数据留在 BookKeeper，冷数据下沉到对象存储，消费端无感</strong>——这才是存算分离架构的完整兑现。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：Ledger 关闭，是下沉的天然时机</h2>
+
+  <h3>能下沉，是因为 Pulsar 的存储生来就是分段的</h3>
+  <p>分层存储能做且好做，根子在 Pulsar 的存储模型：<strong>Topic 的数据由 Managed Ledger（托管账本）管理，逻辑上切成一段段不可变的 Ledger（账本），分段分布式地存在 BookKeeper 上</strong>。Ledger 一旦关闭（写满滚动或超时滚动）就不可变——"不可变"是下沉工程里最值钱的性质：拷贝一个不再变化的文件，不需要锁、不需要暂停写入、不需要压缩合并（对比 LSM 存储引擎的 compaction，那是把"可变"历史的代价分期偿还）。Broker 内置的 Offloader 组件盯着<strong>已关闭的 ledger</strong>，达到阈值就把整段数据读出来、按 ledger 结构写成不可变对象传到对象存储，成功后在元数据里登记"这段在远端"，再等删除延迟到期，才把 BookKeeper 上的本地副本删掉。<strong>读取方向由 Broker 透明路由：消费者完全不知道某段数据来自 S3 还是来自 Bookie</strong>——这就是"下沉对业务无感"的全部机制。</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar37" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <text x="380" y="22" text-anchor="middle" fill="var(--muted)" font-size="13">热温冷三层各就各位：写读在 BookKeeper，审计回放在对象存储，保留期由策略而非磁盘决定</text>
+
+    <!-- hot tier -->
+    <rect x="30" y="46" width="205" height="120" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="132" y="70" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">热层 · BookKeeper</text>
+    <text x="46" y="94" fill="var(--muted)" font-size="10.5">写入：Journal 顺序落盘 + 副本</text>
+    <text x="46" y="114" fill="var(--muted)" font-size="10.5">实时消费、积压追赶都在这层</text>
+    <text x="46" y="134" fill="var(--muted)" font-size="10.5">只有最近 1~2 个打开的 ledger</text>
+    <text x="46" y="154" fill="var(--ink)" font-size="10.5">值钱的是延迟，介质是 SSD</text>
+
+    <!-- cold tier -->
+    <rect x="525" y="46" width="205" height="120" rx="10" fill="var(--ok-soft, rgba(46,160,67,.08))" stroke="var(--ok, #2ea043)"/>
+    <text x="627" y="70" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">冷层 · 对象存储</text>
+    <text x="541" y="94" fill="var(--muted)" font-size="10.5">S3 / OSS / GCS / Azure / HDFS</text>
+    <text x="541" y="114" fill="var(--muted)" font-size="10.5">不可变对象，镜像 ledger 结构</text>
+    <text x="541" y="134" fill="var(--muted)" font-size="10.5">容量近无限，单价低一个量级</text>
+    <text x="541" y="154" fill="var(--ink)" font-size="10.5">审计回放、长周期重置消费</text>
+
+    <!-- offloader arrow -->
+    <rect x="270" y="80" width="220" height="52" rx="9" fill="var(--card)" stroke="var(--line)"/>
+    <text x="380" y="100" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">Broker · Offloader</text>
+    <text x="380" y="119" text-anchor="middle" fill="var(--muted)" font-size="10.5">只搬"已关闭"的 ledger：安全、无锁、无暂停</text>
+    <line x1="237" y1="106" x2="268" y2="106" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar37)"/>
+    <line x1="492" y1="106" x2="523" y2="106" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar37)"/>
+    <text x="380" y="150" text-anchor="middle" fill="var(--muted)" font-size="10">阈值触发（字节数 / 存活时间）→ 上传 → 登记元数据 → 删除延迟到期才删本地副本</text>
+
+    <!-- bottom band -->
+    <rect x="30" y="192" width="700" height="120" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="380" y="216" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">客户端为什么无感：Broker 透明路由读取</text>
+    <text x="46" y="240" fill="var(--muted)" font-size="10.5">消费请求 → Broker 判断消息所在 ledger：本地有 → Bookie 读；本地已删 → 从对象存储拉取再回给消费者</text>
+    <text x="46" y="260" fill="var(--muted)" font-size="10.5">生产者更是从头到尾不参与：写入路径不经过 offloader，吞吐与延迟零影响</text>
+    <text x="46" y="280" fill="var(--muted)" font-size="10.5">跳转回放（seek 到三个月前）也能用：冷段按需从远端读取，只是首条消息延迟变高</text>
+    <text x="46" y="300" fill="var(--ink)" font-size="10.5">保留期改一年 = 改一行 namespace 策略，不再是一批采购单</text>
+  </svg>
+  </div>
+
+  <h3>三个时间参数，决定数据怎么走过生命周期</h3>
+  <p>整个下沉流程里有三个"时间窗口"，理解它们就理解了全部参数语义：<strong>① 触发时机</strong>——offload 只在 ledger 关闭后才有得搬（自动触发加在 segment 滚动这个动作上，所以低流量 topic 的最后一次滚动要等写满，别把"配了阈值没下沉"当故障）；<strong>② 读取优先级</strong>——消息同时存在于 BookKeeper 和对象存储的窗口内，默认 <code>tiered-storage-first</code> 从远端读，介意冷读走网络的可以把读取优先级改成 <code>bookkeeper-first</code>，让本地副本优先服务；<strong>③ 删除延迟</strong>——上传成功后不立刻删本地副本，默认 4 小时（<code>managedLedgerOffloadDeletionLagMs=14400000</code>），给正在读这段数据的消费者留缓冲。第四个版本演进值得知道：4.0 起 PIP-350 支持禁用删除延迟（只卸载不删本地，供"远端留档 + 本地照常服务"的用法），PIP-348 让 topic 加载阶段就能触发 offload。</p>
+
+  <div class="callout">
+    <p class="callout-title">版本坐标（2026-09）</p>
+    <p>当前稳定版 <strong>4.2.4</strong>（2026-08-03，4.2 线）；<strong>4.0 仍是 LTS</strong>（4.0.13，安全支持到 2027-10）；5.0.0-M2 里程碑已出（生产勿用）。4.0 的分层存储脉络：Managed Ledger 大重构为可插拔实现铺路（消息 ID 不再绑定 ledger ID/entry ID）；Docker 主镜像与 pulsar-all 的合并让 offloader NAR 进了标准镜像（"装分层存储"从部署清单里消失了）。另注意 4.2.0 起 <strong>etcd 元数据后端被移除</strong>（4.0~4.1 的实验窗口结束，用过的集群要迁回 ZooKeeper 或 Oxia）——升级存量集群前先核对元数据后端。</p>
+  </div>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：把"冷热界线"画在数据上</h2>
+
+  <h3>三级规划法：界线画在哪，钱就省在哪</h3>
+  <p><strong>第一步，画冷热界线。</strong>拿最近一个季度的消费数据回答两个问题：读取发生在多新的数据上（P99 读到几小时前的数据）？跳转回放/审计抽查的频率和跨度多大？<strong>界线原则：宁可略保守</strong>——界线画在"最近 3 天"而读取 P99 落在 48 小时内，多存的成本有限；画太紧（比如 1 天）而积压高峰要回放 3 天，冷读穿透对象的延迟就进了消费链路。<strong>第二步，容量规划。</strong>BookKeeper 集群按"界线内的热数据 + 写入速率 × 恢复窗口"定容量，而不是按保留期定容量——这是分层存储带来的规划范式转变：磁盘容量与保留期解耦，保留期变成 <code>set-retention</code> 一行策略。<strong>第三步，成本核算。</strong>对象存储的单价通常只有高性能 SSD 的 1/5~1/10（还能再叠生命周期规则沉降到低频/归档档位），冷数据占比越高省得越多；但要把冷读延迟与出口流量费算进去——回放大跨度冷数据的场景，出口流量可能比存储费先出圈。</p>
+
+  <h3>触发与删除参数表</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>参数</th><th>默认值</th><th>架构含义</th></tr>
+    <tr><td><code>managedLedgerOffloadAutoTriggerSizeThresholdBytes</code></td><td>-1（禁用）</td><td>topic 存储量超过该字节数自动触发；0 = 尽早下沉；按 namespace 设置用 <code>set-offload-threshold --size</code></td></tr>
+    <tr><td><code>managedLedgerOffloadThresholdInSeconds</code></td><td>-1（禁用）</td><td>按存活时间触发（字节数之外的第二把尺子），适合低流量长保留 topic</td></tr>
+    <tr><td><code>managedLedgerOffloadDeletionLagMs</code></td><td>14400000（4 小时）</td><td>上传成功到删除本地副本的延迟；给消费缓冲留时间，太小增加冷读概率</td></tr>
+    <tr><td><code>managedLedgerOffloadMaxThreads</code> / <code>ReadThreads</code></td><td>2 / 2</td><td>offloader 线程池；大量 topic 同时下沉时是吞吐瓶颈，按磁盘 IO 余量上调</td></tr>
+    <tr><td>读取优先级 <code>-orp</code></td><td>tiered-storage-first</td><td>双副本窗口内读哪边；本地读敏感改 bookkeeper-first</td></tr>
+    <tr><td>触发时机（机制）</td><td>ledger 关闭时</td><td>自动 offload 挂在 segment 滚动上：低流量 topic 的最后一段要等写满才搬，急用就手动 offload</td></tr>
+  </table>
+  </div>
+  <p>规划完成后给自己留一个验收口径：<strong>让"热层占用"成为常驻监控指标</strong>——如果开了 offload 之后 BookKeeper 磁盘占用还在跟着保留期线性涨，说明触发配置没有生效或阈值配得太高，省钱的架构没有省到钱。</p>
+
+  <div class="callout">
+    <p class="callout-title">可靠性：下沉不删数据，只搬数据</p>
+    <p>安全链条是"先上传成功 → 元数据登记 → 删除延迟到期 → 才删本地副本"——任何一步失败，本地副本都在。唯一的物理真相是<strong>下沉后的数据可靠性 = 对象存储的可靠性</strong>：BookKeeper 的三副本不再覆盖已删除本地副本的冷段。所以桶策略要按生产标准配：版本控制/防误删（桶策略禁止 hard delete 也能防住管理事故）、跨区复制或异地备份按 RPO 要求选配。冷读延迟要有预期：对象存储的首字节延迟在几十毫秒量级，回放到冷段的<strong>第一条</strong>消息延迟会高，之后的顺序读会进入节奏——把"回放冷数据 P99"单独纳入压测，别让它第一次出现在审计现场。</p>
+  </div>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：MinIO 后端的三段落地</h2>
+
+  <h3>片段一：broker.conf 配 offloader（S3 兼容端点指向 MinIO）</h3>
+  <pre><code><span class="c-com"># broker.conf —— 内网 MinIO 做 S3 兼容后端</span>
+managedLedgerOffloadDriver=aws-s3
+s3ManagedLedgerOffloadBucket=pulsar-cold-archive
+s3ManagedLedgerOffloadServiceEndpoint=http://minio.internal:9000
+<span class="c-com"># 凭证走环境变量或 Vault 注入，不落配置文件</span>
+<span class="c-com"># 4.x 主镜像已内置 offloader NAR，无需再拷 offloaders 目录</span></code></pre>
+
+  <h3>片段二：namespace 级策略 + 手动触发</h3>
+  <pre><code><span class="c-com"># 冷热界线：热层最多留 100GB，下沉后本地副本保留 1 小时再删</span>
+bin/pulsar-admin namespaces set-offload-threshold \
+    --size 100G risk/events
+bin/pulsar-admin namespaces set-offload-deletion-lag --lag 1h risk/events
+<span class="c-com"># 审计要读三年前？保留期与 offload 是两件事，分开配</span>
+bin/pulsar-admin namespaces set-retention --size -1 --time 1095d risk/events
+<span class="c-com"># 低流量 topic 等不及滚动，手动推一把</span>
+bin/pulsar-admin topics offload -s 0 persistent://risk/events/audit-track</code></pre>
+
+  <h3>片段三：回放三个月前的数据（消费者代码零改动）</h3>
+  <pre><code><span class="c-com">// 重置订阅到最早位置——哪怕那段数据已在对象存储</span>
+Consumer&lt;byte[]&gt; c = pulsarClient.newConsumer()
+    .topic("persistent://risk/events/audit-track")
+    .subscriptionName("audit-replay-0929")
+    .resetIncludeHead(true)   <span class="c-com">// 从头消费</span>
+    .subscribe();
+<span class="c-com">// Broker 自动路由：冷段从 MinIO 拉取，热段走 BookKeeper</span>
+<span class="c-com">// 业务代码对"数据在哪一层"完全无感</span></code></pre>
+
+  <div class="warn">
+    <p><strong>四个必踩的坑：</strong>① <strong>混淆保留策略与 offload 策略</strong>——retention 决定数据活多久（到期真删，对象存储里也删），offload 决定数据住哪里；两个维度四象限，先想清楚每个 topic 落在哪一格再动手。② <strong>删除延迟配成 0</strong>——上传成功立刻删本地副本，正在消费这段的 reader 下一秒就变冷读，消费延迟毛刺自己造的；默认 4 小时是缓冲，压缩它要有明确理由。③ <strong>对象存储当冷备份用却没配防删策略</strong>——桶能被任何有凭证的人清空；生产桶必须版本控制 + 删除保护，凭证按最小权限发。④ <strong>只算存储单价不算出口流量</strong>——频繁回放大跨度冷数据时，对象存储的出口流量费可能反超存储费；高频回放需求认真评估读取优先级与回放任务的调度（错峰、限并发）。</p>
+  </div>
+
+  <div class="card card-tip">
+    <h4>✅ 分层存储上线体检清单</h4>
+    <p>☐ 冷热界线用消费数据定过（读取 P99 落点 + 回放跨度），不是拍的　☐ BookKeeper 容量按"热窗口 + 恢复带宽"重算，不再按保留期　☐ 触发阈值（字节或时间）与删除延迟成对配置并记录理由　☐ 热层磁盘占用有常驻大盘与告警（offload 生效性的一线证据）　☐ 对象存储桶：版本控制/防误删策略开启，凭证最小权限　☐ 冷读延迟（回放首条 + 顺序读）进过压测　☐ 保留策略与 offload 策略分列台账，topic 归属象限清晰　☐ 回放任务有调度约束（错峰/限并发），出口流量费进成本报表　☐ 升级路径核对过版本坐标（4.2.x / 4.0 LTS；etcd 元数据用户先迁移）　☐ 灾难演练含"对象存储不可用"场景：热层不受影响、冷读降级路径明确</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>分层存储把保留期从磁盘预算变成策略问题：</strong>热数据留 BookKeeper 保延迟，冷数据沉对象存储保成本；保留期改一年是改一行策略，不是一批采购单——这是存算分离架构的完整兑现。</li>
+    <li><strong>能无感下沉，靠的是 Ledger 不可变：</strong>offloader 只搬已关闭的 ledger，不需要锁、暂停、压缩合并；Broker 透明路由读取，生产者消费者对数据在哪一层完全无感。</li>
+    <li><strong>三个时间参数定生死：</strong>触发时机挂在 ledger 滚动上（低流量 topic 要等写满或手动推）；双副本窗口内有读取优先级可调；删除延迟（默认 4h）是消费缓冲，别轻易压成 0。</li>
+    <li><strong>下沉后的可靠性等于对象存储的可靠性：</strong>本地副本删除后，三副本不再覆盖冷段——桶的版本控制、防误删、跨区复制按生产标准配，冷读延迟与出口流量费进压测与成本报表。</li>
+    <li><strong>retention 与 offload 是两个正交维度：</strong>一个管活多久（到期真删），一个管住哪里；先画好每个 topic 的四象限归属，再动配置。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目一：你们 Pulsar 集群要新增两类 topic：A 类是设备遥测流，日增 500GB，消费延迟秒级，保留期要求 365 天供算法团队随时回放训练；B 类是交易对账流，日增 20GB，保留 7 天但每天凌晨有批处理把整个 topic 从头读一遍。① 两类 topic 的冷热界线与 offload 策略应该怎么差异化设计？② B 类"每天全量重读一遍"的模式对分层存储意味着什么——冷热界线还成立吗？③ 如果对象存储的出口流量单价折算是 SSD 存储单价的 3 倍（按 B 类的读放大折算），你的成本结论会怎么变？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>A 类是分层存储的教科书场景。</strong>消费延迟秒级说明读取几乎全部落在最近几分钟到几小时的写入段；365 天保留、低频回放——冷热界线可以画得很激进：热层留 1~2 天（比如阈值 1TB），其余全部下沉。策略组合：字节阈值触发（<code>set-offload-threshold --size 1T</code>）+ 删除延迟默认或略放（回放训练是批量的、可容忍首条慢，不需要长双副本窗口）；保留期 365 天用 retention 配，与 offload 解耦。算容量账：热层稳定在 ~1TB 出头，其余 ~180TB 进对象存储，按 SSD 与对象存储 5~10 倍价差，存储成本降到原来的 5% 量级——这就是"保留期与磁盘解耦"的直接收益。<strong>B 类恰恰相反，是个反例题眼。</strong></p>
+      <p>② <strong>B 类每天从头读一遍 = 它根本没有"冷"数据。</strong>按读取频率定义温度，7 天前的数据每天都被读一次——它是"整条 topic 全温"。若给它配 offload，每天凌晨的批处理会从对象存储全量拉一遍，出口流量费按时计费地烧；若读取优先级设 bookkeeper-first，本地副本又不能删，offload 变成纯冗余拷贝。<strong>结论：冷热界线不是按"数据年龄"画，是按"读取温度"画</strong>——B 类的正确方案是：不 offload（或仅做远端容灾副本、本地不删，对应 PIP-350 的"只卸载不删除"用法），把批处理改造为增量读取（cursor 记位点，只读新增），或者让"每天全量重读"这个需求本身退场。这道题的考点就是防止把"分层存储"当无脑默认项——它优化的是"写后少读"的访问模式，对"周期性全量重读"的模式是负优化。</p>
+      <p>③ <strong>出口流量费会翻转整个决策。</strong>给 B 类做个粗算：日增 20GB、保留 7 天 ≈ 140GB 常驻；每天全量重读 = 每天出口 140GB。若出口单价比 SSD 存储单价贵 3 倍（题设折算），一天的读流量费 ≈ 420GB 的 SSD 存储费，而 140GB 数据在 SSD 上放一天只要 140GB 的存储费——读 3 天就比纯 SSD 放着更贵。推广成判断式：<strong>当"日读取量 × 出口流量单价"超过"常驻数据量 × 存储单价"时，下沉是亏的</strong>。这个不等式应该进分层存储的评审清单：先量化读放大（日读取量 / 常驻数据量），再套当地价目表算账。架构师的价值不在会开功能，在于能算出这个功能在自家负载画像下是赚是赔。</p>
+    </div>
+  </details>
+
+  <details class="q-card">
+    <summary>题目二：故障演练中发现：对象存储（MinIO 集群）整体不可用 30 分钟。① 这 30 分钟内，正在实时消费的业务受影响吗？分"消费位点在热层"与"正好回放到冷段"两种情况讨论。② 演练还暴露了一个隐患：运维平台用同一个 AK/SK 管所有桶，一次误操作可以清空冷数据桶。设计这个桶的防误删纵深（至少三层）。③ 如果审计要求"冷数据删除必须留痕、且保留期内不可被任何单点角色删除"，你的治理方案要加什么？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>位点在热层：完全不受影响。</strong>写入路径不经过 offloader，实时消费读的是 BookKeeper 热层——对象存储挂掉那一刻，生产与消费照常，这正是分层架构"热路径与冷层解耦"的分红。唯一受影响的旁路是：这 30 分钟内到达触发阈值的 ledger 无法完成上传，offload 任务排队重试（4.x 的 offloader 会退避重试），热层磁盘占用短暂高于稳态——只要热层容量按"冷层故障窗口 + 写入速率"留过余量，就是无感事件，这也是 03 节容量规划里"恢复窗口"参数的用武之地。<strong>正好回放在冷段：冷读失败/阻塞。</strong>那段数据本地副本已删，唯一副本在对象存储——回放任务的读取会报错或重试。设计要点是让回放客户端有退避重试与断点续读（位点已 ack 的不重来），把"冷层故障"的影响圈定在那几个回放任务，而不是横向扩散。极端情况：若这批冷数据同时被实时业务依赖（比如新消费者 reset 到冷段追历史），那说明冷热界线画错了或业务不该这么用——回到规划层修。</p>
+      <p>② <strong>防误删纵深三层：</strong><strong>第一层，IAM 最小权限拆分</strong>——offloader 用独立凭证，只授目标桶的 PutObject/GetObject/ListBucket，不给 DeleteBucket、不给批量 DeleteObjects；运维平台的凭证与 offloader 凭证物理隔离，绝不用同一个 AK/SK。<strong>第二层，对象锁/版本控制 + MFA 删除</strong>——桶开启版本控制后，"删除"只是加删除标记，数据还在版本里；再叠加对象锁的合规模式（retention 期内任何人包括 root 都删不掉版本）或至少 governance 模式 + 特权角色审批。MinIO 上对应的是对象锁（Object Lock）与桶配额/桶策略的组合。<strong>第三层，元数据与物理隔离的备份副本</strong>——冷数据再往低频桶或异地做一份数据目录级备份（冷数据不可变、天然适合异步复制，增量就是新 ledger 对象），恢复演练纳入季度routine。三层合起来：误操作删不掉（一层）、删了能恢复（二层）、极端场景还有底（三层）。</p>
+      <p>③ <strong>补两块治理：删除留痕与双人控制。</strong>删除留痕：开启桶的审计日志（MinIO 的 audit webhook / 云厂商的 CloudTrail 类），DELETE 类操作记录操作者、时间、对象清单，日志落到独立账户/独立集群，防"删证据"；配合版本控制的删除标记，天然形成"谁在何时删了什么"的账本。不可被单点删除：在对象锁合规模式之下（按 retention 策略锁到保留期满），叠加<strong>流程层双人机制</strong>——真正需要提前删数据的场景（GDPR 类删除请求）走审批流：两人复核 + 专用降权凭证执行 + 审计留痕，任何一个单点角色（包括管理员）都无法独自完成冷数据删除。<strong>架构上的最后一道闸：把"删除冷数据"这件事的触发权从运维平台手里拿走</strong>——冷数据删除只应来自 Pulsar 的 retention 策略到期（由 broker 用自己的凭证执行、有 ledger 级日志），而不是任何人工通道直接碰桶。人的操作止步于策略层，物理删除只属于系统策略——这句原则值得抄进存储治理规范。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>Apache Pulsar 官方文档 · Tiered Storage（offloader 配置、各云后端参数、namespace 策略命令全量参考）：<br>
+    <a href="https://pulsar.apache.org/docs/4.2.x/tiered-storage/" target="_blank" rel="noopener">https://pulsar.apache.org/docs/4.2.x/tiered-storage/</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>分层存储是存算分离的果实，存算分离架构与 Kafka 的对比在存档期 <a href="0012-pulsar-vs-kafka.html">第 12 期</a>；下沉后的读取路由依赖订阅游标，订阅模型在 <a href="0013-pulsar-subscription-models.html">第 13 期</a>；吞吐调优在 <a href="0014-pulsar-prod-cons-tuning.html">第 14 期</a>；offload 之前消息本身的可靠性链路在 <a href="0021-pulsar-message-reliability.html">第 21 期</a>（BookKeeper 的副本机制对热层照常生效）。对象存储侧的纠删码、防脑裂拓扑在第 <a href="0023-minio-erasure-coding.html">23 期 MinIO</a> 有完整展开；监控体系可回看 <a href="0028-prometheus-grafana.html">第 28 期</a>给热层占用建大盘。下一期继续 Pulsar 主线——Schema Registry 与消息演进。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0036-redis-lock-fencing.html">← 上一期：Redis 分布式锁服役工程</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 37 期 · Apache Pulsar 系列 · 下一期预告：Schema Registry 与消息演进（Pulsar 第 2 期）</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
