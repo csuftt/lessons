@@ -176,7 +176,7 @@ $ curl -s -H "X-Token: secret123" http://localhost:8080/order/list</code></pre>
   <details class="q-card">
     <summary>思考二：本期用官方 SimpleDiscoveryClient 静态清单跑通了服务名路由，换成 Nacos 后，什么变了、什么没变？</summary>
     <div class="details-body">
-      <p>没变的是<b>网关这一侧的全部机制</b>：discovery locator 照样按 DiscoveryClient::getServices 拿服务列表，照样生成 lb://服务名 的路由、照样剥前缀；ReactiveLoadBalancerClientFilter 照样解析地址。变的在<b>清单的来源</b>：静态清单要人肉维护，服务扩缩容、换端口都得改配置重启；Nacos 这样的注册中心让实例清单自动跟随心跳上下线，动态路由才名副其实——这正是"服务名路由是官方机制"的底气：机制不绑定任何一个注册中心实现。迁移成本小到只有依赖与实例来源两处（集成实战见第 0004 期）。这也回答了一个架构问题：为什么 Spring Cloud 坚持把"发现服务"抽象成 DiscoveryClient 接口——<b>抽象稳定，实现可换，上层机制才能一次建成、处处复用</b>。</p>
+      <p>没变的是<b>网关这一侧的全部机制</b>：discovery locator 照样按 DiscoveryClient::getServices 拿服务列表，照样生成 lb://服务名 的路由、照样剥前缀；ReactiveLoadBalancerClientFilter 照样解析地址。变的在<b>清单的来源</b>：静态清单要人肉维护，服务扩缩容、换端口都得改配置重启；Nacos 这样的注册中心让实例清单自动跟随心跳上下线，动态路由才名副其实——这正是"服务名路由是官方机制"的底气：机制不绑定任何一个注册中心实现。迁移成本小到只有依赖与实例来源两处（Nacos 官方文档有完整示例）。这也回答了一个架构问题：为什么 Spring Cloud 坚持把"发现服务"抽象成 DiscoveryClient 接口——<b>抽象稳定，实现可换，上层机制才能一次建成、处处复用</b>。</p>
     </div>
   </details>
 </section>
@@ -230,7 +230,7 @@ $ curl -s -H "X-Token: secret123" http://localhost:8080/order/list</code></pre>
   <div class="key-points">
     <ul>
       <li><strong>三步搭出统一入口：</strong>服务名路由（开官方开关，静态清单先行）→ 限流（RequestRateLimiter + RedisRateLimiter）→ 鉴权（自定义 GlobalFilter Bean）；</li>
-      <li><strong>服务名路由是官方机制：</strong>默认生成 lb://服务名 路由、Path=/服务名/** 谓词、剥前缀转发；无注册中心时官方 SimpleDiscoveryClient 静态清单先行，Nacos 即插即换（集成实战见第 0004 期）；</li>
+      <li><strong>服务名路由是官方机制：</strong>默认生成 lb://服务名 路由、Path=/服务名/** 谓词、剥前缀转发；无注册中心时官方 SimpleDiscoveryClient 静态清单先行，Nacos 即插即换（官方 DiscoveryClient 抽象，实现可换）；</li>
       <li><strong>限流两参数一把钥匙：</strong>replenishRate 注水速率 + burstCapacity 桶容量（设零全拒；官方三档配方）；KeyResolver 必配——默认实现取不到 key 就默认拒绝；不支持 shortcut 一行式写法；</li>
       <li><strong>状态码即路标：</strong>401 鉴权闸 / 429 限流闸 / 503 无实例 / 404 无路由——先分诊再动手；</li>
       <li><strong>版本口径：</strong>Gateway 5.0.3 + Spring Cloud 2025.1.3 + Boot 4.1.1，限流需 spring-boot-starter-data-redis-reactive，服务名路由需 spring-cloud-starter-loadbalancer。</li>
