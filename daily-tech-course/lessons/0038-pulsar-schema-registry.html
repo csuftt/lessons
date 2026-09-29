@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · Pulsar Schema Registry 与消息演进：让契约挡在事故前面 | 2026-09-30</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0038</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0037-pulsar-tiered-storage.html">上一期：Pulsar 分层存储与冷数据下沉</a> · <a href="https://www.bilibili.com/video/BV1GpaR6ZEmA" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">APACHE PULSAR · Pulsar 系列第 6 讲（契约治理篇 · Schema Registry）</p>
+  <h1>Schema Registry 与消息演进：让契约挡在事故前面</h1>
+  <p class="subtitle">上一讲聊了 <a href="0037-pulsar-tiered-storage.html">分层存储与冷数据下沉</a>，这期继续 Pulsar 主线，从"存得起"聊到"读得懂"。消息队列里最贵的故障不是丢消息（<a href="0021-pulsar-message-reliability.html">第 21 期</a>治过）也不是存不下（上一期治过），而是<strong>数据还在、契约没了</strong>：一个字段改名，下游三十七个消费者里三十五个静默丢数据。Schema Registry 就是把"消息长什么样"从散落在各团队代码里的口头约定，变成 broker 强制执行的成文契约——Pulsar 把它内置在 broker 里，不需要像 Kafka 生态那样外挂一个独立注册中心。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🟪 Pulsar</span>
+    <span class="tag-date">📅 2026-09-30 · 第 38 期</span>
+    <span class="tag time">⏱ 预计阅读 10 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>一次"字段改名"引发的四小时排查</h2>
+  <p>某平台订单事件流（日峰值 8 万条/秒，Avro 序列化），风控组把字段 <code>userId</code> 重命名为 <code>buyerId</code>，"只是个名字"，当晚发布。次日凌晨报表组发现订阅该 topic 的 12 个下游服务里，<strong>3 个直接崩溃在反序列化，9 个"正常"运行但产出的报表全是空字段</strong>——最阴险的是后一种：Avro 读不到声明的字段就填默认值，作业不报错、数据默默错。全链路排查四小时（P99 事件响应时长），回滚后复盘：变更走了代码评审，但<strong>没有任何机制把"契约变了"这个事实推送给下游</strong>，更没有一道门在变更进门时拦住它。</p>
+  <p>这就是 Schema Registry 要解的问题。机制上它做两件事：<strong>① 生产端登记契约</strong>——生产者连接时把 schema 送到 broker，broker 按兼容策略检查通过后登记新版本；<strong>② 消费端按版本还原</strong>——每条消息的元数据里嵌着 8 字节的 schema 版本号，消费者拿到消息按版本号取回写入方的 schema 反序列化，新旧消息混流各读各的。上一期的分层存储治"数据活多久"，这一期治"数据怎么被读懂"——都是把散在口头的东西变成系统里的显式资产。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：两道关口，一个注册中心</h2>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 340" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar38" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar38r" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--bad)"/>
+      </marker>
+    </defs>
+    <text x="380" y="22" text-anchor="middle" fill="var(--muted)" font-size="13">两道关口：注册时管"能不能演进"，消费时管"按谁还原"</text>
+
+    <!-- producer -->
+    <rect x="24" y="46" width="170" height="112" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="109" y="70" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">生产者（带 schema）</text>
+    <text x="38" y="92" fill="var(--muted)" font-size="10.5">连接时上送 SchemaInfo</text>
+    <text x="38" y="110" fill="var(--muted)" font-size="10.5">.avsc 定义与代码一起发布</text>
+    <text x="38" y="132" fill="var(--ink)" font-size="10.5">不带 schema？默认放进，</text>
+    <text x="38" y="148" fill="var(--ink)" font-size="10.5">enforce 开启后被拒之门外</text>
+
+    <!-- broker -->
+    <rect x="248" y="40" width="264" height="126" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="380" y="62" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">Broker · 内置 Schema Registry</text>
+    <rect x="262" y="74" width="115" height="76" rx="7" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="319" y="94" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">兼容检查器</text>
+    <text x="319" y="112" text-anchor="middle" fill="var(--muted)" font-size="9.5">Avro / JSON 各一个</text>
+    <text x="319" y="128" text-anchor="middle" fill="var(--muted)" font-size="9.5">按策略比对旧版本</text>
+    <rect x="386" y="74" width="115" height="76" rx="7" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="443" y="94" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">版本登记</text>
+    <text x="443" y="112" text-anchor="middle" fill="var(--muted)" font-size="9.5">通过 → 版本 +1</text>
+    <text x="443" y="128" text-anchor="middle" fill="var(--muted)" font-size="9.5">不过 → 拒绝连接</text>
+    <line x1="197" y1="102" x2="246" y2="102" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar38)"/>
+
+    <!-- metadata store -->
+    <rect x="248" y="196" width="264" height="64" rx="10" fill="var(--ok-soft, rgba(46,160,67,.08))" stroke="var(--ok, #2ea043)"/>
+    <text x="380" y="218" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">元数据存储（ZooKeeper / Oxia）</text>
+    <text x="380" y="238" text-anchor="middle" fill="var(--muted)" font-size="10.5">SchemaInfo 全版本链：type + 定义 + properties，随 topic 生命周期管理</text>
+    <line x1="380" y1="169" x2="380" y2="194" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar38)"/>
+
+    <!-- consumer -->
+    <rect x="566" y="46" width="170" height="112" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="651" y="70" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">消费者（AutoConsume）</text>
+    <text x="580" y="92" fill="var(--muted)" font-size="10.5">消息元数据带 8 字节版本号</text>
+    <text x="580" y="110" fill="var(--muted)" font-size="10.5">按版本取回写方 schema 反序列化</text>
+    <text x="580" y="132" fill="var(--ink)" font-size="10.5">新旧消息混流，各读各的契约</text>
+    <text x="580" y="148" fill="var(--ink)" font-size="10.5">取过的版本本地缓存</text>
+
+    <!-- producer -> consumer message arrow -->
+    <path d="M196,64 C420,4 500,8 566,64" fill="none" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar38)"/>
+    <text x="386" y="34" text-anchor="middle" fill="var(--muted)" font-size="10.5">消息内嵌 schema 版本号 →</text>
+    <!-- consumer -> broker dashed -->
+    <path d="M566,132 C500,180 460,190 516,178" fill="none" stroke="var(--muted)" stroke-dasharray="5 4" stroke-width="1.5" marker-end="url(#ar38)"/>
+    <text x="560" y="188" fill="var(--muted)" font-size="10">按版本拉取 SchemaInfo</text>
+
+    <!-- reject path -->
+    <path d="M516,150 C560,168 586,150 596,140" fill="none" stroke="var(--bad)" stroke-width="1.5" marker-end="url(#ar38r)"/>
+    <text x="640" y="290" fill="var(--bad)" font-size="10.5">检查不过 → IncompatibleSchemaException，坏契约死在门口</text>
+
+    <text x="380" y="326" text-anchor="middle" fill="var(--ink)" font-size="10.5">架构差异：注册中心住在 broker 里（元数据存储承载），无需外挂独立服务 —— Kafka 生态需要 Confluent Schema Registry 另起一套</text>
+  </svg>
+  </div>
+
+  <h3>兼容策略：八档门槛，默认档位由类型决定</h3>
+  <p>生产者送来新 schema 时，broker 用该 schema 类型的检查器（Avro、JSON 各有专属实现）按 namespace 配置的策略比对已注册版本：<strong>BACKWARD</strong>（新消费者能读旧数据：加带默认值的字段、删字段）/ <strong>FORWARD</strong>（老消费者能读新数据：加字段、删带默认值的字段）/ <strong>FULL</strong>（双向都行：改带默认值的可选字段）——各有对全历史版本的 TRANSITIVE 变体，外加 ALWAYS_COMPATIBLE（不检查）与 ALWAYS_INCOMPATIBLE（禁止演进）。<strong>默认档位：AVRO 和 JSON 是 FULL，其余类型一律 ALWAYS_INCOMPATIBLE</strong>——即 Protobuf 等类型默认禁止演进，这是很多团队"加了 schema 却改不了字段"的第一困惑源。策略配置优先级 topic 级 &gt; namespace 级 &gt; 集群级。</p>
+
+  <h3>AutoUpdate 与版本机制：便利与失控的分界</h3>
+  <p>AutoUpdate 默认开启：兼容检查通过后 schema 自动登记为新版本，生产者无感。<strong>注意它管的是"过了检查的自动登记"，不是"跳过检查"</strong>。核心 topic 可以关掉 AutoUpdate，让新版本只能走 <code>schemas upload</code> 人工通道 + 兼容性预检端点（<code>POST /admin/v2/schemas/.../compatibility</code>），把契约变更升级成评审级动作。版本号从 0 递增，每条消息的 MessageMetadata 携带写入时的版本；消费端 AutoConsumeSchema 按版本号向 broker 取 SchemaInfo 并本地缓存——这就是"新旧消息混流各读各的"的机制根源。<strong>一个要抄进运维手册的红色按钮：<code>schemas delete</code> 删除该 topic 的全部版本且不可恢复</strong>，等价于撕毁契约，生产环境基本没有它的合法场景。</p>
+
+  <div class="callout">
+    <p class="callout-title">类型选择的两个工程事实</p>
+    <p>① <strong>Avro 是演进支持最完整的类型</strong>：字段解析规则成熟（写方多出的字段被忽略、读方缺的字段用默认值、int→long 单向提升、改名走 alias），八档策略全可用——事件流契约首选。<strong>JSON 有独立检查器</strong>，规则类似。<strong>Protobuf 默认策略是 ALWAYS_INCOMPATIBLE</strong>，且 Pulsar 传统上以 JSON 表示法存 .proto 定义，跨语言 wire 兼容性有坑，新版本提供了 PROTOBUF_NATIVE（原生 descriptor）来补这块。② schema 全版本存在元数据存储里，体量极小、随 topic 生命周期管理——Registry 不是新增组件，是 broker 的内置能力。</p>
+  </div>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：契约治理的三道防线</h2>
+
+  <h3>防线一：契约资产化——先注册，后生产</h3>
+  <p>把 schema 从业务代码里抽出来当资产管理：核心事件流用 <code>schemas upload</code> 预注册基线版本（版本 0），schema 文件进独立 git 仓库，变更走 PR 评审——契约的 single source of truth 从"某个团队的代码"变成"topic 上的注册记录 + git 里的评审历史"。业务代码上线只是携带者，不再单方面定义契约。<strong>防线二：演进门槛——策略与升级顺序成对出现</strong>。策略决定升级顺序：BACKWARD 要先升消费者再升生产者，FORWARD 相反，FULL 任意序——这不是偏好，是策略语义的一部分，写进变更 runbook 时必须"变更类型 × 策略 × 升级顺序"三要素成对出现。误配的代价不对称：FULL 下顺序随意，BACKWARD 下先升生产者就是拿旧消费者赌运气。<strong>防线三：入口锁——schemaValidationEnforced</strong>。namespace 级开启后，无 schema 的生产者（裸字节直写、测试脚本、新同学的 demo）在连接阶段被拒——第 01 节那类"3 条测试消息毒死下游 Flink"的事故，这道锁直接免疫。</p>
+
+  <h3>治理参数速查表</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>配置 / 命令</th><th>默认</th><th>架构含义</th></tr>
+    <tr><td>兼容策略 <code>set-schema-compatibility-strategy</code></td><td>AVRO/JSON=FULL；其余 ALWAYS_INCOMPATIBLE</td><td>演进门槛；topic 级可覆盖 namespace 级，收紧别放松</td></tr>
+    <tr><td>AutoUpdate <code>set-is-allow-auto-update-schema</code></td><td>开启</td><td>过检查即自动登记版本；核心流关掉，变更只走人工通道</td></tr>
+    <tr><td><code>set-schema-validation-enforce</code></td><td>关闭</td><td>开启后无 schema 生产者被拒；治理收口的最后一把锁</td></tr>
+    <tr><td>版本号机制</td><td>从 0 起</td><td>消息元数据嵌 8 字节版本，消费端按版本还原写方 schema</td></tr>
+    <tr><td><code>schemas get / get --version N</code></td><td>—</td><td>契约审计入口；巡检脚本拉全量 topic 建契约台账</td></tr>
+    <tr><td><code>schemas delete</code></td><td>—</td><td>删全部版本且不可恢复；生产环境红色按钮</td></tr>
+  </table>
+  </div>
+
+  <div class="callout">
+    <p class="callout-title">不兼容变更的正确路径</p>
+    <p>改字段类型（如 string→long）在任何演进策略下都过不了检查——<strong>这不是缺陷，是 Registry 在工作：坏契约死在门口，而不是死在深夜的消费者里</strong>。官方路径是"新 topic + 新 schema + 迁移"：建 v2 topic、生产者双写、消费方逐批迁移、旧 topic 冷却后归档（配合上一期的分层存储把旧数据低成本留档到保留期满）。事件溯源风格的多事件共存场景才用 ALWAYS_COMPATIBLE，那是特例不是默认。另注意：兼容检查保的是"标准 Avro 解析不炸"，<strong>保不了消费端代码里手写的字段白名单</strong>——消费端字段映射对未知字段必须宽容（跳过或旁路），否则策略形同虚设。</p>
+  </div>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：三段落地</h2>
+
+  <h3>片段一：生产者注册契约，消费者按版本还原</h3>
+  <pre><code>// V2：加 optional 字段（.avsc: {"name":"ext_info",
+//      "type":["null","string"],"default":null}）—— FULL 下双向兼容
+Producer&lt;OrderEvent&gt; producer = pulsarClient
+    .newProducer(Schema.AVRO(OrderEventV2.class))
+    .topic("persistent://trade/ns/order-events")
+    .create();  // 连接时上送 schema，broker 过检查 → 登记为版本 2
+
+Consumer&lt;GenericRecord&gt; consumer = pulsarClient
+    .newConsumer(Schema.AVRO(GenericRecord.class))
+    .subscriptionName("report-job")
+    .subscribe(); // 每条消息按自带版本号取 schema，新旧混流各读各的</code></pre>
+
+  <h3>片段二：namespace 治理三把锁</h3>
+  <pre><code># 预注册基线契约（版本 0）——先契约后代码
+bin/pulsar-admin schemas upload \
+    --filename order-events-v1.avsc persistent://trade/ns/order-events
+# 锁一：演进门槛（AVRO/JSON 默认 FULL，显式声明留档）
+bin/pulsar-admin namespaces set-schema-compatibility-strategy \
+    --compatibility FULL trade/ns
+# 锁二：拒绝无 schema 生产者（裸字节之门）
+bin/pulsar-admin namespaces set-schema-validation-enforce --enable trade/ns
+# 锁三：核心流关自动登记，变更走 schemas upload + 预检端点
+bin/pulsar-admin namespaces set-is-allow-auto-update-schema --disable trade/ns
+# 审计：拉当前版本与历史版本，建契约台账
+bin/pulsar-admin schemas get persistent://trade/ns/order-events
+bin/pulsar-admin schemas get --version 0 persistent://trade/ns/order-events</code></pre>
+
+  <h3>片段三：三个版本的命运——兼容演进速查</h3>
+  <pre><code>// order-events.avsc（namespace 策略 FULL）
+// V1：{"fields":[{"name":"order_id","type":"string"},
+//               {"name":"amount","type":"double"}]}
+// V2 ✅ 加带默认值字段：旧消费者忽略新字段，新消费者读旧数据补默认值
+//      {"name":"ext_info","type":["null","string"],"default":null}
+// V3 ❌ 改字段类型：string→long 无提升关系
+//      {"name":"user_id","type":"long"}   → IncompatibleSchemaException
+// 改名用 alias，不搞"删旧加新"；不兼容变更走新 topic 双写迁移</code></pre>
+
+  <div class="warn">
+    <p><strong>四个必踩的坑：</strong>① <strong>裸字节直写有毒</strong>——topic 有 schema 而生产者不带（默认仍放进，消息按 BYTES 处理），下游结构化消费直接崩；治理节奏是"先补契约、再开 enforce"，反过来开锁会当场打死还裸写着的生产者。② <strong>把 Protobuf 当 Avro 用</strong>——默认 ALWAYS_INCOMPATIBLE 禁止演进，改一个字段全员连接失败，误以为 Registry 坏了；要么改策略、要么换 Avro/JSON。③ <strong>AutoUpdate 当免检通道</strong>——它只是省掉人工注册，不跳过兼容检查；但"任何过检查的变更自动上线"对核心流太激进，评审权应该在人。④ <strong>手写字段白名单架空兼容策略</strong>——策略保证标准解析不炸，消费代码遇到未知字段就抛异常的话，FULL 也救不了你。</p>
+  </div>
+
+  <div class="card card-tip">
+    <h4>✅ 契约治理体检清单</h4>
+    <p>☐ 核心事件流全部有注册 schema（巡检脚本扫无 schema topic 台账）　☐ namespace 兼容策略显式声明并记录理由（不依赖隐式默认）　☐ schemaValidationEnforced 已开启（先补契约后上锁）　☐ 核心流 AutoUpdate 关闭，变更走 upload + /compatibility 预检　☐ schema 文件进 git，变更走 PR，properties 挂 owner　☐ 升级顺序（策略 × 变更类型）写进变更 runbook　☐ 消费端字段映射对未知字段宽容　☐ schemas delete 在生产权限体系里禁用　☐ 契约版本历史纳入季度审计（谁在何时改了什么）　☐ 新人指南含"如何正确发一条测试消息"</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>最贵的故障是"数据还在、契约没了"</strong>：字段改名让 12 个下游 3 崩 9 静默错——静默错比崩溃贵得多；Schema Registry 把契约从口头约定变成 broker 强制执行的成文资产。</li>
+    <li><strong>两道关口</strong>：注册时按兼容策略拦住坏契约（八档策略，AVRO/JSON 默认 FULL，其余类型默认禁止演进）；消费时按消息内嵌的 8 字节版本号取回写方 schema，新旧混流各读各的。</li>
+    <li><strong>策略决定升级顺序</strong>：BACKWARD 先消费者、FORWARD 先生产者、FULL 任意序——顺序是策略语义的一部分，三要素成对写进变更 runbook。</li>
+    <li><strong>三道防线</strong>：契约资产化（先注册后生产）→ 演进门槛（核心流关 AutoUpdate 走人工评审）→ 入口锁（schemaValidationEnforced 拒绝裸字节生产者）。</li>
+    <li><strong>不兼容变更是设计题不是操作题</strong>：改类型走新 topic 双写迁移；Registry 的价值就是让坏契约死在门口，而不是死在深夜的消费者里。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目一：订单事件 topic（Avro，namespace 策略 FULL）要加一个 optional 字段 ext_info（带 default null），发布顺序是先升全部生产者再逐批升消费者。当晚，一个还停在 V1 的报表消费者把新消息全部判为"Schema 损坏"丢弃。① 按标准 Avro 解析规则，V1 消费者读 V2 数据应该是什么行为？"Schema 损坏"最可能出在哪个环节？② 下一次变更是把 user_id 从 string 改成 long，FULL 策略下会发生什么？正确路径是什么？③ 为什么"先升生产者再升消费者"在 FULL 下没出事，在 BACKWARD 下却可能酿成事故？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>标准 Avro 解析下这次变更是无害的。</strong>Avro 的字段配对规则按"写方模式 × 读方模式"双向进行：V1 消费者读 V2 数据时，写方多出的 ext_info 字段会被<strong>忽略</strong>（residual 字段直接跳过）；反过来 V2 消费者读 V1 数据时，读方声明的 ext_info 缺失，用 default null 补齐——这正是"加带默认值的 optional 字段通过 FULL 检查"的机理。所以"Schema 损坏"<strong>不是 Avro 机制失败，是消费端代码自己写的精确匹配</strong>：报表组大概率在反序列化后做了字段白名单校验（映射表里没有 ext_info 就抛 UnknownFieldException），或者把本地 schema 与消息版本做了字节级比对。教训：兼容策略保证的是"标准解析不炸"，保证不了业务代码里的手写字段校验——消费端对未知字段必须宽容（跳过或进旁路字段），这一条要写进消费端开发规范，否则八档策略全是形同虚设。</p>
+      <p>② <strong>FULL 检查直接拒绝，生产者连接抛 IncompatibleSchemaException，变更根本进不了 topic。</strong>string 与 long 之间没有 Avro 的类型提升关系（提升只存在于 int→long→float→double 这条单向链），任何演进策略都救不了改类型。这不是缺陷而是 Registry 在工作：坏契约死在门口，而不是死在深夜的三十七个消费者里。正确路径是"新 topic + 新 schema + 双写迁移"：建 v2 topic、生产者双写新旧两流、消费方按自己的节奏逐批迁移、旧 topic 按 retention 冷却归档——配合分层存储（上一期）把旧数据低成本留档到保留期满。顺带两个易混点：字段改名用 alias 声明，不要"删旧加新"（那是一次删除+一次新增，语义完全不同）；想改的是"多事件共存"才用 ALWAYS_COMPATIBLE，那是事件溯源场景的特例。</p>
+      <p>③ <strong>升级顺序是策略语义的一部分，不是发布偏好。</strong>FULL 承诺双向可读（新读旧、旧读新都行），所以先升谁都不出事；BACKWARD 只承诺"新消费者能读旧生产者的数据"，它<strong>不保证旧消费者读得懂新数据</strong>。若这次变更包含"删除一个旧消费者依赖的字段"，BACKWARD 下先升生产者，旧消费者读新数据缺字段、又没有默认值，解析直接失败——静默错或崩溃取决于消费端姿势。所以变更 runbook 里必须三要素成对出现：变更类型（加/删/改字段）× 生效策略（FULL/BACKWARD/...）× 升级顺序（consumer-first / producer-first / 任意）。团队里最常见的落地错误是"策略配了 FULL，runbook 还写着永远 consumer-first"——保守没错，但要知道自己在保守什么；更危险的反例是"策略降到 BACKWARD 求通过检查，顺序还按 FULL 的随意来"——那是在拿兼容性承诺之外的方向赌运气。</p>
+    </div>
+  </details>
+
+  <details class="q-card">
+    <summary>题目二：接手一个 200+ topic 的存量 Pulsar 集群，巡检发现：31 个 topic 无 schema（历史裸字节直写）；两个团队各自用 JSON.stringify 手写序列化写同一条事件流（字段名 date 与 create_time 混用）；上周一个新同学用无 schema 生产者往订单 topic 写了 3 条测试消息，下游 Flink 任务反序列化失败重启三次。① 设计让裸字节安全退场的迁移方案（含 schemaValidationEnforced 的启用时机）。② 字段名分歧该在哪个层面解决——Registry 能帮什么、帮不上什么？③ "先注册后生产"适合哪些 topic？和 AutoUpdate 开着冲突吗？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>三步走：发现 → 补契约 → 上锁，顺序不能反。</strong>第一步"发现"：巡检脚本拉全部 topic 的 schema 状态（<code>schemas get</code> 空即无契约）+ 生产者清单，把 200+ topic 分三档：有契约 / 裸字节-单团队 / 裸字节-多团队混写。第二步"补契约"：为裸字节 topic 反推当前真实结构（从最大消费方的反序列化代码或最近消息样本反推 .avsc），<code>schemas upload</code> 预注册为版本 0；过渡期策略放宽为 ALWAYS_COMPATIBLE、AutoUpdate 保持开启，观察一个双周确认全部消费链路无异常——补注的契约必须与线上真实数据一致，这一步是给"既成事实"追认法律地位。第三步"上锁"：<code>set-schema-validation-enforce --enable</code>，从此无 schema 生产者在连接阶段被拒；同时策略收紧回 FULL。顺序铁律的原理：enforce 开着时无 schema 生产者直接拒连，<strong>先上锁后补契约会把还裸写着的生产者当场打死</strong>——上锁的杀伤范围必须以"契约已补齐"为前提。新同学写测试消息那次事故，正是这道锁的靶子：订单 topic 在受保护 namespace 里，无 schema 连接在握手阶段就失败，Flink 根本不会看到那 3 条毒消息。</p>
+      <p>② <strong>字段名分歧本质是"事件契约归谁管"的组织问题，Registry 能提供 enforcement，不能替你做命名决策。</strong>能帮的：把契约的 single source of truth 从两个团队的代码里抽到 topic 上——schema 一注册，两边生产者都携带同一份契约，谁的字段名不合规谁在连接阶段失败；AutoConsume 的下游从此只面对一个稳定契约而不是两套手写序列化的并集。帮不上的："该叫 date 还是 create_time"是业务命名决策，要在数据契约评审里由事件属主团队拍板。配套的组织动作：每条事件流指定 schema 属主（owner 写进 SchemaInfo 的 properties，连同 wiki 链接），外部团队要改契约走"PR 式"提案而不是各改各的代码。建模层面的修正：同一条流出现两套字段名本身就是建模错误——要么合并成一个 schema 的两组 optional 字段（过渡期双名并存、消费端归一），要么承认它们是两件事拆成两个 topic。Registry 是执法机构，立法还在人。</p>
+      <p>③ <strong>"先注册后生产"（schemas upload 预注册基线）适合三类 topic：核心业务流（订单/支付，出错代价高）、有外部消费方的流（跨团队/跨公司，契约即对外承诺）、以及想把"契约变更"从"代码发布"里解耦出来管理的团队</strong>（schema 走独立评审，代码只是携带者）。与 AutoUpdate 不冲突，但分工要设计清楚：预注册定基线版本，AutoUpdate 管后续演进的自动登记——生产者带着演进版 schema 连接，过了兼容检查就自动成为新版本，这条路适合"演进频繁但都在兼容圈内"的普通流。对核心流更进一步：关掉 AutoUpdate（<code>set-is-allow-auto-update-schema --disable</code>），新版本只能走 <code>schemas upload</code> 人工通道 + <code>/compatibility</code> 预检端点，把 Registry 用成"带门禁的契约仓库"——代价是每次演进多一道人工流程，核心流值得、边缘流没必要，<strong>治理强度分级本身就是架构决策</strong>：全集群一把尺子要么管死迭代要么放任风险，按 topic 分级才能两头都占。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>Apache Pulsar 官方文档 · Understand Schema（schema 解析机制、八档兼容策略、AutoUpdate 与升级顺序全量参考）：<br>
+    <a href="https://pulsar.apache.org/docs/4.2.x/schema-understand/" target="_blank" rel="noopener">https://pulsar.apache.org/docs/4.2.x/schema-understand/</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>Schema 版本机制叠在消息链路上，消息本身的可靠性在 <a href="0021-pulsar-message-reliability.html">第 21 期</a>；分层存储在<a href="0037-pulsar-tiered-storage.html">上一期</a>（不兼容变更的新 topic 迁移正好用得上冷数据留档）；存算分离的架构地基在存档期 <a href="0012-pulsar-vs-kafka.html">第 12 期</a>。消费端字段映射的宽容性原则与 <a href="0027-function-calling.html">第 27 期</a>的 schema 即合同是同一个思想：契约机器可校验，解析端永远假设对方会变。下一期按十三类轮换进入 TDengine 线——数据订阅：让下游按需拉增量。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0037-pulsar-tiered-storage.html">← 上一期：Pulsar 分层存储与冷数据下沉</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 38 期 · Apache Pulsar 系列 · 下一期预告：TDengine 数据订阅（Pulsar 主线告一段落，进阶主题后面再回来）</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
