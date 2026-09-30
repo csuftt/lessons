@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · TDengine 数据订阅：让下游按需拉增量 | 2026-10-01</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0039</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0038-pulsar-schema-registry.html">上一期：Pulsar Schema Registry 与消息演进</a> · <a href="https://www.bilibili.com/video/BV1rrYw6ZEfo" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">TDENGINE · TDengine 系列第 3 讲（数据分发篇 · 数据订阅）</p>
+  <h1>数据订阅：让下游按需拉增量，不再轮询数据库</h1>
+  <p class="subtitle">上一讲在 <a href="0038-pulsar-schema-registry.html">Pulsar</a> 聊了契约治理，Pulsar 主线告一段落，今天回到 TDengine——把"数据怎么流到下游"讲完。时序平台的经典困局：告警、大屏、同步 ES、规则引擎……每个下游都想知道"有没有新数据"，最直觉的答案是每 5 秒查一次库。今天这期聊 <strong>TDengine 内置的数据订阅（TMQ）：它把 WAL 改造成一个保留事件到达顺序的存储引擎，让下游像消费 Kafka 一样按需拉增量</strong>——很多场景里，外挂消息队列这一层可以直接省掉。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">📊 TDengine</span>
+    <span class="tag-date">📅 2026-10-01 · 第 39 期</span>
+    <span class="tag time">⏱ 预计阅读 10 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>五个下游，五把"每 5 秒扫一次"的耙子</h2>
+  <p>某能源平台 4 万块智能电表，写入 <a href="0022-tdengine-write-read-performance.html">第 22 期</a>那套 TDengine 集群。下游有五个消费方：实时告警、设备大屏、数据同步 ES、规则引擎、计费预处理。最初的实现最直觉——<strong>每个下游各自轮询</strong>：每 5~15 秒执行一次 <code>SELECT * FROM meters WHERE ts &gt; now - 15s</code>。上线三个月，两笔账摆到桌上：</p>
+  <p><strong>数据库的账：</strong>五个下游错峰轮询，白天平均每秒 2~3 次"找最新数据"的查询。每次查询即使没新数据，也要走一遍"定位块—比较时间戳"的路径，叠加起来 <strong>DB 全天约 40% 的算力花在回答"没有新数据"上</strong>——查询资源被空转轮询吃掉，月度报表一跑，轮询查询的排队延迟先涨，告警反而更慢了。<strong>下游的账：</strong>平均感知延迟 ≈ 轮询间隔的一半，5 秒轮询平均慢 2.5 秒、最坏 5 秒；想快一倍，查询频率就得翻倍，数据库的账先爆。</p>
+  <p>真正的爆点是<strong>深夜补报</strong>：采集端 10:05 断网、10:40 恢复，补报数据的时间戳还是 10:05——而轮询的 WHERE 条件是"最近 15 秒"，<strong>35 分钟前的数据永远匹配不上，一路漏到 T+1 对账才发现</strong>。三个根因叠在一起：轮询按"墙上时钟"找增量而不是按"写入顺序"；轮询间隔是延迟和负载的双重约束；每个下游独立扫一遍，同一个数据被"发现"了五次。解法只有两条路：外挂一套消息队列把数据再搬一份（架构多一跳、多一份数据、多一套运维），或者用数据库自己把增量吐出来——<strong>TDengine 3.0 起内置的数据订阅，就是后一条路</strong>。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：WAL 被改造成了一个"消息队列"</h2>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 350" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar39" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar39a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+    <text x="380" y="22" text-anchor="middle" fill="var(--muted)" font-size="13">消费的不是副本，是写入路径本身：WAL + 索引 + 统一查询引擎</text>
+
+    <!-- write path -->
+    <rect x="20" y="46" width="150" height="66" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="95" y="72" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">设备写入</text>
+    <text x="95" y="92" text-anchor="middle" fill="var(--muted)" font-size="10.5">4 万子表 · 顺序追加</text>
+
+    <line x1="170" y1="79" x2="216" y2="79" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar39)"/>
+
+    <!-- WAL -->
+    <rect x="220" y="40" width="270" height="78" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="355" y="60" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">WAL（按 vgroup 分片）</text>
+    <rect x="236" y="70" width="34" height="30" rx="4" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="253" y="89" text-anchor="middle" fill="var(--muted)" font-size="10">0</text>
+    <rect x="274" y="70" width="34" height="30" rx="4" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="291" y="89" text-anchor="middle" fill="var(--muted)" font-size="10">1</text>
+    <rect x="312" y="70" width="34" height="30" rx="4" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="329" y="89" text-anchor="middle" fill="var(--ink)" font-size="10" font-weight="700">2</text>
+    <rect x="350" y="70" width="34" height="30" rx="4" fill="none" stroke="var(--accent)" stroke-dasharray="4 3"/>
+    <text x="367" y="89" text-anchor="middle" fill="var(--muted)" font-size="10">3</text>
+    <text x="400" y="82" fill="var(--muted)" font-size="10">滚动+保留可配</text>
+    <text x="400" y="98" fill="var(--muted)" font-size="10">自动建索引</text>
+
+    <line x1="355" y1="118" x2="355" y2="146" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar39)"/>
+    <text x="470" y="136" fill="var(--muted)" font-size="10">offset 版本号，单调递增</text>
+
+    <!-- TQ -->
+    <rect x="220" y="150" width="270" height="66" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="355" y="172" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">TQ 消费引擎 + 统一查询引擎</text>
+    <text x="355" y="192" text-anchor="middle" fill="var(--muted)" font-size="10.5">按 offset 从 WAL 读 → 服务端过滤/变换 → 推送</text>
+    <text x="355" y="208" text-anchor="middle" fill="var(--muted)" font-size="10.5">查询 topic 的 WHERE 下推在数据库内完成</text>
+
+    <!-- consumers -->
+    <line x1="490" y1="183" x2="536" y2="130" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar39)"/>
+    <line x1="490" y1="183" x2="536" y2="200" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar39)"/>
+    <rect x="540" y="92" width="196" height="56" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="638" y="112" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">告警消费组 A</text>
+    <text x="638" y="130" text-anchor="middle" fill="var(--muted)" font-size="10">提交位点 2 · 独立推进</text>
+    <rect x="540" y="172" width="196" height="56" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="638" y="192" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">同步 ES 消费组 B</text>
+    <text x="638" y="210" text-anchor="middle" fill="var(--muted)" font-size="10">提交位点 3 · 互不干扰</text>
+
+    <!-- commit back -->
+    <path d="M638,148 C638,168 560,166 536,160" fill="none" stroke="var(--accent)" stroke-dasharray="5 4" stroke-width="1.5" marker-end="url(#ar39a)"/>
+    <text x="620" y="164" fill="var(--accent)" font-size="10">ACK 提交位点（at-least-once）</text>
+
+    <rect x="20" y="252" width="720" height="78" rx="8" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="34" y="274" fill="var(--ink)" font-size="11" font-weight="700">与外挂消息队列的本质差异</text>
+    <text x="34" y="292" fill="var(--ink)" font-size="10.5">数据只有一份：WAL 既是崩溃恢复日志，又是消费源——不搬副本、不双写，写入即"发布"</text>
+    <text x="34" y="310" fill="var(--ink)" font-size="10.5">代价：保留窗口有限（WAL 压缩率远低于 TSDB），消费进度不受保护——落后太久，数据就被回收了</text>
+  </svg>
+  </div>
+
+  <h3>三个关键机制</h3>
+  <p><strong>① WAL 的第二职业。</strong>TDengine 为 WAL 自动建立索引以支持快速随机访问，并提供可配置的文件滚动与保留策略（时间、大小双维度）——官方的说法是"把 WAL 改造成一个保留事件到达顺序的、可持久化的存储引擎"。<strong>消费时按当前 offset 从 WAL 直接读数据，再用与普通查询同一套查询引擎做过滤和变换</strong>：这就是查询 topic 能在服务端完成 <code>WHERE voltage &gt; 240</code> 过滤的机理——下游只收到需要的数据，而不是全量搬运后再各自筛。<strong>② at-least-once 投递。</strong>消费组带 ACK 机制：处理完提交位点，崩溃重启后从上次位点继续——语义与 <a href="0021-pulsar-message-reliability.html">第 21 期</a>聊的消息队列一致，代价也一样：<strong>可能重复投递，消费端必须幂等</strong>。<strong>③ 消费组的 Kafka 式模型。</strong>同组消费者分摊 vgroup（一个 vgroup 同一时刻只归一个消费者），不同组进度独立；消费者异常退出约 12 秒触发 rebalance，状态转 LOST 后约 1 天自动清理，新增消费者约 2 秒完成加入——API 设计贴近 Kafka 习惯，<code>bootstrap.servers</code>、<code>group.id</code>、<code>auto.offset.reset</code> 这些参数名原样照搬，Kafka 团队几乎零学习成本。</p>
+
+  <h3>三种 topic：粒度从细到粗</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>类型</th><th>语法要点</th><th>结构行为</th><th>典型用途</th></tr>
+    <tr><td><strong>查询 topic</strong></td><td><code>CREATE TOPIC t AS SELECT ... WHERE ...</code>（支持标量函数，不支持聚合与窗口）</td><td>结构在建 topic 时定死；被订阅的列不能删改，表结构变了新列不出现（3.3.9 起可 RELOAD TOPIC 重载）</td><td>告警、大屏——服务端过滤，只推需要的数据</td></tr>
+    <tr><td><strong>超级表 topic</strong></td><td><code>CREATE TOPIC t AS STABLE stb [WHERE 标签条件]</code>（WHERE 只能用 tag/tbname）</td><td>返回非结构化数据，结构随超级表演进；不锁表结构变更；返回数据不含标签</td><td>按超级表全量增量分发；WITH META 供迁移工具用</td></tr>
+    <tr><td><strong>数据库 topic</strong></td><td><code>CREATE TOPIC t AS DATABASE db</code></td><td>整库全部表数据（WITH META 时含建表/删表/改表语句）</td><td>数据同步、跨系统迁移——官方也提醒属高级模式，易错</td></tr>
+  </table>
+  </div>
+
+  <div class="callout">
+    <p class="callout-title">选型直觉</p>
+    <p>粒度越细（查询 topic）越省下游的过滤成本，但结构锁得越死；粒度越粗（库 topic）越灵活，但下游要自己应对结构变化和全量数据。默认答案：<strong>业务分发用查询 topic，迁移同步用 WITH META 的超级表/库 topic</strong>。另注意集群默认 topic 上限 <code>tmqMaxTopicNum = 20</code>——topic 是有代价的对象，别把订阅当视图滥用。</p>
+  </div>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：保留窗口是一块要花钱的地皮</h2>
+
+  <h3>WAL 保留的三笔账</h3>
+  <p>数据订阅所有架构权衡都压在一个事实上：<strong>WAL 的压缩率远低于 TSDB 的列式存储</strong>（官方建议保留时长一般不超过几天），而消费位点不受 WAL 清理机制保护——清理只看时间与大小，不看谁还没消费。三笔账：<strong>地皮账</strong>：保留窗 = 写入吞吐 × 窗口时长。日写 300GB 的库，留 4 小时就是 50GB 量级的额外 WAL 空间，留 3 天就是 TB 级——保留窗按"最慢消费者允许落后多久"倒推，再放一倍余量。<strong>落后账</strong>：消费者故障 8 小时，保留窗 4 小时——重启后位点指向的数据已被回收，只能按 <code>auto.offset.reset</code> 重置（跳过丢失段或从头再来），<strong>丢增量在订阅模型里是设计内行为，不是故障</strong>。<strong>堆积账</strong>：一个慢消费组不影响别人（各写各的位点），但它决定你必须把保留窗开多大——<strong>最慢的那个消费者，替全集群决定了 WAL 预算</strong>。</p>
+
+  <h3>治理参数速查表</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>参数</th><th>默认</th><th>架构含义</th></tr>
+    <tr><td><code>walRetentionPeriod</code></td><td>单副本 0（落盘即删）；多副本 4 天</td><td>为订阅额外保留的时长；开订阅必须显式配，按最慢消费者倒推</td></tr>
+    <tr><td><code>walRetentionSize</code></td><td>单副本 0；多副本无上限</td><td>大小兜底上限——防止吞吐突增撑爆磁盘</td></tr>
+    <tr><td><code>walRollPeriod / walSegmentSize</code></td><td>按落盘节奏滚动</td><td>文件滚动节奏，影响索引粒度与回收精度</td></tr>
+    <tr><td><code>auto.offset.reset</code></td><td>3.2.0.0 起变更（earliest/latest/none）</td><td>无位点时的起点；新消费组上线前必须显式声明</td></tr>
+    <tr><td><code>enable.auto.commit</code></td><td>true，间隔默认 1s</td><td>自动提交省事；处理与提交解耦要求高时改手动</td></tr>
+    <tr><td><code>tmqMaxTopicNum</code></td><td>20</td><td>集群 topic 上限；订阅是带代价的能力，不是免费视图</td></tr>
+  </table>
+  </div>
+
+  <h3>两种消费拓扑：触发与搬运</h3>
+  <p><strong>触发模式（替轮询）</strong>：告警/规则引擎直接消费查询 topic，数据到达即触发计算——延迟从"轮询间隔的一半"降到亚秒级，且补报数据按写入顺序到达，<strong>10:05 的迟到数据不会再被 now-15s 的窗口漏掉</strong>。<strong>搬运模式（替双写）</strong>：一个消费组把增量搬去 ES/缓存/异地，写侧不再多写一份——原来"写 TDengine + 写 ES"的双写一致性难题（两套事务域），退化成"消费 + 幂等重试"的单向链路。更进一步，搬运途中还能顺手做轻聚合（1 分钟均值再写回 TDengine 降采样表），把 <a href="0022-tdengine-write-read-performance.html">第 22 期</a>的流计算降采样换成显式可控的消费管线。</p>
+
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>维度</th><th>TDengine 数据订阅</th><th>轮询查询</th><th>外挂消息队列</th></tr>
+    <tr><td>数据份数</td><td>一份（WAL 复用）</td><td>一份</td><td>两份（库 + 队列）</td></tr>
+    <tr><td>延迟</td><td>亚秒（写入即推）</td><td>≈ 轮询间隔/2</td><td>亚秒</td></tr>
+    <tr><td>库负载</td><td>按需拉取，无空转</td><td>持续空转扫描</td><td>零（不碰库）</td></tr>
+    <tr><td>迟到/补报数据</td><td>按写入顺序到达 ✅</td><td>按墙上时钟漏掉 ❌</td><td>取决于生产端逻辑</td></tr>
+    <tr><td>服务端过滤</td><td>查询 topic 下推 ✅</td><td>每次查询都过滤</td><td>无（消费端自理）</td></tr>
+    <tr><td>回溯窗口</td><td>WAL 保留窗内有限</td><td>全历史</td><td>保留期内</td></tr>
+    <tr><td>削峰/复杂路由</td><td>弱</td><td>—</td><td>强（队列本色）</td></tr>
+  </table>
+  </div>
+
+  <div class="callout">
+    <p class="callout-title">边界判断</p>
+    <p>数据订阅不是消息队列的替代品——官方定位是"以数据分发为中心的场景可以省掉外部队列"。判断式很简单：<strong>需求是"新写入的时序数据分发给若干下游"，用 TMQ；需要削峰填谷、延迟队列、复杂路由、事务消息，上 Pulsar/Kafka</strong>。两者也能叠着用：TMQ 消费 → 规则加工 → 写 Pulsar 供多方消费，库只被消费一次。</p>
+  </div>
+
+  <h3>版本坐标（2026-10）</h3>
+  <p>3.0 重写了数据订阅（当前 TMQ 形态的起点）；3.2 起支持 vnode 迁移与分裂场景下的订阅（<strong>红线：订阅依赖 WAL，而迁移不同步 WAL——动 vgroup 前必须先把 WAL 消费完</strong>），同年 auto.offset.reset 默认值变更；3.3.6.0 起 <code>DROP TOPIC/CONSUMER GROUP</code> 支持 FORCE；3.3.7.0 起 MQTT 客户端可直接订阅；3.3.9 起 RELOAD TOPIC 让表结构变更无需重建订阅；当前 3.4.x（2026-02 发布 3.4.0.0，流计算与虚拟表性能大幅优化），升级注意 3.4 客户端必须先行升级。</p>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：三段落地</h2>
+
+  <h3>片段一：建库开保留窗，建 topic 定粒度</h3>
+  <pre><code>-- 开订阅的库，先给 WAL 留地皮：按最慢消费者倒推
+CREATE DATABASE power WAL_RETENTION_PERIOD 14400   -- 4h
+    WAL_RETENTION_SIZE 1073741824                    -- 1TB KB 兜底
+    WAL_ROLL_PERIOD 3600  WAL_SEGMENT_SIZE 262144;   -- 1h / 256MB 滚动
+
+-- 告警用查询 topic：过滤下推，只推过压数据，带表名定位设备
+CREATE TOPIC topic_overvoltage AS
+    SELECT ts, current, voltage, tbname, groupid
+    FROM power.meters WHERE voltage &gt; 240;
+
+-- 全量分发用超级表 topic：结构随表演进，不锁 DDL
+CREATE TOPIC topic_meters_all AS STABLE power.meters;</code></pre>
+
+  <h3>片段二：Java 消费者（手动提交 + 幂等键）</h3>
+  <pre><code>Properties props = new Properties();
+props.setProperty("bootstrap.servers", "td1:6030");
+props.setProperty("group.id", "alert-group");          // 组内分摊 vgroup
+props.setProperty("auto.offset.reset", "latest");      // 无位点时只追新数据
+props.setProperty("enable.auto.commit", "false");      // 处理完再提交
+props.setProperty("msg.with.table.name", "true");      // 默认 false！没表名拿不到设备
+props.setProperty("value.deserializer", "...MetersDeserializer");
+
+try (TaosConsumer&lt;MetersRow&gt; consumer = new TaosConsumer&lt;&gt;(props)) {
+    consumer.subscribe(List.of("topic_overvoltage"));
+    while (running) {
+        for (ConsumerRecord&lt;MetersRow&gt; r : consumer.poll(Duration.ofMillis(500))) {
+            alertEngine.fire(r.value().getTbname(), r.value().getVoltage(),
+                             idempotentKey(r));        // 幂等键防重复投递
+        }
+        consumer.commitSync();                          // 处理完成才推位点
+    }
+}</code></pre>
+
+  <h3>片段三：订阅可观测性三板斧</h3>
+  <pre><code>SHOW TOPICS;            -- topic 台账：类型、SQL、库
+SHOW CONSUMERS;         -- 消费者：组、订阅状态（READY/LOST）
+SHOW SUBSCRIPTIONS;     -- 消费组 × vgroup 分配与位点推进
+-- 巡检口径：位点长时间不动 + 消费组仍在 = 堆积告警
+--          保留窗口口 = NOW - WAL_RETENTION_PERIOD，位点不得早于它</code></pre>
+
+  <div class="warn">
+    <p><strong>五个必踩的坑：</strong>① <strong>msg.with.table.name 默认 false</strong>——消息里不带子表名，设备维度直接丢失，查半天才发现"数据都有但不知道是谁的"；用超级表 topic 时标签也不随数据走，设备维度要靠表名自己带。② <strong>WAL 保留参数没配就上生产</strong>——单副本默认落盘即删，消费组重启一次就从 latest 重来，增量丢了都不知道。③ <strong>把订阅当视图无限建</strong>——topic 上限默认 20，且每个查询 topic 都占 WAL 读取路径，多了互相拖累。④ <strong>消费端不幂等</strong>——at-least-once 必然重复投递（重启、rebalance 都会），告警去重键、ES 写入用 (tbname, ts) 做 upsert。⑤ <strong>消费者数超过 vgroup 数</strong>——多出来的消费者纯空转还占连接；先 <code>SHOW SUBSCRIPTIONS</code> 看 vgroup 数再加人。</p>
+  </div>
+
+  <div class="card card-tip">
+    <h4>✅ 数据订阅体检清单</h4>
+    <p>☐ 开订阅的库显式配置 WAL_RETENTION_PERIOD/SIZE（按最慢消费者倒推 ×2 余量）　☐ auto.offset.reset 显式声明（新组上线语义明确）　☐ msg.with.table.name=true 且消费端确认设备维度可用　☐ 消费端幂等（幂等键/upsert）已落地并演练过重启重放　☐ 位点推进进监控（不动即告警），位点落后保留窗的差值做容量预警　☐ 消费者数 ≤ vgroup 数（SHOW SUBSCRIPTIONS 核对）　☐ 消费者优雅退出（unsubscribe/close，别等 12 秒 rebalance）　☐ vgroup 迁移/分裂前先排空 WAL 消费　☐ topic 台账季度评审（tmqMaxTopicNum 不是免费额度）　☐ 迟到数据链路演练：补报一条 35 分钟前的数据，验证端到端到达</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>轮询的三宗罪</strong>：空转吃掉数据库算力（40% 花在回答"没有新数据"）、延迟与负载互相锁死、按墙上时钟找增量会漏掉补报数据——数据订阅按<strong>写入顺序</strong>推增量，三个问题一起解。</li>
+    <li><strong>机制内核：WAL 的第二职业</strong>——索引化的 WAL + 统一查询引擎 = 保留事件到达顺序的消费源；数据只有一份，写入即发布，查询 topic 的过滤在服务端完成。</li>
+    <li><strong>保留窗口是要花钱的地皮</strong>：WAL 压缩率远低于 TSDB，清理只看时间/大小不看消费进度——最慢的消费者替全集群决定 WAL 预算；落后超窗丢增量是设计内行为。</li>
+    <li><strong>Kafka 式消费组，at-least-once 投递</strong>：组内分摊 vgroup、组间进度独立、异常退出 12 秒 rebalance——投递语义与外挂队列一致，消费端幂等一个都不能少。</li>
+    <li><strong>边界判断</strong>：需求是"时序增量分发"用 TMQ 省掉外挂队列；要削峰、延迟队列、复杂路由、事务消息，老老实实上消息队列——两者还能叠着用。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目一：你要把实时告警链路从"5 秒轮询"迁到数据订阅。当前配置：日写入 300GB，告警服务双实例部署，历史上最长的下游故障是 8 小时（那次 ES 同步链路挂了）。① WAL 保留窗怎么定？给出推导过程和参数。② 告警服务双实例消费同一个 topic，部署上要注意什么？消费端代码要补什么？③ 迁移后第二周，值班同学反馈"告警偶尔重复触发"，这是缺陷吗？怎么治？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>保留窗由"允许落后多久"倒推，不是拍脑袋给个大数。</strong>约束链：最坏故障恢复时间 8 小时 → 保留窗必须 ≥ 8 小时才敢说"故障期间的数据不丢"；再放一倍余量应对"恢复后发现还要回放重算"的场景 → 16 小时起步，配 24 小时（一天）便于运维记忆。空间核算：日写 300GB → 24 小时保留 ≈ 300GB 量级的额外 WAL 空间（WAL 压缩率低，不能按 TSDB 的 1/10 压缩比估算），确认 vgroup 所在节点磁盘余量 ≥ 2 倍；再配 <code>WAL_RETENTION_SIZE</code> 做大小兜底，防止吞吐突增（比如批量补报）把盘撑爆。反过来验证：如果磁盘只够留 4 小时，就要把"告警链路允许丢 4 小时以上故障窗的增量"写进架构决策记录，并给告警链路加"恢复后从 TSDB 补扫"的兜底——保留窗不足时，订阅只管实时、TSDB 查询管补偿，两条腿走路。</p>
+      <p>② <strong>双实例 = 一个消费组两个消费者，注意三点。</strong>其一，分摊单位是 vgroup：先 <code>SHOW SUBSCRIPTIONS</code> 看目标 topic 覆盖多少个 vgroup，消费者数 ≤ vgroup 数才有意义（超出的空转）；其二，两个实例用同一个 <code>group.id</code> 才是"分摊"，配错了组名就变成两份全量、告警双发；其三，<strong>优雅退出</strong>：发版停机走 unsubscribe/close，不要 kill -9——异常退出要等约 12 秒才触发 rebalance，这 12 秒里分到的 vgroup 无人消费，高频告警链路能感知到停顿。消费端代码要补的是<strong>幂等</strong>：at-least-once 语义下，rebalance 和重启都会造成消息重复投递，告警去重键用 (tbname, ts, 告警规则 ID) 在 Redis 里做短窗口去重，或者让告警面板天然支持"同键覆盖显示"。</p>
+      <p>③ <strong>不是缺陷，是 at-least-once 的固有行为，治法在消费端不在传输端。</strong>重复的来源：enable.auto.commit 或手动 commit 之前的崩溃（处理了但没来得及提交位点，重启后重投）、rebalance 期间的边界消息。想从传输端消灭重复只能退回"先提交再处理"，那会把语义换成 at-most-once——丢告警比重复告警贵得多，方向反了。正确姿势就是幂等消费：去重键的 TTL 覆盖"最大重投延迟"（rebalance 周期 + 重启窗口，给几分钟够了）；更彻底的是把告警动作做成状态化（"设备 X 已在告警中"是状态，重复触发只是状态机的重复输入，天然收敛）。这和 <a href="0021-pulsar-message-reliability.html">第 21 期</a>的结论同构：投递语义选完之后，幂等永远是消费端的功课。</p>
+    </div>
+  </details>
+
+  <details class="q-card">
+    <summary>题目二：同步 ES 的链路用超级表 topic 搬了一年，某天 ES 同学反馈"最近三天的数据少了一块"，排查发现：三天前凌晨该库做过一次 vgroup 迁移，同步服务当晚正好在重启窗口。① 数据丢失的机理是什么？为什么"重启 + 迁移"两个各自无害的操作叠在一起就出事？② 立即止损怎么做？长期补强做哪三件事？③ 如果这条链路的消费端换成"先提交位点、再异步批量写 ES"（为了吞吐），风险面怎么变化？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>机理：订阅绑定的 WAL 在 vgroup 迁移时不随迁。</strong>官方文档明确：订阅依赖 WAL 文件，而 WAL 不在 vnode 迁移/分裂时同步——迁移前没消费完的 WAL 数据，迁移后无法继续消费。当天的时间线是：同步服务重启（位点停在迁移前的某个 offset）→ 迁移执行（旧 vgroup 的 WAL 剩余段作废）→ 服务恢复，从位点继续拉，但那段数据已经"不在了"——于是位点跳过了丢失段继续推进，监控上一切正常，<strong>静默丢失比崩溃丢失危险一个量级</strong>。单独看每个操作都没错：重启窗口丢了的消息本来会在重启后补上（位点还在）；迁移本来也要求"先消费完 WAL 再动"（运维手册写了，但没人把"有个慢消费组"和"能迁移"关联起来）。叠在一起出事，是因为<strong>两条纪律分别属于两个团队的知识域</strong>——这是订阅这类"跨库中间件特性"特有的组织风险。</p>
+      <p>② <strong>止损：从 TSDB 补数，不是从订阅补。</strong>丢失段的数据在 TSDB 里完好（WAL 回收不影响已落盘数据），按丢失时间窗 + 库表范围直接 <code>SELECT</code> 拉出来重写 ES，幂等键 (tbname, ts) 保证重写安全。长期补强三件事：<strong>其一，迁移前置检查</strong>——vgroup 迁移/分裂的 runbook 第一条改为"SHOW SUBSCRIPTIONS 确认所有消费组位点已推到最新，否则先等或先停"；<strong>其二，对账巡检</strong>——订阅链路必须有独立对账（TSDB 按小时 count vs ES 按小时 count，差值告警），本次事故拖了三天才发现，就是缺这条；<strong>其三，位点监控</strong>——消费组位点与写入水位（endOffsets）的差值进大盘，位点长时间不动、位点倒退、位点与保留窗边界距离过近，三个都要告警。</p>
+      <p>③ <strong>风险面从"丢"挪向"更隐蔽的丢"，且窗口扩大。</strong>先提交再处理 = 处理失败（写 ES 失败、进程崩溃在提交后）的那批消息永久跳过——语义从 at-least-once 动等价于 at-most-once，而且失败是无声的：位点已推进，重启后从新位点继续，连"重投"都不会发生。吞吐焦虑的正确解法不是先提交，而是：<strong>批量攒批 + 写完再提交</strong>（poll 500ms 攒一批，ES bulk 成功后一次 commitSync——批量化本身就能把吞吐拉起来）；真要异步，就必须给"已提交未写入"的段加本地缓冲 + 失败回补，复杂度立刻超过收益。这个取舍和 <a href="0021-pulsar-message-reliability.html">第 21 期</a>消费端"先处理后 ack"是同一条纪律：位点是承诺，提交之前先兑现。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>TDengine 官方文档 · 数据订阅（topic 语法、消费者参数、WAL 保留机制全量参考）：<br>
+    <a href="https://docs.taosdata.com/data-subscription" target="_blank" rel="noopener">https://docs.taosdata.com/data-subscription</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>订阅读的是 WAL，WAL 怎么写进去的在 <a href="0022-tdengine-write-read-performance.html">第 22 期</a>（写入路径五开关）；建模基础（超级表/子表/标签）见存档期 <a href="0015-tdengine-supertable.html">第 15 期</a>。at-least-once 与消费端幂等的完整方法论在 <a href="0021-pulsar-message-reliability.html">第 21 期</a>——投递语义的功课是跨产品通用的。下一期按过渡排程进入 Spring Cloud Alibaba——Dubbo RPC 治理（TDengine 主线告一段落，进阶主题后面再回来）。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0038-pulsar-schema-registry.html">← 上一期：Pulsar Schema Registry 与消息演进</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 39 期 · TDengine 系列 · 下一期预告：Spring Cloud Alibaba——Dubbo RPC 治理（TDengine 主线告一段落，进阶主题后面再回来）</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
