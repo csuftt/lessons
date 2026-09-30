@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Dify 系列第 2 期：5 分钟跑起来 Dify | 2026-09-30</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0091</span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0090 · Dify 系列第 2 期 / 共 4 期 · 下一期:0092 · <a href="https://dify.ai" target="_blank" rel="noopener">dify.ai ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · DIFY 系列第 2 期：5 分钟跑起来</p>
+  <h1>5 分钟跑起来 Dify：一条命令起一套应用全栈</h1>
+  <p class="subtitle">上一期认识了 Dify——把编排、RAG、Agent 收进一张画布的开源 LLM 应用开发平台。这期动手：docker compose 一条命令拉起全套栈，初始化管理员账号，建出第一个聊天应用，挂一个知识库试出带引用的 RAG 回答，最后接出一条 REST API 让业务系统能调用。全程逐字对照官方部署文档，前置只要两核 CPU、4 GiB 内存。<strong>本期结束，你拥有的不是一个 demo，而是一条从文档到回答、从回答到接口的完整链路</strong>。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 开源 LLM 应用开发平台 · Python / TypeScript · Dify Open Source License</span>
+    <span class="tag">📦 基于 v1.17.1（官方 Latest，2026-09-10 发布）</span>
+    <span class="tag-date">📅 2026-09-30 · 第 2 期</span>
+    <span class="tag time">⏱ 预计阅读 10 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 前置 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>跑之前：三件前置对齐</h2>
+  <p>官方部署文档《Deploy with Docker Compose》把门槛压得很低（docs.dify.ai，2026-09-30 核对）：<strong>CPU 两核起、内存 4 GiB 起、Docker Compose 2.24.0 以上</strong>——一台笔记本的虚拟机就带得动。两处系统差异提前留意：macOS 用 Docker Desktop 时把虚拟机配到至少 2 vCPU、8 GiB 内存；Windows 走 WSL2 方案，官方特别提醒<strong>代码和数据要放在 Linux 文件系统里</strong>而不是 Windows 盘。动手前一条命令验版本：<code>docker compose version</code>。</p>
+  <figure style="margin:1rem 0">
+    <img src="../img/0091-dify-quickstart/dify-docs-deploy-overview.png" alt="Dify 官方部署总览页" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">
+    <figcaption style="font-size:.85rem;color:var(--muted);margin-top:.4rem">官方部署总览：Dify runs anywhere Docker runs——笔记本、本地服务器、云主机均可；主推 Deploy with Docker Compose，另有本地源码启动、平台指南、环境变量手册等入口（来源：docs.dify.ai，2026-09-30 截图）</figcaption>
+  </figure>
+</section>
+
+<!-- ================= 02 克隆与启动 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>第一步：克隆与启动，三条命令</h2>
+  <pre class="codeblock"><code>git clone https://github.com/langgenius/dify.git
+cd dify/docker
+cp .env.example .env        # 环境变量先复制再改
+docker compose up -d        # 后台拉起全套服务</code></pre>
+  <p>首次启动要拉取一批镜像，数分钟后全套就绪。所有配置集中在 <code>dify/docker/.env</code> 一个文件里：访问端口、密钥种子、选哪个向量库，改完重启生效。两个高频小操作：</p>
+  <pre class="codeblock"><code>docker compose ps           # 体检：应全为 Up 或 healthy
+# init_permissions 显示 Exited 属正常：任务容器跑完即退
+
+# 80 端口被占？改 .env 里的 nginx 端口再重启
+# EXPOSE_NGINX_PORT=8080
+docker compose up -d</code></pre>
+  <p class="note">来源注记——docs.dify.ai《Deploy Dify with Docker Compose》（2026-09-30 核对）：启动命令、状态检查口径（Up / healthy，init_permissions 退出属预期）与默认 80 端口均出自该页；端口变量 EXPOSE_NGINX_PORT 出自仓库 docker/.env.example 第 297 行（2026-09-30 核对）。</p>
+</section>
+
+<!-- ================= 03 一套栈的成员 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>起来了什么：一支小型舰队</h2>
+  <div class="diagram">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar91" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="310" y="14" width="140" height="44" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="380" y="42" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">nginx 入口 · 80</text>
+    <rect x="120" y="98" width="180" height="60" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="210" y="122" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">web 管理界面</text>
+    <text x="210" y="142" text-anchor="middle" fill="var(--muted)" font-size="9.5">Next.js · 画布与控制台</text>
+    <rect x="460" y="98" width="180" height="60" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="550" y="122" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">api 核心 + worker</text>
+    <text x="550" y="142" text-anchor="middle" fill="var(--muted)" font-size="9.5">Flask · Celery 异步任务</text>
+    <rect x="20" y="200" width="160" height="60" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="100" y="224" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">postgres + redis</text>
+    <text x="100" y="244" text-anchor="middle" fill="var(--muted)" font-size="9.5">元数据 · 缓存与队列</text>
+    <rect x="210" y="200" width="160" height="60" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="290" y="224" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">weaviate 向量库</text>
+    <text x="290" y="244" text-anchor="middle" fill="var(--muted)" font-size="9.5">默认检索后端，可换型</text>
+    <rect x="400" y="200" width="160" height="60" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="480" y="224" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">plugin_daemon</text>
+    <text x="480" y="244" text-anchor="middle" fill="var(--muted)" font-size="9.5">模型与工具插件进程</text>
+    <rect x="590" y="200" width="150" height="60" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="665" y="224" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">sandbox 沙箱</text>
+    <text x="665" y="244" text-anchor="middle" fill="var(--muted)" font-size="9.5">隔离执行代码节点</text>
+    <line x1="380" y1="58" x2="380" y2="92" stroke="var(--accent-3)" stroke-width="2"/>
+    <line x1="255" y1="128" x2="305" y2="128" stroke="var(--accent-3)" stroke-width="2"/>
+    <line x1="455" y1="128" x2="410" y2="128" stroke="var(--accent-3)" stroke-width="2"/>
+    <line x1="210" y1="158" x2="140" y2="196" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar91)"/>
+    <line x1="520" y1="158" x2="300" y2="196" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar91)"/>
+    <line x1="550" y1="158" x2="480" y2="196" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar91)"/>
+    <line x1="580" y1="158" x2="650" y2="196" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar91)"/>
+    <text x="16" y="288" fill="var(--muted)" font-size="9.5">图例：一条 docker compose up -d 拉起的成员（概念图，只画常驻主体；ssrf_proxy 等安全组件与可选向量库见 docker/docker-compose.yaml）</text>
+  </svg>
+  </div>
+  <p>这条命令背后是一支各司其职的小舰队：<strong>nginx</strong> 把住入口默认 80 端口；<strong>web</strong> 是管理界面；<strong>api</strong> 是大脑，重活外包给 <strong>worker</strong> 异步队列；数据分三处——元数据进 postgres、缓存队列进 redis、知识检索进默认向量库 weaviate（compose 里换 Qdrant、Milvus、PGVector 等只需切换 profile）；再加上管模型与工具插件的 <strong>plugin_daemon</strong> 和隔离执行代码的 <strong>sandbox</strong>。第 3 期按职责细拆。</p>
+</section>
+
+<!-- ================= 04 初始化 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>第二步：初始化管理员，进工作台</h2>
+  <p>浏览器打开 <strong>http://localhost</strong>，首次访问会被引到 <code>/install</code> 设置页——给管理员设好邮箱和密码，之后回到首页登录进工作台。<strong>这个设置页只在第一次出现</strong>，它是整套系统的root账号，生产环境密码务必够硬、访问面务必收窄（官方文档 Access 一节口径，2026-09-30 核对）。</p>
+  <figure style="margin:1rem 0">
+    <img src="../img/0091-dify-quickstart/dify-docs-docker-compose.png" alt="官方 Docker Compose 部署文档" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">
+    <figcaption style="font-size:.85rem;color:var(--muted);margin-top:.4rem">官方《Deploy Dify with Docker Compose》：Before Deployment 列明 CPU ≥ 2 Core、RAM ≥ 4 GiB 与三平台软件要求；右侧目录含 Deploy and Start、Access、Customize、Upgrade（来源：docs.dify.ai，2026-09-30 截图）</figcaption>
+  </figure>
+</section>
+
+<!-- ================= 05 建应用 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>第三步：建第一个聊天应用</h2>
+  <p>登录后四步走：<strong>① 创建</strong>——工作台选"创建空白应用"，类型挑<strong>聊天助手</strong>；<strong>② 选模型</strong>——右上角设置里先安装一个模型供应商插件（OpenAI、DeepSeek 或本地 Ollama 都在市场里），配好密钥选一个对话模型；<strong>③ 调提示词</strong>——编排页写人设与要求，右侧预览即改即测；<strong>④ 发布</strong>——一键发布成 WebApp 直接对话，或走 API 给业务系统用（第 07 节）。全程不写一行代码，原型五分钟出街。</p>
+</section>
+
+<!-- ================= 06 知识库 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>第四步：挂知识库，试出第一句 RAG</h2>
+  <p>先建库：左侧"知识"页创建知识库，上传文档（产品手册、制度文件都行），<strong>分段设置</strong>先按默认（分段长度与重叠），<strong>索引方式</strong>选高质量——它会调用嵌入模型做向量化；<strong>检索设置</strong>可选向量、全文或混合检索加重排。处理完成后，回到聊天应用的编排页<strong>关联这个知识库</strong>，再提问时回答会自动附引用出处。官方文档《Create a Ready-to-Use Knowledge Base》给的正是这条四步路径（2026-09-30 核对）。</p>
+  <p>建完别急着用，先做<strong>召回测试</strong>：知识库详情页里模拟用户提问，看命中的分段准不准、引用贴不贴题；不准就调——改分段粒度、开混合检索加重排，再测一轮。<strong>检索质量决定回答质量，这一步是 RAG 应用的命门</strong>，第 4 期实战还会回来细调。</p>
+</section>
+
+<!-- ================= 07 API ================= -->
+<section>
+  <h2><span class="sec-num">07</span>第五步：接出第一条 API</h2>
+  <p>应用的"API 访问"入口生成密钥（app- 开头），业务系统就能把整个应用当服务调。对照官方 API Reference（2026-09-30 核对），chat 模式的发消息接口一条命令验证：</p>
+  <pre class="codeblock"><code>curl -X POST 'http://localhost/v1/chat-messages' \
+  -H 'Authorization: Bearer app-xxxxxx' \
+  -H 'Content-Type: application/json' \
+  -d '{"inputs": {}, "query": "入职流程是什么？",
+       "response_mode": "blocking", "user": "hr-001"}'</code></pre>
+  <p>返回 JSON 里 <code>answer</code> 字段是回答，引用分段在元数据里；同一会话带 <code>conversation_id</code> 续接。<code>inputs</code>、<code>query</code>、<code>user</code> 必填，<code>response_mode</code> 默认 blocking、可选 streaming 流式。官方特别提醒：<strong>密钥只在后端使用，别嵌进前端代码</strong>。到这一步，"应用即服务"闭环了。</p>
+</section>
+
+<!-- ================= 08 坑与版本 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>常见坑与版本注意</h2>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>现象</th><th>原因</th><th>解法</th></tr></thead>
+    <tbody>
+      <tr><td>容器反复重启</td><td>虚拟机内存给得太小</td><td>调到 2 核 4 GiB 以上再起（官方前置口径）</td></tr>
+      <tr><td>80 端口被占</td><td>本机已有服务占用</td><td>.env 改 EXPOSE_NGINX_PORT 后重启</td></tr>
+      <tr><td>镜像拉取慢/超时</td><td>到 Docker Hub 网络不稳</td><td>配镜像加速后重跑 compose 命令</td></tr>
+      <tr><td>老环境升级后检索异常</td><td>捆绑向量库跨版本跳跃</td><td>严格按 v1.17.1 升级指南分步迁移</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>最后一行展开说：v1.17.1 的发布说明里有一条<strong>醒目警告</strong>——捆绑的 Weaviate 从 1.27.0 跨到 1.39.2（十二个小版本），存量部署必须按官方升级指南分步操作，直接跳升可能<strong>永久损坏向量检索</strong>；全新部署不受影响。这也是开源项目的基本功：<strong>认准 Latest 标签，升级前先读 Release Note</strong>。</p>
+  <figure style="margin:1rem 0">
+    <img src="../img/0091-dify-quickstart/dify-github-releases.png" alt="Dify GitHub Releases 页：v1.17.1 Latest 与 Weaviate 升级警告" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">
+    <figcaption style="font-size:.85rem;color:var(--muted);margin-top:.4rem">GitHub Releases：顶部 v1.17.1 挂 Latest（2026-09-10，Bug Fixes and Improvements）；Warning 段原文——Self-hosted deployments using the bundled Weaviate must complete a manual, staged upgrade before starting 1.17.1（2026-09-30 截图）</figcaption>
+  </figure>
+  <p class="note">来源注记——github.com/langgenius/dify/releases（2026-09-30 核对）：v1.17.1 为 Latest，2026-09-10 发布；Weaviate 升级警告原文见该页 Warning 段；上方列表中 v1.16.0-rc1 为预发布标签，生产环境勿追。</p>
+</section>
+
+<!-- ================= 09 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. 社区版默认通过哪个端口访问？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，那是 API 服务的内部端口。","不对，Dify 社区版默认不走 3000。","对的：nginx 入口默认 80 端口，想换改 .env 的 EXPOSE_NGINX_PORT 后重启。"]'>
+        <li class="quiz-option">5001</li>
+        <li class="quiz-option">3000</li>
+        <li class="quiz-option">80（nginx 入口，可在 .env 的 EXPOSE_NGINX_PORT 改）</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. docker compose ps 里 init_permissions 显示 Exited，说明？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，它是一次性初始化任务容器，跑完即退。","对的：任务容器执行完退出属预期，其余常驻容器应为 Up 或 healthy。","不对，不需要删掉重装，这不是故障。"]'>
+        <li class="quiz-option">初始化失败，必须删掉重装</li>
+        <li class="quiz-option">属正常：一次性任务容器跑完即退出</li>
+        <li class="quiz-option">端口冲突的报错信号</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 老环境升级到 v1.17.1 前，发布说明里的关键警告是？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：捆绑 Weaviate 从 1.27.0 到 1.39.2，须按升级指南分步操作，跳步可能永久损坏向量检索。","不对，模型密钥不受影响。","不对，Docker Compose 版本要求一直存在，不是这次警告的内容。"]'>
+        <li class="quiz-option">捆绑的 Weaviate 跨大版本，必须按升级指南分步迁移</li>
+        <li class="quiz-option">模型供应商密钥全部失效，要重新配置</li>
+        <li class="quiz-option">必须先升级 Docker Compose 到 3.0</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 10 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：一条 docker compose 命令起了十个上下的容器，"全栈单机"与"微服务分拆"的边界在哪？什么信号出现时该把 Dify 拆出单机？</summary>
+    <div class="details-body">
+      <p>先理解这套默认布局的设计意图：compose 把 nginx、web、api、worker、三套存储、插件进程、沙箱<strong>编排成一个逻辑整体</strong>，容器之间是进程隔离，共享一台主机的资源池——它卖的是"五分钟可用"，不是"生产级分布"。这条单机路线的舒适区：<strong>团队规模几十人以内、知识库文档量在万级以下、QPS 个位数到几十</strong>，三个条件同时满足，单机加好备份就是最省钱的正解。拆分的信号也有三个：<strong>其一，资源互抢</strong>——嵌入索引任务把 CPU 打满拖累对话响应，worker 与 api 的资源曲线高度负相关，说明该分主机了；<strong>其二，可用性要求升级</strong>——问答服务进入生产业务链路，单机故障等于业务停摆，需要多副本加负载均衡；<strong>其三，数据规模越线</strong>——向量库与 postgres 需要独立扩容、独立备份策略。值得强调的是：<strong>Dify 的拆分成本是可控的</strong>——compose 里的服务边界就是天然的拆分单元，api 无状态化后横向扩 worker、向量库换外置集群都是官方文档覆盖的路径。架构师的活儿不是"一步到位上集群"，而是<strong>认清单机舒适区的三条边界，在信号出现时按服务边界渐进拆分</strong>——这与微服务演进的方法论一脉相承。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：知识库建完，"先做召回测试再上线"这步为什么是命门？跳过它，故障会在哪一层爆发、以什么形式？</summary>
+    <div class="details-body">
+      <p>RAG 应用的回答质量由两段决定：<strong>检索段</strong>（能不能把对的段落捞回来）和<strong>生成段</strong>（模型怎么用捞回来的段落作答）。生成段有平台兜底，检索段的质量却完全取决于你的数据形态与分段决策——文档结构、分段粒度、重叠设置、检索方式，每个选择都影响命中。<strong>召回测试之所以是命门，因为它是唯一在"上线前"就能独立验证检索段质量的手段</strong>：模拟真实提问，看命中的分段对不对。跳过它，故障不会在测试环境爆发，而会在生产以三种形式出现：<strong>其一，静默降级</strong>——检索捞回的是沾边的错误段落，模型一本正经地编出似是而非的回答，用户无从分辨，这是最危险的形态；<strong>其二，引用露馅</strong>——回答附了引用，点开发现文不对题，信任一次性崩塌；<strong>其三，长尾黑洞</strong>——主路径的提问恰好命中，少数派问法全部落空，而这类问题恰恰是知识库存在的意义。运维视角再补一刀：这类故障<strong>监控难覆盖</strong>（服务全绿、延迟正常），只能靠用户投诉发现。所以正确的顺序是：召回测试用真实问题库打磨到命中稳定，再接应用、再上线；上线后靠日志里的引用命中持续监控。五分钟的测试，买的是检索段的确定性。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 11 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">11</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>前置底线：2 核 CPU、4 GiB 内存、Docker Compose 2.24+；命令三连——clone、cp .env、compose up -d；</li>
+      <li>栈的成员：nginx 入口（默认 80，EXPOSE_NGINX_PORT 可改）、web 界面、api+worker、postgres/redis/weaviate、插件进程与沙箱；</li>
+      <li>首次访问 /install 设管理员，只出现一次；建应用四步——创建、选模型、调提示词、发布；</li>
+      <li>RAG 第一口：建库（分段+高质量索引）→ 关联应用 → 召回测试打磨后再上线；</li>
+      <li>升级纪律：认准 Latest（v1.17.1，2026-09-10）；老环境升级看 Release Note 的 Weaviate 分步迁移警告。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 3 期《核心概念与整体架构》——五种应用类型怎么选、编排引擎与节点模型、RAG 管线从分段到重排的内部、模型供应商抽象与插件生态。</p>
+  <p><strong>Primary source：</strong><a href="https://docs.dify.ai/en/self-host/deploy/quick-start/docker-compose" target="_blank" rel="noopener">Dify 官方部署文档（Docker Compose）</a>——本期命令、前置要求与初始化口径均出自官方文档与仓库（v1.17.1，2026-09-30 核对）；API 口径见 <a href="https://docs.dify.ai/en/api-reference/guides/get-started" target="_blank" rel="noopener">API Reference</a>，版本记录见 <a href="https://github.com/langgenius/dify/releases" target="_blank" rel="noopener">GitHub Releases</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev">← 上一期：<a href="0090-dify-what-and-why.html">认识 Dify</a></span>
+  <a class="next" href="0092-dify-core-concepts.html">下一期：核心概念与整体架构 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

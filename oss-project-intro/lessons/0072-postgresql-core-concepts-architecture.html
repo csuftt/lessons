@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · PostgreSQL 系列第 3 期：核心概念与整体架构 | 2026-09-30</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0072</span>
+  <span><a href="../index.html">课程目录</a> · 上一期:<a href="0071-postgresql-quickstart.html">0071</a> · PostgreSQL 系列第 3 期 / 共 5 期 · 下一期:<a href="0073-postgresql-json-pgvector-in-action.html">0073</a> · <a href="https://www.postgresql.org/" target="_blank" rel="noopener">postgresql.org ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · POSTGRESQL 系列第 3 期：核心概念与整体架构</p>
+  <h1>PostgreSQL 核心概念与整体架构:把"连上就能用"的黑盒拆开</h1>
+  <p class="subtitle">上一期我们跑通了它,这一期拆开它。四个概念撑起 PG 的全部骨架:<strong>进程模型</strong>(postgres 守护进程 + 每连接一进程 + 后台进程族)、<strong>MVCC 多版本并发控制</strong>(读不阻塞写的底气,以及 vacuum 的由来)、<strong>WAL 先写日志</strong>(崩溃恢复靠它)、<strong>查询处理五阶段</strong>(一条 SQL 从进门到出结果的路)。顺手回收第 2 期埋的两个钩子:连接池为什么几乎必配、pg_hba 检查完之后发生了什么。基于 <strong>v18.6(官方 Latest,2026-08-13 发布)</strong>,架构描述全部对齐官方文档。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🐘 开源关系型数据库 · C · PostgreSQL License</span>
+    <span class="tag">📦 基于 v18.6（官方 Latest，2026-08-13 发布）</span>
+    <span class="tag-date">📅 2026-09-30 · 第 3 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 黑盒三问 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>为什么拆:连上就能用,但黑盒里有三问</h2>
+  <p>第 2 期结束时,它已经是一个"连上就能用"的黑盒。能用归能用,三个现象解释不了:<strong>一问,连接是什么?</strong>应用报"too many connections"时,连接到底占了什么资源,为什么 PG 圈人人嘴边挂着连接池?<strong>二问,更新去哪了?</strong>UPDATE 一行之后,旧值还在不在?磁盘会不会被新旧两份撑爆?vacuum 这个词为什么总在运维会议出现?<strong>三问,断电怎么办?</strong>写入正在半途,进程被 kill -9,数据凭什么不丢?</p>
+  <p>这三问的答案,就是本期四个概念。学完它们,第 2 期急救表里的每条报错你都能说出"发生在架构的哪一层"——<strong>报错从"查表对号"升级成"看图定位"</strong>,这是认识架构的直接回报。</p>
+</section>
+
+<!-- ================= 02 整体架构图 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>总览:一张图看整体架构</h2>
+  <div class="diagram">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar72" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="10" y="30" width="140" height="70" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="80" y="58" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">客户端进程</text>
+    <text x="80" y="78" text-anchor="middle" fill="var(--muted)" font-size="9.5">psql · 应用 · 连接池</text>
+    <rect x="220" y="20" width="200" height="90" rx="12" fill="var(--card)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="320" y="46" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">postgres 守护进程</text>
+    <text x="320" y="68" text-anchor="middle" fill="var(--muted)" font-size="9.5">监听端口 · 鉴权(pg_hba.conf)</text>
+    <text x="320" y="90" text-anchor="middle" fill="var(--muted)" font-size="9.5">为每条连接 fork 后端进程</text>
+    <rect x="220" y="140" width="200" height="66" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="320" y="166" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">后端进程 × N</text>
+    <text x="320" y="188" text-anchor="middle" fill="var(--muted)" font-size="9.5">解析 · 计划 · 执行(每连接一个)</text>
+    <rect x="490" y="130" width="260" height="86" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="620" y="154" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">共享内存(Buffer Pool 等)</text>
+    <text x="620" y="176" text-anchor="middle" fill="var(--muted)" font-size="9.5">数据页缓存 · 锁 · 事务状态</text>
+    <text x="620" y="198" text-anchor="middle" fill="var(--muted)" font-size="9.5">后台进程族同住一地址空间</text>
+    <rect x="490" y="20" width="260" height="72" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="620" y="44" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">后台进程族</text>
+    <text x="620" y="66" text-anchor="middle" fill="var(--muted)" font-size="9.5">checkpointer · bgwriter · walwriter</text>
+    <text x="620" y="84" text-anchor="middle" fill="var(--muted)" font-size="9.5">autovacuum launcher/workers 等</text>
+    <rect x="220" y="234" width="530" height="54" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="485" y="256" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">磁盘:数据目录(data dir)</text>
+    <text x="485" y="276" text-anchor="middle" fill="var(--muted)" font-size="9.5">库表文件(base/) · 先写日志(WAL, pg_wal/) · 配置(pg_hba.conf 等)</text>
+    <line x1="150" y1="65" x2="216" y2="63" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar72)"/>
+    <line x1="320" y1="110" x2="320" y2="136" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar72)"/>
+    <line x1="420" y1="173" x2="486" y2="173" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar72)"/>
+    <line x1="620" y1="126" x2="620" y2="96" stroke="var(--accent-3)" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#ar72)"/>
+    <line x1="560" y1="216" x2="540" y2="230" stroke="var(--accent-3)" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#ar72)"/>
+    <line x1="420" y1="196" x2="460" y2="232" stroke="var(--accent-3)" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#ar72)"/>
+    <text x="168" y="52" fill="var(--muted)" font-size="9">TCP 5432</text>
+    <text x="445" y="130" fill="var(--muted)" font-size="9">读写页</text>
+    <text x="335" y="222" fill="var(--muted)" font-size="9">先写 WAL · 刷脏页</text>
+    <text x="14" y="290" fill="var(--muted)" font-size="9.5">图例:实线为请求路径,虚线为落盘路径;概念图,以官方文档 Architectural Fundamentals 与 postgres 参考页为准</text>
+  </svg>
+  </div>
+  <p>整体架构一句话:<strong>一个守护进程当家,一条连接一个后端进程,一族后台进程守家业,一块共享内存当中转,一套先写日志保平安</strong>。客户端只跟守护进程握手一次,之后就由专属后端进程伺服到底——这是理解后面所有概念的地基。</p>
+</section>
+
+<!-- ================= 03 进程模型 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>进程模型:每连接一进程,连接池因此必配</h2>
+  <p>PG 的服务器进程官名就叫 <code>postgres</code>,官方文档给它的描述是:<strong>监听连接、鉴权,然后为每条连接启动("fork")一个新的后端进程</strong>;此后客户端与该后端直接对话,守护进程退回监听位。这是与 MySQL"每连接一线程"最大的形态差异:进程比线程重——每条连接都有独立的内存映像与调度开销,<code>max_connections</code> 默认 100 不是保守,是<strong>进程模型的物理账</strong>。</p>
+  <figure>
+    <img src="../img/0072-postgresql-core-concepts-architecture/pg-docs-arch.png" alt="官方教程 Architectural Fundamentals 页">
+    <figcaption>postgresql.org/docs/18/tutorial-arch.html(2026-09-30 截图):1.2 Architectural Fundamentals 原文——server process 即 postgres,"starts (forks) a new process for each connection",supervisor server process 恒在等待连接</figcaption>
+  </figure>
+  <p>于是连接池成为 PG 部署的标配:应用侧成百上千的短连接,经 pgbouncer 这类池化组件收敛成后端区区几十条长连接。<strong>应用看到的是"连接很便宜",后端保住的是"进程很贵"的底线</strong>。守护进程之外,还有一族常驻后台进程替你打理家业:</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>后台进程</th><th>职责一句话</th><th>对应概念</th></tr></thead>
+    <tbody>
+      <tr><td>checkpointer</td><td>周期性把脏页刷盘并做检查点</td><td>WAL / 恢复起点</td></tr>
+      <tr><td>background writer</td><td>在检查点之间提前把脏页写出</td><td>Buffer 管理</td></tr>
+      <tr><td>walwriter</td><td>把 WAL 记录从缓冲写到磁盘</td><td>WAL</td></tr>
+      <tr><td>autovacuum launcher / workers</td><td>自动触发清理死元组与冻结</td><td>MVCC</td></tr>
+      <tr><td>logical replication launcher</td><td>为逻辑复制拉起工作者</td><td>复制</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">来源注记——官方文档 1.2 Architectural Fundamentals(postgresql.org/docs/18/tutorial-arch.html,2026-09-30 截图):server process 即 postgres,"forks a new process for each connection",supervisor process 恒在;后台进程族与 max_connections 默认值见 postgres 参考页与 Server Configuration 各章(2026-09-30 核对)。</p>
+</section>
+
+<!-- ================= 04 MVCC ================= -->
+<section>
+  <h2><span class="sec-num">04</span>MVCC:读不阻塞写,以及 vacuum 的由来</h2>
+  <p>MVCC(Multiversion Concurrency Control,多版本并发控制)是 PG 并发的地基,官方定义:<strong>每条语句看到的是数据在某个时刻的快照,写操作不覆盖旧值,而是产生新版本</strong>。具体到行:每行元组带着两个隐藏列——<code>xmin</code>(创建它的事务号)与 <code>xmax</code>(删除/替换它的事务号)。UPDATE 一行的真实动作是:把旧元组标记上 xmax,<strong>插入一条新版本元组</strong>,两个版本共存于表中;读事务按自己的快照决定"我该看见哪个版本"。于是有了那句著名的保证:<strong>读永远不阻塞写,写也永远不阻塞读</strong>。</p>
+  <figure>
+    <img src="../img/0072-postgresql-core-concepts-architecture/pg-docs-mvcc.png" alt="官方文档 Concurrency Control Introduction">
+    <figcaption>postgresql.org/docs/18/mvcc-intro.html(2026-09-30 截图):13.1 Introduction 原文——data consistency is maintained by using a multiversion model (MVCC);locks acquired for querying do not conflict with locks acquired for writing,reading never blocks writing</figcaption>
+  </figure>
+  <p>代价随之而来:<strong>旧版本不会自己消失</strong>,它们躺在表里变成死元组,占着空间还拖慢扫描。回收工作就是 vacuum——autovacuum 后台进程族自动做,大表频繁更新时它是运维的常驻话题。一句话记住因果链:<strong>MVCC 换来读写互不阻塞,死元组是它的账单,vacuum 是付款方式</strong>。</p>
+</section>
+
+<!-- ================= 05 WAL ================= -->
+<section>
+  <h2><span class="sec-num">05</span>WAL:先写日志,崩溃恢复的底气</h2>
+  <p>WAL(Write-Ahead Log,先写日志)规则只有一句话:<strong>数据页的任何变更,先把变更记录写进日志并落盘,再谈数据页本身</strong>。提交事务时,PG 默认等的是"WAL 刷盘",而不是"数据页刷盘"——日志是顺序写,便宜;数据页是随机写,昂贵。把昂贵的随机写推给后台的 checkpointer 周期性批量做,把便宜的顺序写放在关键路径上,性能与可靠同时成立。断电重启时,PG 从上一个检查点起重放 WAL,把没来得及落盘的变更补齐——<strong>崩溃恢复的全部秘密,就是重放日志</strong>。</p>
+  <figure>
+    <img src="../img/0072-postgresql-core-concepts-architecture/pg-docs-wal.png" alt="官方文档 Reliability and the Write-Ahead Log 章节">
+    <figcaption>postgresql.org/docs/18/wal.html(2026-09-30 截图):Chapter 28 Reliability and the Write-Ahead Log 章节目录——Reliability、Write-Ahead Logging(WAL)、Asynchronous Commit、WAL Configuration、WAL Internals</figcaption>
+  </figure>
+  <p>顺手回收第 2 期的报错:<code>connection refused</code> 之后你用 systemctl 拉起服务,服务起来时做的第一件事就是检查 WAL、执行恢复——<strong>你在第 2 期每一次"起服务",都已经用过一次 WAL</strong>。</p>
+</section>
+
+<!-- ================= 06 查询五阶段 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>一条 SQL 的五阶段:从进门到出结果</h2>
+  <div class="diagram">
+  <svg viewBox="0 0 760 150" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar72b" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="8" y="46" width="128" height="58" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="72" y="70" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">① 连接分发</text>
+    <text x="72" y="90" text-anchor="middle" fill="var(--muted)" font-size="9">鉴权 · 绑定后端进程</text>
+    <rect x="160" y="46" width="128" height="58" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="224" y="70" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">② 解析</text>
+    <text x="224" y="90" text-anchor="middle" fill="var(--muted)" font-size="9">语法树 · 词法语法检查</text>
+    <rect x="312" y="46" width="128" height="58" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="376" y="70" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">③ 分析重写</text>
+    <text x="376" y="90" text-anchor="middle" fill="var(--muted)" font-size="9">语义解析 · 视图展开</text>
+    <rect x="464" y="46" width="128" height="58" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="528" y="70" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">④ 计划</text>
+    <text x="528" y="90" text-anchor="middle" fill="var(--muted)" font-size="9">优化器挑路径 · 代价模型</text>
+    <rect x="616" y="46" width="128" height="58" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="680" y="70" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">⑤ 执行</text>
+    <text x="680" y="90" text-anchor="middle" fill="var(--muted)" font-size="9">执行器按计划树取数</text>
+    <line x1="136" y1="75" x2="156" y2="75" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar72b)"/>
+    <line x1="288" y1="75" x2="308" y2="75" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar72b)"/>
+    <line x1="440" y1="75" x2="460" y2="75" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar72b)"/>
+    <line x1="592" y1="75" x2="612" y2="75" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar72b)"/>
+    <text x="380" y="136" text-anchor="middle" fill="var(--muted)" font-size="9.5">图例:五阶段在同一个后端进程内完成;④ 计划是成本大头,统计信息准不准直接决定快慢</text>
+  </svg>
+  </div>
+  <p>SQL 进了后端进程,走五站:<strong>连接分发(已在进门时完成)、解析、分析重写、计划、执行</strong>。优化器基于统计信息与代价模型,在索引扫描、顺序扫描、连接方式之间挑一条它认为最便宜的路径——你用 <code>EXPLAIN</code> 看到的就是它的决定,用 <code>EXPLAIN ANALYZE</code> 还能看到实际执行的对照。慢查询调优的第一课不在网上,在<strong>统计信息是否新鲜(ANALYZE)与计划是否如你所想(EXPLAIN)</strong>。</p>
+  <p class="note">来源注记——官方文档 Part VII Internals → Overview of PostgreSQL Internals(postgresql.org/docs/18/overview.html,2026-09-30 核对):Parser/Analyzer/Rewriter/Planner/Executor 分工;EXPLAIN 族命令见 SQL Commands 章节。</p>
+</section>
+
+<!-- ================= 07 Buffer 与系统目录 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>Buffer 管理与系统目录:内存里的页,元数据里的库</h2>
+  <p><strong>Buffer 管理</strong>:PG 启动时开出一大块共享内存做缓冲池(<code>shared_buffers</code>,默认 128 MB),所有后端进程与后台进程族共用。读写都先走缓冲池里的页:命中就免磁盘,改脏了标记起来交给 bgwriter/checkpointer 择机刷盘。<strong>所以调 shared_buffers 的本质是给"热页"多发常驻席位</strong>,一般从机器内存的四分之一量级起步压测,不是越大越好。</p>
+  <p><strong>系统目录</strong>:库自己长什么样,PG 存在一组特殊表里,统一挂在 <code>pg_catalog</code> 模式下——表清单在 <code>pg_class</code>,列定义在 <code>pg_attribute</code>,运行中的会话在 <code>pg_stat_activity</code>,参数在 <code>pg_settings</code>。你天天用的 <code>\d</code>、<code>\l</code>,背后就是查这些目录表;SQL 标准口径的 <code>information_schema</code> 是它们的"官方视图版"。元数据也是数据——<strong>目录表本身也走 MVCC,也吃 vacuum</strong>,这句话是第 04 节概念普适性的最好注脚。</p>
+  <pre class="codeblock"><code>SHOW shared_buffers;  SHOW work_mem;  SHOW max_connections;
+SELECT pid, usename, state, query FROM pg_stat_activity;
+SELECT relname, n_live_tup FROM pg_stat_user_tables LIMIT 5;</code></pre>
+  <p class="note">来源注记——参数默认值见官方文档 Server Configuration → Resource Usage(runtime-config-resource.html,2026-09-30 核对):shared_buffers 默认 128MB、work_mem 默认 4MB、max_connections 默认 100;系统目录见 catalogs 与 monitoring-stats 各章。</p>
+</section>
+
+<!-- ================= 08 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. PG 为每条客户端连接做什么?为什么连接池几乎必配?</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对,PG 的连接模型是每连接一进程,不是每连接一线程。","对的:守护进程 fork 一个专属后端进程,进程重、内存开销大,池化把海量短连接收敛成少量长连接。","不对,连接由后端进程独立服务,不共享同一个执行进程。"]'>
+        <li class="quiz-option">开一个轻量线程,连接很便宜,不需要池</li>
+        <li class="quiz-option">fork 一个专属后端进程;进程重,池化收敛连接数</li>
+        <li class="quiz-option">所有连接排队共享同一个后端进程</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. UPDATE 一行之后,旧版本元组去哪了?</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对,原地覆盖正是 PG 不做的——那会让读阻塞写。","不对,旧版本在 vacuum 之前一直留在表里,不是立刻删除。","对的:旧元组标上 xmax 留在原地,新元组带新 xmin 插入,回收交给 vacuum。"]'>
+        <li class="quiz-option">被原地覆盖,不存在旧值</li>
+        <li class="quiz-option">立即物理删除,只剩新版本</li>
+        <li class="quiz-option">标记 xmax 留在表里成死元组,由 vacuum 回收</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 事务提交时,PG 默认等的是哪个动作完成?</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对,数据页刷盘被刻意推给 checkpointer 周期性做,不在提交路径上等。","对的:等 WAL 记录落盘;顺序写便宜,崩溃恢复靠重放它。","不对,断开连接与持久性无关,那是连接层的动作。"]'>
+        <li class="quiz-option">把所有脏数据页刷盘</li>
+        <li class="quiz-option">把本次事务的 WAL 记录落盘</li>
+        <li class="quiz-option">断开客户端连接</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 09 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>思考题(点击展开解析)</h2>
+  <details class="q-card">
+    <summary>思考一:MySQL 团队转 PG,最容易踩的坑是"把连接当线程用"。从进程模型出发,推演这个误用会在生产表现出什么症状?怎么根治?</summary>
+    <div class="details-body">
+      <p>把连接当线程用,典型形态是<strong>应用每次请求开新连接、用完即弃,或连接数随服务实例数线性放大</strong>。在 MySQL 线程模型下这通常扛得住——线程轻,创建销毁成本小。放到 PG 上,同一行为的物理账完全不同:<strong>每条连接是一个 fork 出来的进程</strong>,建立时要复制内存映像、初始化执行环境,成本高一个量级;每条连接常驻若干 MB 内存;守护进程还要为每次连接做认证与派生。于是症状很典型:高峰期 <code>too many connections</code>、CPU 花在进程创建与上下文切换上、内存被几十条闲置连接占住、短连接风暴时守护进程忙到影响新连接接入。根治分三层:<strong>第一层,池化</strong>——pgbouncer 以事务级池化把应用的千级连接收敛为后端几十条,应用侧不改代码;<strong>第二层,语义校准</strong>——池化后 prepared statements、会话级特性(如临时表、SET 参数)要改用事务级写法或显式管理,这是迁移团队最常见的第二只脚;<strong>第三层,容量规划</strong>——max_connections 保持默认量级,把"支撑高并发"的职责交给应用侧池,而不是数据库进程数。<strong>一句话:MySQL 的连接是"轻羽",PG 的连接是"家丁",养法完全不同</strong>。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二:大表频繁 UPDATE 的业务,为什么深夜总在跑 autovacuum?能不能把它关了换成分裂式手动清理?给出运维决策链。</summary>
+    <div class="details-body">
+      <p>先还原因果:MVCC 让 UPDATE 产生新版本、旧版本变死元组;死元组堆积的代价有三——<strong>表与索引膨胀</strong>(扫描要跳过尸体,IO 放大)、<strong>事务号回卷风险</strong>(PG 事务号 32 位,autovacuum 的 freeze 工作防的是系统级故障,这个不能不还)、<strong>计划劣化</strong>(统计被死元组污染)。所以深夜频繁跑 autovacuum 不是病,<strong>是 MVCC 的账单到期</strong>。能不能关?能,但等于宣布"我接管全部回收职责"。决策链四步:<strong>第一步,量账单</strong>——用 pg_stat_user_tables 看 n_dead_tup 与 last_autovacuum,确认堆积速率;<strong>第二步,调参而不是关停</strong>——对高频更新大表单独设更激进的 autovacuum_vacuum_scale_factor(如 0.02),把清理摊平到全天,而不是等默认阈值攒一堆深夜爆跑;<strong>第三步,改变写入形态</strong>——批量更新改成小批多次,超长事务尽快提交(它会让 vacuum 白干,死元组无法越过最老快照回收);<strong>第四步,兜底手段</strong>——膨胀已成型才用 pg_repack 类在线重组,锁窗口谨慎。<strong>关停 autovacuum 换手动清理,唯一的适用场景是"完全由 DBA 掌控写入节奏的维护窗口系统";在线业务这么干,是把确定性风险换成定时炸弹</strong>。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 10 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话:</strong></p>
+    <ul>
+      <li>进程模型:postgres 守护进程监听并鉴权,每连接 fork 一个专属后端进程;进程贵,所以连接池(pgbouncer)是部署标配;</li>
+      <li>MVCC:写不覆盖旧值,xmin/xmax 标记多版本共存,读永远不阻塞写;死元组是账单,vacuum 是付款;</li>
+      <li>WAL:变更先写日志并落盘,数据页刷盘交给 checkpointer;崩溃恢复 = 从检查点重放日志;</li>
+      <li>内存与目录:shared_buffers(默认 128MB)是全员共享的热页席位;pg_catalog 系统目录记录库的一切,\d 背后就是查目录;</li>
+      <li>五阶段:解析 → 分析重写 → 计划 → 执行;EXPLAIN 看优化器的决定,统计信息新鲜度决定计划质量。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告:</strong>第 4 期《实战:商品中心,一张库装下表 + 文档 + 向量》——jsonb 二进制存储与 GIN 索引、pgvector 建表与相似度查询、HNSW 索引,把第 1 期"数据不动、能力挂载"的心智模型落成可运行的 SQL。</p>
+  <p><strong>Primary source:</strong><a href="https://www.postgresql.org/docs/18/" target="_blank" rel="noopener">PostgreSQL 18 官方文档</a>——进程模型见 <a href="https://www.postgresql.org/docs/18/tutorial-arch.html" target="_blank" rel="noopener">Tutorial → Architectural Fundamentals</a> 与 postgres 参考页,MVCC 见 <a href="https://www.postgresql.org/docs/18/mvcc-intro.html" target="_blank" rel="noopener">Concurrency Control → Introduction</a>,WAL 见 <a href="https://www.postgresql.org/docs/18/wal.html" target="_blank" rel="noopener">Reliability and the Write-Ahead Log</a>,执行器分工见 Part VII Internals(2026-09-30 核对)。</p>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0071-postgresql-quickstart.html">← 上一期:5 分钟跑起来 PostgreSQL</a>
+  <a class="next" href="0073-postgresql-json-pgvector-in-action.html">下一期:实战:商品中心 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对,再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

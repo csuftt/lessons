@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Apache RocketMQ 系列第 4 期：实战订单一致性 | 2026-09-30</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0088</span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0087 · RocketMQ 系列第 4 期 / 共 5 期 · 下一期:0089 · <a href="https://rocketmq.apache.org/" target="_blank" rel="noopener">rocketmq.apache.org ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · APACHE ROCKETMQ 系列第 4 期：实战订单一致性</p>
+  <h1>RocketMQ 实战：用事务消息与顺序消息守住订单一致性</h1>
+  <p class="subtitle">上一期我们把概念地图画完了，这期继续——把三件武器用进"订单一致性"这个最典型的场景：<strong>事务消息</strong>解决"订单落库成功、下游消息却发不出去"的半程失败，半消息先落、本地事务再跑、结果未知时 Broker 主动回查；<strong>顺序消息</strong>解决"创建、支付、发货状态机被乱序执行"，同一订单的消息锁进同一队列串行消费；<strong>定时消息</strong>解决"三十分钟未支付自动关单"，秒级定时原生支持。最后把事务消息与经典的本地事务表方案放上天平对比。本期全部用法逐字对照官方文档，结束你能独立设计一条敢上生产的订单消息链路。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🚀 分布式消息队列 · Java · Apache-2.0</span>
+    <span class="tag">📦 基于 v5.5.1（官方 Latest，2026-08-20 发布）</span>
+    <span class="tag-date">📅 2026-09-30 · 第 4 期</span>
+    <span class="tag time">⏱ 预计阅读 14 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>场景拆解：订单链路的三道一致性坎</h2>
+  <p>把电商下单的最小链路摆上桌：用户提交订单，订单服务<strong>落库</strong>，然后要通知下游——扣库存、发积分、推送履约；支付成功后状态推进；三十分钟未支付要<strong>自动关单</strong>。三道坎都在这里：</p>
+  <ul>
+    <li><strong>半程失败坎：</strong>落库成功、发消息失败（网络抖动、MQ 不可用），下游永远不知道这单存在。反过来先发消息再落库，消息发出去了订单却没落成——两个动作不在一个事务里，怎么摆都有缝；</li>
+    <li><strong>乱序坎：</strong>扣库存、创建、发货几条消息并发到达，"已发货"先于"已创建"被消费，状态机直接错乱；</li>
+    <li><strong>时间坎：</strong>超时关单要准点触发，自己起一堆定时扫描任务，开发运维两头的债。</li>
+  </ul>
+  <p>这三道坎正好对应本期三件武器。先立一个总原则：<strong>分布式一致性没有银弹，事务消息只保证"消息与本地事务的最终一致"，官方文档明确说它不保证消费端的结果一致</strong>——消费端该幂等还得幂等，第 3 期的课没有白上。</p>
+</section>
+
+<!-- ================= 02 事务消息机制 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>事务消息：半消息机制的完整回合</h2>
+  <div class="diagram">
+  <svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar88" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="40" y="40" width="200" height="64" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="140" y="66" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">生产者（订单服务）</text>
+    <text x="140" y="86" text-anchor="middle" fill="var(--muted)" font-size="9.5">本地事务的执行方</text>
+    <rect x="520" y="40" width="200" height="64" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="620" y="66" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">Broker</text>
+    <text x="620" y="86" text-anchor="middle" fill="var(--muted)" font-size="9.5">半消息的保管方</text>
+    <rect x="40" y="150" width="680" height="120" rx="12" fill="var(--card)" stroke="var(--line)"/>
+    <text x="380" y="176" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">第 1 回合：发送半消息 → 消费者完全不可见</text>
+    <text x="380" y="200" text-anchor="middle" fill="var(--muted)" font-size="10">第 2 回合：本地事务执行成功则提交（消息转为可消费），失败则回滚（半消息删除）</text>
+    <text x="380" y="224" text-anchor="middle" fill="var(--muted)" font-size="10">第 3 回合：二次确认丢失或结果未知时，Broker 定时回查生产者，查本地事务的真实结果</text>
+    <text x="380" y="248" text-anchor="middle" fill="var(--muted)" font-size="9.5">兜底：始终无法确认的消息，Broker 默认按回滚处理（官方文档口径）</text>
+    <line x1="240" y1="66" x2="516" y2="66" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar88)"/>
+    <text x="378" y="56" text-anchor="middle" fill="var(--muted)" font-size="9.5">半消息先落库（对消费者不可见）</text>
+    <line x1="516" y1="86" x2="244" y2="86" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar88)"/>
+    <text x="380" y="108" text-anchor="middle" fill="var(--muted)" font-size="9.5">确认收到，生产者开始执行本地事务</text>
+    <line x1="560" y1="128" x2="560" y2="146" stroke="var(--accent-3)" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#ar88)"/>
+    <text x="640" y="142" text-anchor="middle" fill="var(--muted)" font-size="9.5">回查</text>
+    <line x1="200" y1="128" x2="200" y2="146" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar88)"/>
+    <text x="240" y="142" fill="var(--muted)" font-size="9.5">提交 / 回滚 / 保持未知</text>
+    <text x="40" y="308" fill="var(--muted)" font-size="9.5">图例：三个回合的核心是"先落一个不可见的半消息，把两阶段提交藏进消息系统"；官方提醒大量回查会拖累性能，回查要幂等（概念图）</text>
+  </svg>
+  </div>
+  <p>官方文档把这个机制讲成三个回合：<strong>第一回合</strong>，生产者发半消息，Broker 存下但标记为"未就绪"，对消费者完全不可见，然后回 ACK——此刻订单服务可以放心执行本地事务，因为消息已经"落袋"；<strong>第二回合</strong>，本地事务执行完，提交则消息转为可消费，回滚则半消息删除；<strong>第三回合</strong>是精髓：如果二次确认丢了、或者生产者在事务执行中挂了，Broker 等一会儿后<strong>主动回查</strong>生产者——回查器拿着消息上的业务键（比如订单号）去查本地事务的真实状态，答提交、答回滚、答"还在进行中请再等等"都行。始终确认不了的消息，官方口径是<strong>默认回滚</strong>——宁可少发，不可错发。</p>
+</section>
+
+<!-- ================= 03 事务消息用法 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>事务消息：官方用法五步与回查器</h2>
+  <figure>
+    <img src="../img/0088-rocketmq-in-action/rocketmq-docs-transaction.png" alt="官方事务消息文档">
+    <figcaption>官方文档 Transaction Message 章节（2026-09-30 截图）：应用场景、工作机制与使用限制的原文出处，官方场景图正是"支付订单联动四个下游分支"。</figcaption>
+  </figure>
+  <p>官方使用步骤五步走（5.x 新客户端 API）：建 <strong>Transaction 类型 Topic</strong>（普通主题会直接拒绝事务消息，这是新手第一坑）；生产者构建器上挂<strong>回查器</strong>；<code>beginTransaction</code> 开事务；发送半消息并带上业务键属性；执行本地事务后二阶段提交或回滚。代码骨架如下：</p>
+  <pre class="codeblock"><code>// 官方文档 Transaction Message 示例骨架（5.x 客户端）
+Producer producer = provider.newProducerBuilder()
+    .setClientConfiguration(config)
+    .setTransactionChecker(tx -&gt; {                  // 回查器：查本地事务结果
+        if (orderDao.paid(tx.getProperty("OrderId"))) {
+            return TransactionResolution.COMMIT;
+        }
+        return TransactionResolution.UNKNOWN;       // 查不到别乱答，交给下轮回查
+    }).build();
+Transaction tx = producer.beginTransaction();
+Message msg = provider.newMessageBuilder()
+    .setTopic("order_tx_topic")
+    .addProperty("OrderId", orderId)                // 关联本地事务的业务键
+    .setBody(orderBody).build();
+producer.send(msg, tx);                             // 半消息发送
+orderDao.create(order);                             // 本地事务：落库
+tx.commit();                                        // 二阶段：提交或 rollback</code></pre>
+  <p>回查器有三个实务要点：<strong>回查必须幂等</strong>——同一封半消息可能被查多次，实现要经得起重复；<strong>查不到别急着答回滚</strong>——可能是库延迟，返回 Unknown 等下一轮，官方警告答错没有后悔药；<strong>控制进行中事务的判定</strong>——长时间挂起的事务要能被识别，别让回查轮空轮个没完，官方明确提醒大量事务回查会拖累系统性能。</p>
+  <p>4.x 经典 API 对照：<code>TransactionMQProducer</code> 加 <code>executeLocalTransaction</code> / <code>checkLocalTransaction</code> 两个回调，机制相同、入口不同。存量系统见到它们不要陌生——半消息加回查这套戏，两代客户端唱的是同一本。</p>
+</section>
+
+<!-- ================= 04 顺序消息 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>顺序消息：把订单锁进一条队列</h2>
+  <figure>
+    <img src="../img/0088-rocketmq-in-action/rocketmq-docs-fifo.png" alt="官方顺序消息文档">
+    <figcaption>官方文档 Ordered Message 章节（2026-09-30 截图）：官方场景图正是"报价系统经 FIFO 消息到交易系统，报价顺序 c→b→a 必须原样送达"。</figcaption>
+  </figure>
+  <p>顺序消息的保序哲学是<strong>只保证该有序的</strong>。5.x 的答案是<strong>消息组（MessageGroup）</strong>：同一组的消息进同一队列、组内先进先出，不同组之间互不干扰——把组设为订单号，同一订单的状态变更天然串行，不同订单照常并行，吞吐与正确性兼得。官方文档的三个硬约束值得抄在工位上：<strong>必须单生产者串行发送</strong>（跨生产者不保证序）；消费必须<strong>串行处理</strong>，收到、处理、确认走完才取下一条；组内一条消息重试没成功，<strong>后面的消息全部阻塞等待</strong>——所以顺序消息的失败处理是快进快出，别让一条毒消息堵住整条队列。</p>
+  <pre class="codeblock"><code>// 5.x：FIFO 主题 + 消息组（官方文档用法）
+Message msg = provider.newMessageBuilder()
+    .setTopic("order_fifo_topic")        // 主题类型需为 FIFO
+    .setMessageGroup(orderId)            // 组=订单号：同单保序
+    .setBody(orderBody).build();
+producer.send(msg);
+
+// 4.x 经典对照：MessageQueueSelector 手动选队列
+producer.send(msg, (queues, m, arg) -&gt;    // 同一订单号哈希到同一队列
+    queues.get((Math.abs(arg.hashCode()))
+        % queues.size()), orderId);</code></pre>
+  <p>4.x 的经典写法是 <code>MessageQueueSelector</code>：发送端按业务键手动选择队列，同一订单永远进同一队列，配合队列内先进先出与顺序消费开关，效果等价。5.x 把这个动作抽象成了消息组属性，API 更干净，机制没变——<strong>保序范围始终是"组内"，官方文档原话：不同消息组之间没有顺序保证</strong>。别向上不存在的"全局有序"许愿，那是把整个系统压成单队列的昂贵的错。</p>
+</section>
+
+<!-- ================= 05 定时消息 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>定时消息：超时关单的原生解法</h2>
+  <figure>
+    <img src="../img/0088-rocketmq-in-action/rocketmq-docs-delay.png" alt="官方定时消息文档">
+    <figcaption>官方文档 Delay Message 章节（2026-09-30 截图）：定时与延时本质相同的官方 NOTE，以及"分布式定时调度"场景图（钉钉经 RocketMQ 定时消息到推送平台）。</figcaption>
+  </figure>
+  <p>超时关单、延迟重试、预约提醒，这类"到点做事"的需求，原生解法是定时消息。5.x 的口径：时间用<strong>毫秒级 Unix 时间戳</strong>表示（官方强调是时间点不是时间段），粒度默认 1000 毫秒，<strong>默认最长延迟 24 小时</strong>；时间戳已过或超范围的消息立即投递，不会报错——这个"宽容"特性偶尔能救命，但也要求调用方先校验参数。主题类型必须是 DELAY，普通主题照旧拒绝：</p>
+  <pre class="codeblock"><code>// 官方文档 Delay Message 示例骨架（5.x 客户端）
+Message msg = provider.newMessageBuilder()
+    .setTopic("order_delay_topic")       // 主题类型需为 DELAY
+    .setDeliveryTimestamp(               // 毫秒级时间戳：到点前不可见
+        System.currentTimeMillis() + 30L * 60 * 1000)  // 30 分钟后
+    .setBody(orderBody).build();
+producer.send(msg);                      // 30 分钟后消费者才可见</code></pre>
+  <p>关单链路串起来看：下单时发一条 30 分钟后投递的"关单检查"消息，落库走事务消息保一致；支付成功则按订单号删除或标记跳过（消费时检查状态即可）；到点消息可见，消费者检查订单仍未支付则执行关单。<strong>一条消息替代一个扫描任务族</strong>——这就是把时间维度交给中间件托管的味道。官方还提醒：避免把大量消息压到同一时间戳，投递会扎堆造成延迟。</p>
+</section>
+
+<!-- ================= 06 方案对比 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>天平两端：事务消息 vs 本地事务表</h2>
+  <p>"落库与发消息的一致性"在事务消息诞生前就有经典解法——<strong>本地事务表</strong>：业务库加一张待发消息表，与业务数据同事务写入，后台任务扫描表补发消息、发成功才标记完成。两派对比：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>维度</th><th>事务消息</th><th>本地事务表 + 扫描</th></tr></thead>
+    <tbody>
+      <tr><td>落地方式</td><td>中间件内置半消息与回查</td><td>建表、扫描任务、补偿逻辑全自建</td></tr>
+      <tr><td>一致性窗口</td><td>秒级，回查自动兜底</td><td>取决于扫描间隔，通常分钟级</td></tr>
+      <tr><td>代码侵入</td><td>实现一个回查器</td><td>表设计加调度加幂等全要自己养</td></tr>
+      <tr><td>技术依赖</td><td>绑定 MQ 能力（Topic 类型受限）</td><td>只用数据库，异构系统也能用</td></tr>
+      <tr><td>典型风险</td><td>大量回查拖累性能（官方口径）</td><td>扫描任务自身的高可用要另解</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>选型口径：<strong>已经在用 RocketMQ 的系统，事务消息是首选</strong>——表和扫描的活中间件替你干了；不引消息中间件、或要把一致性做到异构存储之间，本地事务表依然是可靠的经典。<strong>两者并存也常见</strong>：老系统一套事务表跑得好好的，不必为"先进性"迁移；新服务直接用事务消息起步。架构决策比的是总成本，不是新鲜度。</p>
+</section>
+
+<!-- ================= 07 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. 事务消息的"半消息"处于什么状态？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，半消息对消费者完全不可见，直到二阶段提交。","对的：Broker 已存储但标记未就绪，消费者看不见，等二阶段提交才转为可消费。","不对，半消息就是为这个场景设计的，不会拒绝。"]'>
+        <li class="quiz-option">已存储、消费者立即可见</li>
+        <li class="quiz-option">已存储但消费者不可见，等二阶段提交后转为可消费</li>
+        <li class="quiz-option">发送被 Broker 暂时拒绝，等重试</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. Broker 回查生产者时，回查器查不到本地事务的明确结果，最稳妥的返回是？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，乱答提交可能发出不该发的消息。","不对，回滚是默认兜底，但能等时先等是更稳的选择。","对的：返回 Unknown 等下一轮回查，官方口径默认兜底是回滚，但确认中的事务就该保持未知。"]'>
+        <li class="quiz-option">返回 COMMIT，先发了再说</li>
+        <li class="quiz-option">返回 ROLLBACK，宁可少发</li>
+        <li class="quiz-option">返回 UNKNOWN，等下一轮回查</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 顺序消息把组设为订单号，保序范围是？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，全局有序要付出单队列的代价，RocketMQ 不提供也不建议。","对的：同组（同订单）进同队列组内先进先出，不同组之间没有顺序保证——官方原话。","不对，不同组的消息之间没有顺序关系。"]'>
+        <li class="quiz-option">全局严格有序</li>
+        <li class="quiz-option">组内（同订单）严格有序，组间无保证</li>
+        <li class="quiz-option">同一队列的所有消息都有序</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 08 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：老系统用本地事务表跑得好好的，新订单服务要不要直接上事务消息？如果新旧并存，一致性账怎么算？</summary>
+    <div class="details-body">
+      <p>先给决策框架，再算并存账。<strong>新服务直接上事务消息</strong>的理由充分：团队已经在维护 RocketMQ 集群，事务消息把建表、扫描、补偿三件自建活收编进中间件，新服务从第一行代码就少背一套基础设施；而且 Topic 类型的事务语义（普通主题拒收）天然防止误用。老系统不动：本地事务表跑得稳就没必要为先进性买单，迁移的风险（消息重复期、双写期、回切预案）远大于收益。<strong>并存期的一致性账分三笔。</strong>第一笔，重复消息：事务消息与事务表各自保证自己那条链的"至少一次"，同一订单在两条链路各发一条下游消息完全可能，所以下游幂等键必须统一到订单号加事件类型，这事要在并存前做好而不是事后补。第二笔，语义漂移：两条链路的"订单创建成功"定义可能悄然不同（一个是落库完成、一个是消息提交），先用一页文档把事件语义钉死。第三笔，运维双轨：事务表的扫描延迟监控与事务消息的回查监控要各自有告警，别只盯一头。<strong>反过来一个信号要警惕</strong>：如果老系统的事务表开始频繁拖慢业务库（扫描压力大、表膨胀），那不是"要不要换"的问题，是存量债务到期，迁移排期该启动了。架构判断的落点始终是总成本：并存的成本可控就并存，债务到期就还债，别被"统一"这个审美冲动推着走。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：顺序消息的并行度天花板是"组数"，订单量涨十倍后链路怎么扩？请给出从便宜到贵的三级扩容路径，并指出哪一级动了业务语义。</summary>
+    <div class="details-body">
+      <p>先认清天花板的结构：保序单位是组，组被哈希进队列，队列数封了并行度上限——所以扩容本质是把这三个变量依次松开。<strong>第一级，加消费者实例</strong>（最便宜）：组数远大于队列数、队列数远大于实例数时，加实例直接提升并行，不动任何语义，这级先吃满。注意实例数超过队列数后是纯浪费（第 3 期思考一讲过）。<strong>第二级，扩队列数</strong>（中等代价）：FIFO 主题增加队列数量，哈希桶变多，组分布更均匀、总并行度上升；代价是扩队列瞬间组到队列的映射变化，在途消息与重平衡要消化一阵，要选流量低谷操作——语义没变，还是组内保序。<strong>第三级，拆组粒度</strong>（动了语义，最贵）：组从"订单号"改成"订单号加阶段"或"订单号加子流程"，同一订单内的不同阶段并行推进——并行度翻倍，但<strong>"同订单全序"的业务保证被放弃</strong>，换成"阶段内保序"，这需要业务侧确认状态机允许阶段间乱序，是语义级的决定，不能由中间件同学单方面拍板。还有一个常被忽略的方向：审视"真的需要顺序吗"。把"创建、支付、发货"三个事件拆成三个独立主题各自消费，很多所谓顺序需求就消失了——顺序是昂贵的需求，每次都要拿证据续费。三级路径的顺序暗合一条铁律：<strong>先吃免费并行，再买结构并行，最后才动业务语义</strong>。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 09 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>事务消息三回合：半消息先落（消费者不可见）、本地事务后跑、结果未知 Broker 回查——默认回滚兜底，回查必须幂等；</li>
+      <li>事务消息只保证"消息与本地事务最终一致"，官方明确不保证消费端结果一致，下游幂等照旧；</li>
+      <li>顺序消息：5.x 消息组（组=订单号）进同队列组内 FIFO，4.x 用 MessageQueueSelector 选队列，保序范围永远是组内；</li>
+      <li>顺序消息的硬约束：单生产者串行发、消费串行处理、组内重试会阻塞后续——毒消息快进快出；</li>
+      <li>定时消息：毫秒时间戳、默认上限 24 小时，一条"到点投递"替代一族扫描任务；与本地事务表并存不是耻辱，总成本说话。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 5 期《架构与源码导读》（收官）——走进 store 模块，沿"putMessage 到刷盘"的写入路径与 ReputMessageService 的分发路径读 RocketMQ 的存储引擎，给 Java 工程师一条读码路线。</p>
+  <p><strong>Primary source：</strong><a href="https://rocketmq.apache.org/docs/featureBehavior/04transactionmessage/" target="_blank" rel="noopener">RocketMQ 官方文档 Feature Behavior 章节（Transaction / Ordered / Delay Message，rocketmq.apache.org/docs）</a>——本期机制、用法与限制逐条对照官方文档（基于 v5.5.1，2026-09-30 核对）。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev">← 上一期：<a href="0087-rocketmq-core-concepts-architecture.html">核心概念与整体架构</a></span>
+  <a class="next" href="0089-rocketmq-source-reading.html">下一期：架构与源码导读 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

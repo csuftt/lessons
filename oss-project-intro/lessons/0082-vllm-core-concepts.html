@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · vLLM 系列第 3 期：PagedAttention、连续批处理与多进程架构 | 2026-09-30</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0082</span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0081 · vLLM 系列第 3 期 / 共 5 期 · 下一期:0083 · <a href="https://docs.vllm.ai/en/latest/" target="_blank" rel="noopener">docs.vllm.ai ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · VLLM 系列第 3 期：核心概念与整体架构</p>
+  <h1>vLLM 核心概念与架构：显存怎么省、批次怎么排、一张卡怎么变"多张"</h1>
+  <p class="subtitle">上一期你亲手把 vLLM 跑了起来，这期继续往里看一层——把"显存精算师"的两门绝技拆开验货。<strong>PagedAttention</strong> 怎么用"块表"把 KV 缓存的浪费从 60%～80% 压到 4% 以内；<strong>Continuous Batching</strong> 怎么让请求随到随进批、说完即退，不等整批起飞降落；显卡不够大时，<strong>张量并行</strong>怎么把一张卡切成多张算，<strong>量化</strong>怎么把权重压薄；最后画出 vLLM 的多进程架构地图——API 服务、EngineCore、GPU Worker 各司其职。学完这期，上一期那三个启动参数你就不只是会抄，而是知道每一刀切在了哪。（基于 v0.30.0，2026-09-30 核对）</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🚀 开源 LLM 推理引擎 · Python · Apache-2.0</span>
+    <span class="tag">📦 基于 v0.30.0（官方 Latest，2026-09-22 发布）</span>
+    <span class="tag-date">📅 2026-09-30 · 第 3 期</span>
+    <span class="tag time">⏱ 预计阅读 14 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 概念地图 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>概念地图：三个问题，三组答案</h2>
+  <p>把上一期的疑问摊开，vLLM 的概念体系就是三问三答。<strong>第一问：显存浪费怎么办？</strong>——PagedAttention，把 KV 缓存按小块分页管理，这是它的立身之本。<strong>第二问：请求排队怎么办？</strong>——Continuous Batching（连续批处理），调度器每一步都重新组批，长请求短请求各走各的，谁也不拖累谁。<strong>第三问：一张卡装不下怎么办？</strong>——两条路：张量并行把模型切到多卡上一起算，量化把权重和缓存压薄。这三组答案最终都落在同一个架构里：API 服务接请求，EngineCore 里的调度器做决策，GPU Worker 执行计算。下面逐个拆。</p>
+</section>
+
+<!-- ================= 02 PagedAttention ================= -->
+<section>
+  <h2><span class="sec-num">02</span>PagedAttention：给显存装上"块表"</h2>
+  <p>先复习病灶：KV 缓存<strong>大</strong>（官方博客口径，LLaMA-13B 一条序列最多吃到 1.7 GB）且<strong>动态</strong>（随对话生长，结束前没人知道多长）。老办法按最大长度静态预留，结果是 60%～80% 的显存被碎片和超量预留浪费。PagedAttention 的思路直接抄了操作系统：<strong>把物理显存切成固定大小的"块"（block），每条序列的逻辑 KV 缓存记在一张"块表"上，块表映射到不连续的物理块</strong>——就像进程页表映射物理内存页。序列长了申请新块，说完了归还块，逻辑上连续、物理上打散。</p>
+  <div class="diagram">
+  <svg viewBox="0 0 760 320" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar82" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <text x="24" y="30" fill="var(--ink)" font-size="12" font-weight="700">请求 A 的逻辑 KV 缓存（按块编号）</text>
+    <rect x="24" y="44" width="86" height="40" rx="8" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="67" y="68" text-anchor="middle" fill="var(--ink)" font-size="10.5">逻辑块 0</text>
+    <rect x="122" y="44" width="86" height="40" rx="8" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="165" y="68" text-anchor="middle" fill="var(--ink)" font-size="10.5">逻辑块 1</text>
+    <rect x="220" y="44" width="86" height="40" rx="8" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="263" y="68" text-anchor="middle" fill="var(--ink)" font-size="10.5">逻辑块 2</text>
+    <text x="320" y="68" fill="var(--muted)" font-size="9.5">…生长中，按需追加</text>
+    <rect x="24" y="104" width="282" height="54" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="165" y="126" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">块表（逻辑块 → 物理块）</text>
+    <text x="165" y="146" text-anchor="middle" fill="var(--muted)" font-size="9.5">A: 0→7 · 1→2 · 2→9　B: 0→4 · 1→11</text>
+    <line x1="110" y1="84" x2="140" y2="100" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar82)"/>
+    <text x="24" y="192" fill="var(--ink)" font-size="12" font-weight="700">GPU 物理显存：切成等大的块（默认一块 16 个 token）</text>
+    <g font-size="10.5" text-anchor="middle">
+      <rect x="24"  y="206" width="86" height="38" rx="8" fill="var(--accent-soft)" stroke="var(--line)"/><text x="67"  y="229" fill="var(--ink)">块 2 · A1</text>
+      <rect x="122" y="206" width="86" height="38" rx="8" fill="var(--accent-soft)" stroke="var(--line)"/><text x="165" y="229" fill="var(--ink)">块 4 · B0</text>
+      <rect x="220" y="206" width="86" height="38" rx="8" fill="var(--card)" stroke="var(--line)"/><text x="263" y="229" fill="var(--muted)">块 7 · A0</text>
+      <rect x="318" y="206" width="86" height="38" rx="8" fill="var(--accent-soft)" stroke="var(--line)"/><text x="361" y="229" fill="var(--ink)">块 9 · A2</text>
+      <rect x="416" y="206" width="86" height="38" rx="8" fill="var(--accent-soft)" stroke="var(--line)"/><text x="459" y="229" fill="var(--ink)">块 11 · B1</text>
+      <rect x="514" y="206" width="86" height="38" rx="8" fill="var(--card)" stroke="var(--line)"/><text x="557" y="229" fill="var(--muted)">空闲</text>
+      <rect x="612" y="206" width="86" height="38" rx="8" fill="var(--card)" stroke="var(--line)"/><text x="655" y="229" fill="var(--muted)">空闲</text>
+    </g>
+    <line x1="165" y1="158" x2="263" y2="202" stroke="var(--accent-3)" stroke-width="1.6" marker-end="url(#ar82)"/>
+    <line x1="205" y1="158" x2="67" y2="202" stroke="var(--accent-3)" stroke-width="1.6" marker-end="url(#ar82)"/>
+    <line x1="235" y1="158" x2="361" y2="202" stroke="var(--accent-3)" stroke-width="1.6" marker-end="url(#ar82)"/>
+    <text x="24" y="284" fill="var(--muted)" font-size="9.5">图例：请求的 KV 缓存不再要求物理连续——逻辑块经块表映射到任意空闲物理块，最后一个块只装已生成的部分，</text>
+    <text x="24" y="302" fill="var(--muted)" font-size="9.5">碎片从"整段预留"降到"块内少量"，官方口径浪费压到 4% 以内（概念图，PagedAttention 论文 SOSP 2023）</text>
+  </svg>
+  </div>
+  <p>三个工程细节值得记住。<strong>块大小默认 16 个 token</strong>（源码 <code>CacheConfig.DEFAULT_BLOCK_SIZE = 16</code>），块越小碎片越少、查表开销越大，16 是论文调出来的折中。<strong>最后一块只按需装填</strong>——请求只生成到第 37 个 token，就只占三个整块加一小块，不再为"理论上限"买单。<strong>前缀共享</strong>——多条请求共用同一段开头（系统提示词、few-shot 示例）时，块表指向同一批物理块，一份缓存服务所有请求，这正是 prefix caching 省钱的原理。分页的收益直接改写了显存账：<strong>原本"每条请求 × 最大长度"的预留额，变成了"已生长的部分 + 一小块零头"</strong>。</p>
+  <figure>
+    <img src="../img/0082-vllm-core-concepts/pagedattention-paper.png" alt="PagedAttention 论文 arXiv 页面">
+    <figcaption>arXiv 2309.06180《Efficient Memory Management for Large Language Model Serving with PagedAttention》：vLLM 团队的 SOSP 2023 论文，PagedAttention 的方法学原文</figcaption>
+  </figure>
+  <p class="note">来源注记——arxiv.org/abs/2309.06180（2026-09-30 截图）；块大小默认 16 见 v0.30.0 源码 vllm/config/cache.py；1.7 GB/4% 口径见 vllm.ai 官方博客 2023-06-20。</p>
+</section>
+
+<!-- ================= 03 Continuous Batching ================= -->
+<section>
+  <h2><span class="sec-num">03</span>Continuous Batching：随到随进批，说完即退</h2>
+  <p>光省显存还不够——GPU 吞吐的另一半瓶颈在<strong>批处理方式</strong>。传统静态批（static batching）把一批请求捆死：批里最长的请求没说完，所有人都陪跑，GPU 大量算力花在补位（padding）上；新到的请求只能等下一班。连续批处理把决策粒度降到<strong>每一步</strong>：调度器每生成一个 token 就重新组一次批，先完成的立即退场腾出显存，新请求随到随插进来。这个思想源自 Orca 论文的 iteration-level scheduling，vLLM 把它做成了默认行为。</p>
+  <div class="diagram">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar82" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <text x="24" y="28" fill="var(--ink)" font-size="12" font-weight="700">静态批：等整批 · 补位空转</text>
+    <rect x="24" y="40" width="380" height="26" rx="6" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="40" y="57" fill="var(--ink)" font-size="10">请求 A（短）跑完…干等</text>
+    <rect x="24" y="72" width="380" height="26" rx="6" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="40" y="89" fill="var(--ink)" font-size="10">请求 B（长）独占批队，A 空转到 B 说完</text>
+    <line x1="24" y1="110" x2="404" y2="110" stroke="var(--line)" stroke-width="1.5"/>
+    <text x="24" y="128" fill="var(--muted)" font-size="9.5">时间 →　新请求只能等下一班，GPU 在补位中空转</text>
+    <text x="24" y="164" fill="var(--ink)" font-size="12" font-weight="700">连续批：每一步重组 · 说完即退 · 随到随进</text>
+    <rect x="24" y="176" width="120" height="26" rx="6" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="84" y="193" text-anchor="middle" fill="var(--ink)" font-size="10">A · B</text>
+    <rect x="152" y="176" width="120" height="26" rx="6" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="212" y="193" text-anchor="middle" fill="var(--ink)" font-size="10">B · C · D</text>
+    <rect x="280" y="176" width="120" height="26" rx="6" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="340" y="193" text-anchor="middle" fill="var(--ink)" font-size="10">C · D · E · F</text>
+    <rect x="408" y="176" width="120" height="26" rx="6" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="468" y="193" text-anchor="middle" fill="var(--ink)" font-size="10">D · E · F · G</text>
+    <text x="24" y="232" fill="var(--muted)" font-size="9.5">时间 →　A 说完立即退场（第一格末），C/D/E/F/G 在各自的完成点上插入，批的形状每步都变</text>
+    <line x1="418" y1="120" x2="418" y2="170" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar82)"/>
+    <text x="428" y="148" fill="var(--accent-3)" font-size="10" font-weight="700">调度器每步重组</text>
+    <text x="24" y="272" fill="var(--muted)" font-size="9.5">图例：连续批处理把"组批"从一次性动作变成每步决策，配合分页显存，新请求的入批不再受旧请求的长度绑架（概念图）</text>
+  </svg>
+  </div>
+  <p>两门绝技是咬合在一起的：<strong>分页让显存按小块借还，调度器才敢每步重组批</strong>——如果显存是整段预留的，半路插入一条新请求就得整批重新分配。官方博客的数字是这套组合拳的战绩：对比 HuggingFace Transformers 吞吐最高 24 倍、对比 TGI 最高 3.5 倍，论文口径对当时最优系统也有 2～4 倍。你在上一期启动服务时什么都没配，这两样已经在默认生效——vLLM 把最难的优化做成了默认值。</p>
+</section>
+
+<!-- ================= 04 张量并行 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>一张卡不够：张量并行（TP）入门</h2>
+  <p>70B 的模型 BF16 权重就要 140 GB，单卡装不下，怎么办？vLLM 内置的第一条路是<strong>张量并行（Tensor Parallelism，TP）</strong>：把模型的权重矩阵<strong>横向切开</strong>，每张卡持有自己的一份切片，前向计算时各算各的，再通过 NCCL 的 <strong>AllReduce 通信</strong>把中间结果汇总同步。对外它仍是一个完整的模型——TP 是"把一张大卡虚拟成多张小卡"的横向扩建。启动只需一个参数：</p>
+  <pre class="codeblock"><code># 2 张卡一起扛一个模型（默认单卡，即 --tensor-parallel-size 1）
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+  --tensor-parallel-size 2</code></pre>
+  <p>三个使用要点。<strong>其一，卡数按 2 的幂取</strong>（1/2/4/8），因为矩阵切分要整除——单机 8 卡是最常见的档位。<strong>其二，TP 吃卡间带宽</strong>：每一步前后都要同步中间结果，官方建议卡间有 NVLink 这类高速互联；用 PCIe 普通互联时收益会打折，多机场景官方另有流水线并行（PP）与外置 Ray 的组合，入门期先记住"单机内多卡用 TP"。<strong>其三，TP 扩的是"装得下"，顺带也扩了 KV 池</strong>——每张卡的闲置显存都并入分页池，并发放大不是线性但接近。</p>
+  <p class="note">来源注记——docs.vllm.ai Distributed Serving 章节与 v0.30.0 源码 vllm/config/parallel.py（tensor_parallel_size 默认 1，2026-09-30 核对）。</p>
+</section>
+
+<!-- ================= 05 量化 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>把权重压薄：量化选项概览</h2>
+  <p>张量并行是"横向扩"，量化是"纵向压"：用更少的比特存权重（和 KV 缓存），显存省一半以上，卡上能装下的模型与并发直接翻倍。官方文档的量化版图按用途分四类，全部开箱即用（加载时自动识别）：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>路线</th><th>代表方案</th><th>一句话定位</th></tr></thead>
+    <tbody>
+      <tr><td>权重量化（离线）</td><td>AWQ、GPTQ（GPTQModel）、LLM Compressor</td><td>提前把权重压成 4/8 bit，市面开源模型大量自带 AWQ/GPTQ 版</td></tr>
+      <tr><td>权重量化（在线）</td><td>FP8、BitsAndBytes、TorchAO</td><td>加载时转换，FP8 是 H 卡新一代默认甜点</td></tr>
+      <tr><td>KV 缓存量化</td><td>Quantized KV Cache（FP8 等）</td><td>缓存也压薄，长上下文场景的 KV 池直接翻倍</td></tr>
+      <tr><td>压缩工具链</td><td>LLM Compressor、NVIDIA Model Optimizer</td><td>自己产量化模型的官方工具，校准后无缝加载</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>给新手的选型口径：<strong>优先找现成的 AWQ/GPTQ 4bit 版模型</strong>（Hugging Face 上主流模型基本都有），省一半显存、精度损失可接受；卡是 H100/L4 这类 FP8 硬件就优先 FP8；长上下文吃紧时再上 KV 缓存量化。量化的代价是精度与算子的适配复杂度，上生产前用自己的业务数据回归测试——这是纪律，不是可选项。</p>
+  <figure>
+    <img src="../img/0082-vllm-core-concepts/vllm-docs-quantization.png" alt="vLLM 量化文档">
+    <figcaption>vLLM 仓库 docs/features/quantization/README.md（v0.30.0，docs.vllm.ai 同源发布）：AutoAWQ、BitsAndBytes、GPTQModel、LLM Compressor、NVIDIA Model Optimizer、Quantized KV Cache、TorchAO 等方案一页总览</figcaption>
+  </figure>
+  <p class="note">来源注记——github.com/vllm-project/vllm 仓库 docs/features/quantization/README.md（v0.30.0 tag，2026-09-30 截图核对）：方案清单与分类出自该文档。</p>
+</section>
+
+<!-- ================= 06 整体架构 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>整体架构：多进程分工，一次看懂</h2>
+  <p>把三组答案装回一个架构。官方架构文档描述的 V1 多进程设计：<strong>API 服务进程</strong>接住 HTTP 请求、做鉴权与协议转换；<strong>EngineCore 进程</strong>是引擎心脏，里面的调度器（Scheduler）每步决定哪些请求上批、分页管理器记账，执行器（Executor）把批次下发；<strong>GPU Worker 进程</strong>每卡一个，真正执行模型前向与 PagedAttention 算子；数据并行规模大时还有一个协调进程统筹多副本。你在终端 <code>ps</code> 一下就会看到这一串进程——"一条命令"背后是一个分工明确的小型分布式系统。</p>
+  <div class="diagram">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar82" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="24" y="110" width="150" height="80" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="99" y="138" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">API 服务进程</text>
+    <text x="99" y="158" text-anchor="middle" fill="var(--muted)" font-size="9.5">OpenAI 兼容接口</text>
+    <text x="99" y="174" text-anchor="middle" fill="var(--muted)" font-size="9.5">HTTP :8000 · 鉴权</text>
+    <rect x="290" y="96" width="190" height="108" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="385" y="120" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">EngineCore 进程（心脏）</text>
+    <text x="385" y="142" text-anchor="middle" fill="var(--muted)" font-size="9.5">Scheduler：每步组批 · 准入</text>
+    <text x="385" y="160" text-anchor="middle" fill="var(--muted)" font-size="9.5">KV 管理：块表 · 分配归还</text>
+    <text x="385" y="178" text-anchor="middle" fill="var(--muted)" font-size="9.5">Executor：多进程/多卡下发</text>
+    <rect x="596" y="34" width="140" height="70" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="666" y="60" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">GPU Worker 0</text>
+    <text x="666" y="80" text-anchor="middle" fill="var(--muted)" font-size="9.5">模型前向 · 注意力算子</text>
+    <rect x="596" y="196" width="140" height="70" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="666" y="222" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">GPU Worker 1</text>
+    <text x="666" y="242" text-anchor="middle" fill="var(--muted)" font-size="9.5">TP 时各持权重切片</text>
+    <line x1="174" y1="150" x2="286" y2="150" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar82)"/>
+    <text x="228" y="140" text-anchor="middle" fill="var(--muted)" font-size="9.5">请求入队</text>
+    <line x1="480" y1="120" x2="592" y2="76" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar82)"/>
+    <line x1="480" y1="180" x2="592" y2="226" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar82)"/>
+    <text x="532" y="118" text-anchor="middle" fill="var(--muted)" font-size="9.5">批次下发</text>
+    <line x1="592" y1="92" x2="480" y2="136" stroke="var(--accent-3)" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#ar82)"/>
+    <text x="532" y="164" text-anchor="middle" fill="var(--muted)" font-size="9.5">流式回传</text>
+    <text x="24" y="284" fill="var(--muted)" font-size="9.5">图例：接口、决策、执行三进程分离——接口崩溃不丢批，调度独立于硬件，Worker 每卡一个（概念图，官方 Architecture Overview 文档，第 5 期进源码逐层读）</text>
+  </svg>
+  </div>
+  <figure>
+    <img src="../img/0082-vllm-core-concepts/vllm-docs-arch-overview.png" alt="vLLM 官方架构总览文档">
+    <figcaption>vLLM 仓库 docs/design/arch_overview.md（v0.30.0，docs.vllm.ai 同源发布）：两个入口（离线 LLM 类与在线 vllm serve）与 V1 多进程设计——API server、engine core、GPU worker（及条件性 DP coordinator）</figcaption>
+  </figure>
+  <p>为什么拆成多进程？官方文档给的三个理由：<strong> extensibility（扩展性）</strong>——后端算子、调度策略可以各自替换；<strong>uniformity（一致性）</strong>——离线 LLM 类与在线 serve 共用同一套引擎心脏；<strong>可运维性</strong>——接口层重启不影响显存里的批次状态。这也是第 5 期源码导读的行进路线：从这两个入口出发，一路走进 EngineCore。</p>
+  <p class="note">来源注记——github.com/vllm-project/vllm 仓库 docs/design/arch_overview.md（v0.30.0 tag，2026-09-30 截图核对）：多进程角色划分与设计目标出自该文档。</p>
+</section>
+
+<!-- ================= 07 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. PagedAttention 中"块表"的作用是？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，压缩权重是量化的工作，块表不碰权重。","对的：块表把每条序列的逻辑块映射到不连续的物理块，逻辑连续、物理打散，KV 缓存按块借还。","不对，请求排队是调度器的职责，与块表无关。"]'>
+        <li class="quiz-option">把模型权重压缩到更小的比特数</li>
+        <li class="quiz-option">把序列的逻辑 KV 块映射到不连续的物理显存块</li>
+        <li class="quiz-option">决定哪些请求进入下一个批次</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 连续批处理相对静态批，核心改进是？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，模型计算本身没变，变的是组批的时机。","不对，等待整批凑齐正是静态批的问题。","对的：调度器每生成一步就重组批，先完成的立即退场、新请求随到随进，长请求不再拖累短请求。"]'>
+        <li class="quiz-option">把模型改成了更快的计算结构</li>
+        <li class="quiz-option">把请求攒到更多再一起算</li>
+        <li class="quiz-option">每生成一步就重组一次批，请求随到随进、说完即退</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 单机 4 张卡跑一个 70B 模型，最直接的启动方式是？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：--tensor-parallel-size 4 把权重切到 4 张卡协同计算，对外仍是一个完整服务。","不对，量化 4 倍后 70B 仍约 35 GB，单卡仍装不下，而且精度代价要先评估。","不对，起 4 个独立实例等于部署 4 个模型，显存根本不够。"]'>
+        <li class="quiz-option">vllm serve 模型名 --tensor-parallel-size 4</li>
+        <li class="quiz-option">给模型做 4 倍量化后单卡加载</li>
+        <li class="quiz-option">起 4 个独立服务实例分摊请求</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 08 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：分页管理引入了"块表查表"的间接开销，为什么最终反而更快？这笔账在你们的系统设计里有没有同款？</summary>
+    <div class="details-body">
+      <p>这是"用可控的间接开销换回巨额浪费"的经典权衡，账要这么算。<strong>开销侧</strong>：块表查询发生在 CPU 侧的调度与记账环节，每个请求每步查一次表、维护一张表，开销是微秒级的数据结构操作；GPU 侧的 PagedAttention 算子把"逻辑连续"的假设改成"按块表寻址"，注意力内核多一层间接寻址，实测开销占比很小。<strong>收益侧</strong>：显存利用率从两成提高到九成以上，同卡并发翻数倍——GPU 的算力利用率是乘在"同时服务的请求数"上的，这个杠杆远大于查表的损耗。再看第二层：<strong>碎片从 O(序列上限) 降到 O(块内零头)</strong>，意味着"显存够但分配不出来"这类最恶心的故障直接消失，准入判断变得可计算（池子里有多少块，就是还能接多少请求），调度器的决策从"猜"变成"算"。最后看同款：你们系统里的<strong>内存池化、连接池、数据库页表、对象存储的分块上传，全是这个模式</strong>——把"按最大需求预留"改成"按固定小块借还 + 一张映射表"，代价一张表，收益一整个量级。反过来的教训也通用：<strong>间接层要控制粒度</strong>，块太大退化回预留浪费，块太小查表开销淹没收益，16 token 这个折中数是论文用实验换来的，不是拍脑袋。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：一张 80 GB 的卡跑 70B 模型，权重 140 GB 装不下。给出你能想到的所有落地路线，并排一个优先级。</summary>
+    <div class="details-body">
+      <p>先算死账：BF16 下 70B 权重约 140 GB，80 GB 卡无论怎么调度都装不下，所以至少要用到一条"压缩或拆分"路线。<strong>路线一，量化（优先推荐）。</strong>换用 AWQ/GPTQ 4bit 版本，权重压到约 35 GB，80 GB 卡装下后还剩 40 GB 以上给 KV 池，并发出色；FP8 版本约 70 GB，勉强装下但 KV 池局促。代价是精度回归成本，主流 70B 模型的 4bit 版社区已大量验证，风险可控。<strong>路线二，张量并行 TP=2。</strong>两张 80 GB 卡各持 70 GB 权重切片，合计 160 GB 装下 BF16 全量，KV 池两卡合并；需要卡间 NVLink 高速互联，否则同步开销侵蚀收益。适合精度红线严格、卡预算充足的场景。<strong>路线三，量化 + TP 组合。</strong>4bit 权重 35 GB + TP=2，KV 池极其充裕，是高并发长上下文的重炮配置，成本两张卡。<strong>路线四，换更小模型。</strong>32B 级模型单卡装下，若业务效果达标，这是总成本最低的路线——别忘了这永远是候选之一。优先级排序的逻辑：<strong>先问效果预算，再问卡预算</strong>——效果达标优先路线四（最便宜）；效果必须 70B 且允许量化，路线一（一张卡的事）；精度红线不许量化，路线二；既要 70B 又要高并发长上下文，路线三。把这四条路线讲给业务方听的时候，账本是同三笔：权重、KV 池、卡间带宽——第 4 期压测会把这笔账算到底。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 09 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>PagedAttention：KV 缓存按块管理（默认 16 token 一块），块表映射逻辑到物理，浪费压到 4% 以内；</li>
+      <li>Continuous Batching：调度器每步重组批，说完即退、随到随进，长请求不再绑架短请求；</li>
+      <li>张量并行 TP：<code>--tensor-parallel-size N</code> 把权重切到 N 卡协同，吃卡间带宽，卡数取 2 的幂；</li>
+      <li>量化四路线：离线 AWQ/GPTQ、在线 FP8/BNB、KV 缓存量化、LLM Compressor 工具链，新手先找现成 4bit 版；</li>
+      <li>架构三进程：API 服务接请求、EngineCore 调度记账、GPU Worker 每卡一个执行计算。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 4 期《实战：压测与容量》——用官方压测工具给一块卡做体检：吞吐与延迟两根曲线怎么读，权重、KV 缓存、激活三笔显存账怎么算，max-model-len 与选卡怎么取舍。</p>
+  <p><strong>Primary source：</strong><a href="https://docs.vllm.ai/en/latest/design/arch_overview.html" target="_blank" rel="noopener">官方架构总览</a> · <a href="https://arxiv.org/abs/2309.06180" target="_blank" rel="noopener">PagedAttention 论文（arXiv 2309.06180）</a> · <a href="https://docs.vllm.ai/en/latest/features/quantization/index.html" target="_blank" rel="noopener">量化文档</a>——本期原理与数字均出自官方文档与论文（v0.30.0，2026-09-30 核对）。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev">← 上一期：5 分钟跑起来 vLLM</span>
+  <a class="next" href="0083-vllm-in-action.html">下一期：实战：压测与容量 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

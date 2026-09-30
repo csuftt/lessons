@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Apache RocketMQ 系列第 1 期：双 11 磨出来的交易消息引擎 | 2026-09-30</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0085</span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0084 · RocketMQ 系列第 1 期 / 共 5 期 · 下一期:0086 · <a href="https://rocketmq.apache.org/" target="_blank" rel="noopener">rocketmq.apache.org ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · APACHE ROCKETMQ 系列第 1 期：认识项目</p>
+  <h1>Apache RocketMQ 是什么：双 11 磨出来的交易消息引擎</h1>
+  <p class="subtitle">今天开启新项目 Apache RocketMQ——官网自述 <strong>AI-Native Asynchronous Communication Engine</strong>，而它更广为人知的身份是：从阿里双 11 交易主链路里磨出来、后捐赠给 Apache 的开源消息队列。消息队列三强各占生态位：Kafka 长于吞吐与流生态，Pulsar 主打存算分离与多租户，RocketMQ 的立身之本是<strong>交易级可靠性与业务消息能力</strong>——定时、事务、顺序消息开箱即用。一句话心智模型：<strong>RocketMQ 是一台"轻量注册中心 + 顺序写存储引擎"打底、为交易场景长出全套业务消息特性的消息中间件</strong>。本期结束，你能答上四个问题：它是什么、从哪来、三强格局里凭什么站一极、5.x 架构往哪演进。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🚀 分布式消息队列 · Java · Apache-2.0</span>
+    <span class="tag">📦 基于 v5.5.1（官方 Latest，2026-08-20 发布）</span>
+    <span class="tag-date">📅 2026-09-30 · 第 1 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<figure>
+  <img src="../img/0085-rocketmq-what-and-why/rocketmq-site-home.png" alt="RocketMQ 官网首页">
+  <figcaption>RocketMQ 官网首页（2026-09-30 截图）：口号 AI-Native Asynchronous Communication Engine，自述"为多智能体协作、AI 推理调度与 MCP 会话状态而生，在万亿级消息规模下久经考验"。</figcaption>
+</figure>
+
+<!-- ================= 01 痛点 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>痛点：同步调用链，撑不起大促的洪峰</h2>
+  <p>没有消息队列的微服务架构长这样：下单服务调用库存服务、再调用积分服务、再调用通知服务，一条同步链穿到底。平时能跑，一到流量洪峰就露出三处裂缝：<strong>耦合</strong>——下游任何一个服务抖动，整条链跟着超时，上游却只是"想通知你一声"；<strong>洪峰</strong>——瞬时流量超过下游处理能力，限流熔断救得了一时，堆积极请求又把内存压垮；<strong>峰值算力</strong>——为了双 11 那几分钟的峰值给所有下游配足机器，平日全是浪费。</p>
+  <p>消息队列给出的答案是<strong>异步化削峰</strong>：上游只管把"事件"投递出去就算完成，下游按自己的节奏消费，洪峰被水库蓄住再匀速放水。但"有一个队列"和"交易场景敢用"之间隔着一条鸿沟：消息不能丢、不能重得离谱、该按序的必须按序、支付回调必须准点——这些正是 RocketMQ 的主场。</p>
+</section>
+
+<!-- ================= 02 是什么 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>是什么：官方定位与一句话心智模型</h2>
+  <p>Apache RocketMQ 是一个分布式消息与流平台：Java 编写，Apache-2.0 许可，2012 年前后从阿里内部消息引擎演进开源，2015 年进入 Apache 孵化器，2016 年毕业成为顶级项目。GitHub 仓库 About 栏的自我介绍是 <strong>"a cloud native messaging and streaming platform"</strong>——云原生消息与流处理平台。它在阿里的出身决定了性格：为交易而生，把"消息不丢"当底线，把交易场景需要的消息形态（定时、事务、顺序）做成内置能力。</p>
+  <p>一句话心智模型：<strong>一个"不管协奏曲"的三层架构——轻量的 NameServer 只管路由，Broker 集群管存储与收发，客户端自己缓存路由自主决策</strong>。NameServer 彼此独立、无状态、不互联，挂掉一台不换脑子照样服务；存储层把所有消息顺序写进统一日志（CommitLog），再由后台线程分发到各队列的索引。简单、可靠、好运维，是它能在国内成为消息队列事实标准之一的底层原因。</p>
+  <p class="note">来源注记——rocketmq.apache.org 首页（2026-09-30 核对）：口号 AI-Native Asynchronous Communication Engine；GitHub apache/rocketmq 仓库（2026-09-30 核对）：Star 约 22.6k · Fork 约 12k · Apache-2.0 · Contributors 586 · Releases 26，About 原文 "a cloud native messaging and streaming platform"。</p>
+</section>
+
+<!-- ================= 03 心智模型图 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>心智模型：一图看懂三层架构</h2>
+  <div class="diagram">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar85" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="16" y="40" width="150" height="66" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="91" y="66" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">Producer 生产者</text>
+    <text x="91" y="86" text-anchor="middle" fill="var(--muted)" font-size="9.5">发消息 · 缓存路由表</text>
+    <rect x="16" y="194" width="150" height="66" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="91" y="220" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">Consumer 消费者</text>
+    <text x="91" y="240" text-anchor="middle" fill="var(--muted)" font-size="9.5">消费者组 · 重平衡</text>
+    <rect x="238" y="24" width="150" height="56" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="313" y="48" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">NameServer 路由</text>
+    <text x="313" y="66" text-anchor="middle" fill="var(--muted)" font-size="9.5">无状态 · 彼此独立</text>
+    <rect x="238" y="120" width="290" height="140" rx="12" fill="var(--card)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="383" y="146" text-anchor="middle" fill="var(--ink)" font-size="13" font-weight="700">Broker 集群（主从）</text>
+    <text x="383" y="170" text-anchor="middle" fill="var(--muted)" font-size="10">收发 · 存储 · 过滤 · 重试</text>
+    <rect x="262" y="184" width="110" height="52" rx="8" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="317" y="206" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">CommitLog</text>
+    <text x="317" y="224" text-anchor="middle" fill="var(--muted)" font-size="9.5">全类型顺序写</text>
+    <rect x="392" y="184" width="110" height="52" rx="8" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="447" y="206" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">队列索引</text>
+    <text x="447" y="224" text-anchor="middle" fill="var(--muted)" font-size="9.5">按队列组织</text>
+    <rect x="594" y="40" width="150" height="56" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="669" y="64" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">5.x Proxy 层</text>
+    <text x="669" y="84" text-anchor="middle" fill="var(--muted)" font-size="9.5">可选 · gRPC 多语言接入</text>
+    <rect x="594" y="194" width="150" height="66" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="669" y="218" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">特征能力</text>
+    <text x="669" y="238" text-anchor="middle" fill="var(--muted)" font-size="9.5">定时 · 事务 · 顺序</text>
+    <text x="669" y="252" text-anchor="middle" fill="var(--muted)" font-size="9.5">重试 · 死信</text>
+    <line x1="166" y1="60" x2="234" y2="52" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar85)"/>
+    <text x="200" y="42" fill="var(--muted)" font-size="9.5">问路由</text>
+    <line x1="166" y1="80" x2="234" y2="180" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar85)"/>
+    <text x="196" y="146" fill="var(--muted)" font-size="9.5">发消息</text>
+    <line x1="166" y1="220" x2="234" y2="200" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar85)"/>
+    <text x="196" y="226" fill="var(--muted)" font-size="9.5">拉消息</text>
+    <line x1="383" y1="120" x2="330" y2="84" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar85)"/>
+    <text x="330" y="110" fill="var(--muted)" font-size="9.5">上报</text>
+    <line x1="528" y1="170" x2="590" y2="90" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar85)"/>
+    <line x1="528" y1="210" x2="590" y2="220" stroke="var(--accent-3)" stroke-width="2"/>
+    <text x="16" y="290" fill="var(--muted)" font-size="9.5">图例：NameServer 只管路由不带数据；Broker 顺序写统一日志再分发索引；Proxy 是 5.x 新增的可选接入层（概念图，第 3 期拆存储引擎）</text>
+  </svg>
+  </div>
+  <p>读这张图的三个要点：<strong>第一，路由与存储分离</strong>——NameServer 是"通讯录"不是"仓库"，知道每个 Topic 的队列在哪个 Broker 上，自己不碰一条消息；<strong>第二，一切消息先顺序写 CommitLog</strong>——不管什么类型、哪个 Topic，混在一起追加写，把磁盘随机写变成顺序写，这是高吞吐低延迟的物理基础；<strong>第三，消费者组的横向扩容</strong>——一组消费者分摊一个 Topic 的队列，加机器就加消费能力。第 3 期把这三点逐个拆开。</p>
+</section>
+
+<!-- ================= 04 起源 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>起源：双 11 磨出来的交易消息</h2>
+  <p>RocketMQ 不是实验室作品。它的前身是阿里的消息中间件，为应对大促而演进：早期产品解决"服务间异步解耦"，随后参考 Kafka 的存储思路用 Java 重写，2012 年前后以 RocketMQ 之名开源，2015 年进入 Apache 孵化器，2016 年毕业成为 Apache 顶级项目。关键在于它<strong>服务的场景</strong>：历年双 11 大促的交易主链路——下单、扣减、支付、通知——都压在它身上。交易场景对消息系统的要求是"最苛刻的一档"：钱相关的消息丢一条都是事故，订单消息乱序就是资损，支付超时回调晚一秒就是客诉。</p>
+  <p>这段出身解释了它的产品取向：与"吞吐至上"的大数据管道路线不同，RocketMQ 把<strong>交易级可靠性与业务消息语义</strong>做成了内置能力——同步刷盘与主从复制保不丢、队列级顺序消息保乱序不发生、事务消息用半消息加回查解决"本地事务与发消息的一致性"、定时消息支撑超时关单这类交易节奏。官网那句"battle-tested at trillion-message scale"（万亿级消息规模下久经考验），说的正是这段淬炼。国内互联网公司的消息选型里，"交易与业务消息看 RocketMQ"由此成为默认共识之一。</p>
+  <p class="note">来源注记——Apache 官方项目页与 rocketmq.apache.org About/博客区（2026-09-30 核对）：Apache 顶级项目身份；官网首页 "battle-tested at trillion-message scale" 原文；孵化与毕业年份以 Apache 官方项目名录为准。</p>
+</section>
+
+<!-- ================= 05 三强格局 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>消息队列三强：Kafka、RocketMQ、Pulsar 的生态位</h2>
+  <p>聊 RocketMQ 绕不开另外两个名字。三强都是成熟的生产级系统，差异在<strong>基因与生态位</strong>，而非简单的强弱——只作技术对比：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>维度</th><th>Kafka</th><th>RocketMQ</th><th>Pulsar</th></tr></thead>
+    <tbody>
+      <tr><td>出身场景</td><td>日志管道与流数据</td><td>交易与业务消息</td><td>多租户云原生消息</td></tr>
+      <tr><td>存储模型</td><td>分区日志，分区即文件</td><td>统一 CommitLog + 队列索引</td><td>BookKeeper 存算分离</td></tr>
+      <tr><td>特色消息</td><td>以流为核心，无内置定时/事务业务语义</td><td>定时、事务、顺序开箱即用</td><td>分层存储、紧凑功能集，类型能力靠外围补齐</td></tr>
+      <tr><td>协调组件</td><td>早期依赖 ZooKeeper，后内置 KRaft</td><td>自研 NameServer，轻量无状态</td><td>ZooKeeper/Oxia 元数据</td></tr>
+      <tr><td>生态强项</td><td>流处理与大数据管道事实标准</td><td>业务集成与运维心智国内最普及</td><td>多租户、跨地域复制、函数计算</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>选型口径一句话：<strong>日志与流管道看 Kafka，交易与业务消息看 RocketMQ，多租户与存算分离刚需再看 Pulsar</strong>。多数业务系统要的是"交易语义齐全 + 团队会运维"，这正是 RocketMQ 在国内存量最大的原因。</p>
+</section>
+
+<!-- ================= 06 5.x 演进 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>5.x 架构演进概览：从四件套到 Proxy 无代理</h2>
+  <p>4.x 时代的部署形态是三件套：NameServer、Broker、加上直连 Broker 的 Java 客户端（Remoting 协议）。5.x 在保留这套经典形态的同时做了三条演进线，官网称之为"云原生升级"：</p>
+  <ul>
+    <li><strong>Proxy 无代理架构：</strong>新增计算无状态的 Proxy 层，支持 Local 模式（与 Broker 同进程）与 Cluster 模式（独立部署），计算存储分离后 Broker 可以无状态弹性伸缩；</li>
+    <li><strong>多语言客户端：</strong>Proxy 对外提供 gRPC 协议，官方 rocketmq-clients 仓库提供 Java、Go、Python、C# 等语言的统一客户端，不再只有 Java 一等公民；</li>
+    <li><strong>Pop 消费与存算延伸：</strong>Pop 消费把"客户端拉取"改为"服务端按需取"的消费范式，弱化客户端负载均衡；分层存储（tieredstore）把冷数据下沉到对象存储，队列容量逼近无限。</li>
+  </ul>
+  <p>架构师的读法：<strong>4.x 形态依然是生产主力，5.x 是同一套核心概念的弹性化外壳</strong>——NameServer 路由、CommitLog 顺序写、消费者组这些根基没变，变的是接入方式与弹性边界。学概念按经典形态学，上生产按 5.x 部署，一套知识两代架构通用。</p>
+</section>
+
+<!-- ================= 07 版本口径 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>版本口径：认 GitHub Latest，警惕文档站滞后</h2>
+  <p>以 2026-09-30 核对为准：GitHub apache/rocketmq 仓库 Releases 列表 <strong>Latest 标记是 rocketmq-all-5.5.1，2026-08-20 发布</strong>——维护版性质，移除 fastjson 1.x（fastjson2 升到 2.0.63）、废弃传统 Broker DLedger 模式、引入原生 RocksDB 压缩过滤器，并带大量稳定性修复。往下是 5.5.0（2026-04-10）、5.4.0（2025-12-24）等 5.x 线版本；4.9.8 是 4.x 的最后维护版。</p>
+  <figure>
+    <img src="../img/0085-rocketmq-what-and-why/rocketmq-github-releases.png" alt="RocketMQ Releases 页">
+    <figcaption>github.com/apache/rocketmq/releases（2026-09-30 截图）：Latest 为 rocketmq-all-5.5.1（2026-08-20），列表同屏可见 5.5.0、5.4.0、5.3.x 与 4.9.8 维护线。</figcaption>
+  </figure>
+  <p>一个实务提醒：<strong>官网 Download 页的版本更新常常滞后于 GitHub Releases</strong>（核对时页面仍停留在 5.3.x），找"当前最新稳定版"请以 GitHub Releases 的 Latest 标记为准。本系列五期统一锚定 v5.5.1，文档站标 Version 5.0 的官方文档是概念主参考。</p>
+</section>
+
+<!-- ================= 08 架构师视角 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>架构师视角：什么信号出现时把它请进来</h2>
+  <p>给一个三问决策框架，出现任一信号就值得认真评估 RocketMQ：</p>
+  <ul>
+    <li><strong>交易一致性问：</strong>业务链路里有没有"本地事务成功则消息必须发出"的诉求（下单发积分、支付发履约）？有——事务消息是它的独门能力，其他方案要自己搭本地消息表加扫描任务；</li>
+    <li><strong>时间维度问：</strong>有没有"延迟 X 分钟做事"的需求（超时关单、延迟重试、预约提醒）？定时消息原生支持到秒级粒度，不必引入额外的延迟任务中间件；</li>
+    <li><strong>顺序诉求问：</strong>同一订单、同一用户的状态变更是否必须按序消费？队列级顺序消息把范围收到"该有序的那部分才有序"，吞吐与正确性兼得。</li>
+  </ul>
+  <p>反过来的信号也要诚实：纯日志采集与大数据管道，Kafka 生态更顺；团队零 Java 运维经验又是多语言重度栈，需评估 Proxy 加 gRPC 客户端的新路线。第 2 期动手跑起来，第 3 期拆架构，第 4 期做订单一致性实战，第 5 期读存储引擎源码——五期学完，上面三问你能自己回答。</p>
+</section>
+
+<!-- ================= 09 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. RocketMQ 的 NameServer 与 ZooKeeper 这类协调组件最大的不同是？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，NameServer 集群节点之间不互联。","对的：各节点彼此独立、无状态，互不通信，客户端轮询任一节点拿路由，挂一台不影响整体。","不对，NameServer 自己不存储消息数据。"]'>
+        <li class="quiz-option">NameServer 用 Raft 协议选出主节点，强一致</li>
+        <li class="quiz-option">节点彼此独立、无状态、互不通信，挂一台不影响服务</li>
+        <li class="quiz-option">NameServer 负责存储消息，Broker 只做转发</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. RocketMQ 存储高吞吐低延迟的物理基础是？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，那是按 Topic 建文件的思路，随机写多。","不对，消息默认就是落盘持久化的。","对的：所有 Topic 的消息混写进统一 CommitLog，把磁盘随机写变成顺序追加写，再由后台分发到队列索引。"]'>
+        <li class="quiz-option">每个 Topic 单独一个文件，互不干扰</li>
+        <li class="quiz-option">消息全部放内存，定时批量落盘</li>
+        <li class="quiz-option">全类型消息统一顺序追加写 CommitLog，随机写变顺序写</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 5.x 相对 4.x 的架构演进，说法正确的是？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，经典 NameServer 加 Broker 形态仍是生产主力。","对的：Proxy 支持 Local 与 Cluster 两种模式，对外提供 gRPC 协议，多语言客户端由此统一。","不对，5.x 核心概念与 4.x 一脉相承，不是推翻重来。"]'>
+        <li class="quiz-option">5.x 废弃了 NameServer 与 Broker，全部推倒重写</li>
+        <li class="quiz-option">新增可选 Proxy 层与 gRPC 多语言客户端，经典形态仍保留</li>
+        <li class="quiz-option">5.x 改用 ZooKeeper 做路由中心</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 10 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：公司要新建三类链路——网关行为埋点（日均十亿条）、电商订单履约（要求不丢不乱序）、营销定时触达（次日九点推送）。三类都塞给同一个 Kafka 集群合适吗？怎么分？</summary>
+    <div class="details-body">
+      <p>先给结论：<strong>埋点归 Kafka，订单履约与定时触达归 RocketMQ，物理上分集群</strong>。逐类看。埋点是典型的大数据管道：量极大、允许少量丢失、下游是流计算与数仓，Kafka 的分区日志模型与流生态在这里如鱼得水，RocketMQ 也能扛量但流生态集成不如前者顺。订单履约是交易消息的教科书场景：不丢要靠同步刷盘加主从复制，不乱序要靠队列级顺序消息，出问题要能按订单号查消息轨迹——这些是 RocketMQ 的内置能力，换 Kafka 都要应用层自建。定时触达更直接：Kafka 没有内置定时语义，要么轮询数据库要么自研延迟队列，RocketMQ 定时消息一条配置的事。三问之后再问一层<strong>运维边界</strong>：两类系统的故障域、容量模型、升级节奏都不同，混部会让"埋点洪峰打满磁盘"连累交易消息——消息基础设施的隔离成本，远低于故障联动成本。再补一句务实的话：如果团队已经有一个 Kafka 重集群加一个 RocketMQ 重集群，别为了"架构统一"做迁移，迁移的风险远大于多维护一套组件的烦。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：RocketMQ 弃用 ZooKeeper、自研"彼此不通信"的 NameServer，等于选了弱一致的注册中心——为什么在消息路由场景这个"弱"反而成立？什么场景下它不成立？</summary>
+    <div class="details-body">
+      <p>关键是分清<strong>"路由错了"和"数据丢了"的代价等级</strong>。ZooKeeper 给出的是强一致视图，代价是写入要过仲裁、节点间要同步、运维要养一套 CP 组件；而消息路由的读多写少、容忍短暂陈旧：Broker 的地址几分钟不变，NameServer 上的路由表落后十几秒，客户端最坏情况是"连到一个已下线的 Broker，失败后重试别的"——用一次重试的代价，换掉整套强一致协调设施，这笔账在消息场景是划算的。更妙的是客户端设计放大了这种容忍：客户端拿到路由表后缓存在本地自主决策，NameServer 整体不可用几分钟，存量生产者消费者照常收发，只是不能发现新 Broker。这就是"无中心的弹性"：组件越少、依赖越浅，故障面越小。它不成立的场景也有明确特征：需要<strong>强一致的元数据决策</strong>时——比如主从切换的选主仲裁（一个 Broker 的从属关系必须是唯一的、全局认可的），RocketMQ 的解法是另加 Controller 组件做仲裁，而不是把 NameServer 做强；再比如服务发现的消费方对"绝不连到旧节点"有硬要求，弱一致路由就不合适。一句话收束：<strong>注册中心的选型不看强弱论高低，看业务把哪类错误的代价放得更大</strong>——消息路由错一次可重试，选主错一次就是双主脑裂。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 11 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">11</span>本期要点与下期预告</h2>
+  <figure>
+    <img src="../img/0085-rocketmq-what-and-why/rocketmq-github-repo.png" alt="apache/rocketmq 仓库页">
+    <figcaption>github.com/apache/rocketmq（2026-09-30 截图）：Star 22.6k · Fork 12k · Apache-2.0 · About 原文 "a cloud native messaging and streaming platform"。</figcaption>
+  </figure>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>Apache RocketMQ = 从双 11 交易主链路磨出来、捐赠 Apache 的消息队列（基准 v5.5.1，2026-08-20）；</li>
+      <li>心智模型：<strong>NameServer 只管路由，Broker 顺序写统一 CommitLog，消费者组横向扩容</strong>；</li>
+      <li>三强生态位：日志流管道看 Kafka、交易业务消息看 RocketMQ、多租户存算分离看 Pulsar，比的是基因不是强弱；</li>
+      <li>5.x 演进：Proxy 无代理架构、gRPC 多语言客户端、Pop 消费与分层存储——经典形态不变，弹性外壳升级；</li>
+      <li>版本真源在 GitHub Releases 的 Latest 标记，官网 Download 页更新滞后，最新稳定版 5.5.1。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 2 期《5 分钟跑起来》——两条命令起一个最小集群，用官方 Java 客户端发出第一条消息，顺手收下 mqadmin 常用命令与 Dashboard 管理台。</p>
+  <p><strong>Primary source：</strong><a href="https://rocketmq.apache.org/docs/" target="_blank" rel="noopener">RocketMQ 官方文档（rocketmq.apache.org/docs）</a>——本期定位、版本与特性口径均出自官网、官方文档与 GitHub apache/rocketmq 仓库（基于 v5.5.1，2026-09-30 核对）。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev">← 上一期：0084 · vLLM 架构与源码导读</span>
+  <a class="next" href="0086-rocketmq-quickstart.html">下一期：5 分钟跑起来 Apache RocketMQ →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

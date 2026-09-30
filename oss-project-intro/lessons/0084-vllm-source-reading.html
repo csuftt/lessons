@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · vLLM 系列第 5 期：架构与源码导读，从一条请求走进引擎 | 2026-09-30</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0084</span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0083 · vLLM 系列第 5 期 / 共 5 期（收官） · <a href="https://github.com/vllm-project/vllm" target="_blank" rel="noopener">github.com/vllm-project/vllm ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · VLLM 系列第 5 期：架构与源码导读（收官）</p>
+  <h1>vLLM 架构与源码导读：从一条请求，走进显存精算师的引擎室</h1>
+  <p class="subtitle">系列收官期。前四期你认识了它、跑通了它、看懂了原理、算清了容量，这期继续，走进源码把最后一层窗户纸捅破。<strong>先画仓库目录地图</strong>，再顺着一条请求的完整旅程走读五个据点：入口层（<code>LLM</code> 类与 <code>vllm serve</code>）、引擎心脏（EngineCore 的调度循环）、调度器（每步组批的决策者）、块池（分页 KV 的账本）、注意力后端（PagedAttention 算子的老家）。最后给一份"工程师读码路线"——照着走，你能在半天内建立自己的第一手理解。本期源码行号全部锚定 <strong>git tag v0.30.0</strong>（与系列版本基准一致，2026-09-30 核对）。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🚀 开源 LLM 推理引擎 · Python · Apache-2.0</span>
+    <span class="tag">📦 基于 v0.30.0（官方 Latest · 源码 tag v0.30.0）</span>
+    <span class="tag-date">📅 2026-09-30 · 第 5 期</span>
+    <span class="tag time">⏱ 预计阅读 14 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 目录地图 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>仓库目录地图：从顶层到心脏</h2>
+  <p>vLLM 是一个 Python 为主的仓库（性能关键处下沉到 C++/CUDA 内核），顶层结构职责清晰：<code>vllm/</code> 是主包，<code>docs/design/</code> 藏着官方设计文档（源码导读的第二地图），<code>tests/v1/</code> 是新版引擎的行为文档，<code>examples/</code> 是可跑的用法大全。主包内部，五个据点按"请求流经的顺序"排开：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>目录 / 文件</th><th>职责</th><th>读码价值</th></tr></thead>
+    <tbody>
+      <tr><td><code>vllm/entrypoints/</code></td><td>两类入口：llm.py（离线 LLM 类）、openai/（serve 的 API 服务）、cli/</td><td>想知道"一次调用从哪进来的"，从这开始</td></tr>
+      <tr><td><code>vllm/v1/engine/</code></td><td>引擎层：core.py（EngineCore 心脏）、async_llm.py（在线引擎）</td><td>多进程分工与主循环都在这</td></tr>
+      <tr><td><code>vllm/v1/core/</code></td><td>调度与显存：sched/scheduler.py、block_pool.py、kv_cache_manager.py</td><td>连续批处理与分页 KV 的全部决策逻辑</td></tr>
+      <tr><td><code>vllm/v1/worker/</code></td><td>执行层：gpu_worker.py、gpu_model_runner.py、block_table.py</td><td>每卡一个 Worker 怎么把批次变成张量运算</td></tr>
+      <tr><td><code>vllm/v1/attention/backends/</code></td><td>注意力后端：registry.py 注册表 + flash_attn.py 等各家实现</td><td>PagedAttention 算子的真实老家</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <figure>
+    <img src="../img/0084-vllm-source-reading/vllm-repo-root.png" alt="vLLM 仓库根目录">
+    <figcaption>github.com/vllm-project/vllm 仓库根目录：vllm/ 主包、docs/ 设计文档、tests/ 行为文档、examples/ 用法示例（2026-09-30 截图，tag v0.30.0）</figcaption>
+  </figure>
+  <p class="note">来源注记——目录结构对照 github.com/vllm-project/vllm/tree/v0.30.0（2026-09-30 核对）；下文行号均锚定该 tag。</p>
+</section>
+
+<!-- ================= 02 双入口 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>据点一：两个入口，一个引擎</h2>
+  <p>第 2 期用过的两种姿势，在源码里是两个入口：<strong>离线入口</strong> <code>vllm/entrypoints/llm.py</code>——第 67 行的 <code>class LLM</code>，第 418 行的 <code>generate()</code>，脚本里三行代码跑批量的就是它；<strong>在线入口</strong> <code>vllm/entrypoints/openai/</code>——<code>vllm serve</code> 命令拉起的 API 服务进程，把 HTTP 请求翻译成引擎调用。关键在于：两个入口最终都汇入同一个引擎对象（在线是 <code>vllm/v1/engine/async_llm.py</code> 的 <code>AsyncLLM</code>，离线经 <code>vllm/engine/llm_engine.py</code> 兼容层转到同一套 V1 引擎）。这就是官方架构文档强调的 uniformity：<strong>学会一次，两条路通用</strong>。入口层做得极薄——鉴权、协议转换、组装采样参数，然后就把请求交给引擎，自己不做任何推理决策。读码第一课在这里：<strong>找主线就找"数据怎么流动"，入口层的薄，正是设计好的路标</strong>。</p>
+</section>
+
+<!-- ================= 03 EngineCore ================= -->
+<section>
+  <h2><span class="sec-num">03</span>据点二：EngineCore，引擎的心脏</h2>
+  <p><code>vllm/v1/engine/core.py</code> 第 105 行，<code>class EngineCore</code>——官方注释自称"Inner loop of vLLM's Engine"（引擎的内循环）。心脏只有一个动作：<code>step()</code>（第 589 行）——问调度器要一批活，交给执行器去算，把结果收回来。主循环就是这样一步一遍地转：</p>
+  <pre class="codeblock"><code># vllm/v1/engine/core.py（v0.30.0，节选）
+class EngineCore:
+    """Inner loop of vLLM's Engine."""
+
+    def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
+        """Schedule, execute, and make output."""
+        if not self.scheduler.has_requests():
+            return {}, False
+        scheduler_output = self.scheduler.schedule(...)
+        # ... 交给 executor 执行模型前向，回收输出</code></pre>
+  <p>注意进程模型：<code>EngineCoreProc</code>（第 1019 行）把它包成了独立进程——API 服务进程通过 <code>core_client.py</code> 与它通信。这一层隔离的意义在第 2 期架构图里见过：<strong>接口崩溃不丢批、调度独立演进</strong>。读这个文件的正确姿势是只读 <code>step()</code> 前后二十行，把"调度→执行→回传"的主干走通，细节全部留到对应据点去看——<strong>引擎文件里到处是分支（多卡、多副本、容错），主线只有一条</strong>。</p>
+</section>
+
+<!-- ================= 04 Scheduler ================= -->
+<section>
+  <h2><span class="sec-num">04</span>据点三：Scheduler，每步一次的决策者</h2>
+  <p><code>vllm/v1/core/sched/scheduler.py</code> 第 79 行 <code>class Scheduler</code>，第 561 行的 <code>schedule()</code> 是全仓库最值得精读的一个方法——连续批处理就发生在每一次调用里。它每步做四件事：<strong>看预算</strong>（新 token 预算与显存水位够不够）、<strong>做准入</strong>（等待队列里谁能上批，谁继续等）、<strong>要显存</strong>（向 KV 管理器为每条请求申请或归还块）、<strong>组批次</strong>（产出 <code>SchedulerOutput</code>：哪些请求 prefill、哪些继续 decode、块表增量）。源码里作者留的注释非常坦诚："no prefill phase nor decoding phase"——v1 调度器不再区分预填与解码两个阶段，统一看成"每条请求还要算多少 token"，因此 chunked prefill（长输入切块）、prefix caching（前缀复用）、投机解码都自然融进同一个循环。<strong>读它的技巧：对着 <code>SchedulerOutput</code> 的字段读——输出结构就是调度器的全部决策，字段看懂了，策略就看懂了</strong>。</p>
+  <figure>
+    <img src="../img/0084-vllm-source-reading/vllm-docs-design-dir.png" alt="vLLM 仓库 docs/design 设计文档目录">
+    <figcaption>仓库 docs/design/ 目录：分页注意力、调度、前缀缓存等设计文档与源码同仓维护——读码前先读对应设计稿，事半功倍（2026-09-30 截图）</figcaption>
+  </figure>
+</section>
+
+<!-- ================= 05 BlockPool ================= -->
+<section>
+  <h2><span class="sec-num">05</span>据点四：BlockPool，分页 KV 的账本</h2>
+  <p>第 2 期的"块表"在源码里的家：<code>vllm/v1/core/block_pool.py</code> 第 143 行 <code>class BlockPool</code>——管理全部 KV 物理块的账本。类文档写得直白：空闲块按"逐出顺序"挂在 <code>free_block_queue</code> 上，分配就是从队头取块（<code>get_new_blocks()</code>，第 664 行），归还就是挂回队列；<code>cached_block_hash_to_block</code> 维护"块哈希 → 缓存块"的映射，前缀缓存命中时直接复用物理块，不重新计算。上层的 <code>kv_cache_manager.py</code> 按请求视角记账（每条请求一张块表），下层的 <code>worker/block_table.py</code> 把块表变成 GPU 上的张量供注意力算子寻址——<strong>三段合起来，就是"逻辑连续、物理打散"从 Python 字典落到显存布局的全过程</strong>。</p>
+  <figure>
+    <img src="../img/0084-vllm-source-reading/vllm-source-blockpool.png" alt="block_pool.py 源码 BlockPool 类">
+    <figcaption>v0.30.0 源码 vllm/v1/core/block_pool.py#L143 起：BlockPool 类文档——分配、归还、缓存逐出的职责一目了然，是分页 KV 的最佳第一阅读点</figcaption>
+  </figure>
+</section>
+
+<!-- ================= 06 attention backend ================= -->
+<section>
+  <h2><span class="sec-num">06</span>据点五：注意力后端，PagedAttention 的老家</h2>
+  <p>最后一步，批次下发到 GPU Worker 后，注意力算子从哪来？答案是一个<strong>注册表模式</strong>的插件体系：<code>vllm/v1/attention/backends/registry.py</code> 里 <code>AttentionBackendEnum</code> 列出全部后端（FLASH_ATTN、TRITON_ATTN、FLEX_ATTN、各家 MLA 变体等），默认 <code>auto</code>——按模型形态与硬件自动挑选，也可用 <code>--attention-backend</code> 显式指定。每个后端实现同一套接口（<code>backend.py</code> 定义），输入是"本次批次的块表 + KV 缓存张量"，输出是注意力结果——<strong>PagedAttention 在实现层就是"会按块表寻址的注意力内核"</strong>，FlashAttention 等成熟内核被改造成支持分页寻址的版本，这也是"操作系统老思想 + 最新内核"的合流点。为什么默认不让你操心后端？硬件迭代太快（新卡、新内核月度刷新），把"选内核"做成注册表 + 自动选择，是它月度发版还能保持稳定的工程秘密。</p>
+  <div class="diagram">
+  <svg viewBox="0 0 760 250" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar84" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="24" y="88" width="170" height="74" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="109" y="116" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">SchedulerOutput</text>
+    <text x="109" y="136" text-anchor="middle" fill="var(--muted)" font-size="9.5">批次 + 块表增量</text>
+    <rect x="270" y="88" width="180" height="74" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="360" y="112" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">GPU ModelRunner</text>
+    <text x="360" y="132" text-anchor="middle" fill="var(--muted)" font-size="9.5">组装张量 · block_table</text>
+    <text x="360" y="150" text-anchor="middle" fill="var(--muted)" font-size="9.5">v1/worker/gpu_model_runner.py</text>
+    <rect x="530" y="88" width="200" height="74" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="630" y="112" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">Attention Backend</text>
+    <text x="630" y="132" text-anchor="middle" fill="var(--muted)" font-size="9.5">flash_attn / triton / …</text>
+    <text x="630" y="150" text-anchor="middle" fill="var(--muted)" font-size="9.5">按块表寻址的分页注意力</text>
+    <line x1="194" y1="125" x2="266" y2="125" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar84)"/>
+    <line x1="450" y1="125" x2="526" y2="125" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar84)"/>
+    <text x="222" y="114" text-anchor="middle" fill="var(--muted)" font-size="9.5">下发</text>
+    <text x="488" y="114" text-anchor="middle" fill="var(--muted)" font-size="9.5">调用</text>
+    <text x="24" y="212" fill="var(--muted)" font-size="9.5">图例：调度器只产出"决策"，Worker 里的 ModelRunner 把决策翻译成张量与块表，注意力后端按块表寻址完成计算——三段各可替换（概念图，registry.py 注册表选择后端）</text>
+  </svg>
+  </div>
+</section>
+
+<!-- ================= 07 读码路线 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>给工程师的读码路线：半天走完五步</h2>
+  <p>把五个据点串成一条可执行的路线，按"跟着一条请求走"的顺序：<strong>第一步（30 分钟）</strong>，跑通 <code>examples/</code> 里最简单的离线示例，断点打在 <code>entrypoints/llm.py</code> 的 <code>generate()</code>，看请求长什么样；<strong>第二步（30 分钟）</strong>，进 <code>v1/engine/core.py</code> 只读 <code>EngineCore.step()</code> 主干，确认"调度→执行"两跳；<strong>第三步（60 分钟）</strong>，精读 <code>sched/scheduler.py</code> 的 <code>schedule()</code>，对照 <code>SchedulerOutput</code> 字段理解准入与组批；<strong>第四步（60 分钟）</strong>，读 <code>block_pool.py</code> 的分配与归还，再回头看 <code>kv_cache_manager.py</code> 的请求级记账；<strong>第五步（30 分钟）</strong>，在 <code>attention/backends/registry.py</code> 收尾，挑 <code>flash_attn.py</code> 的 <code>FlashAttentionBackend</code>（第 283 行）看一眼接口长什么样，不必读懂内核本身。三个提效习惯：<strong>tests/v1/ 当行为文档查</strong>（想确认某个行为的语义，找对应测试最准）；<strong>docs/design/ 先于源码</strong>（设计文档讲"为什么"）；<strong>对齐 tag 读码</strong>（主线更新极快，行号只在固定 tag 下有意义——本文行号锚定 v0.30.0）。</p>
+  <p class="note">来源注记——vllm-project/vllm 仓库 v0.30.0 tag：entrypoints/llm.py、v1/engine/core.py、v1/core/sched/scheduler.py、v1/core/block_pool.py、v1/attention/backends/registry.py 均于 2026-09-30 核对。</p>
+</section>
+
+<!-- ================= 08 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. 离线 LLM 类与在线 vllm serve 的关系是？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，两者不是两套引擎，那会造成双倍维护成本。","对的：入口不同，但最终汇入同一套 V1 引擎心脏，这正是官方强调的 uniformity。","不对，serve 与 LLM 类能力对等，只是在线离线之别。"]'>
+        <li class="quiz-option">两套完全独立的引擎实现</li>
+        <li class="quiz-option">两个入口，汇入同一套引擎心脏</li>
+        <li class="quiz-option">serve 是阉割版，能力远弱于 LLM 类</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 调度器 schedule() 每一步不负责的事是？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，准入正是它的核心决策：谁上批谁等待。","不对，向 KV 管理器申请与归还块是每步的常规动作。","对的：执行模型前向是 GPU Worker（经 Executor 下发）的活，调度器只产出决策 SchedulerOutput。"]'>
+        <li class="quiz-option">决定等待队列中哪些请求上批</li>
+        <li class="quiz-option">为请求申请与归还 KV 物理块</li>
+        <li class="quiz-option">执行模型前向计算</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 读 vLLM 源码，为什么行号要锚定具体 git tag？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：月度发版、主线快速演进，类与方法的行号只在固定 tag 下稳定，对齐 tag 才能按图索骥。","不对，tag 与许可协议无关。","不对，tag 不是性能开关，只是版本快照。"]'>
+        <li class="quiz-option">主线月度更新，行号只在固定 tag 下稳定可查</li>
+        <li class="quiz-option">不同 tag 的开源协议不同</li>
+        <li class="quiz-option">tag 影响运行性能，读码前必须选择</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 09 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：vLLM 把"选注意力内核"做成注册表 + auto 自动选择，而不是写死一个最优内核。这种设计换来了什么、付出了什么？</summary>
+    <div class="details-body">
+      <p>这道题的答案写在它的发版节奏里。<strong>换来的是三样。第一，硬件红利吃到最前。</strong>注意力内核的迭代速度以月计——新卡上市、新内核（FlashAttention、FlashInfer、Triton 变体）发布，注册表加一行就能接入，auto 选择让用户"升级即提速"，不需要改任何业务代码。<strong>第二，模型形态的碎片化有解。</strong> MLA 架构、线性注意力、Mamba 混合架构各有各的最优内核，写死任何一个都会把其他模型变成二等公民；注册表 + 按模型/硬件自动选择，让"每种形态都能落到最合适的内核"。<strong>第三，社区分工有接口。</strong>各家内核团队（FlashInfer 等）对着同一套接口贡献，vLLM 主仓库不背内核实现的维护债。<strong>付出的是两样。第一，行为不可枚举。</strong>auto 选择的组合空间大，同一个服务换张卡可能换了内核，性能与精度行为随之漂移——这是排障时的额外自由度，官方为此提供 --attention-backend 显式钉死。<strong>第二，测试矩阵膨胀。</strong>每个后端 × 每种模型 × 每代硬件的组合都要回归，社区靠 tests/v1/attention 的后端级测试与 CI 分摊。<strong>通用结论：凡是"底层组件快速迭代、上层要稳定"的系统（数据库的存储引擎、JVM 的 GC、浏览器的 JS 引擎），最后都长成注册表 + 自动选择——代价是把"确定性"从编译期挪到了配置期，用户多了一个"要不要钉死版本"的决策点</strong>。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：把 vLLM 的五期知识浓缩成一张"能力卡片"，下次选型时你要向团队讲清哪五句话？</summary>
+    <div class="details-body">
+      <p>试着写这张卡片，每句都必须经得起追问。<strong>第一句，它是谁：</strong>vLLM 是生产级 LLM 推理与服务引擎（Apache-2.0），从一篇 SOSP 论文起家，治的病是 KV 缓存的显存浪费——把这话说在前面，是为了把它与聊天工具、训练框架划清界限。<strong>第二句，两门绝技：</strong>PagedAttention 分页管理 KV 缓存（浪费压到 4% 以内）+ Continuous Batching 每步重组批（随到随进、说完即退），吞吐数字全从这两处来——追问"为什么快"就答这句。<strong>第三句，怎么跑：</strong>Linux 加 CUDA 环境，<code>vllm serve 模型名</code> 一条命令起 OpenAI 兼容服务，三参数模型：水位 0.92 圈显存、max-model-len 定单条、两者定并发——追问"怎么上手指"就答这句。<strong>第四句，怎么算容量：</strong>三本账（权重房租、KV 池弹性、激活水电），用 vllm bench serve 阶梯压测，工作点定在 P99 起飞之前——追问"买几张卡"就答这句，并附上你自己的压测曲线。<strong>第五句，边界在哪：</strong>它是推理引擎不是训练框架；单机多卡用 TP，再往上有多副本与调度生态；个人电脑本地玩用不着它——追问"什么不该用它"就答这句。<strong>一张卡片五句话，每句背后都站着这五期的一期：认识、跑起来、原理、容量、源码</strong>——这也是这个系列想留给你的读开源项目的方法论：定位、上手、原理、容量、源码，五步一圈，下一个项目你可以自己走。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 10 收官要点 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>系列收官：带走这张卡片</h2>
+  <div class="card card-tip">
+    <p><strong>vLLM 五期系列，浓缩成五句话：</strong></p>
+    <ul>
+      <li><strong>认识（第 1 期）：</strong>高吞吐、省显存的推理与服务引擎，一篇论文起家，显存精算师；</li>
+      <li><strong>跑起来（第 2 期）：</strong>uv 安装、serve 一条命令起 OpenAI 兼容服务，三参数管住一块卡；</li>
+      <li><strong>原理（第 3 期）：</strong>分页管显存、连续批处理排批次，TP 与量化管"一张卡变多张"；</li>
+      <li><strong>容量（第 4 期）：</strong>三本账算显存，bench serve 阶梯压测，工作点定在延迟起飞之前；</li>
+      <li><strong>源码（本期）：</strong>双入口汇入 EngineCore，Scheduler 每步决策，BlockPool 记账，注意力后端按块表寻址。</li>
+    </ul>
+  </div>
+  <p><strong>版本与素材口径：</strong>全系列基于 vLLM v0.30.0（GitHub Latest，2026-09-22 发布，2026-09-30 核对）；源码导读期行号锚定 git tag v0.30.0；素材来自官方仓库、官方文档与官方博客。<strong>延伸阅读认准官方：</strong><a href="https://docs.vllm.ai/en/latest/" target="_blank" rel="noopener">docs.vllm.ai 官方文档</a>、<a href="https://blog.vllm.ai/" target="_blank" rel="noopener">官方博客</a>、<a href="https://github.com/vllm-project/vllm" target="_blank" rel="noopener">GitHub 仓库</a>。</p>
+  <p>五期收官，感谢一路跟练。回到<a href="../index.html">课程目录</a>，下一个开源项目等你拆解。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev">← 上一期：实战：压测与容量</span>
+  <a class="next" href="../index.html">返回课程目录 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

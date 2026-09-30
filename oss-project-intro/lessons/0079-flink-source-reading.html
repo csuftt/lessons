@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Apache Flink 系列第 5 期：跟着一次快照读穿 flink-runtime | 2026-09-30</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0079</span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0078 · Apache Flink 系列第 5 期 / 共 5 期 · 系列收官 · <a href="https://flink.apache.org/" target="_blank" rel="noopener">flink.apache.org ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · APACHE FLINK 系列第 5 期：架构与源码导读（收官）</p>
+  <h1>Apache Flink 源码导读：跟着一次快照读穿 flink-runtime</h1>
+  <p class="subtitle">收官期，回答"想读 Flink 源码，从哪进"。路线很简单：<strong>先拿地图，再走干道，最后跟一次完整的 Checkpoint</strong>——从 JobManager 里的 CheckpointCoordinator 发起，到 barrier 随数据流流过每个算子，再到状态落盘、回执完成。本系列全程锚定 <strong>git tag release-2.3.0</strong>，所有截图与行号都可复现。最后给 Java 工程师一条四周读码路线和一套防迷路纪律——读完这期，你在 IDE 里不再需要向导。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🐿️ 开源流计算引擎 · Java · Apache-2.0</span>
+    <span class="tag">📦 基于 v2.3.0（官方 Latest，2026-06-25 发布）· tag release-2.3.0</span>
+    <span class="tag-date">📅 2026-09-30 · 第 5 期（收官）</span>
+    <span class="tag time">⏱ 预计阅读 13 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 读码准备 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>读码准备：三样东西，半小时备齐</h2>
+  <p><strong>第一样，锚定 tag。</strong>Flink 主分支每天都在变，读码必须钉死一个版本：本系列全程用 <code>release-2.3.0</code>（对应官网 2.3.0 正式版，GitHub tag 命名规律是 <code>release-主版本</code>）。<strong>第二样，能编译的环境。</strong>JDK 17 + Maven 导入根 pom，第一次全量构建较久，可先 <code>-pl flink-runtime -am</code> 只建目标模块及其依赖。<strong>第三样，一份官方文档开在旁边。</strong>2.3 文档站的 Concepts、Internals 与 Operat­ions 三章就是源码的"人话注释"——本期每一段读码路线，都对应文档的一个章节，先读文档建立预期，再进源码验证细节，是读大项目最快的姿势。</p>
+  <p>读码目标也先说清：本期不求读完，只求<strong>读穿一条主干线</strong>——Checkpoint 的执行路径。它是 flink-runtime 里最核心、也最能串起调度、状态、网络三层的一条线，走完它，其他路你会自己走。</p>
+</section>
+
+<!-- ================= 02 仓库地图 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>仓库地图：模块分层看一眼</h2>
+  <figure>
+    <img src="../img/0079-flink-source-reading/flink-repo-root.png" alt="apache/flink 仓库根目录">
+    <figcaption>github.com/apache/flink @ release-2.3.0（2026-09-30 截图）：根目录模块列表，About 栏 26.4k stars / 14.0k forks / 296 tags——flink-runtime 是读码主战场</figcaption>
+  </figure>
+  <p>根目录几十个模块，按层读就不晕：<strong>API 层</strong>——flink-core-api 与 flink-core（类型系统、函数接口、状态声明）、flink-datastream-api 与 flink-datastream（新一代 DataStream API V2）；<strong>实现层</strong>——flink-streaming-java（经典 DataStream API 的实现入口）、flink-clients（作业提交与编译）、flink-connectors（连接器）；<strong>运行时层</strong>——<code>flink-runtime</code>，JobManager 与 TaskManager 的全部执行逻辑都在这里，是名副其实的主战场；<strong>外围层</strong>——flink-dist（发行打包）、flink-examples（官方示例，第 2 期跑过的 WordCount 就住这里）。<strong>分层读法一句话：从你每天用的 API 进入，顺着一个调用栈往 runtime 走。</strong></p>
+</section>
+
+<!-- ================= 03 flink-runtime 地图 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>flink-runtime：包名就是功能分区图</h2>
+  <p>展开 <code>flink-runtime/src/main/java/org/apache/flink/runtime</code>，包名几乎是自解释的功能分区：<strong>checkpoint 与 state</strong>——快照协调与状态后端，本期主线；<strong>executiongraph</strong>——三层图的第三层，调度与恢复的依据；<strong>scheduler 与 slots</strong>——作业调度与槽位管理；<strong>resourcemanager</strong>——第 3 期讲的资源管理者本人；<strong>shuffle 与 net</strong>——数据交换与网络栈；<strong>rest 与 webmonitor</strong>——Web UI 背后的接口。<strong>读 runtime 不必按目录顺序，按你关心的功能点直达对应包</strong>——这份"包名即地图"的直觉，比任何导读文章都持久。</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>你想搞懂什么</th><th>直接进哪个包</th><th>对应官方文档</th></tr></thead>
+    <tbody>
+      <tr><td>快照怎么发起与完成</td><td>runtime.checkpoint</td><td>Fault Tolerance 系列</td></tr>
+      <tr><td>状态存哪、怎么读写</td><td>runtime.state（hashmap / heap / filesystem）</td><td>State Backends</td></tr>
+      <tr><td>作业怎么被调度</td><td>runtime.scheduler + executiongraph</td><td>Internals / Job Scheduling</td></tr>
+      <tr><td>Slot 怎么分配</td><td>runtime.slots + resourcemanager</td><td>Concepts / Flink Architecture</td></tr>
+      <tr><td>数据怎么在算子间流动</td><td>runtime.shuffle + runtime.io.network</td><td>Internals / Data Exchange 类文章</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ================= 04 状态接口抽象 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>接口抽象：状态后端为什么插拔自如</h2>
+  <figure>
+    <img src="../img/0079-flink-source-reading/flink-runtime-state-dir.png" alt="flink-runtime 的 state 包">
+    <figcaption>flink-runtime .../runtime/state @ release-2.3.0（2026-09-30 截图）：接口与实现分层——StateBackend、CheckpointStorage 声明在包根，hashmap、heap、filesystem 等子目录各是一套实现</figcaption>
+  </figure>
+  <p>第 3 期讲过"哈希表换速度、RocksDB 换规模"，现在看它在新码里的结构基础：<strong>包根放接口，子包放实现</strong>。接口层是三个词：<code>StateBackend</code>（工作状态放哪、怎么创建各类状态）、<code>CheckpointStorage</code>（快照写哪：文件系统还是 JobManager 堆）、以及各类 <code>State</code> 与 <code>StateDescriptor</code>（第 3 期代码里的 ValueState 三兄弟就是这层的门面）。实现层各占一个子包：hashmap、heap、filesystem，RocksDB 在独立模块 flink-state-backends 里。业务代码永远只碰接口，<strong>换后端 = 换一行配置，这就是"面向接口"在基础设施里的样子</strong>——你自己设计 SDK 时，这层包结构值得照抄。</p>
+  <p class="note">来源注记——github.com/apache/flink @ release-2.3.0（2026-09-30 核对与截图）：runtime/state 包根含 CheckpointStorage.java、KeyedStateBackend.java 等接口与抽象类，hashmap/heap/filesystem/storage 等子包各为实现；RocksDB 后端位于 flink-state-backs 模块。</p>
+</section>
+
+<!-- ================= 05 Checkpoint 主线 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>主线：跟着一次 Checkpoint 走穿源码</h2>
+  <div class="diagram">
+  <svg viewBox="0 0 760 240" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar79a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="14" y="84" width="170" height="72" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="99" y="110" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">CheckpointCoordinator</text>
+    <text x="99" y="130" text-anchor="middle" fill="var(--muted)" font-size="9.5">JobManager 侧 · 定时发起</text>
+    <text x="99" y="146" text-anchor="middle" fill="var(--muted)" font-size="9.5">约 2400 行的核心类</text>
+    <rect x="300" y="84" width="160" height="72" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="380" y="110" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">Source 算子</text>
+    <text x="380" y="130" text-anchor="middle" fill="var(--muted)" font-size="9.5">先记消费位点</text>
+    <text x="380" y="146" text-anchor="middle" fill="var(--muted)" font-size="9.5">再插 barrier 进流</text>
+    <rect x="576" y="30" width="170" height="72" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="661" y="56" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">每个算子</text>
+    <text x="661" y="76" text-anchor="middle" fill="var(--muted)" font-size="9.5">barrier 到齐即对齐</text>
+    <text x="661" y="96" text-anchor="middle" fill="var(--muted)" font-size="9.5">状态异步写状态后端</text>
+    <rect x="576" y="138" width="170" height="72" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="661" y="164" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">回执与完成</text>
+    <text x="661" y="184" text-anchor="middle" fill="var(--muted)" font-size="9.5">ack 收齐，快照完成</text>
+    <text x="661" y="200" text-anchor="middle" fill="var(--muted)" font-size="9.5">元数据落 checkpoint 目录</text>
+    <line x1="184" y1="120" x2="296" y2="120" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar79a)"/>
+    <text x="240" y="108" text-anchor="middle" fill="var(--muted)" font-size="9">触发</text>
+    <line x1="460" y1="106" x2="572" y2="72" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar79a)"/>
+    <text x="512" y="78" text-anchor="middle" fill="var(--muted)" font-size="9">barrier 随流</text>
+    <line x1="661" y1="102" x2="661" y2="134" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar79a)"/>
+    <text x="702" y="122" text-anchor="middle" fill="var(--muted)" font-size="9">回执</text>
+    <text x="14" y="216" fill="var(--muted)" font-size="9.5">图例：官方口径——asynchronous barrier snapshotting 是 Chandy-Lamport 算法的变体；coordinator 属 JobManager 一部分，copy-on-write 让异步快照不堵计算（概念图）</text>
+  </svg>
+  </div>
+  <figure>
+    <img src="../img/0079-flink-source-reading/flink-checkpoint-coordinator.png" alt="CheckpointCoordinator.java 源码页">
+    <figcaption>flink-runtime .../runtime/checkpoint/CheckpointCoordinator.java @ release-2.3.0（2026-09-30 截图）：约 2454 行（2138 loc），checkpoint 包内 Checkpoint FAILURE 管理元数据等类族一字排开</figcaption>
+  </figure>
+  <p>源码主线五站，每一站都有明确的"地标"：<strong>第一站，发起</strong>——CheckpointCoordinator（坐标：runtime/checkpoint，官方文档明说它是 JobManager 的一部分）按周期触发第 n 次快照；<strong>第二站，源头插屏障</strong>——官方原话：所有 source 先记录消费位点、往流里插入编号的 checkpoint barrier；<strong>第三站，barrier 流动</strong>——barrier 随作业图流过每个算子，官方文档原话："As each operator receives one of these barriers, it records its state"，多输入算子先做对齐；<strong>第四站，异步落盘</strong>——状态经 StateBackend 写入 CheckpointStorage 指向的目录，copy-on-write 让计算不被快照堵住；<strong>第五站，回执完成</strong>——所有算子 ack 收齐，快照完成，可从恢复点拉起。<strong>读的时候带着三个问题走：</strong>barrier 是谁生成的、怎么跟着数据走的？对齐在哪个方法里等齐两路输入？ack 丢了一路怎么办（答案是超时按失败处理）？——问题驱动，比逐行扫描快十倍。</p>
+  <p class="note">来源注记——nightlies.apache.org 2.3 文档 Fault Tolerance via State Snapshots 与 github.com/apache/flink @ release-2.3.0（2026-09-30 核对）：发起方为 checkpoint coordinator（JobManager 的一部分）、source 记位点插 barrier、算子收到 barrier 记状态、asynchronous barrier snapshotting 为 Chandy-Lamport 变体均为官方原文。</p>
+</section>
+
+<!-- ================= 06 checkpoint 与 savepoint ================= -->
+<section>
+  <h2><span class="sec-num">06</span>顺手分清：checkpoint 与 savepoint 在源码里的关系</h2>
+  <p>读 checkpoint 包时你会不断撞见 savepoint（保存点），两者共用同一套状态快照的底座，定位完全不同：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>维度</th><th>Checkpoint（检查点）</th><th>Savepoint（保存点）</th></tr></thead>
+    <tbody>
+      <tr><td>谁触发</td><td>引擎按周期自动</td><td>用户手动命令触发</td></tr>
+      <tr><td>快照形态</td><td>可增量（RocksDB 独家）</td><td>总是完整快照</td></tr>
+      <tr><td>保留策略</td><td>通常只留最近几个，随作业取消清理</td><td>长期保留，面向升级迁移</td></tr>
+      <tr><td>典型用途</td><td>故障自动恢复</td><td>改代码升级、扩缩容、双跑切换</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>一句话分工：<strong>checkpoint 是安全气囊，savepoint 是搬运托盘</strong>。源码里两者最终都走"状态快照 + 元数据落盘"那条路，读懂 checkpoint，savepoint 自动就懂了。</p>
+</section>
+
+<!-- ================= 07 四周读码路线 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>给 Java 工程师的四周读码路线</h2>
+  <ul>
+    <li><strong>第 1 周，用起来再读：</strong>跑通第 2 期的本地集群与教程作业，把 flink-examples 里的 WordCount 逐行读懂——所有 API 在示例里都有最小用例；</li>
+    <li><strong>第 2 周，跟着一次提交走：</strong>flink-clients 到 runtime.scheduler/executiongraph，看你的 DataStream 代码如何变成 JobGraph、再并行化、再被派发到 slot——对照第 3 期三层图；</li>
+    <li><strong>第 3 周，读穿 checkpoint 主线：</strong>本期第 05 节的五站路线全程走一遍，配 Web UI 的 Checkpoints 页签对照每次快照的真实耗时与大小；</li>
+    <li><strong>第 4 周，按需深入：</strong>关心性能读 shuffle 与 network 包，关心状态读 state 子包与 flink-state-backends，关心资源读 resourcemanager——此后不再需要地图。</li>
+  </ul>
+  <p>两条纪律贯穿四周：<strong>永远在 tag 上读</strong>（release-2.3.0 的行号与本期截图可互相对照）；<strong>每个概念先用官方文档建立预期，再进源码验证</strong>——文档是人话版的设计说明，源码是细节版的真相。</p>
+</section>
+
+<!-- ================= 08 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. Checkpoint 的发起方是谁？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，TaskManager 是执行方，负责真正做快照与回执。","对的：官方文档明说 checkpoint coordinator 是 JobManager 的一部分，按周期发起。","不对，Client 提交完作业就离场，不参与运行期快照。"]'>
+        <li class="quiz-option">TaskManager 里的某个 Task</li>
+        <li class="quiz-option">JobManager 侧的 checkpoint 协调器</li>
+        <li class="quiz-option">提交作业的 Client 进程</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. barrier 机制中，"记录消费位点"发生在哪一步？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：官方原话——所有 source 先记录自己的位点，再往流里插入编号的 barrier。","不对，对齐是多输入算子收到 barrier 之后的动作。","不对，ack 是算子完成快照后向 coordinator 的回执。"]'>
+        <li class="quiz-option">Source 先记位点，再插 barrier</li>
+        <li class="quiz-option">算子做 barrier 对齐的时候</li>
+        <li class="quiz-option">coordinator 收齐 ack 之后</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 关于 savepoint，符合源码与文档口径的是？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，savepoint 由用户手动触发，不是周期自动。","不对，增量快照是 checkpoint 在 RocksDB 后端的独家能力。","对的：savepoint 总是完整快照，面向升级、迁移、扩缩容等运维场景。"]'>
+        <li class="quiz-option">按周期自动触发，替代 checkpoint</li>
+        <li class="quiz-option">默认增量快照，比 checkpoint 更小</li>
+        <li class="quiz-option">手动触发的完整快照，面向升级与迁移</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 09 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：官方说 Flink 的快照是"Chandy-Lamport 算法的变体"。查一下原算法的思路，说说流式版本改了什么、为什么这样改？</summary>
+    <div class="details-body">
+      <p>先回顾原算法。Chandy-Lamport（1985）解决的是"没有全局时钟的分布式系统怎么拍一张全局一致的快照"：任意节点先给自己打标记并记录自身状态，然后沿每条信道发出一个标记消息（marker）；节点收到第一条 marker 时也记录自身状态，并把 marker 继续转发，随后把"收到首 marker 之前、之后"的信道消息分别记账。全部节点记完，快照即一致——它的精髓是<strong>用消息本身携带进度语义，不要求停机、不依赖时钟对齐</strong>。Flink 的流式版本把这套思想改造了三处。<strong>第一，marker 有了方向与载体：</strong>原算法的 marker 走控制信道，Flink 的 barrier 直接嵌在数据流里随数据走——因为流系统的"进度"本来就定义在数据上，barrier 天然就是"此前的数据都到齐了"的声明，还顺带承担了第 3 期讲的触发窗口的职责，一份机制两用。<strong>第二，"记状态"变成"写状态后端"：</strong>原算法假设状态就是内存里的变量，Flink 的状态可能几十 GB，所以快照是异步的——copy-on-write 让计算继续改"新版"，后端慢慢持久化"旧版"，这是原论文没有的工程层。<strong>第三，对齐换来了精确语义：</strong>原算法允许多个 marker 混行，Flink 在 exactly-once 模式下要求多输入算子把 barrier 对齐，让快照边界严格落在"所有输入恰好消费到 barrier n"——这正是第 3 期思考题里那个"快分区等慢分区"的代价来源。<strong>读算法原文再看源码，你会发现教科书与工程之间隔着一层"约束翻译"：无界流、海量状态、精确语义，每一条约束都在原算法上对应一处改造。</strong>这种"读论文—对照源码—找出改造点"的读法，是读所有分布式系统源码的通用钥匙，不止 Flink 一家。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：团队想让你评估"读 Flink 源码这件事值不值得投入一个月"。用本系列学过的东西，给出投入产出分析与最小可行读码方案。</summary>
+    <div class="details-body">
+      <p>先算产出，不谈情怀。<strong>直接的产出有三笔。</strong>第一笔，排障能力升维：实时作业的故障大多发生在框架层——反压传导、checkpoint 超时、状态恢复异常，会读源码的人从"看日志猜"变成"按调用栈定位"，第 4 期反压三步只是入口，源码是终局武器。第二笔，调优有依据：并行度、缓冲、状态后端、心跳超时这些参数，读不懂源码只能抄别人的值，读懂了就能按自己的数据形状推导——第 3 期那个"slot 数等于最高并行度"的结论，源码里能看到它为什么成立。第三笔，迁移成本下降：2.x 清账期（Scala API 移除、DataSet 退场）意味着存量升级会持续发生，读得懂的人做升级评估、做 savepoint 迁移方案，是团队里的稀缺角色。<strong>再算投入与风险：</strong>flink-runtime 两千多行的核心类、遍布回调与异步，完整读通远不止一个月——风险是"读了三周还没用到生产，被业务催走"。<strong>所以最小可行方案是"用问题切割，不追求读通"：</strong>第一周只跟第 05 节的 checkpoint 五站，产出一份"我们的作业快照要多久、卡在哪"的分析报告，直接回哺生产调参；第二周只读 scheduler 到 slot 分配一段，产出"我们该买多少 TaskManager"的容量推导；第三、四周按当季度的实际故障类型选包深读。<strong>判断标准也送给团队：</strong>当你们发现"每次出问题都在搜同样关键词"时，读码的复利就开始超过投入了——读码不是 KPI，是排障边际成本递减的投资。一个月不长，但足够把"黑盒"变成"灰盒"，而灰盒，已经是团队里前百分之十的水平。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 10 收官要点 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>系列收官：带走这张地图</h2>
+  <div class="card card-tip">
+    <p><strong>Apache Flink 五期，带走这六句话：</strong></p>
+    <ul>
+      <li>它是数据流上的有状态计算引擎：乱序有 Watermark 治，容错有 Checkpoint 保，状态有后端管（基准 v2.3.0，2026-06-25 发布）；</li>
+      <li>跑起来只要三下：<code>start-cluster.sh</code> 起集群、<code>flink run</code> 交作业、<code>enableCheckpointing(n)</code> 开容错；</li>
+      <li>概念地图：两种进程、三层执行图、两种时间语义、两个状态后端、四种窗口——仪表盘上的词全部有出处；</li>
+      <li>实战口径：连接器对矩阵，事件时间窗口定口径，端到端 exactly-once 四道闸（快照、重放、事务、读已提交）；</li>
+      <li>读码主线：CheckpointCoordinator 发起 → source 记位点插 barrier → 算子对齐快照落盘 → ack 收齐完成，全程锚定 tag release-2.3.0；</li>
+      <li>官方文档是第一手资料：<a href="https://nightlies.apache.org/flink/flink-docs-release-2.3/" target="_blank" rel="noopener">nightlies.apache.org/flink/flink-docs-release-2.3</a>，源码在 <a href="https://github.com/apache/flink" target="_blank" rel="noopener">github.com/apache/flink</a>。</li>
+    </ul>
+  </div>
+  <p>本系列到此收官——从"流处理为什么难"到"跟着一次快照读穿运行时"，五期的全部产物都锚定同一个版本基准与官方文档口径，欢迎回到<a href="../index.html">课程目录</a>挑下一个项目继续。<strong>Primary source：</strong><a href="https://nightlies.apache.org/flink/flink-docs-release-2.3/" target="_blank" rel="noopener">Apache Flink 官方文档 2.3</a>——本期读码路线、快照机制与 checkpoint/savepoint 口径均出自官方文档 Internals、Fault Tolerance 章节（v2.3.0 / tag release-2.3.0，2026-09-30 核对）；模块与行号截图出自 GitHub apache/flink 仓库。</p>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0078-flink-in-action.html">← 上一期：实战：订单流实时大屏</a>
+  <a class="next" href="../index.html">系列收官 · 返回课程目录 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · PostgreSQL 系列第 5 期：架构与源码导读（系列收官） | 2026-09-30</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0074</span>
+  <span><a href="../index.html">课程目录</a> · 上一期:<a href="0073-postgresql-json-pgvector-in-action.html">0073</a> · PostgreSQL 系列第 5 期 / 共 5 期 · 收官 · <a href="https://www.postgresql.org/" target="_blank" rel="noopener">postgresql.org ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · POSTGRESQL 系列第 5 期：架构与源码导读 · 系列收官</p>
+  <h1>PostgreSQL 架构与源码导读:把 35 年的内核读薄</h1>
+  <p class="subtitle">系列收官期。前四期建认知、跑链路、拆架构、做实战,这一期把架构图<strong>钉到代码上</strong>:src/backend 目录地图、一条查询从 <code>postgres.c</code> 到执行器的真实路径、heapam 里 MVCC 的代码落点,再给一份<strong>面向 Java 工程师的 C 语言读码路线</strong>。读码全程锚定官方 git 仓库的 <strong>tag <code>REL_18_6</code></strong>(对应 v18.6,2026-08-13 发布),行号与文件名逐个对过,不凭记忆讲源码。读完这本"内核地图册",再回头看第 3 期那张架构图,每一根线你都知道它落在哪个文件。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🐘 开源关系型数据库 · C · PostgreSQL License</span>
+    <span class="tag">📦 基于 v18.6（tag REL_18_6，2026-08-13）</span>
+    <span class="tag-date">📅 2026-09-30 · 第 5 期 · 收官</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 为什么读源码 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>收官三问:为什么是 PG,为什么是 C,为什么是现在</h2>
+  <p><strong>为什么读 PG 的源码?</strong>第 1 期说过:大量国产数据库与分析型 MPP 以 PG 为底座二次开发——读懂 PG 的源码与术语,等于拿到理解这一整层生态的钥匙;而且它是<strong>极少数"文档、注释、代码三位一体"的 C 项目</strong>,每个目录几乎都有 README,官方文档 Part VII 就是官方导读。</p>
+  <p><strong>为什么 C 语言不构成门槛?</strong>读码不是写码。你需要认识的 C 特性其实很收敛:指针与结构体、宏、函数指针(回调)。PG 的编码风格保守克制——<strong>没有花哨的模板元编程,只有 35 年沉淀的直白工程</strong>。Java 工程师真正的优势在这里:<strong>你懂事务、索引、并发,缺的只是"这些概念在 C 里叫什么、住在哪个文件"</strong>——本期就补这张映射表。</p>
+  <p><strong>为什么是现在?</strong>因为前四期你已经装过它、连过它、拆过它。带着架构印象读代码,每读一个文件都在给旧地图钉钉子;反过来裸读源码,三个月也走不出目录迷雾。</p>
+</section>
+
+<!-- ================= 02 目录地图 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>源码锚点与目录地图:先认地形再赶路</h2>
+  <p>第一纪律:<strong>读码必须锚定 tag</strong>。PG 官方 git 仓库的 tag 格式是 <code>REL_主版本_小版本</code>,本文全部锚定 <code>REL_18_6</code>(与官网 Latest 的 18.6 同源)。GitHub 上的 postgres/postgres 是官方镜像,浏览无碍,合并请求不在此收——提交去官方 git 流程。</p>
+  <figure>
+    <img src="../img/0074-postgresql-source-reading/pg-github-src-backend.png" alt="GitHub postgres/postgres REL_18_6 的 src/backend 目录">
+    <figcaption>github.com/postgres/postgres/tree/REL_18_6/src/backend(2026-09-30 截图):tag 选择器显示 REL_18_6;access、catalog、commands、executor、optimizer、storage、tcop 等子目录即本期地图主角</figcaption>
+  </figure>
+  <p><code>src/backend</code> 是服务端的主战场,按"功能族"分家,六大族先记住:</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>目录族</th><th>职责</th><th>关键文件/入口</th></tr></thead>
+    <tbody>
+      <tr><td>tcop/(交通指挥)</td><td>后端主循环,收发并分发每条查询</td><td>postgres.c(后端"main"模块)</td></tr>
+      <tr><td>parser + rewrite + optimizer</td><td>解析、分析重写、生成计划</td><td>analyze.c、planner.c</td></tr>
+      <tr><td>executor/</td><td>按计划树执行取数</td><td>execMain.c、execScan.c 族</td></tr>
+      <tr><td>access/(访问方法)</td><td>表与索引的存取:heap、btree、transam</td><td>heap/heapam.c、transam/xact.c</td></tr>
+      <tr><td>storage/</td><td>缓冲区、锁、大文件与 WAL 底层</td><td>buffer/bufmgr.c、lmgr/</td></tr>
+      <tr><td>catalog/ + utils/</td><td>系统目录与基础设施(内存、日志、错误)</td><td>pg_class 相关、palloc/elog</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">来源注记——目录职责对照官方文档 Part VII Internals → Overview(postgresql.org/docs/18/overview.html,2026-09-30 核对)与 REL_18_6 源码树(2026-09-30 浏览);src/backend 各子目录另多有自带 README。</p>
+</section>
+
+<!-- ================= 03 postgres.c ================= -->
+<section>
+  <h2><span class="sec-num">03</span>第 1 站:postgres.c,后端的"交通枢纽"</h2>
+  <p>每条连接 fork 出来的后端进程,它的"main"就是 <code>src/backend/tcop/postgres.c</code>。文件头注释自报家门:</p>
+  <figure>
+    <img src="../img/0074-postgresql-source-reading/pg-github-tcop-postgres-c.png" alt="GitHub 上 REL_18_6 的 src/backend/tcop/postgres.c">
+    <figcaption>github.com/postgres/postgres/blob/REL_18_6/src/backend/tcop/postgres.c(2026-09-30 截图):文件头原文——postgres.c,POSTGRES C Backend Interface,this is the "main" module of the postgres backend and hence the main module of the "traffic cop";全文件 5234 行</figcaption>
+  </figure>
+  <p>"traffic cop(交通警察)"这个名字起得极准:<strong>它不亲自办案,只负责把每条查询按规程派发到各站</strong>。简单查询协议的处理函数 <code>exec_simple_query</code> 就是第 3 期"查询五阶段"的代码化身——解析、重写、计划、执行,依次调用,一步不跳:</p>
+  <pre class="codeblock"><code>/* tcop/postgres.c · exec_simple_query(简化示意) */
+queryTree = pg_parse_query(query_string);          /* ① 解析 */
+queryTree_list = pg_analyze_and_rewrite(parsetree, /* ② 分析重写 */
+                                         ...);
+plantree_list = pg_plan_queries(queryTree_list, ...); /* ③ 计划 */
+PortalStart(portal); PortalRun(portal, ...);       /* ④ 执行 */
+/* 收尾:事务边界由 StartTransactionCommand /
+   CommitTransactionCommand 包住(见 transam README) */</code></pre>
+  <p>对着第 3 期那张五阶段流程图看这段:<strong>图上的每个方框,就是一个真实存在的函数调用</strong>。读到这一步,"架构图"和"源码"两个世界就接上了。</p>
+</section>
+
+<!-- ================= 04 heapam 与 transam ================= -->
+<section>
+  <h2><span class="sec-num">04</span>第 2 站:transam 与 heapam,MVCC 的代码落点</h2>
+  <p>事务系统的自我介绍,藏在 <code>src/backend/access/transam/README</code> 开篇:</p>
+  <figure>
+    <img src="../img/0074-postgresql-source-reading/pg-github-transam-readme.png" alt="GitHub 上 REL_18_6 的 access/transam/README">
+    <figcaption>github.com/postgres/postgres/blob/REL_18_6/src/backend/access/transam/README(2026-09-30 截图):The Transaction System——三层结构:底层实现低层事务与子事务,中层在 postgres.c 处理每条查询前后被调用(StartTransactionCommand 等),顶层实现用户可见的事务与保存点</figcaption>
+  </figure>
+  <p>第 3 期讲的 MVCC,代码落点在 <code>src/backend/access/heap/heapam.c</code>:<strong>heap_update 把旧元组标上 xmax、再把新版本元组插入页面</strong>;元组头上那两个事务号字段(xmin/xmax)定义在 <code>src/include/access/htup_details.h</code> 的元组头结构里。可见性判断由 transam 层根据快照与事务提交状态完成——<strong>第 3 期的因果链,在代码里一节一节都能摸到</strong>:</p>
+  <div class="diagram">
+  <svg viewBox="0 0 760 170" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar74" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="10" y="56" width="150" height="58" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="85" y="80" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">heap_update</text>
+    <text x="85" y="100" text-anchor="middle" fill="var(--muted)" font-size="9">access/heap/heapam.c</text>
+    <rect x="200" y="20" width="170" height="54" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="285" y="42" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">旧元组标 xmax</text>
+    <text x="285" y="60" text-anchor="middle" fill="var(--muted)" font-size="9">死元组,等回收</text>
+    <rect x="200" y="96" width="170" height="54" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="285" y="118" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">新元组带新 xmin</text>
+    <text x="285" y="136" text-anchor="middle" fill="var(--muted)" font-size="9">同页面内插入</text>
+    <rect x="410" y="56" width="150" height="58" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="485" y="80" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">快照判可见</text>
+    <text x="485" y="100" text-anchor="middle" fill="var(--muted)" font-size="9">transam 层裁决</text>
+    <rect x="600" y="56" width="150" height="58" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="675" y="80" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">vacuum 回收</text>
+    <text x="675" y="100" text-anchor="middle" fill="var(--muted)" font-size="9">无人引用的死元组</text>
+    <line x1="160" y1="75" x2="196" y2="53" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar74)"/>
+    <line x1="160" y1="95" x2="196" y2="117" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar74)"/>
+    <line x1="370" y1="47" x2="406" y2="75" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar74)"/>
+    <line x1="370" y1="123" x2="406" y2="95" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar74)"/>
+    <line x1="560" y1="85" x2="596" y2="85" stroke="var(--accent-3)" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#ar74)"/>
+    <text x="380" y="158" text-anchor="middle" fill="var(--muted)" font-size="9">图例:概念路径,函数与结构体名以 REL_18_6 源码为准</text>
+  </svg>
+  </div>
+</section>
+
+<!-- ================= 05 读码路线 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>给 Java 工程师的读码路线:四周,从行为到代码</h2>
+  <p>不要按目录顺序硬啃,按<strong>"行为 → 模块 → 函数"</strong>倒着走。四周计划,每周产出一篇自己的笔记图:</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>周次</th><th>目标行为</th><th>主战场</th><th>自测问题</th></tr></thead>
+    <tbody>
+      <tr><td>第 1 周</td><td>一条 SELECT 的旅程</td><td>postgres.c → executor/</td><td>五阶段各对应哪个函数调用?</td></tr>
+      <tr><td>第 2 周</td><td>一条 UPDATE 的一生</td><td>heapam.c + transam/</td><td>新旧版本怎么共存?谁标记 xmax?</td></tr>
+      <tr><td>第 3 周</td><td>一次提交的落盘</td><td>xlog.c + bufmgr.c</td><td>提交时在等什么?检查点做了什么?</td></tr>
+      <tr><td>第 4 周</td><td>一条连接的诞生</td><td>main/main.c + postmaster/</td><td>连接如何变成专属后端进程?</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>C 语言读码心法四条:<strong>一,头文件是地图,先看 src/include 里对应模块的 .h,结构体字段比函数体好懂;</strong>二,宏当别名读,别展开,PG 的宏大多只是命名美化;<strong>三,目录 README 与官方 Internals 章先于代码</strong>,它们是内核开发者自己写的导读;<strong>四,工具用 grep 加 IDE 跳转就够</strong>,不必迷信花哨索引。读完每周的行为,把第 3 期的架构图重新画一遍——画到第三遍,这张图就是你的了。</p>
+</section>
+
+<!-- ================= 06 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. PG 官方 git 仓库里,对应 v18.6 的 tag 写法是?</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对,tag 里没有点号,也不带 v 前缀。","对的:REL_18_6,主版本与次版本用下划线分隔,与官网 18.6 同源。","不对,PG 的 tag 不用 v 前缀,那是很多其他项目的习惯。"]'>
+        <li class="quiz-option">v18.6</li>
+        <li class="quiz-option">REL_18_6</li>
+        <li class="quiz-option">18.6-final</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. tcop/postgres.c 被文件头注释称为 traffic cop,它的职责是?</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对,亲自执行算子的是 executor/ 层,不是 postgres.c。","不对,持久化由 storage/ 与 WAL 相关模块负责。","对的:后端主循环把每条查询按规程派发到解析、重写、计划、执行各站,自己不亲自办案。"]'>
+        <li class="quiz-option">亲自执行扫描与连接算子</li>
+        <li class="quiz-option">负责 WAL 落盘与恢复</li>
+        <li class="quiz-option">后端主循环,把每条查询派发到各站</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. MVCC 的"旧元组标 xmax、新版本插入"发生在哪个文件?</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的:access/heap/heapam.c 的 heap_update;元组头的 xmin/xmax 字段定义在 htup_details.h。","不对,planner.c 负责生成计划,与元组版本无关。","不对,catcache.c 是系统目录缓存,不碰用户表元组。"]'>
+        <li class="quiz-option">access/heap/heapam.c(heap_update)</li>
+        <li class="quiz-option">optimizer/path/planner.c</li>
+        <li class="quiz-option">utils/cache/catcache.c</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 07 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>思考题(点击展开解析)</h2>
+  <details class="q-card">
+    <summary>思考一:同样是读源码,读 PG 内核与读 Spring 这类业务框架有什么本质区别?方法要怎么调整?</summary>
+    <div class="details-body">
+      <p>三个本质区别。<strong>一,抽象层不同。</strong>Spring 的源码是你业务代码的"下方一层",调用关系、生命周期、扩展点都有现成的心理模型;PG 内核在数据库抽象的另一端,你要面对的是页、元组、缓冲、锁这些<strong>与业务语言完全脱节的原语</strong>——所以读内核的第一步不是找 main 函数,而是建立原语词典(元组是什么、页怎么组织、快照怎么表示),词典没建完就追函数,必迷路。<strong>二,演化动力不同。</strong>框架源码围着 API 兼容与开发体验转,读的时候问"用户怎么用";内核源码围着硬件与一致性转,读的时候要问"磁盘一次寻址多大代价、一次写多大才是原子的"——<strong>用性能与可靠的问题驱动读码,比用调用栈驱动有效得多</strong>。<strong>三,文档耦合度不同。</strong>框架的好文档在社区博客,质量参差;PG 的 README、注释、官方 Internals 章是内核作者写的,可信度极高——<strong>读 PG 要"先读文后读码",读框架要"先读码再对照文"</strong>。方法调整成三句话:先建原语词典(第 2 期与第 3 期概念就是底稿);以行为为单位切片(本周计划的行为四问),不做目录顺序的苦行僧;每读完一个行为,用自己的话把机制讲一遍,讲不顺就回去重读。<strong>内核读码的目标不是背函数名,是拿到"任何现象都能定位到模块"的地图感</strong>。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二:公司要基于 PG 做存储引擎级改造(比如把默认堆表换成某类定制存储),从读码视角给出可行性评估框架。</summary>
+    <div class="details-body">
+      <p>这是第 1 期"源码级衍生"的实战版,评估框架五步。<strong>第一步,定改造层次。</strong>PG 把存储抽象成了 table access method 接口(PG 12 起内置,见 src/include/access/tableam.h):不动内核、只实现一套 tableam,是侵入最小的正路;改 heapam 本体则是内核级改造,代价完全不同——<strong>能走接口绝不改内核</strong>。<strong>第二步,算事务账。</strong>定制的存储必须接住 MVCC 语义:xmin/xmax 的标记、快照可见性、与 vacuum 的配合;这些语义在 heapam 里实现得非常细,替换者最容易低估"可见性裁决"的复杂度——transam/README 与 htup_details.h 是必读起点。<strong>第三步,算生态账。</strong>索引(btree 等通过 tableam 下推操作)、逻辑复制、备份工具(pg_basebackup)、升级工具(pg_upgrade)对存储的假设逐个核对,<strong>内核级改造的隐性成本几乎全在生态适配,不在核心代码本身</strong>。<strong>第四步,算人力账。</strong>参考系:pgvector 这样的扩展是"能力挂载",一两人年可成;Greenplum 级的内核衍生是团队工程。对照第 1 期的分层——<strong>先问能否做成扩展,再问能否做成 tableam,最后才考虑 fork 内核</strong>。<strong>第五步,定回退路径。</strong>改造分支与上游 REL 主线的合并节奏、回归测试集(pg 自带整套 SQL 回归测试,是改造最便宜的护栏)必须在动第一行代码前定好。结论口径:存储引擎级改造的可行性,三分看技术,七分看"改造层次选得对不对、生态账算得全不全"。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 08 收官要点 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>系列收官:五期一张图,带走这五句</h2>
+  <div class="card card-tip">
+    <p><strong>PostgreSQL 系列,五期收束成五句话:</strong></p>
+    <ul>
+      <li>第 1 期·认识:35 年社区共治的关系库,心智模型"内核管标准、扩展管特长",选型看数据形态;</li>
+      <li>第 2 期·跑起来:三平台三条官方路,首连卡认证,createdb 是端到端第一测,报错是路标;</li>
+      <li>第 3 期·架构:一守护进程当家、一连接一进程、MVCC 让读不阻塞写、WAL 保崩溃恢复、五阶段出计划;</li>
+      <li>第 4 期·实战:jsonb+GIN 管文档,pgvector+HNSW 管语义,先一库后拆分;</li>
+      <li>第 5 期·源码:tag 锚定 REL_18_6,postgres.c 是枢纽,heapam 是 MVCC 落点,按行为四周读完。</li>
+    </ul>
+  </div>
+  <p>五期一图:从"它是什么"到"它为什么稳",再到"它长什么样"、"怎么用它干活"、"代码在哪一行"——<strong>同一张架构图,被五个高度各钉了一遍钉子</strong>。下一步建议:把第 5 期的四周读码计划排进日历,读完回来重画第 3 期那张架构图。</p>
+  <p>感谢你跟完 PostgreSQL 全系列。课程目录里还有更多开源项目的系列(从 Nacos 到 Kafka、从 Redis 到 Ollama),欢迎按需取用。</p>
+  <p><strong>Primary source:</strong><a href="https://github.com/postgres/postgres/tree/REL_18_6/src/backend" target="_blank" rel="noopener">postgres/postgres @ REL_18_6(src/backend)</a> 与 <a href="https://www.postgresql.org/docs/18/overview.html" target="_blank" rel="noopener">官方文档 Part VII → Overview of PostgreSQL Internals</a>——本期文件路径、函数名与注释引文均出自该 tag 源码树与官方文档(2026-09-30 核对)。</p>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0073-postgresql-json-pgvector-in-action.html">← 上一期:实战:商品中心</a>
+  <a class="next" href="../index.html">返回课程目录 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对,再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · vLLM 系列第 2 期：5 分钟跑起来，一条命令起一个 OpenAI 兼容服务 | 2026-09-30</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0081</span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0080 · vLLM 系列第 2 期 / 共 5 期 · 下一期:0082 · <a href="https://docs.vllm.ai/en/latest/" target="_blank" rel="noopener">docs.vllm.ai ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · VLLM 系列第 2 期：5 分钟跑起来</p>
+  <h1>vLLM 快速上手：5 分钟跑起来，一条命令起一个 OpenAI 兼容服务</h1>
+  <p class="subtitle">上一期我们认识了这位"显存精算师"，这期继续，把它请进你自己的 Linux 机器。目标很小也很硬：<strong>装上 vLLM，一条命令起一个 OpenAI 兼容服务，收到模型的第一句回答</strong>——然后顺手讲清三个最常用的启动参数：模型怎么指、上下文长度怎么控、显存水位怎么调。这三个参数是你与"显存精算师"谈判的筹码：它们决定一块卡被怎样瓜分、一条请求最长能吃多少缓存。本期全程对照官方 Quickstart 与 CLI 文档（基于 v0.30.0，2026-09-30 核对），命令逐字可抄。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🚀 开源 LLM 推理引擎 · Python · Apache-2.0</span>
+    <span class="tag">📦 基于 v0.30.0（官方 Latest，2026-09-22 发布）</span>
+    <span class="tag-date">📅 2026-09-30 · 第 2 期</span>
+    <span class="tag time">⏱ 预计阅读 10 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 环境自检 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>动手前 60 秒：环境自检三条命令</h2>
+  <p>上期的环境底线这里直接复用：<strong>Linux 原生（Windows 走 WSL）、Python 3.10～3.13、NVIDIA 显卡计算能力 7.5 及以上</strong>。开装之前，60 秒自检三条命令，确认你的机器"有资格"：</p>
+  <pre class="codeblock"><code>nvidia-smi        # 有卡吗？驱动正常吗？显存多大？
+python3 --version # 3.10 ~ 3.13 之间吗？
+df -h ~           # 磁盘够吗？模型权重动辄几个 GB</code></pre>
+  <p><code>nvidia-smi</code> 是你最常用的仪表盘：右上角能看到驱动版本与 CUDA 版本，下面是显存总量与实时占用——<strong>本期调参数时盯的就是这块数字</strong>。磁盘方面，本期的示例模型 Qwen2.5-1.5B 权重约 3 GB，换更大的模型按比例放大。没有 NVIDIA 卡？云厂商按小时租一张 T4 或 L4 是最省心的起步方式，全套流程不变。</p>
+  <p class="note">来源注记——环境要求出自 docs.vllm.ai Installation → GPU 页（2026-09-30 核对）：Linux、Python 3.10–3.13、算力 7.5+（T4/RTX20xx/A100/L4/H100/B200 在官方清单）。</p>
+</section>
+
+<!-- ================= 02 安装 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>第一步：装上它（uv 一条龙，pip 亦可）</h2>
+  <p>官方 Quickstart 推荐用 <strong>uv</strong> 管理环境——它快，而且能自动匹配本机 CUDA 与 PyTorch 轮子：</p>
+  <pre class="codeblock"><code>uv venv --python 3.12 --seed
+source .venv/bin/activate
+uv pip install vllm --torch-backend=auto</code></pre>
+  <p>三条命令逐字对照官方文档：建虚拟环境、激活、安装。<code>--torch-backend=auto</code> 是点睛之笔——uv 会探测本机驱动，自动挑选匹配的 PyTorch 与 CUDA 组合，免去"驱动与轮子对不上"的经典暗坑。习惯 pip 的话，<code>pip install vllm</code> 也可以：预编译轮子默认按 <strong>CUDA 12.9</strong> 构建，官方另提供 12.8 与 13.0 变体，Blackwell 新卡（B200/GB200）至少需要 CUDA 12.8。安装包约 2 GB 出头（含 PyTorch），慢的话挂代理或用国内镜像源。</p>
+  <figure>
+    <img src="../img/0081-vllm-quickstart/vllm-docs-install-gpu.png" alt="vLLM 安装文档 GPU 要求页">
+    <figcaption>vLLM 仓库 docs/getting_started/installation/gpu.md（v0.30.0，docs.vllm.ai 同源发布）：Requirements 一节 OS Linux / Python 3.10–3.13 / 算力 7.5+，预编译二进制默认 CUDA 12.9（另有 12.8、13.0）</figcaption>
+  </figure>
+  <p class="note">来源注记——github.com/vllm-project/vllm 仓库 docs/getting_started/installation/gpu.md（v0.30.0 tag，2026-09-30 截图核对）：安装命令、CUDA 12.9 默认构建与 12.8/13.0 变体口径均出自该文档。</p>
+</section>
+
+<!-- ================= 03 起服务 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>第二步：一条命令，起一个 OpenAI 兼容服务</h2>
+  <p>见证门面的时刻。<code>vllm serve</code> 后面直接跟模型名，回车：</p>
+  <pre class="codeblock"><code>vllm serve Qwen/Qwen2.5-1.5B-Instruct</code></pre>
+  <p>第一次运行会自动从 Hugging Face 拉取权重（约 3 GB），然后加载模型、初始化 KV 缓存池、做几轮预热——<strong>大约两三分钟后</strong>，日志出现 <code>Application startup complete.</code>，服务就绪，默认监听 <strong>8000 端口</strong>。这条命令背后其实发生了三件事：下载并加载权重进显存；按显存水位圈出一整块 KV 缓存池（上期说的 0.92 默认值在这里生效）；在 8000 端口挂起一套 OpenAI 兼容的 HTTP 服务。<strong>你看到的"一条命令"，是精算师把三步打包成了一次握手</strong>。</p>
+  <figure>
+    <img src="../img/0081-vllm-quickstart/vllm-docs-quickstart.png" alt="vLLM 仓库 Quickstart 文档 Online Serving 一节（v0.30.0）">
+    <figcaption>vLLM 仓库 docs/getting_started/quickstart.md（v0.30.0，docs.vllm.ai 同源发布）：Online Serving 一节——安装后直接 vllm serve 示例模型 Qwen/Qwen2.5-1.5B-Instruct，默认地址 http://localhost:8000，同页给 curl 查询示例（2026-09-30 截图）</figcaption>
+  </figure>
+  <p class="note">来源注记——github.com/vllm-project/vllm 仓库 docs/getting_started/quickstart.md（v0.30.0 tag，2026-09-30 截图核对）：vllm serve Qwen/Qwen2.5-1.5B-Instruct、默认地址 http://localhost:8000、--host/--port 可改、curl 调用样例均出自该文档 Online Serving 一节；docs.vllm.ai 同源发布。</p>
+</section>
+
+<!-- ================= 04 第一句回答 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>第三步：收到第一句回答（curl 与 SDK 两种姿势）</h2>
+  <p>服务在 8000 端口听活了。用 curl 发一条对话请求——路径 <code>/v1/chat/completions</code>、报文结构，都和 OpenAI API 同构：</p>
+  <pre class="codeblock"><code>curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "Qwen/Qwen2.5-1.5B-Instruct",
+       "messages": [{"role": "user",
+                     "content": "用一句话介绍你自己"}]}'</code></pre>
+  <p>返回是标准 JSON，答案在 <code>choices[0].message.content</code> 里。存量应用只要把 <code>base_url</code> 改成 <code>http://localhost:8000/v1</code>，其余代码一行不动——这是 vLLM 把"接入成本"也精算掉了。更顺手的是官方 Python 库，连 openai 客户端都不用装：</p>
+  <pre class="codeblock"><code>from vllm import LLM
+llm = LLM(model="Qwen/Qwen2.5-1.5B-Instruct")
+out = llm.chat([{"role": "user",
+                 "content": "用一句话介绍你自己"}])
+print(out[0].outputs[0].text)  # 离线批量的另一条路</code></pre>
+  <p>注意两条路的分工：<code>vllm serve</code> 起的是<strong>在线服务</strong>，7×24 接 HTTP 请求；<code>LLM()</code> 类是<strong>离线批处理</strong>，脚本里一口气喂一批提示词跑完即退。批量摘要、数据合成走后者，线上业务走前者——第 4 期压测的就是在线这条路。</p>
+</section>
+
+<!-- ================= 05 三个关键参数 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>三个关键参数：与精算师谈判的筹码</h2>
+  <p>默认值能让服务跑起来，但生产部署必须会调这三样。名字与默认值全部对照官方 CLI 文档（2026-09-30 核对）：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>参数</th><th>默认值</th><th>管什么</th></tr></thead>
+    <tbody>
+      <tr><td><code>vllm serve &lt;模型&gt;</code></td><td>无默认，必填</td><td>服务哪个模型——HF 模型名或本地权重路径，对应引擎参数 model</td></tr>
+      <tr><td><code>--max-model-len</code></td><td>取模型配置的上下文上限</td><td>单条请求最大长度（输入+输出）；不指定时自动取模型配置，很多模型上千上下文直接把 KV 池撑爆</td></tr>
+      <tr><td><code>--gpu-memory-utilization</code></td><td>0.92</td><td>本实例最多用多少比例的显存（0~1）；圈内圈外，就是 KV 缓存池的天花板</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>三者关系一句话：<strong>水位（0.92）圈出显存蛋糕，减去权重和激活就是 KV 池；上下文长度决定每条请求切多大一块；剩下的池子除以单条份额，就是理论并发上限</strong>。实例默认 1.5B 模型在入门卡上就能跑；若日志报 KV 缓存放不下，先调 <code>--max-model-len</code>——这是新手最常见的一撞，下一节给急救方案。</p>
+  <figure>
+    <img src="../img/0081-vllm-quickstart/vllm-docs-serve-cli.png" alt="vLLM serve CLI 文档参数页">
+    <figcaption>docs.vllm.ai CLI → vllm serve：--gpu-memory-utilization 默认 0.92（别名 --device-memory-utilization），--max-model-len 不指定时从模型配置自动推导，--port 默认 8000</figcaption>
+  </figure>
+  <p class="note">来源注记——docs.vllm.ai/en/latest/cli/serve.html（2026-09-30 截图核对）：三个参数的名字、默认值与说明均出自该页。</p>
+</section>
+
+<!-- ================= 06 报错急救 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>三个最常见的坑与急救动作</h2>
+  <p>第一次跑，八成的失败集中在三处。报错原文我对照了 v0.30.0 源码（<code>vllm/v1/core/kv_cache_utils.py</code>），遇到时按方抓药：</p>
+  <ul>
+    <li><strong>KV 池放不下单条请求</strong>——日志抛 ValueError："To serve at least one request with the model's max seq len (N)... larger than the available KV cache memory"。意思是按当前水位，权重扣完后的 KV 池连一条最大长度的请求都装不下。<strong>急救：调低 <code>--max-model-len</code></strong>（比如 4096），或确认没有别的进程占着显存；官方还给了个"省显存"专页列各种腾挪手段；</li>
+    <li><strong>启动时或运行中 CUDA OOM</strong>——显存被其他进程（桌面环境、旧进程）占掉了一角。<strong>急救：<code>nvidia-smi</code> 找出占用者杀掉，或把 <code>--gpu-memory-utilization</code> 从 0.92 调低留出余量</strong>；</li>
+    <li><strong>连接被拒 / 404</strong>——curl 打不通先看服务日志是否真的 startup complete；模型名写错会收到 404，<strong>报文里的 model 字段必须与 serve 时的模型名一字不差</strong>；端口冲突则用 <code>--port</code> 换一个。</li>
+  </ul>
+  <p class="note">来源注记——报错文案摘自 vLLM v0.30.0 源码 vllm/v1/core/kv_cache_utils.py（git tag v0.30.0 核对）；官方"省显存"指引见 docs.vllm.ai/configuration/conserving_memory/。</p>
+</section>
+
+<!-- ================= 07 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. vLLM 预编译轮子默认按哪个 CUDA 版本构建？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，11.8 是很旧的版本，官方早已升级。","对的：官方安装文档明写预编译二进制默认 CUDA 12.9，另有 12.8 与 13.0 变体可选。","不对，13.0 是可选变体之一，不是默认。"]'>
+        <li class="quiz-option">CUDA 11.8</li>
+        <li class="quiz-option">CUDA 12.9</li>
+        <li class="quiz-option">CUDA 13.0</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 启动时报"KV cache 放不下 max seq len 一条请求"，最直接的急救动作是？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，加大水位只在不超 1.0 的范围里微调，救不了『单条就装不下』的局。","不对，换模型是最后手段，成本太高。","对的：报错原文就建议调低 max-model-len 或加大 gpu-memory-utilization，前者立竿见影。"]'>
+        <li class="quiz-option">把显存水位直接调到 1.0</li>
+        <li class="quiz-option">立刻换一个更小的模型</li>
+        <li class="quiz-option">调低 --max-model-len（或适度调高水位）</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. <code>LLM()</code> 类和 <code>vllm serve</code> 的分工是？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：LLM() 是离线批处理入口，vllm serve 起的是 7×24 的在线 OpenAI 兼容服务，两条路各有主场。","不对，LLM() 不提供 HTTP 服务，它只是进程内对象。","不对，两者是官方双入口，serve 不是调试专用的阉割版。"]'>
+        <li class="quiz-option">前者离线批量、后者在线服务，官方双入口</li>
+        <li class="quiz-option">前者也能起 HTTP 服务，只是写法不同</li>
+        <li class="quiz-option">serve 只是调试用，生产必须用 LLM()</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 08 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：--gpu-memory-utilization 从 0.92 调到 1.0，是不是就"白捡" 8% 显存？</summary>
+    <div class="details-body">
+      <p>数字上看似白捡，工程上是<strong>把余量换成风险</strong>。这 8% 的官方默认余量至少挡三件事。<strong>第一，CUDA 上下文与框架开销的波动。</strong>PyTorch 与 CUDA 驱动层在运行中会有一块不可精确预测的上下文内存（CUDA context、cuDNN 工作区等），不同驱动版本、不同模型结构下大小会漂；水位拉满，漂移直接变成 OOM。<strong>第二，峰值时刻的临时分配。</strong>推理过程中激活值的峰值与平均值的差，会在长输入、大 batch 的瞬间冒头——0.92 是官方留给这些尖峰的缓冲带，而你的真实流量峰值一定比你压测时的更刁钻。<strong>第三，多实例共存的现实。</strong>一块卡跑多个 vLLM 实例（不同模型、灰度流量）是常见玩法，每个实例的 0.92 是"本实例上限"，实例间要靠各自留余量才不打架——官方文档特别说明这个参数是 per-instance 的。<strong>那什么时候可以上调？</strong>专用推理卡、独占实例、流量可控的离线批量任务，可以试 0.95；即便如此也要盯住 OOM 日志留回退预案。<strong>精算师的余量不是浪费，是给不确定性的保险费</strong>——把保险费全花了，省下的是小钱，赌上的是整块卡的稳定性。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：团队要把一个内网业务从"调云端 API"切到"自建 vLLM"，第一台机器的显卡怎么选？给出决策链。</summary>
+    <div class="details-body">
+      <p>按"模型规格 → 显存拆账 → 卡型匹配 → 余量复核"四步走。<strong>第一步，定模型规格。</strong>先回答业务要什么档位的模型：7B 级起步够不够、要不要 14B/32B、是否要长上下文——这一步决定后面所有账。<strong>第二步，把显存拆成三笔账。</strong>权重是固定开销：BF16 下每 1B 参数约 2 GB，7B 约 14 GB、14B 约 28 GB；再留激活与开销数 GB；剩下的才轮到 KV 缓存池。若权重就吃掉整张卡，并发会是零——这就是为什么 7B 模型配 24 GB 卡（BF16 刚好放下但 KV 池可怜）不如配量化版或更大卡。<strong>第三步，卡型匹配。</strong>入门选 T4（16 GB，算力 7.5，老但便宜）；主流选 L4（24 GB）或 A10（24 GB）；上量选 A100/H100（40/80 GB，带宽大，KV 池能给足）；预算敏感可看 48 GB 档（如 A6000 系、L40S）。<strong>第四步，余量复核。</strong>按 0.92 水位反推可用显存，估算"权重之外的 KV 池 ÷ 单条请求份额"得理论并发，对照业务峰值并发，<strong>至少留一倍余量</strong>——GPU 服务器扩容是按月计的事，流量增长是按周计的事。最后提醒：第一台机器的任务是<strong>把链路跑通、把账算准</strong>，规格可以保守，账本必须真实——它就是你向公司申请第二张卡的证据。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 09 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>环境自检三条命令：nvidia-smi、python3 --version、df -h——Linux、Python 3.10～3.13、算力 7.5+；</li>
+      <li>安装走 uv：<code>uv pip install vllm --torch-backend=auto</code> 自动匹配 CUDA；轮子默认 CUDA 12.9（另有 12.8/13.0）；</li>
+      <li><code>vllm serve 模型名</code> 一条命令起 OpenAI 兼容服务，默认 8000 端口，就绪看 Application startup complete；</li>
+      <li>三参数模型：<strong>水位 0.92 圈蛋糕，max-model-len 定单条份额，两者相除定并发</strong>；</li>
+      <li>报错急救口诀：<strong>装不下减长度，OOM 查占用，404 对模型名</strong>。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 3 期《核心概念与整体架构》——把精算师的两门绝技拆开看：PagedAttention 怎么用"块表"管理 KV 缓存、Continuous Batching 怎么让请求随到随进批，再看懂张量并行与量化选项，最后把 vLLM 的多进程架构地图画出来。</p>
+  <p><strong>Primary source：</strong><a href="https://docs.vllm.ai/en/latest/getting_started/quickstart.html" target="_blank" rel="noopener">vLLM 官方 Quickstart</a> 与 <a href="https://docs.vllm.ai/en/latest/cli/serve.html" target="_blank" rel="noopener">CLI 文档（vllm serve）</a>——本期命令、默认值与报错口径均出自官方文档与 v0.30.0 源码（2026-09-30 核对）。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev">← 上一期：vLLM 是什么</span>
+  <a class="next" href="0082-vllm-core-concepts.html">下一期：核心概念与整体架构 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

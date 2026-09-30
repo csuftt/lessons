@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Apache RocketMQ 系列第 5 期：架构与源码导读（收官） | 2026-09-30</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0089</span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0088 · RocketMQ 系列第 5 期 / 共 5 期 · 系列收官 · <a href="https://rocketmq.apache.org/" target="_blank" rel="noopener">rocketmq.apache.org ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · APACHE ROCKETMQ 系列第 5 期：架构与源码导读（收官）</p>
+  <h1>RocketMQ 源码导读：沿写入与分发两条主路，读透存储引擎</h1>
+  <p class="subtitle">上一期我们把三件武器用进了订单一致性，这期继续——也是 RocketMQ 系列的收官期：进源码。策略是<strong>不求全、只求两条主路</strong>：写入主路从 <code>DefaultMessageStore.putMessage</code> 出发，经 <code>CommitLog.asyncPutMessage</code> 到 <code>doAppend</code> 字节级追加、最后刷盘落稳；分发主路跟着 <code>ReputMessageService</code> 从写入位点重放统一日志，看 ConsumeQueue 与 IndexFile 是怎么被"顺手"建出来的。本期源码全部锚定 git 标签 <strong>rocketmq-all-5.5.1</strong>（与本系列版本基准一致），每处引用都给了文件与行号，打开仓库即可对照。读码路线表在最后一节——五期收官，你拿到的不只是知识，是一条能独立走下去的读码路。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🚀 分布式消息队列 · Java · Apache-2.0</span>
+    <span class="tag">📦 基于 v5.5.1（git 标签 rocketmq-all-5.5.1）</span>
+    <span class="tag-date">📅 2026-09-30 · 第 5 期（收官）</span>
+    <span class="tag time">⏱ 预计阅读 13 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 为什么从 store 读起 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>为什么收官读 store：存储引擎是消息队列的心脏</h2>
+  <p>先把仓库全景铺开。以 rocketmq-all-5.5.1 标签为准，顶层模块包括 <code>client</code>（经典客户端）、<code>common</code>、<code>broker</code>（Broker 主逻辑）、<code>store</code>（存储引擎）、<code>namesrv</code>（路由中心）、<code>remoting</code>（经典协议通信）、<code>proxy</code>（5.x 接入层）、<code>controller</code>（切换仲裁）、<code>tieredstore</code>（分层存储）等。五个概念里你已经在第 3 期见过它们各自的名字，现在它们落成了目录。</p>
+  <p>从哪里读起？答案是 <strong>store 模块</strong>，理由有三：它是消息队列的<strong>心脏</strong>——"消息不丢"的承诺全部兑现在这里；它是<strong>概念密度最高</strong>的模块——第 3 期的 CommitLog、ConsumeQueue、IndexFile、重平衡后的消息投递，全部能在里面找到代码形态；它还是<strong>最好验证</strong>的模块——读完写路径，回头跑一遍第 2 期的 <code>tools.sh</code>，日志里的每一步都能对上号。其余模块（broker 的请求处理、remoting 的协议编解码）都值得读，但先拿下心脏，其余是它的服务生。</p>
+</section>
+
+<!-- ================= 02 store 模块地图 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>store 模块地图：一个包，十几个子目录</h2>
+  <figure>
+    <img src="../img/0089-rocketmq-source-reading/rocketmq-store-tree.png" alt="store 模块目录树">
+    <figcaption>GitHub 仓库 store/src/main/java/org/apache/rocketmq/store 目录（2026-09-30 截图，git 标签 rocketmq-all-5.5.1）：config、dledger、ha、index、logfile、queue、rocksdb 等子目录与 DefaultMessageStore.java、CommitLog.java 等核心类同屏可见。</figcaption>
+  </figure>
+  <div class="diagram">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar89" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="270" y="116" width="220" height="72" rx="12" fill="var(--card)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="380" y="142" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">DefaultMessageStore</text>
+    <text x="380" y="164" text-anchor="middle" fill="var(--muted)" font-size="9.5">存储引擎门面 · 读写与调度总入口</text>
+    <rect x="30" y="30" width="180" height="64" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="120" y="54" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">CommitLog.java</text>
+    <text x="120" y="74" text-anchor="middle" fill="var(--muted)" font-size="9.5">统一日志 · 写入主路起点</text>
+    <rect x="30" y="210" width="180" height="64" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="120" y="234" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">logfile 包</text>
+    <text x="120" y="254" text-anchor="middle" fill="var(--muted)" font-size="9.5">MappedFile 内存映射文件</text>
+    <rect x="550" y="30" width="180" height="64" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="640" y="54" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">ConsumeQueue.java</text>
+    <text x="640" y="74" text-anchor="middle" fill="var(--muted)" font-size="9.5">队列索引 · 每条 20 字节</text>
+    <rect x="550" y="210" width="180" height="64" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="640" y="234" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">index 包</text>
+    <text x="640" y="254" text-anchor="middle" fill="var(--muted)" font-size="9.5">IndexFile 按键索引</text>
+    <rect x="300" y="242" width="160" height="48" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="380" y="264" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">支撑子包</text>
+    <text x="380" y="281" text-anchor="middle" fill="var(--muted)" font-size="9">config · ha · dledger · pop · queue</text>
+    <line x1="212" y1="72" x2="266" y2="122" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar89)"/>
+    <line x1="212" y1="232" x2="266" y2="184" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar89)"/>
+    <line x1="548" y1="72" x2="494" y2="122" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar89)"/>
+    <line x1="548" y1="232" x2="494" y2="184" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar89)"/>
+    <text x="16" y="120" fill="var(--muted)" font-size="9.5">写主路</text>
+    <text x="16" y="150" fill="var(--muted)" font-size="9.5">读主路</text>
+    <text x="16" y="294" fill="var(--muted)" font-size="9.5">图例：门面类居中调度，四个角各守一条主路；子包按职责挂靠——ha/dledger 管高可用，config 管参数，pop/queue 管 5.x 消费形态</text>
+  </svg>
+  </div>
+  <p>读 store 模块的方法是<strong>先立骨架再填肉</strong>：<code>DefaultMessageStore</code> 是门面类（三千多行），所有读写与后台服务的调度从它出发；写主路的核心是 <code>CommitLog</code>（两千五百多行）；<code>logfile</code> 包的 <code>MappedFile</code> 是内存映射文件的抽象——RocketMQ "把磁盘当内存用"的物理载体；读主路落在一个 <code>queue</code> 包加根包的 <code>ConsumeQueue</code>；按键索引独立成 <code>index</code> 包。高可用（<code>ha</code>、<code>dledger</code>）、配置（<code>config</code>）、5.x 消费形态（<code>pop</code>）各居其位。骨架立住，读码不再迷路。</p>
+</section>
+
+<!-- ================= 03 写入主路 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>写入主路：putMessage 到字节级追加</h2>
+  <figure>
+    <img src="../img/0089-rocketmq-source-reading/rocketmq-dms-blob.png" alt="DefaultMessageStore putMessage 源码">
+    <figcaption>GitHub 源码 DefaultMessageStore.java 第 716~745 行（2026-09-30 截图，标签 rocketmq-all-5.5.1）：putMessage 同步包装、putMessages 批量入口与 waitForPutResult 等待逻辑高亮可见。</figcaption>
+  </figure>
+  <p>写入主路四步走，行号均以 rocketmq-all-5.5.1 为准：</p>
+  <pre class="codeblock"><code>// 1. 门面入口：DefaultMessageStore.java 第 716 行
+public PutMessageResult putMessage(MessageExtBrokerInner msg) {
+    return waitForPutResult(asyncPutMessage(msg));   // 同步包异步
+}
+// 2. 统一日志：CommitLog.java 第 999 行 asyncPutMessage
+//    持锁定位/新建 MappedFile（单文件 1 GB，写满滚动）
+// 3. 字节级追加：第 1990 行 doAppend——
+//    消息体编成字节写入映射缓冲，返回 AppendMessageResult
+// 4. 落盘与复制：第 1360 行 handleDiskFlushAndHA——
+//    刷盘策略决定何时 fsync，主从复制另走 ha 通道</code></pre>
+  <p>四步里藏着一个值得停下来看的设计：<strong>同步入口只是异步主路的包装</strong>（第 716 行一眼见底），真正的写入逻辑全在异步链上，这让刷盘与复制的等待可以精细控制；<strong>追加是无脑顺序的</strong>——doAppend 不关心 Topic 与业务语义，把消息当字节流追加进当前 1 GB 文件，写满换下一个；<strong>落盘是策略不是动作</strong>——同步刷盘等 fsync 返回、异步刷盘攒着写，选择权交给配置，代码里两组服务并存（第 3 期的 8g 堆外内存设计也在这条路上见真章）。</p>
+</section>
+
+<!-- ================= 04 分发主路 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>分发主路：ReputMessageService 把一条日志变成多份索引</h2>
+  <div class="diagram">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar89b" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="40" y="110" width="180" height="72" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="130" y="138" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">CommitLog</text>
+    <text x="130" y="158" text-anchor="middle" fill="var(--muted)" font-size="9.5">追加写入完成 · 位点推进</text>
+    <rect x="290" y="104" width="190" height="84" rx="12" fill="var(--card)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="385" y="130" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">ReputMessageService</text>
+    <text x="385" y="150" text-anchor="middle" fill="var(--muted)" font-size="9.5">DefaultMessageStore 内部类</text>
+    <text x="385" y="168" text-anchor="middle" fill="var(--muted)" font-size="9.5">第 2655 行 · 从位点重放</text>
+    <rect x="550" y="40" width="180" height="64" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="640" y="64" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">doDispatch（2064 行）</text>
+    <text x="640" y="84" text-anchor="middle" fill="var(--muted)" font-size="9.5">分发器按请求类型转派</text>
+    <rect x="550" y="150" width="180" height="60" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="640" y="174" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">构建 ConsumeQueue</text>
+    <text x="640" y="192" text-anchor="middle" fill="var(--muted)" font-size="9.5">队列索引：偏移加长度</text>
+    <rect x="550" y="226" width="180" height="56" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="640" y="250" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">构建 IndexFile</text>
+    <text x="640" y="268" text-anchor="middle" fill="var(--muted)" font-size="9.5">按键索引：按 Key 可查</text>
+    <line x1="220" y1="146" x2="286" y2="146" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar89b)"/>
+    <line x1="480" y1="130" x2="546" y2="86" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar89b)"/>
+    <line x1="480" y1="166" x2="546" y2="180" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar89b)"/>
+    <line x1="480" y1="178" x2="546" y2="248" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar89b)"/>
+    <text x="16" y="292" fill="var(--muted)" font-size="9.5">图例：统一日志是唯一事实源，分发线程近实时重放生成多份索引——"一条写路径多条读路径"在代码里的形态（行号均为 rocketmq-all-5.5.1）</text>
+  </svg>
+  </div>
+  <p>分发主路的主角是 <code>DefaultMessageStore</code> 的内部类 <code>ReputMessageService</code>（第 2655 行）：它维护一个重放位点，<strong>紧跟写入位点从统一日志里逐条读出刚落的消息</strong>，组装成轻量的分发请求，交给 <code>doDispatch</code>（第 2064 行）；分发器把请求转派给注册好的构建器——一个往队列索引追加 20 字节条目，一个往按键索引登记哈希。这就是"统一顺序写加多索引"在代码里的真实形态：<strong>日志是唯一事实源，索引是日志的投影</strong>，投影丢了可以重放重建（宕机恢复正靠这一点）。读完这两条主路，第 3 期的存储原理图就在源码里逐行兑现了。</p>
+</section>
+
+<!-- ================= 05 读码路线 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>给 Java 工程师的读码路线：五步从体感到源力</h2>
+  <p>最后把五期沉淀成一张路线表。建议环境先就位（第 2 期），源码切到 <strong>rocketmq-all-5.5.1</strong> 标签，边读边在本地跑通对照：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>阶段</th><th>目标</th><th>源码入口（5.5.1 行号）</th></tr></thead>
+    <tbody>
+      <tr><td>第 1 步 · 建立体感</td><td>本地跑通收发，盯日志对照</td><td>第 2 期环境 + tools.sh 示例</td></tr>
+      <tr><td>第 2 步 · 读写入口</td><td>门面类怎么调度读写</td><td>DefaultMessageStore.putMessage（716）/ getMessage（853）</td></tr>
+      <tr><td>第 3 步 · 写入主路</td><td>追加写与刷盘复制</td><td>CommitLog.asyncPutMessage（999）→ doAppend（1990）→ handleDiskFlushAndHA（1360）</td></tr>
+      <tr><td>第 4 步 · 分发主路</td><td>索引怎么被构建</td><td>ReputMessageService（2655）→ doDispatch（2064）→ queue 与 index 包</td></tr>
+      <tr><td>第 5 步 · 按需深入</td><td>高可用与 5.x 形态</td><td>ha 与 dledger 包、controller 与 proxy 模块</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>三条读码心法带走：<strong>第一，带着一条消息读</strong>——从 <code>tools.sh</code> 发出的那条消息出发打断点，比干读快一倍；<strong>第二，先主路后支路</strong>——两条主路没走通之前，别进 ha、dledger 这些支路迷宫；<strong>第三，行号是路标不是终点</strong>——版本演进行号会漂，认方法名与调用关系，认"消息从进来到落稳经过谁"的骨架。</p>
+</section>
+
+<!-- ================= 06 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. 写入主路的正确顺序是？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，分发是写入完成后的下游，不在写主路上。","对的：putMessage 门面入口，asyncPutMessage 定位映射文件，doAppend 字节级追加，handleDiskFlushAndHA 落盘加复制。","不对，读路径两级跳是消费读消息的路径。"]'>
+        <li class="quiz-option">doAppend 先追加，putMessage 再包装</li>
+        <li class="quiz-option">putMessage 门面 → asyncPutMessage 定位文件 → doAppend 追加 → 刷盘与复制</li>
+        <li class="quiz-option">先查队列索引，再写统一日志</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. ReputMessageService 的职责是？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，刷盘是 FlushManager 相关服务的职责。","不对，它不与生产者通信，只消费本地日志。","对的：紧跟写入位点从统一日志重放，经 doDispatch 构建队列索引与按键索引——索引是日志的投影。"]'>
+        <li class="quiz-option">负责刷盘，决定何时 fsync</li>
+        <li class="quiz-option">接收生产者的半消息回查</li>
+        <li class="quiz-option">从写入位点重放统一日志，构建队列索引与按键索引</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. "索引是日志的投影"这个说法，对应源码里的什么性质？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，分发请求是由分发线程内部组装的。","对的：统一日志是唯一事实源，索引可以从日志重放重建——宕机恢复正是靠这个性质。","不对，索引文件坏了会重放重建，不依赖回查。"]'>
+        <li class="quiz-option">索引由生产者直接推送构建</li>
+        <li class="quiz-option">索引可从统一日志重放重建，日志才是唯一事实源</li>
+        <li class="quiz-option">索引坏了无法恢复，必须重新生产消息</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 07 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一："同步入口是异步主路的包装"（putMessage 调 asyncPutMessage 再等待结果）——这个设计换来了什么？代价是什么？业务代码里有哪些同款？</summary>
+    <div class="details-body">
+      <p>先把设计看清楚：门面方法 putMessage 一行——调 asyncPutMessage 拿到 CompletableFuture，再用 waitForPutResult 带超时等待结果。同步语义是"包装"出来的，不是另一条实现路径。<strong>换来的有三样。</strong>第一，<strong>一份写逻辑两种出口</strong>：同步与异步共享同一条追加加刷盘的链路，Bug 修一处、优化是全体的，两套实现最大的成本从来不是代码量，是行为漂移。第二，<strong>等待策略可精细</strong>：超时时间综合了刷盘超时与主从复制超时来算，同步调用可以选择等到刷盘落稳才返回（消息不丢的语义边界），异步调用则完全不阻塞发送线程。第三，<strong>背压有抓手</strong>：异步链上的队列与回调是天然的流量蓄水池，生产端过载时优先拒绝而不是拖垮整条链。<strong>代价也有两样。</strong>一是<strong>栈变深、调试变绕</strong>：线程切换加上回调链，异常堆栈跨越线程，新手在源码里跟丢的往往就是这一跳；二是<strong>语义有陷阱</strong>：同步调用者容易误以为"返回即持久化"，实际返回点取决于刷盘配置——同步发送加异步刷盘的组合，返回时消息只是进了页缓存，机器断电仍有窗口。<strong>业务代码里的同款到处都是</strong>：JDBC 驱动的同步 API 包在连接池的异步资源管理上、Dubbo 的同步调用是对 Future 的 get 包装、Spring MVC 的同步 Controller 底层跑在异步 Servlet 之上——<strong>"异步内核加同步外壳"是服务端软件的通用骨架</strong>，读透 RocketMQ 这一处，等于拿到一把通用的源码钥匙。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：只给你 30 行代码的预算，你会写一个什么样的"最小存储引擎"来复刻 CommitLog 加 ConsumeQueue 的骨架？写完之后，它与真实实现差的最关键一环是什么？</summary>
+    <div class="details-body">
+      <p>30 行预算下的最小复刻：<strong>一个 AppendOnlyLog 类，一个数组式索引</strong>。AppendOnlyLog 持有一个 RandomAccessFile（或 FileChannel），提供 append(byte[])：把长度加数据顺序写入文件尾，返回全局偏移——这就是 CommitLog 的骨架，顺序追加、偏移即地址；再写一个 Index 类，ArrayList 每项存 20 字节语义的三元组（日志偏移、长度、时间戳），get(i) 时拿着日志偏移去 AppendOnlyLog 定位读取——这就是 ConsumeQueue 的骨架，两级跳读。30 行写完，<strong>骨架sense已经齐了</strong>：统一写路径、偏移寻址、索引即投影。<strong>与真实实现差的最关键一环，是内存映射与页缓存的"通道"。</strong>RandomAccessFile 的 write 是普通系统调用，数据从用户态拷进内核；而 MappedFile 用 mmap 把文件直接映射进进程地址空间，追加就是往映射缓冲里写字节，读也直接命中页缓存，操作系统自己决定什么时候刷盘——<strong>RocketMQ 高吞吐低延迟的物理魔法不在算法里，在这层映射里</strong>。剩下的差距按重要度排：多线程下追加位置的并发控制（真实实现用自旋锁保护映射文件切换）；单文件 1 GB 的滚动与文件组管理；崩溃恢复（投影重建的真实用途）；刷盘服务的独立线程与策略化。这个练习的价值在最后一问的答案里：当你发现 30 行骨架加一层 mmap 才像样时，你就真正理解了为什么第 3 期说"高吞吐的物理基础是顺序写、页缓存、内存映射"——<strong>存储引擎的深，不在代码多，在系统层的每一分克制</strong>。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 08 收官要点 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>系列收官：带走这张地图</h2>
+  <div class="card card-tip">
+    <p><strong>RocketMQ 系列五期，带走五句话：</strong></p>
+    <ul>
+      <li><strong>认识期：</strong>双 11 磨出来的交易消息队列（基准 v5.5.1），三强格局里守住"交易语义"生态位；</li>
+      <li><strong>上手期：</strong>NameServer 加 Broker 两步起集群，9876 问路由、8081 走新客户端，默认内存按生产机给的要自己改；</li>
+      <li><strong>架构期：</strong>路由做轻、存储做顺、消费做稳——统一顺序写加两级索引，消费者组扩容，重试死信兜底；</li>
+      <li><strong>实战期：</strong>事务消息守边界、顺序消息守秩序、定时消息守节奏，消费端幂等永远在业务手里；</li>
+      <li><strong>源码期：</strong>两条主路读透存储引擎——写主路 doAppend 顺序追加，分发主路 ReputMessageService 重放建索引，日志是唯一事实源。</li>
+    </ul>
+  </div>
+  <figure>
+    <img src="../img/0089-rocketmq-source-reading/rocketmq-store-index-tree.png" alt="index 包目录">
+    <figcaption>store/index 包目录（2026-09-30 截图，标签 rocketmq-all-5.5.1）：IndexFile、IndexHeader、IndexService 与 QueryOffsetResult——按键索引的全部家当，读码路线第 4 步的落脚点。</figcaption>
+  </figure>
+  <p>收官不是终点：<strong>官方文档是最好的下一站</strong>——Domain Model 与 Feature Behavior 章节值得通读，Deployment 章节管生产部署，GitHub 仓库的 release notes 管版本演进。把五期的概念地图和这期的行号地图叠在一起，RocketMQ 对你不再是黑盒。</p>
+  <p><strong>Primary source：</strong><a href="https://github.com/apache/rocketmq/tree/rocketmq-all-5.5.1" target="_blank" rel="noopener">apache/rocketmq 源码仓库（git 标签 rocketmq-all-5.5.1）</a>——本期行号与文件引用全部锚定该标签（2026-09-30 核对）；概念与文档口径见 <a href="https://rocketmq.apache.org/docs/" target="_blank" rel="noopener">RocketMQ 官方文档</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev">← 上一期：<a href="0088-rocketmq-in-action.html">实战订单一致性</a></span>
+  <a class="next" href="../index.html">本系列已收官 · 回课程目录 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

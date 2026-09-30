@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Apache Flink 系列第 1 期：流处理三座山全接住 | 2026-09-30</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0075</span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0074 · Apache Flink 系列第 1 期 / 共 5 期 · 下一期:0076 · <a href="https://flink.apache.org/" target="_blank" rel="noopener">flink.apache.org ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · APACHE FLINK 系列第 1 期：认识项目</p>
+  <h1>Apache Flink 是什么：流处理三座山全接住</h1>
+  <p class="subtitle">今天开启新项目 Apache Flink——官网给它的一句话定位是 <strong>Stateful Computations over Data Streams</strong>，数据流上的有状态计算。实时计算这块业务，自己写过流式消费者的人都懂：数据乱序、进程挂了怎么办、中间结果往哪放，这三座山每一座都能把"简单统计"做成"分布式难题"。Flink 的答案是把<strong>状态管理、时间语义、容错快照</strong>做进同一个运行时，让你用几行 DataStream 代码拿到"算得准、挂了不丢、状态自己管"的实时计算。一句话心智模型：<strong>Flink 是一台把流处理的脏活脏坑全部内置的流计算引擎</strong>。本期结束，你能答上四个问题：流处理难在哪、Flink 的定位是什么、它与微批路线的本质差异在哪、什么信号出现时该把它请进你的架构。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🐿️ 开源流计算引擎 · Java/Scala · Apache-2.0</span>
+    <span class="tag">📦 基于 v2.3.0（官方 Latest，2026-06-25 发布）</span>
+    <span class="tag-date">📅 2026-09-30 · 第 1 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 痛点 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>痛点：流处理的三座山，翻过才知道多难</h2>
+  <p>"把每条订单实时统计进大屏"——这个需求听起来一页纸就能写完，但只要数据量上了一个量级，你会接连撞上三座山。<strong>第一座山是乱序。</strong>数据的产生顺序和到达顺序几乎必然不一致：手机弱网、消息队列分区重试、机器时钟漂移，都会让 10:01 的事件比 10:02 的更晚到。按"到达时刻"做统计，高峰期一笔补传的旧订单就能把你的小时曲线画歪；按业务时间算，你又不知道"该等到什么时候"才能确认这个窗口的数据齐了。</p>
+  <p><strong>第二座山是容错。</strong>实时作业 7×24 小时跑，机器总要挂、发布总要停。重启之后问题来了：已处理的数据重算一遍会重复计入，直接跳过又会丢失，"不多算不少算"（exactly-once 语义）在分布式环境里是个实打实的技术难题。<strong>第三座山是状态管理。</strong>计数、去重、窗口聚合、双流 Join，中间都要"记住"些什么：状态放内存，进程一挂全丢；放外部存储，每条数据一来一回两次网络往返，吞吐立刻塌掉。三座山叠在一起，就是大多数团队第一次自研实时计算的体验：<strong> demo 一天，生产一年</strong>。Flink 的存在意义，就是把这三座山的解法变成基础设施。</p>
+</section>
+
+<!-- ================= 02 是什么 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>是什么：官方定位与一句话心智模型</h2>
+  <p>Apache Flink 是一个开源的<strong>流计算框架与分布式处理引擎</strong>，官网定位原文："a framework and distributed processing engine for <strong>stateful computations over unbounded and bounded data streams</strong>"——对有界和无界数据流做有状态计算。它源自 2010 年前后的 Stratosphere 研究项目，2014 年成为 Apache 顶级项目，主语言 Java，Apache-2.0 许可，商用零负担。项目的顶点目录挂着一只彩色松鼠，社区里大家叫它"Flink 松鼠"。</p>
+  <figure>
+    <img src="../img/0075-flink-what-and-why/flink-site-home.png" alt="Apache Flink 官网首页">
+    <figcaption>flink.apache.org 首页（2026-09-30 截图）：定位语 Stateful Computations over Data Streams，"run in all common cluster environments, perform computations at in-memory speed and at any scale"</figcaption>
+  </figure>
+  <p>拆开官方定位，三个词组就是三把钥匙：<strong>"unbounded and bounded"</strong>——无界流是常态，有界批处理也能跑，一套引擎流批一体；<strong>"stateful"</strong>——状态管理是一等公民，Flink 替你把状态存在算子本地内存或磁盘（RocksDB），随数据量伸缩而不是每条去查外部库；<strong>"distributed"</strong>——并行度、调度、容错、快照全是运行时的活，你的代码只写业务逻辑。一句话心智模型：<strong>你写"对每条数据做什么"，Flink 负责在分布式集群里"算得快、记得住、挂了不丢"</strong>。</p>
+  <p class="note">来源注记——flink.apache.org 首页与 What is Flink 页（2026-09-30 核对）：定位语 Stateful Computations over Data Streams；GitHub apache/flink 仓库（2026-09-30 核对）：Star 约 26.4k · Fork 约 14.0k · 主语言 Java · Apache-2.0 许可。</p>
+</section>
+
+<!-- ================= 03 心智模型图 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>心智模型：状态、时间、快照，装进同一个运行时</h2>
+  <div class="diagram">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar75" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="14" y="110" width="130" height="76" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="79" y="140" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">无界数据流</text>
+    <text x="79" y="160" text-anchor="middle" fill="var(--muted)" font-size="9.5">消息队列 / 日志 / 埋点</text>
+    <rect x="210" y="34" width="330" height="230" rx="12" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="375" y="62" text-anchor="middle" fill="var(--ink)" font-size="13" font-weight="700">Flink 运行时（你只写中间的算子）</text>
+    <rect x="232" y="84" width="286" height="52" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="375" y="106" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">状态管理：计数 / 窗口 / Join 的中间结果</text>
+    <text x="375" y="124" text-anchor="middle" fill="var(--muted)" font-size="9.5">存算子本地（堆内存 或 RocksDB 磁盘）</text>
+    <rect x="232" y="148" width="286" height="52" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="375" y="170" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">时间语义：Event Time + Watermark</text>
+    <text x="375" y="188" text-anchor="middle" fill="var(--muted)" font-size="9.5">按业务时间算，乱序迟到都有章法</text>
+    <rect x="232" y="212" width="286" height="40" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="375" y="228" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">容错：Checkpoint 周期性快照</text>
+    <text x="375" y="244" text-anchor="middle" fill="var(--muted)" font-size="9.5">挂掉后从快照恢复，不多算不少算</text>
+    <rect x="606" y="110" width="140" height="76" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="676" y="140" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">计算结果</text>
+    <text x="676" y="160" text-anchor="middle" fill="var(--muted)" font-size="9.5">大屏 / 库 / 下游流</text>
+    <line x1="144" y1="148" x2="206" y2="148" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar75)"/>
+    <line x1="540" y1="148" x2="602" y2="148" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar75)"/>
+    <text x="14" y="284" fill="var(--muted)" font-size="9.5">图例：你写的代码只是"对每条数据做什么"；分布式并行、状态存取、时间推进、故障恢复全由运行时接管（概念图，第 3 期拆架构）</text>
+  </svg>
+  </div>
+  <p>这张图是整个系列的地图：<strong>数据流</strong>从左进右出，中间方框里就是你写的算子；算子下面垫着三块地基——<strong>状态</strong>让"记住中间结果"不用外挂存储，<strong>时间</strong>让"按业务时刻统计"不被网络抖动带偏，<strong>快照</strong>让"进程挂了"变成一次普通的故障恢复而不是数据事故。你在第 01 节撞的三座山，在这里一一有了着落；这也是"有状态计算"五个字的分量所在。第 3 期我们会把这层运行时拆开看：JobManager 怎么调度、快照怎么流动、三层执行图怎么生成。</p>
+</section>
+
+<!-- ================= 04 与微批路线的差异 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>路线之争：逐条真流与微批的本质差异</h2>
+  <p>聊流计算绕不开的另一条路线是<strong>微批</strong>：把无界流按时间切成一小段一小段的"迷你批处理"，每段跑一遍批作业。这条路线复用批引擎、运维心智省力，但"批"的基因决定了它的天花板。两条路线的核心差异：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>维度</th><th>逐条真流（Flink 路线）</th><th>微批路线</th></tr></thead>
+    <tbody>
+      <tr><td>处理模型</td><td>事件驱动，数据到了立刻处理</td><td>时间驱动，攒一小段一起跑</td></tr>
+      <tr><td>端到端延迟</td><td>毫秒级（处理完即输出）</td><td>秒级起步（下个批次才输出）</td></tr>
+      <tr><td>时间语义</td><td>Event Time 一等公民，Watermark 原生</td><td>按批边界近似，事件时间精度受限</td></tr>
+      <tr><td>状态管理</td><td>运行时内置，算子本地存取</td><td>常需外挂存储补状态能力</td></tr>
+      <tr><td>流批一体</td><td>同一套 DataStream 代码，流批两种执行模式</td><td>批是本职，流是"高频批"</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>把差异说人话：<strong>微批是把"流"翻译成"批"来借批引擎的力；真流是把"批"降解成"流"的原生形态</strong>。延迟表上的数字只是表象，真正的分野在时间语义——微批的世界里没有"数据还没到齐"这个概念，因为每个批次开跑时就默认它到齐了；而 Flink 用 Watermark 显式回答"等到什么时候"，乱序与迟到第一次有了正式的处理框架。监控大屏这类秒级容忍的场景，微批完全够用；风控、告警、实时特征这些对"准"和"快"同时敏感的场景，差异开始兑现。</p>
+</section>
+
+<!-- ================= 05 版本口径 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>版本口径：2.x 主线已立，Java 17 是默认答案</h2>
+  <p>以 2026-09-30 官网口径为准，Flink 正处在 <strong>2.x 新主线 + 1.20 LTS 双轨</strong>期。2.0 于 2025-03-24 发布，是个"清账"式的大版本：移除了长期废弃的 Scala API 与 DataSet 独立 API，默认 Java 17。当前版本线：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>版本线</th><th>当前小版</th><th>定位</th></tr></thead>
+    <tbody>
+      <tr><td>Flink 2.3</td><td>2.3.0（2026-06-25）</td><td>官方 Latest，本系列基准</td></tr>
+      <tr><td>Flink 2.2 / 2.1 / 2.0</td><td>2.2.1 / 2.1.3 / 2.0.2</td><td>2.x 存量线，连接器生态仍在补齐</td></tr>
+      <tr><td>Flink 1.20</td><td>1.20.5（2026-06-03）</td><td>LTS 长期支持线，存量生产主力</td></tr>
+      <tr><td>Java 支持</td><td>11 / 17 / 21</td><td>官方文档口径：Java 17 为 2.0 起默认与推荐版本，Java 21 实验性</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>两个值得写进笔记的口径：<strong>第一，Scala API 已成历史。</strong>2.0 起官方移除 Scala API，新项目一律走 Java API（社区另有维护的 flink-scala-api 第三方包）。下载页二进制包名里的 <code>scala_2.12</code> 后缀只是发行包内部依赖的 Scala 版本，不代表 Scala 数据集 API 还在。<strong>第二，连接器与内核版本要配套看。</strong>官方下载页按"Flink 版本 × 连接器版本"给兼容矩阵，例如 Kafka Connector 5.0.0 官方标注兼容 2.1.x 与 2.2.x，2.3 专用版尚未发布（2026-09-30 口径）——选型时内核新、连接器旧是 2.x 期的常态，动手前先查矩阵。</p>
+  <p class="note">来源注记——flink.apache.org/downloads（2026-09-30 核对）：2.3.0 Latest、1.20.5 LTS、各连接器兼容矩阵；nightlies.apache.org 2.3 文档（2026-09-30 核对）："You need Java 11, 17, or 21"、Java 17 自 2.0 起为默认；2.0 发布公告（2025-03-24）：移除废弃 Scala API。发行包命名 flink-2.3.0-bin-scala_2.12.tgz。</p>
+</section>
+
+<!-- ================= 06 组件家族与社区 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>组件家族：一个内核，一圈生态</h2>
+  <p>Flink 主仓库之外，Apache Flink 官方还维护一圈子项目，选型时它们决定"生产上多省心"：</p>
+  <ul>
+    <li><strong>Flink CDC（当前 3.6.0）：</strong>把数据库变更日志直接变成流接入 Flink，"数据库即源头"的实时同步标配；</li>
+    <li><strong>Flink Kubernetes Operator（当前 1.16.1）：</strong>在 K8s 上声明式部署、升级、快照 Flink 集群，云原生部署的官方答案；</li>
+    <li><strong>连接器家族：</strong>Kafka Connector、JDBC Connector（当前 4.1.0）等外围连接器单独发版，按兼容矩阵配套；</li>
+    <li><strong>Flink Agents（0.3.1）/ Flink ML（2.3.0）：</strong>社区向 AI 方向延伸的新支线，前者把大模型代理事件化，后者提供机器学习算子库。</li>
+  </ul>
+  <figure>
+    <img src="../img/0075-flink-what-and-why/flink-github-repo.png" alt="GitHub apache/flink 仓库">
+    <figcaption>github.com/apache/flink（2026-09-30 截图）：Star 约 26.4k · Fork 约 14.0k · 主语言 Java · Apache-2.0 许可，最新 tag release-2.3.0</figcaption>
+  </figure>
+  <p>社区现状一句话：<strong>大数据圈里活跃度最高的一档</strong>。GitHub 26.4k Star、每年一个 feature 主版本的发布纪律、从研究项目走到全球实时计算事实标准之一——十多年里它扛住了从"学术新星"到"生产基石"的全部考验。国内实时数仓、风控、大屏场景里，Flink 的渗透率尤其高，这也是本系列把它排进微系列的实用理由。</p>
+</section>
+
+<!-- ================= 07 架构师视角 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>架构师视角：什么信号出现时该上 Flink</h2>
+  <p>Flink 不是"所有实时需求的默认答案"，它是"实时需求变复杂后的收敛点"。给一个三问决策框架：</p>
+  <ul>
+    <li><strong>准确问：</strong>统计口径是不是按业务时间（下单时刻、支付时刻）而非到达时间？乱序迟到会不会算错账？是 → 你需要 Event Time + Watermark，这就是 Flink 的主场；</li>
+    <li><strong>状态问：</strong>逻辑里有没有"要记住东西"的活——窗口聚合、去重、双流 Join、实时特征？状态规模会不会超过单机内存？是 → 内置状态管理与 RocksDB 后端正好接住；</li>
+    <li><strong>容错问：</strong>作业中断后能不能容忍重复计算？财务口径、计费、对账类场景"不多不少"是不是硬约束？是 → Checkpoint 的 exactly-once 语义是买引擎的理由。</li>
+  </ul>
+  <p>反过来，三个"可以先不用"的信号：只是把消息从一个队列搬到另一个队列、无状态转发，普通消费者就够；秒级延迟完全容忍、逻辑就是简单聚合，微批路线门槛更低；一次性离线批分析，批引擎的本职主场。第 3 期讲核心概念与架构，第 4 期做一个 Kafka 订单流实时大屏的完整实战，第 5 期进源码看 Checkpoint 怎么跑——五期之后，上面三问你可以自己回答。</p>
+</section>
+
+<!-- ================= 08 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. Apache Flink 官网的一句话定位是？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，这是通用数据库的定位语，Flink 不做存储主职。","不对，Flink 是流批一体的引擎，不限于消息队列中间件。","对的：Stateful Computations over Data Streams，对有界和无界数据流做有状态计算。"]'>
+        <li class="quiz-option">The World's Most Advanced Open Source Database</li>
+        <li class="quiz-option">A Distributed Messaging Queue for Streaming Pipelines</li>
+        <li class="quiz-option">Stateful Computations over Data Streams</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 流处理三座山里，"该等到什么时候才确认窗口数据齐了"属于哪座？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，容错解决的是挂了之后不多算不少算。","对的：这是乱序问题的核心——按业务时间统计时，Watermark 负责宣告进度。","不对，状态管理解决的是中间结果放哪、丢不丢。"]'>
+        <li class="quiz-option">容错：快照与恢复</li>
+        <li class="quiz-option">乱序：业务时间与到达时间不一致</li>
+        <li class="quiz-option">状态：中间结果的存放</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 关于 Flink 2.x 的版本口径，下列哪个说法符合官方文档？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：2.0 起官方移除 Scala API，Java 17 为默认推荐，包名后缀只是发行包内部依赖。","不对，1.20 是 LTS 长期支持线，官方仍在维护。","不对，连接器按兼容矩阵配套，2.3 的 Kafka 连接器 2026-09-30 口径尚未发布。"]'>
+        <li class="quiz-option">Scala API 已在 2.0 移除，Java API 是官方推荐路线</li>
+        <li class="quiz-option">1.20 已停止维护，必须升级到 2.x</li>
+        <li class="quiz-option">所有连接器与 2.3 内核同步发版、永远兼容</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 09 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：微批路线复用批引擎、运维心智更省，为什么 Flink 坚持"逐条真流"这条更重的路线？这条路的价值边界在哪？</summary>
+    <div class="details-body">
+      <p>先把微批的合理性说透：它把"无界"翻译成"有界"，批引擎的调度、容错、Shuffle 全部复用，工程师用一套心智同时覆盖离线和近实时——<strong>在延迟容忍度是秒级、逻辑是简单聚合的场景里，微批是理性选择，不值得嘲笑</strong>。但翻译是有损耗的，损耗体现在三层。<strong>第一层是延迟的结构性下限：</strong>数据要等下一个批次才被处理，攒批间隔就是延迟地板，毫秒级场景从模型上就不成立，不是调参能救的。<strong>第二层是时间语义的近似：</strong>批次开跑即默认"到齐"，迟到数据的归属只能靠补丁式方案近似，而 Event Time + Watermark 是把"等到什么时候"变成一整套显式协议——这层差异在金融口径、计费、风控上直接体现为"算得对不对"。<strong>第三层是状态的重视程度：</strong>微批时代状态常被降格为"批间共享的临时结果"，外挂存储是常规操作；Flink 把状态当一等公民，本地存取、自动快照、随规模伸缩，复杂有状态逻辑（双流 Join、大窗口、CEP）才写得出来、扛得住量。<strong>价值边界</strong>由此清晰：延迟敏感、时间语义严格、状态逻辑复杂这三个条件命中越多，真流路线的复利越大；一个都不命中，微批甚至普通消费者更务实。<strong>路线没有信仰，只有场景匹配</strong>——这也是判断一个团队实时架构成熟度的试金石：能说清"什么时候不用 Flink"的团队，才是真的把 Flink 用明白了。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：团队现在用"消费者 + 定时任务 + Redis 计数器"拼了一个实时大屏，高峰期数字总对不上、发布后计数还会回退。用本期三座山的框架诊断，问题出在哪、Flink 各给什么解法？</summary>
+    <div class="details-body">
+      <p>逐座山对号入座。<strong>乱序山：</strong>消费者按"到达顺序"累计 Redis 计数器，消息队列重试、分区并行都会让旧事件晚到，晚到的加一遍、去重无从谈起，数字自然漂移。Flink 的解法是 Event Time：从订单里取业务时间戳，Watermark 声明"这个时刻之前的数据到齐了"，窗口按业务时间切、迟到数据走侧输出，口径由协议保证而不是靠运气。<strong>容错山：</strong>发布或崩溃后，定时任务从哪继续全凭口口相传：Redis 里的计数是半新半旧的，重放消息会翻倍，不清空就回退。Flink 的解法是 Checkpoint：状态周期性快照到分布式存储，恢复时回到最后一次快照、从源端对应位置重放——"不多算不少算"由机制保证。<strong>状态山：</strong>Redis 在这个架构里其实是在客串"外部状态层"，每条消息一次网络往返，高峰期既是瓶颈又是单点。Flink 的解法是把状态放进算子本地（HashMapStateBackend 或 RocksDB），读写走内存或本地磁盘，规模大了加并行度而不是换更大的 Redis。<strong>额外红利是运维面：</strong>三件拼图（消费者、定时任务、Redis 契约）收敛成一个声明式的 Flink 作业，监控、恢复、扩缩容都有标准动作。但也要诚实说代价：团队要学一套新的概念体系（并行度、Watermark、状态后端、Checkpoint 调优），小规模场景这套投入未必划算——<strong>数字对不上的痛越真实，换引擎的收益越快兑现</strong>。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 10 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>Apache Flink = 数据流上的有状态计算引擎（基准 v2.3.0，2026-06-25 发布），官网定位 Stateful Computations over Data Streams；</li>
+      <li>流处理三座山：<strong>乱序</strong>（业务时间 ≠ 到达时间）、<strong>容错</strong>（不多算不少算）、<strong>状态</strong>（中间结果放哪）——Flink 把三者的解法全部内置；</li>
+      <li>与微批路线的本质差异不在延迟数字，而在<strong>时间语义</strong>：Watermark 让"等到什么时候"第一次有了正式协议；</li>
+      <li>版本口径：2.x 新主线 + 1.20 LTS 双轨；Java 11/17/21，官方推荐 Java 17；Scala API 已于 2.0 移除；连接器看官方兼容矩阵（Kafka Connector 5.0.0 兼容 2.1.x/2.2.x）；</li>
+      <li>上 Flink 的三问信号：<strong>准不准（Event Time）、记不记（状态）、稳不稳（exactly-once）</strong>——三问皆否时，先别请这台引擎。</li>
+    </ul>
+  </div>
+  <figure>
+    <img src="../img/0075-flink-what-and-why/flink-docs-stateful.png" alt="Flink 官方文档:有状态流处理">
+    <figcaption>nightlies.apache.org 2.3 官方文档 Stateful Stream Processing 一章（2026-09-30 截图）：Keyed State 按键分组后读写全是本地操作，State Persistence 以 stream replay + checkpointing 支撑 exactly-once 语义</figcaption>
+  </figure>
+  <p><strong>下期预告：</strong>第 2 期《5 分钟跑起来》——下载 Flink 2.3.0 起一个本地集群，打开 Web UI，用官方 DataStream API 教程写出并跑通你的第一个流作业，顺手把 Checkpoint 的第一行配置和"常见报错第一套解法"收进兜里。</p>
+  <p><strong>Primary source：</strong><a href="https://nightlies.apache.org/flink/flink-docs-release-2.3/" target="_blank" rel="noopener">Apache Flink 官方文档 2.3（nightlies.apache.org）</a>——本期版本口径、Java/Scala 支持与组件现状均出自官网与官方文档（v2.3.0，2026-09-30 核对）；版本发布记录见 <a href="https://flink.apache.org/downloads/" target="_blank" rel="noopener">flink.apache.org/downloads</a>，源码见 <a href="https://github.com/apache/flink" target="_blank" rel="noopener">github.com/apache/flink</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev">← 上一期：0074 · PostgreSQL 架构与源码导读</span>
+  <a class="next" href="0076-flink-quickstart.html">下一期：5 分钟跑起来 Apache Flink →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Apache RocketMQ 系列第 3 期：核心概念与整体架构 | 2026-09-30</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0087</span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0086 · RocketMQ 系列第 3 期 / 共 5 期 · 下一期:0088 · <a href="https://rocketmq.apache.org/" target="_blank" rel="noopener">rocketmq.apache.org ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · APACHE ROCKETMQ 系列第 3 期：核心概念与整体架构</p>
+  <h1>RocketMQ 核心概念与整体架构：路由、存储、消费的三层功夫</h1>
+  <p class="subtitle">上一期我们跑通了最小集群，这期继续——把跑通的每一步背后的道理讲透。主线三层：<strong>路由层</strong>，NameServer 用"节点互不通信"的极简设计换来了没有单点的路由服务；<strong>存储层</strong>，全类型消息统一顺序追加写 CommitLog，再由后台分发成队列索引与按键索引，这是高吞吐低延迟的物理秘密；<strong>消费层</strong>，消费者组分摊队列实现横向扩容，重试与死信兜住消费失败。最后补上 5.x 的两个新词：Proxy 无代理架构与 Pop 消费。本期结束，你看到的不再是四个黑盒进程，而是一张消息从生产到消费的完整地图。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🚀 分布式消息队列 · Java · Apache-2.0</span>
+    <span class="tag">📦 基于 v5.5.1（官方 Latest，2026-08-20 发布）</span>
+    <span class="tag-date">📅 2026-09-30 · 第 3 期</span>
+    <span class="tag time">⏱ 预计阅读 14 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 分水岭 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>为什么这期是分水岭：从"会用"到"看懂"</h2>
+  <p>第 2 期结束时你拥有了一套能跑的环境，但每条命令背后发生的事还是黑盒：<code>-n localhost:9876</code> 到底问了什么？<code>SEND_OK</code> 之前消息落在了哪？消费者重启后为什么消息接着消费不重不漏？这些问题的答案就是本期的六个概念：<strong>NameServer、Topic 与队列、CommitLog 与双索引、消费者组与重平衡、重试与死信、Proxy 与 Pop</strong>。</p>
+  <p>这期也是"五期里回报率最高的一期"：第 4 期的事务消息与顺序消息，本质是在存储与消费层做文章；第 5 期读源码，读的就是这期概念的代码形态。建议边读边回到第 2 期的环境里对照操作，概念落地最快。</p>
+</section>
+
+<!-- ================= 02 NameServer ================= -->
+<section>
+  <h2><span class="sec-num">02</span>NameServer：把注册中心做"轻"的艺术</h2>
+  <p>NameServer 干一件事：告诉客户端"这个 Topic 的队列都在哪些 Broker 上"。它的设计极简得反直觉——<strong>每个 NameServer 节点彼此独立、无状态、互不通信</strong>；Broker 向所有节点定期上报路由与心跳，客户端向任意节点查询。没有选主、没有仲裁、没有集群元数据同步。</p>
+  <p>对比一下常见的强一致注册中心 ZooKeeper，差异一目了然：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>维度</th><th>NameServer</th><th>ZooKeeper</th></tr></thead>
+    <tbody>
+      <tr><td>一致性模型</td><td>最终一致：各节点视图短暂不同</td><td>强一致：写入过仲裁</td></tr>
+      <tr><td>节点关系</td><td>互不通信，各自独立服务</td><td>集群协议互联，选主仲裁</td></tr>
+      <tr><td>故障影响</td><td>客户端用本地缓存路由，几乎无感</td><td>半数以上节点存活才能写入</td></tr>
+      <tr><td>运维成本</td><td>一个轻进程，几乎免维护</td><td>需专门调优与监控的 CP 组件</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>为什么"弱"在这里成立？因为<strong>路由错了可重试，数据丢了不可逆</strong>——消息路由短暂陈旧的最坏后果是"连到一个已下线的 Broker"，客户端换一个地址重试即可；而为此付出的代价（选主、仲裁、运维一套 CP 组件）却是持续的。用一次重试换掉整套协调设施，这是消息路由场景的划算账。什么时候不成立？需要强一致元数据决策时——主从切换的选主仲裁，RocketMQ 另外交给 Controller 组件处理，不把 NameServer 做强。</p>
+</section>
+
+<!-- ================= 03 Topic 与队列 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>Topic 与队列模型：官方领域模型一图定调</h2>
+  <figure>
+    <img src="../img/0087-rocketmq-core-concepts-architecture/rocketmq-docs-domainmodel.png" alt="官方领域模型文档">
+    <figcaption>官方文档 Domain Model 章节（2026-09-30 截图）：生产者、Topic 与消息队列、消费者组与订阅关系的官方领域模型图。</figcaption>
+  </figure>
+  <p>官方领域模型的原话值得逐条读：<strong>Topic</strong> 是"消息传输与存储的分组容器"，由多个队列组成；<strong>MessageQueue</strong>（5.x 文档常直接称 Queue）是"传输与存储的单元容器"，消息在队列内有序存放；<strong>Message</strong> 是"数据传输的最小单元"，一旦存储不可变更；<strong>Producer</strong> 是"轻量、匿名"的，生产者无身份，可以随便起随便加；<strong>ConsumerGroup</strong> 是"消费身份的分组"，组内成员必须保持相同的消费逻辑与配置；订阅关系是<strong>组级</strong>配置——过滤、重试、进度都挂在组上。</p>
+  <p>这张模型的实用推论：<strong>横向扩容的粒度是队列</strong>——消费能力不够时，加消费者实例或加队列数，配平即可；<strong>订阅关系必须组内一致</strong>——同组两个消费者订阅了不同的 Topic 集合，是新手期最经典的诡异故障来源（消息莫名丢失），官方文档在 Best Practice 里专门警示过。</p>
+</section>
+
+<!-- ================= 04 存储引擎 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>存储引擎：CommitLog 顺序写与两个索引</h2>
+  <div class="diagram">
+  <svg viewBox="0 0 760 320" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar87" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="16" y="120" width="130" height="60" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="81" y="145" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">Producer</text>
+    <text x="81" y="165" text-anchor="middle" fill="var(--muted)" font-size="9.5">全类型消息混发</text>
+    <rect x="196" y="96" width="190" height="110" rx="12" fill="var(--card)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="291" y="122" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">CommitLog</text>
+    <text x="291" y="144" text-anchor="middle" fill="var(--muted)" font-size="10">所有 Topic 统一顺序追加</text>
+    <text x="291" y="164" text-anchor="middle" fill="var(--muted)" font-size="10">单文件默认 1 GB 滚动</text>
+    <text x="291" y="186" text-anchor="middle" fill="var(--muted)" font-size="9.5">随机写 → 顺序写</text>
+    <rect x="196" y="238" width="190" height="58" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="291" y="262" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">后台分发线程</text>
+    <text x="291" y="282" text-anchor="middle" fill="var(--muted)" font-size="9.5">紧跟写入位点重放分发</text>
+    <rect x="452" y="30" width="170" height="72" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="537" y="54" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">ConsumeQueue 队列索引</text>
+    <text x="537" y="74" text-anchor="middle" fill="var(--muted)" font-size="9.5">每条 20 字节：物理偏移</text>
+    <text x="537" y="90" text-anchor="middle" fill="var(--muted)" font-size="9.5">按队列组织 · 供消费定位</text>
+    <rect x="452" y="128" width="170" height="72" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="537" y="152" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">IndexFile 按键索引</text>
+    <text x="537" y="172" text-anchor="middle" fill="var(--muted)" font-size="9.5">消息 Key/时间 → 物理位置</text>
+    <text x="537" y="188" text-anchor="middle" fill="var(--muted)" font-size="9.5">运维按业务键查消息</text>
+    <rect x="452" y="228" width="170" height="66" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="537" y="252" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">Consumer</text>
+    <text x="537" y="272" text-anchor="middle" fill="var(--muted)" font-size="9.5">先查队列索引</text>
+    <text x="537" y="286" text-anchor="middle" fill="var(--muted)" font-size="9.5">再回 CommitLog 读原文</text>
+    <line x1="146" y1="150" x2="192" y2="150" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar87)"/>
+    <line x1="386" y1="170" x2="448" y2="80" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar87)"/>
+    <line x1="386" y1="180" x2="448" y2="160" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar87)"/>
+    <line x1="291" y1="238" x2="291" y2="210" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar87)"/>
+    <text x="298" y="228" fill="var(--muted)" font-size="9.5">重放</text>
+    <line x1="622" y1="262" x2="700" y2="262" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar87)"/>
+    <line x1="700" y1="262" x2="700" y2="90" stroke="var(--accent-3)" stroke-width="2"/>
+    <line x1="700" y1="90" x2="626" y2="76" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar87)"/>
+    <text x="672" y="180" fill="var(--muted)" font-size="9.5">定位回读</text>
+    <text x="16" y="314" fill="var(--muted)" font-size="9.5">图例：写路径只有一条顺序追加；读路径两级跳——队列索引定位，统一日志取原文。默认保留 72 小时，按节点级时间清理（概念图，源码路径第 5 期逐行读）</text>
+  </svg>
+  </div>
+  <p>存储层的洞察只有一句话：<strong>把"多种多样的消息"压成"一条顺序写"，把"多种多样的读法"摊成"多个索引"</strong>。写路径上，不管什么 Topic、什么类型，全部混进 CommitLog 追加，磁盘只做顺序写，物理上限就是带宽本身。读路径上，ConsumeQueue 按队列组织轻量索引——每条固定 20 字节，存物理偏移与大小——消费时先查索引再回 CommitLog 取原文；IndexFile 则按消息 Key 建哈希索引，支撑"按订单号查消息"这类运维诉求。</p>
+  <p>几个值得记住的默认值（v5.5.1 源码 <code>MessageStoreConfig</code> 口径）：CommitLog 单文件 1 GB 写满滚动；ConsumeQueue 单文件 30 万条；消息默认保留 72 小时，清理按节点级时间判断，与消费进度无关——<strong>没消费完的消息到期也会被删</strong>，磁盘紧张时还会提前强制清理，容量规划必须留余量。</p>
+  <figure>
+    <img src="../img/0087-rocketmq-core-concepts-architecture/rocketmq-docs-storepolicy.png" alt="官方消息存储与清理文档">
+    <figcaption>官方文档 Message Storage and Cleanup 章节（2026-09-30 截图）：物理日志队列加轻量逻辑队列的两级组织口径，以及按存储时长清理的机制说明。</figcaption>
+  </figure>
+</section>
+
+<!-- ================= 05 消费者组与重平衡 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>消费者组与重平衡：横向扩容的机制</h2>
+  <figure>
+    <img src="../img/0087-rocketmq-core-concepts-architecture/rocketmq-docs-loadbalance.png" alt="官方消费者负载均衡文档">
+    <figcaption>官方文档 Consumer Load Balancing 章节（2026-09-30 截图）：广播消费与集群消费的官方图示，以及消息维度、队列维度两类分配策略。</figcaption>
+  </figure>
+  <p>消费模式有两种，官方图分得很清楚：<strong>集群消费</strong>（Share Consume）——组内消费者分摊队列，一条消息只被组内一个实例消费，这是业务系统的默认姿势；<strong>广播消费</strong>（Broadcast Consume）——组内每个消费者都消费全量消息，适合配置刷新这类"每台都要知道"的场景。日常绝大多数场景用集群消费。</p>
+  <p>集群消费下，"哪台消费者管哪些队列"由重平衡机制分配。5.x 官方文档给出两个策略维度：<strong>队列维度分配</strong>——把队列整体分给消费者，同一队列的消息固定由同一实例处理，配合顺序消息最稳；<strong>消息维度分配</strong>——按消息属性哈希打散到消费者，负载更均匀但不再保证同队列同实例。消费者上下线都会触发重平衡，重平衡瞬间可能有短暂的重复消费——<strong>消费端幂等是必修课，不是可选项</strong>。</p>
+</section>
+
+<!-- ================= 06 重试与死信 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>重试与死信：消费失败的兜底设计</h2>
+  <p>消费失败不是异常路径，是设计内的常规路径。5.x 官方文档把重试讲成状态机：消息消费失败后进入重试等待，按递增间隔重投——官方给出的无序消息节奏是从 10 秒起步逐次拉长，到第 16 次后固定 2 小时一次；<strong>重试次数上限挂在消费者组配置上</strong>，例如上限 3 次则一条消息最多投递 4 次（1 次原始加 3 次重试）；重试耗尽仍失败，消息不再重投，<strong>转入死信队列</strong>，等人来救——管理台的死信查看与批量重投就是给这步用的。</p>
+  <p>4.x 经典实现里，重试与死信各有以消费者组命名的专属主题（固定前缀加组名），"换一个主题重投"的思路肉眼可见；5.x 把它抽象成消息状态机的 WaitingRetry 与 DLQ 状态，概念更纯粹，行为不变。顺序消息是特例：为避免阻塞队列，重试间隔固定、次数受限——第 4 期讲顺序消息时细说。记住一个原则：<strong>重试是给"偶发业务失败"准备的，不是限流工具，官方明确建议少次数长间隔，别配无限重试</strong>。</p>
+  <p class="note">来源注记——官方文档 Consumption Retry 章节（rocketmq.apache.org/docs/featureBehavior/10consumerretrypolicy，2026-09-30 核对）：重试间隔、次数上限与死信口径。</p>
+</section>
+
+<!-- ================= 07 5.x 新词 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>5.x 的两个新词：Proxy 无代理与 Pop 消费</h2>
+  <p><strong>Proxy 无代理架构</strong>：4.x 时代客户端直连 Broker，计算与存储绑在一起，扩缩容要动存储层。5.x 把计算抽成无状态 Proxy 层（第 2 期的 <code>--enable-proxy</code> 就是它的 Local 模式，独立部署则叫 Cluster 模式），客户端统一接 Proxy，Broker 退化成纯存储节点，弹性伸缩不再牵动客户端。<strong>Pop 消费</strong>：传统客户端要自己管理"我分到哪些队列"，Pop 把队列分配收到服务端——消费者按需"取下一条"，没有队列与实例的强绑定，弱客户端、海量消费者、多语言场景都因此受益。</p>
+  <p>架构师的读法：这两个新词没有动摇前三节的概念——路由还是 NameServer，存储还是 CommitLog，消费语义还是消费者组——它们换的是<strong>接入面与分配面</strong>。存量系统继续经典形态，新系统走 Proxy 加多语言客户端，一套概念两代架构通用，这是 5.x 最务实的地方。</p>
+</section>
+
+<!-- ================= 08 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. NameServer 各节点互不通信，这种"弱"设计在消息场景成立的根本原因是？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，NameServer 也需要 Broker 定期上报路由，不是纯静态。","不对，路由数据有 Broker 上报与本地缓存两道兜底。","对的：路由短暂陈旧的最坏后果是重试一次，代价远小于养一套强一致协调组件。"]'>
+        <li class="quiz-option">路由表是静态配置，从不需要更新</li>
+        <li class="quiz-option">NameServer 内部也做了 Raft 选主</li>
+        <li class="quiz-option">路由短暂陈旧可靠重试兜底，代价远小于强一致协调设施</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 消息写入存储层的路径是？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，按 Topic 各写各的文件会退化成随机写。","对的：全类型消息统一顺序追加写 CommitLog，再由后台线程分发构建队列索引与按键索引。","不对，消息必须先落盘持久化，不能只进内存。"]'>
+        <li class="quiz-option">按 Topic 分别写各自的日志文件</li>
+        <li class="quiz-option">统一顺序追加写 CommitLog，后台再分发构建索引</li>
+        <li class="quiz-option">先写 ConsumeQueue 索引，再异步写日志</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 同一消费者组的两个实例订阅了不同的 Topic 集合，会发生什么？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，订阅关系是组级配置，不是实例级。","对的：订阅关系必须组内一致，不一致是官方文档明确警示的经典故障源，表现为消息莫名丢失。","不对，Broker 会按各自订阅分别投递——这个行为并不存在。"]'>
+        <li class="quiz-option">各自生效，互不影响</li>
+        <li class="quiz-option">订阅关系错乱，消息莫名丢失——官方文档明确警示的经典故障</li>
+        <li class="quiz-option">Broker 自动合并两边的订阅</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 09 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：订单 Topic 有 8 个队列、6 个消费者实例，队列维度分配下负载怎么分？把实例扩到 10 个呢？缩到 2 个呢？由此谈谈"队列数是 Topic 的预购产能"这句话。</summary>
+    <div class="details-body">
+      <p>三种形态算清楚，重平衡就通透了。<strong>8 队列对 6 实例</strong>：队列维度分配下，有两个实例各扛 2 个队列，其余各扛 1 个——天然不均，这就是为什么队列数最好设计成实例数的整数倍。<strong>扩到 10 实例</strong>：8 个队列分给 10 个实例，<strong>有 2 个实例一个队列都分不到，纯空转</strong>——队列是消费能力的分配单位，队列数就是消费并行度的天花板，实例超配只是白花钱。<strong>缩到 2 实例</strong>：每个实例扛 4 个队列，消费能力骤降为原来的四分之一量级，消费延迟抬头，这就是"缩容前先看积压"的原因。由此理解"队列数是 Topic 的预购产能"：建 Topic 时定队列数，等于提前买断了未来的消费并行度上限。定少了，峰值扩容受制于改队列数（涉及存量队列的路由与索引，是重操作）；定多了，大量空队列摊薄元数据与运维注意力，顺序消息场景还会让消息组被摊得更散。工程上的经验区间是<strong>按目标峰值消费并行度乘以安全系数定队列数</strong>，并且让部署实例数贴合队列数走整除关系。最后补一句 5.x 的注脚：Pop 消费把"实例绑定队列"松开了，理论上消费者数量不再受队列数钳制——但存储层队列仍是并行度的物理边界，<strong>队列数的容量规划思维在新架构下依然成立，只是从"客户端分配"挪到了"服务端调度"</strong>。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：把 CommitLog 这套"统一顺序写加多索引"的存储设计与 Kafka 的"分区日志"放在一起看：两种设计各自把什么成本转嫁给了谁？什么业务特征会偏好哪一种？</summary>
+    <div class="details-body">
+      <p>两种设计是同一道题的两个解：<strong>写路径优化与读路径灵活性，不可兼得，必须选一头</strong>。Kafka 把队列（分区）作为存储的第一物理单位，一个分区一个日志文件：读某分区天然顺序，消费端定位零跳转；代价是<strong>Topic 与分区数直接决定文件句柄、随机写与页缓存的碎片程度</strong>——几百上千个 Topic、每个几十个分区的业务场景，写路径被摊成大量小流，顺序性衰减，这句"写路径成本转嫁给业务建模（少 Topic 少分区）"就是它的账。RocketMQ 反着来：所有消息压进一条统一日志，写路径永远是一条顺序流，Topic 数量对写性能几乎不敏感；代价在<strong>读路径多了一跳</strong>——消费要先查 ConsumeQueue 索引再回统一日志取原文，中间隔了页缓存是否命中的运气，所以它要做预读、要做内存映射的精细管理（第 5 期源码里的读写线程分离正是为这个服务的）。业务特征对照就清晰了：<strong>多 Topic、多业务线共享集群、消息类型繁杂</strong>——电商中台、业务消息总线，统一日志设计红利最大；<strong>少 Topic、海量分区、流式管道</strong>——日志采集、数仓管道，分区日志的零跳转读更香。还有一个隐藏差异：统一日志下保留策略只能按节点统一设置（本期第 04 节的 72 小时），分区日志则容易做分区级 TTL——<strong>需要按 Topic 差异化保留期时，统一日志要多做一层</strong>。没有更好的设计，只有更配的设计。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 10 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>NameServer：节点互不通信的最终一致路由，用"可重试"换掉强一致协调设施；</li>
+      <li>领域模型：Topic 由队列组成，队列内有序，生产者匿名轻量，订阅关系挂组不挂实例；</li>
+      <li>存储：全类型统一顺序写 CommitLog（单文件 1 GB），ConsumeQueue 每条 20 字节两级跳读，默认保留 72 小时与消费进度无关；</li>
+      <li>消费：集群消费分摊队列是默认，重平衡瞬间可能重复，<strong>消费端幂等是必修课</strong>；重试间隔递增，耗尽进死信；</li>
+      <li>5.x：Proxy 把计算抽成无状态层，Pop 把队列分配收进服务端——根基不变，接入面升级。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 4 期《实战：订单一致性》——用事务消息的半消息加回查解决"落库与发消息的一致性"，用顺序消息守住订单状态机，顺手对比定时消息与本地事务表方案。</p>
+  <p><strong>Primary source：</strong><a href="https://rocketmq.apache.org/docs/domainModel/01main" target="_blank" rel="noopener">RocketMQ 官方文档 Domain Model 与 Feature Behavior 章节（rocketmq.apache.org/docs）</a>——本期概念口径出自官方文档，存储默认值核对自 v5.5.1 源码 MessageStoreConfig（2026-09-30 核对）。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev">← 上一期：<a href="0086-rocketmq-quickstart.html">5 分钟跑起来 Apache RocketMQ</a></span>
+  <a class="next" href="0088-rocketmq-in-action.html">下一期：实战订单一致性 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

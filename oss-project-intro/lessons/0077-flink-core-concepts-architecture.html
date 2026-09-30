@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Apache Flink 系列第 3 期：把流计算引擎拆开看 | 2026-09-30</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0077</span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0076 · Apache Flink 系列第 3 期 / 共 5 期 · 下一期:0078 · <a href="https://flink.apache.org/" target="_blank" rel="noopener">flink.apache.org ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · APACHE FLINK 系列第 3 期：核心概念与整体架构</p>
+  <h1>Apache Flink 概念与架构：把流计算引擎拆开看</h1>
+  <p class="subtitle">上一期我们把 Flink 跑了起来，这期继续——把你在 Web UI 上看到的每个词变成能讲清楚的概念。作业为什么分成 <strong>JobManager 与 TaskManager</strong> 两种进程、Slot 到底隔离了什么；你写的 DataStream 代码怎么变成 <strong>StreamGraph → JobGraph → ExecutionGraph</strong> 三层图；<strong>Event Time 与 Watermark</strong> 怎么把乱序治住；<strong>Checkpoint 与两个状态后端</strong>各自适合什么量级；窗口从"第一个元素进窗"到"水印触发"的完整生命周期。学完这期，仪表盘上再没有黑话。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🐿️ 开源流计算引擎 · Java · Apache-2.0</span>
+    <span class="tag">📦 基于 v2.3.0（官方 Latest，2026-06-25 发布）</span>
+    <span class="tag-date">📅 2026-09-30 · 第 3 期</span>
+    <span class="tag time">⏱ 预计阅读 13 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 运行时架构 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>运行时架构：两种进程，一个 Slot</h2>
+  <p>Flink 集群的运行时只有两种进程。<strong>JobManager（大师傅）：</strong>负责协调分布式执行——决定下一个任务派给谁、响应任务失败、协调 Checkpoint、组织恢复，官方把它的职责拆成三个组件：<strong>ResourceManager</strong> 管集群资源的分配与释放，调度单位就是 Task Slot；<strong>Dispatcher</strong> 对外提供提交作业的 REST 接口、跑 Web UI，并为每个提交的作业起一个 <strong>JobMaster</strong>；JobMaster 管单个 JobGraph 的执行，集群同时跑多个作业时各有一名。<strong>TaskManager（工人）：</strong>真正执行数据流任务的 JVM 进程，负责缓冲与交换数据，至少要有一个。</p>
+  <figure>
+    <img src="../img/0077-flink-core-concepts-architecture/flink-docs-architecture.png" alt="Flink 集群架构图">
+    <figcaption>nightlies.apache.org 2.3 官方文档 Anatomy of a Flink Cluster（2026-09-30 截图）：JobManager 与 TaskManager 两进程，Client 准备数据流图后提交，Task Slot 是 TaskManager 内的资源分块</figcaption>
+  </figure>
+  <p>再细看 <strong>Slot</strong>：它是 TaskManager 里最小的资源调度单位，每个 slot 分得托管内存的固定份额（三个 slot 就是各三分之一），<strong>目前只隔离托管内存，不隔离 CPU</strong>。Flink 默认允许同一作业的不同任务共享 slot，所以一个 slot 能装下作业的整条流水线——集群需要的 slot 总数只要等于作业的最高并行度即可。这个设计让你改并行度时不必重算资源账。</p>
+  <p class="note">来源注记——nightlies.apache.org 2.3 文档 Concepts / Flink Architecture（2026-09-30 核对）：JobManager 三组件（ResourceManager、Dispatcher、JobMaster）、slot 只隔离 managed memory、slot 共享与"slot 数 = 最高并行度"均为官方原文。</p>
+</section>
+
+<!-- ================= 02 三层执行图 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>三层执行图：从一行代码到可调度</h2>
+  <div class="diagram">
+  <svg viewBox="0 0 760 250" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar77a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="14" y="88" width="150" height="74" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="89" y="116" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">DataStream 程序</text>
+    <text x="89" y="138" text-anchor="middle" fill="var(--muted)" font-size="9.5">你写的业务逻辑</text>
+    <rect x="212" y="88" width="150" height="74" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="287" y="112" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">StreamGraph</text>
+    <text x="287" y="132" text-anchor="middle" fill="var(--muted)" font-size="9.5">客户端生成的数据流图</text>
+    <text x="287" y="150" text-anchor="middle" fill="var(--muted)" font-size="9.5">算子怎么连的原始结构</text>
+    <rect x="410" y="88" width="150" height="74" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="485" y="112" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">JobGraph</text>
+    <text x="485" y="132" text-anchor="middle" fill="var(--muted)" font-size="9.5">可提交的作业图</text>
+    <text x="485" y="150" text-anchor="middle" fill="var(--muted)" font-size="9.5">能合并的算子链成节点</text>
+    <rect x="608" y="88" width="138" height="74" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="677" y="112" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">ExecutionGraph</text>
+    <text x="677" y="132" text-anchor="middle" fill="var(--muted)" font-size="9.5">JobGraph 的并行化版本</text>
+    <text x="677" y="150" text-anchor="middle" fill="var(--muted)" font-size="9.5">JobManager 据此调度</text>
+    <line x1="164" y1="125" x2="208" y2="125" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar77a)"/>
+    <line x1="362" y1="125" x2="406" y2="125" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar77a)"/>
+    <line x1="560" y1="125" x2="604" y2="125" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar77a)"/>
+    <text x="186" y="112" text-anchor="middle" fill="var(--muted)" font-size="9">生成</text>
+    <text x="384" y="112" text-anchor="middle" fill="var(--muted)" font-size="9">提交</text>
+    <text x="582" y="112" text-anchor="middle" fill="var(--muted)" font-size="9">并行化</text>
+    <text x="14" y="210" fill="var(--muted)" font-size="9.5">图例：并行度 100 的算子在 JobGraph 里是一个节点，到 ExecutionGraph 里展开成 100 个执行顶点——Web UI 的 JobGraph 页画的是中间那层（概念图）</text>
+  </svg>
+  </div>
+  <p>你在 Web UI 里点开作业看到的那张图，是这条流水线的中间层。<strong>第一层 StreamGraph</strong> 在客户端生成，忠实记录"数据怎么流"；<strong>第二层 JobGraph</strong> 是提交单位，把能串起来执行的算子合并成节点（operator chain，链上算子同线程直传，省序列化）；<strong>第三层 ExecutionGraph</strong> 由 JobManager 生成——官方内部文档原话："The JobManager transforms the JobGraph into an ExecutionGraph"，它是 JobGraph 的并行化版本，每个并行子任务对应一个执行顶点，任务重试、故障恢复都发生在这一层。三层图各管一件事：<strong>写起来直觉、传过去紧凑、跑起来并行</strong>。</p>
+  <p class="note">来源注记——nightlies.apache.org 2.3 文档 Internals / Job Scheduling（2026-09-30 核对）："The JobManager transforms the JobGraph into an ExecutionGraph"、ExecutionGraph 为 JobGraph 的 parallel version、并行度 100 即一个 JobVertex 对应 100 个 ExecutionVertex 均为官方原文。</p>
+</section>
+
+<!-- ================= 03 时间语义与 Watermark ================= -->
+<section>
+  <h2><span class="sec-num">03</span>时间语义：Event Time 与 Processing Time</h2>
+  <p>流处理里"几点"有两种答法。<strong>Processing Time（处理时间）：</strong>执行算子的那台机器的系统时钟——最简单、延迟最低、不需要协调，但结果不确定：网络抖动、消息队列积压、机器停顿都会改写"哪条数据落在哪个窗口"。<strong>Event Time（事件时间）：</strong>每条数据自带的、在生产设备上就打好的时间戳——时间进度跟着数据走而不跟墙钟走，只要数据到齐，无论乱序、迟到还是重放历史，结果都一致。代价是要回答第 1 期留下的问题：<strong>"该等到什么时候，才能确认这个窗口到齐了？"</strong>答案是 Watermark（水位线）：它是一条插进数据流里的特殊记录，含义是"事件时间不早于我的数据都到齐了"——官方文档把它定义为 signaling progress in event time 的机制。水位线一过某个窗口的结束时刻，窗口就触发计算；之后才到的迟到数据，交给侧输出或容忍延迟参数处理。</p>
+  <figure>
+    <img src="../img/0077-flink-core-concepts-architecture/flink-docs-event-time.png" alt="Flink 官方文档:时间语义">
+    <figcaption>nightlies.apache.org 2.3 官方文档 Timely Stream Processing（2026-09-30 截图）：Processing Time 用算子所在机器的系统时钟，Event Time 用数据自带时间戳、必须指定 Watermark 生成策略</figcaption>
+  </figure>
+  <pre class="codeblock"><code>// 声明"最多乱序 5 秒"：事件时间减 5 秒就是水位线推进的位置
+WatermarkStrategy&lt;Order&gt; wm = WatermarkStrategy
+    .&lt;Order&gt;forBoundedOutOfOrderness(Duration.ofSeconds(5))
+    .withTimestampAssigner((order, ts) -&gt; order.getEventTime());
+orders.assignTimestampsAndWatermarks(wm);</code></pre>
+  <p>这两行就是乱序协议的落地：你告诉引擎"我的数据最多乱 5 秒"，引擎按最大观测事件时间减 5 秒推水位线。调的是<strong>确定性与延迟的旋钮</strong>：容忍乱序越多，窗口开得越久，结果越准、出数越晚。多并行度下每个算子取各输入分区水位线的最小值再推进——任何一条分区慢，整体水位线就慢，这也是排查"窗口迟迟不触发"的第一入口。</p>
+  <p class="note">来源注记——2.3 官方文档 Timely Stream Processing（2026-09-30 核对）：processing time 为系统时钟、event time 内嵌于记录、event time 程序必须指定 Event Time Watermarks 生成机制均为官方原文；WatermarkStrategy 写法见 DataStream API 文档。</p>
+</section>
+
+<!-- ================= 04 Checkpoint 与状态后端 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>Checkpoint：异步屏障快照与两个状态后端</h2>
+  <div class="diagram">
+  <svg viewBox="0 0 760 240" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar77b" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="20" y="80" width="130" height="70" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="85" y="108" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">Source</text>
+    <text x="85" y="128" text-anchor="middle" fill="var(--muted)" font-size="9.5">记下消费位点</text>
+    <text x="85" y="143" text-anchor="middle" fill="var(--muted)" font-size="9.5">插入 barrier n</text>
+    <rect x="240" y="80" width="150" height="70" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="315" y="108" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">算子</text>
+    <text x="315" y="128" text-anchor="middle" fill="var(--muted)" font-size="9.5">barrier 到齐 → 对齐</text>
+    <text x="315" y="143" text-anchor="middle" fill="var(--muted)" font-size="9.5">状态写状态后端</text>
+    <rect x="480" y="80" width="130" height="70" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="545" y="108" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">快照落盘</text>
+    <text x="545" y="128" text-anchor="middle" fill="var(--muted)" font-size="9.5">checkpoint storage</text>
+    <text x="545" y="143" text-anchor="middle" fill="var(--muted)" font-size="9.5">分布式文件系统</text>
+    <rect x="640" y="80" width="106" height="70" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="693" y="108" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">回执完成</text>
+    <text x="693" y="128" text-anchor="middle" fill="var(--muted)" font-size="9.5">coordinator 收齐 ack</text>
+    <line x1="150" y1="115" x2="236" y2="115" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar77b)"/>
+    <line x1="390" y1="115" x2="476" y2="115" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar77b)"/>
+    <line x1="610" y1="115" x2="636" y2="115" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar77b)"/>
+    <text x="20" y="200" fill="var(--muted)" font-size="9.5">图例：checkpoint coordinator（JobManager 的一部分）发起快照，barrier 随数据流流动，算子收到 barrier 即把状态交给状态后端——异步进行，不堵计算（概念图）</text>
+  </svg>
+  </div>
+  <p>这套机制的学名叫<strong>异步屏障快照</strong>，是 Chandy-Lamport 分布式快照算法的流式变体。官方文档的描述：所有 source 先记录自己的消费位点、往数据流里插入编号的 checkpoint barrier；barrier 随作业图流动，算子收到 barrier 就记录自己的状态；coordinator 收齐所有回执，第 n 次 checkpoint 完成。状态写在<strong>状态后端</strong>里，官方提供两种：<strong>HashMapStateBackend</strong>——状态以 Java 对象放在 JVM 堆上，读写就是对象访问，快、但受内存上限约束，是<strong>不配置时的默认值</strong>；<strong>EmbeddedRocksDBStateBackend</strong>——状态放进内嵌 RocksDB（落在 TaskManager 本地磁盘），序列化存取平均比堆后端慢约一个数量级，但状态规模只受磁盘限制，且是<strong>唯一支持增量 checkpoint</strong> 的后端。一句话：<strong>HashMap 换性能，RocksDB 换规模</strong>。</p>
+  <figure>
+    <img src="../img/0077-flink-core-concepts-architecture/flink-docs-fault-tolerance.png" alt="Flink 官方文档:状态后端">
+    <figcaption>nightlies.apache.org 2.3 官方文档 Fault Tolerance via State Snapshots（2026-09-30 截图）：EmbeddedRocksDBStateBackend 工作状态在本地磁盘、支持全量与增量快照；HashMapStateBackend 在 JVM 堆、仅全量；Checkpoint Storage 一节定义快照落盘位置</figcaption>
+  </figure>
+  <p class="note">来源注记——2.3 官方文档 Fault Tolerance 与 Ops / State Backends（2026-09-30 核对）："If nothing else is configured, the system will use the HashMapStateBackend"、RocksDB 慢约 10 倍、仅 EmbeddedRocksDBStateBackend 支持增量快照、asynchronous barrier snapshotting 为 Chandy-Lamport 变体均为官方原文。</p>
+</section>
+
+<!-- ================= 05 窗口模型 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>窗口模型：从第一个元素到水印触发</h2>
+  <p>窗口是"把无界流切成有界块"的官方答案。内置四种窗口分配器：<strong>滚动窗口</strong>（tumbling，固定长度不重叠）、<strong>滑动窗口</strong>（sliding，滑动步长小于窗口长时一条数据会落进多个窗口）、<strong>会话窗口</strong>（session，按不活跃间隙动态收口，没有固定起止）、<strong>全局窗口</strong>（global，默认永不触发，必须自定义 Trigger）。窗口的完整生命周期官方一句话讲完：<strong>第一个属于它的元素到达时创建；时间（事件或处理时间）越过"窗口结束时间加上容忍延迟"后整体移除</strong>；而默认的 EventTimeTrigger 就干一件事——水印越过窗口末端即触发计算。</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>窗口类型</th><th>切分方式</th><th>典型场景</th></tr></thead>
+    <tbody>
+      <tr><td>滚动窗口</td><td>固定长度，首尾相接不重叠</td><td>每分钟订单额、每 5 分钟 PV</td></tr>
+      <tr><td>滑动窗口</td><td>长度固定，按步长滑动可重叠</td><td>最近 1 小时趋势、移动平均</td></tr>
+      <tr><td>会话窗口</td><td>按活跃间隙动态分组收口</td><td>用户会话切分、行为分析</td></tr>
+      <tr><td>全局窗口</td><td>全部进一个窗口，永不自动触发</td><td>自定义触发逻辑的底座</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Trigger 决定"什么时候出数"，Evictor 决定"出数前扔掉谁"——默认配齐前者就够；要留意官方的提醒：<strong>指定 Evictor 会关掉预聚合</strong>，窗口状态量会显著变大。窗口内聚合还有个工程习惯：先用 <code>aggregate()</code> 增量聚合，窗口里只留一个小中间值，而不是攒一整窗原始数据。</p>
+  <p class="note">来源注记——2.3 官方文档 DataStream API / Windows（2026-09-30 核对）：四种 assigner、窗口创建与移除时机的原句、EventTimeTrigger 在水印越过窗口末端时触发、指定 evictor 阻止预聚合均为官方原文。</p>
+</section>
+
+<!-- ================= 06 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. Flink 集群需要的 slot 总数，官方设计下等于？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，slot 共享之下不必按算子数配，一个 slot 能装整条流水线。","不对，slot 只隔离托管内存，不隔离 CPU，不按 CPU 数配。","对的：默认 slot 共享，slot 数只需等于作业最高并行度。"]'>
+        <li class="quiz-option">作业里算子的总个数</li>
+        <li class="quiz-option">TaskManager 的 CPU 核数</li>
+        <li class="quiz-option">作业的最高并行度</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 水位线（Watermark）在 Flink 里的含义是？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，水位线本身不传业务数据，它是时间进度的标记。","对的：官方定义它是声明事件时间进度的机制，越过窗口末端即触发。","不对，水位线不负责重放数据，重放是恢复时源端做的事。"]'>
+        <li class="quiz-option">一种特殊的数据，用来补发丢失的消息</li>
+        <li class="quiz-option">宣告事件时间进度的标记</li>
+        <li class="quiz-option">故障恢复时重放数据的起播指针</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 状态大到单机内存装不下、还要增量快照，选哪个状态后端？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：RocksDB 后端状态规模只受磁盘限制，且是唯一支持增量 checkpoint 的后端。","不对，HashMap 后端在 JVM 堆上，受内存约束且只支持全量快照。","不对，checkpoint 存储管的是快照放哪，不管工作状态放哪。"]'>
+        <li class="quiz-option">EmbeddedRocksDBStateBackend</li>
+        <li class="quiz-option">HashMapStateBackend</li>
+        <li class="quiz-option">JobManagerCheckpointStorage</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 07 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：barrier 对齐是 exactly-once 的前提，但它会让快的分区等慢的分区。对齐的代价该怎么理解、什么时候该关？</summary>
+    <div class="details-body">
+      <p>先想清楚对齐在保护什么。一个双输入算子若先收到输入一的 barrier 就立刻快照，快照里就会混进"输入二 barrier 之后"的数据——恢复重放时这条数据会被再算一遍，exactly-once 就破了。<strong>对齐的本质是让快照的边界严格落在"所有输入都恰好消费到 barrier n"这一瞬间</strong>，官方文档说得很准：对齐仅在提供 exactly-once 保证时需要。代价也由此而来：快的分区到 barrier 后只能停下等慢的，数据在缓冲区里排队，出现"周期性停顿"，表现为吞吐锯齿、checkpoint 时长抖动。<strong>什么时候该关？</strong>业务能容忍重复或上游能去重时，可以切到 AT_LEAST_ONCE 模式，barrier 不对齐、数据不停，换来更平的吞吐。另一个官方出口是 <strong>unaligned checkpoint</strong>：快照时把"还在缓冲区里没处理的数据"也一并拍进快照，让 barrier 越过积压直接飞——代价是快照更大、恢复逻辑更重，官方定位是反压导致对齐超时时的解药，默认关闭。<strong>判断次序建议是：</strong>先看对齐是不是真瓶颈（Web UI 看 busy 与 backpressured 时间占比），再用调大缓冲、优化慢分区等常规手段，最后才动 unaligned——它是安全气囊，不是常态配置。快照机制的一切开关，都要用"恢复口径换运行效率"这杆秤来称。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：团队的大屏作业从 HashMapStateBackend 换成 RocksDB 后，延迟涨了但再也没 OOM 过。这个交换划算吗？给出判断框架与调优入口。</summary>
+    <div class="details-body">
+      <p>先给判断框架，再给调优入口。<strong>判断框架三问。</strong>一问状态规模：状态总量 × 预期增长是否逼近 TaskManager 堆上限？逼近 → 换 RocksDB 是迟早的事，早换早稳。二问访问模式：每条数据要读写几次状态？大窗口聚合这类"每条必读写"的作业，序列化开销按条计，延迟涨幅最明显；而状态访问稀疏的作业几乎无感。三问恢复诉求：要增量 checkpoint、要几十 GB 级状态，RocksDB 是唯一选项——这两条能力是硬门槛，不是偏好。<strong>三问里有两问站 RocksDB，这次交换就是划算的</strong>：延迟涨的是常数，OOM 丢的是整个作业的可用性。<strong>调优入口按收益排序。</strong>第一，开增量 checkpoint（RocksDB 独有），平时只传变化部分，快照又快又小；第二，调 RocksDB 的内存配比——block cache 与 write buffer 的托管内存参数，官方默认偏保守，给足内存能明显收窄与堆后端的差距；第三，缩小状态本身：状态 TTL 让过期键自动清理、把"大 Map 状态"拆成"keyBy 后的键控状态"，都能直接减少序列化量；第四，实在敏感的热路径（如几万 QPS 的去重计数），可以用"RocksDB 兜底 + 热数据放堆内 Flink 状态"的分层思路。<strong>一句话总结：</strong>后端选型不是宗教，是把"状态规模、访问频率、恢复口径"三个约束各归其位——参数能调的是差距，调不动的是量级，量级决定选型。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 08 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>运行时两种进程：JobManager 管协调（ResourceManager 管资源、Dispatcher 管入口、JobMaster 管单作业），TaskManager 管执行，Slot 是最小调度单位、只隔离托管内存；</li>
+      <li>三层执行图：StreamGraph（客户端生成）→ JobGraph（提交单位，算子链合并）→ ExecutionGraph（JobManager 并行化，调度与恢复在这里）；</li>
+      <li>时间语义两把尺：Processing Time 用系统时钟快而不稳，Event Time 用数据时间戳稳而需要 Watermark 宣告进度；</li>
+      <li>Checkpoint 是 Chandy-Lamport 变体的异步屏障快照：状态后端默认 HashMapStateBackend（快、堆内），要规模与增量快照选 EmbeddedRocksDBStateBackend（慢约一个数量级、只受磁盘限制）；</li>
+      <li>窗口四种（滚动/滑动/会话/全局）：第一个元素进窗创建，水印越过窗口末端触发，越过窗口末端加容忍延迟后移除。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 4 期《实战：订单流实时大屏》——把本期概念全部用上：KafkaSource 消费订单流、事件时间窗口做分钟级统计、KafkaSink 事务写出端到端 exactly-once，最后走一遍反压排查的入门三步。</p>
+  <p><strong>Primary source：</strong><a href="https://nightlies.apache.org/flink/flink-docs-release-2.3/" target="_blank" rel="noopener">Apache Flink 官方文档 2.3（nightlies.apache.org）</a>——本期架构、三层图、时间语义、快照与窗口机制均出自官方文档 Concepts / Internals / DataStream API 章节（v2.3.0，2026-09-30 核对）。</p>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0076-flink-quickstart.html">← 上一期：5 分钟跑起来 Apache Flink</a>
+  <a class="next" href="0078-flink-in-action.html">下一期：实战：订单流实时大屏 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

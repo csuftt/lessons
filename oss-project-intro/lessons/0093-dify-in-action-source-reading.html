@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Dify 系列第 4 期：Dify 实战与源码导读，企业知识库问答一条链（收官） | 2026-09-30</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0093</span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0092 · Dify 系列第 4 期 / 共 4 期（收官） · <a href="https://dify.ai" target="_blank" rel="noopener">dify.ai ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · DIFY 系列第 4 期（收官）：实战与源码导读</p>
+  <h1>Dify 实战与源码导读：企业知识库问答一条链</h1>
+  <p class="subtitle">收官期，实战为主、源码为辅。实战端到端做一条<strong>企业知识库问答链</strong>：建知识库（分段与索引的取舍）→ 召回测试调优（对照管线口诀）→ 编排聊天应用 → 发布 API 接入业务系统。源码轻读三站：<strong>仓库目录地图</strong>（api 模块分层）→ <strong>workflow 执行引擎</strong>（图、节点工厂、变量池）→ <strong>模型运行时抽象</strong>（插件守护进程）。四期走完，你不仅会用 Dify，还多了一套拆解"LLM 应用平台"这类系统的眼光。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 开源 LLM 应用开发平台 · Python / TypeScript · Dify Open Source License</span>
+    <span class="tag">📦 基于 v1.17.1（官方 Latest，2026-09-10 发布）</span>
+    <span class="tag-date">📅 2026-09-30 · 第 4 期 · 收官</span>
+    <span class="tag time">⏱ 预计阅读 13 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 收官路线 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>收官路线：一条实战链，三站读码</h2>
+  <p>实战任务单先摆上桌，三行验收标准：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>任务</th><th>用到的能力</th><th>验收标准</th></tr></thead>
+    <tbody>
+      <tr><td>企业知识库上线</td><td>分段设置、高质量索引、混合检索加重排</td><td>召回测试命中稳定</td></tr>
+      <tr><td>问答应用编排</td><td>聊天助手关联知识库、提示词与引用</td><td>回答贴文档、带引用</td></tr>
+      <tr><td>接入业务系统</td><td>Service API、Bearer 密钥、会话续接</td><td>curl 拿到 JSON 回答</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>整套实战跑在上一期部署的自托管环境上（两核四G即可），所有操作对照官方文档知识库与应用构建章节（v1.17.1，2026-09-30 核对）。下面逐步走。</p>
+</section>
+
+<!-- ================= 02 实战① 建知识库 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>实战①：建企业知识库，分段与索引的取舍</h2>
+  <p>路径照旧：知识 → 创建 → 上传文档。这一步<strong>两个决策最值得花时间</strong>。<strong>决策一，分段粒度</strong>：默认分段长度 500 起步没问题，但要按文档形态调——制度条款类文档条款边界清晰，切太碎会丢上下文，切太粗会稀释相关性；手册类按小节切。重叠设 50 左右防句子截断。<strong>决策二，索引方式</strong>：选<strong>高质量索引</strong>，它调用嵌入模型向量化，检索精度远好于经济模式的关键词路线；嵌入模型在模型供应商里选，语义匹配选中文能力强的型号。上传后等处理完成，知识库列表里状态变可用即成。</p>
+  <p class="note">来源注记——docs.dify.ai《Create a Ready-to-Use Knowledge Base》与分块设置章节（2026-09-30 核对）：上传、分段预览、索引方式与检索设置四步为官方口径。</p>
+</section>
+
+<!-- ================= 03 实战② 召回调优 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>实战②：召回测试调优，对照管线找问题</h2>
+  <p>用第 3 期的口诀干活：<strong>回答不对，先分清入库切坏还是查询捞歪</strong>。进入知识库详情的<strong>召回测试</strong>，拿 20 条真实业务问题打样，看命中分段是否贴题：</p>
+  <ul>
+    <li><strong>命中的段落被切碎</strong> → 入库段的锅：调大分段、加重叠，或上父子分段（子段命中、父段作答）；</li>
+    <li><strong>口语问法捞不到书面原文</strong> → 查询段的锅：检索设置从向量切<strong>混合检索 + Rerank 重排</strong>；</li>
+    <li><strong>术语、型号、编号命中不了</strong> → 也是查询段：全文检索那一路负责精确词，混合模式自带；</li>
+    <li><strong>多部门文档互相串</strong> → 给文档补元数据，检索加过滤条件先圈范围。</li>
+  </ul>
+  <p>每改一次配置，<strong>同一份问题集重测一轮</strong>，命中稳定再往下走。这条"改配置 → 重测"的循环，就是 RAG 调优的全部日常。</p>
+  <figure style="margin:1rem 0">
+    <img src="../img/0093-dify-in-action-source-reading/dify-core-rag-tree.png" alt="api/core/rag 目录：管线工序与源码目录一一对应" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">
+    <figcaption style="font-size:.85rem;color:var(--muted);margin-top:.4rem">刚才每个动作都能对上源码：github.com/langgenius/dify 的 api/core/rag 目录——cleaner 清洗、splitter 分段、embedding 嵌入、index_processor 索引、retrieval 召回、rerank 重排、data_post_processor 后处理（main，2026-09-30 截图）</figcaption>
+  </figure>
+</section>
+
+<!-- ================= 04 实战③ 编排 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战③：编排聊天应用，一次问答的完整链路</h2>
+  <p>建一个<strong>聊天助手</strong>，编排页三件事：<strong>提示词</strong>——写明角色（"企业制度助理"）、答题边界（"只依据知识库内容回答，没有依据就直说"）、引用要求；<strong>上下文</strong>——把知识库关联进来，检索节点自动把召回分段注入上下文变量；<strong>参数</strong>——温度调低（制度问答要稳，不要发散）。发布前用右侧预览问几轮，确认回答贴文档、引用能对上。</p>
+  <div class="diagram">
+  <svg viewBox="0 0 760 280" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar93" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="14" y="100" width="120" height="72" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="74" y="128" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">业务系统</text>
+    <text x="74" y="148" text-anchor="middle" fill="var(--muted)" font-size="9.5">POST 对话接口</text>
+    <rect x="182" y="100" width="130" height="72" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="247" y="128" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">聊天助手应用</text>
+    <text x="247" y="148" text-anchor="middle" fill="var(--muted)" font-size="9.5">提示词 · 会话状态</text>
+    <rect x="360" y="100" width="130" height="72" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="425" y="128" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">知识检索</text>
+    <text x="425" y="148" text-anchor="middle" fill="var(--muted)" font-size="9.5">召回 · 重排取前几段</text>
+    <rect x="538" y="100" width="100" height="72" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="588" y="128" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">向量库</text>
+    <text x="588" y="148" text-anchor="middle" fill="var(--muted)" font-size="9.5">分段索引</text>
+    <rect x="360" y="14" width="130" height="52" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="425" y="36" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">LLM 生成</text>
+    <text x="425" y="56" text-anchor="middle" fill="var(--muted)" font-size="9.5">拼上下文作答</text>
+    <rect x="182" y="216" width="130" height="48" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="247" y="245" text-anchor="middle" fill="var(--muted)" font-size="10">JSON 回答 + 引用</text>
+    <line x1="134" y1="136" x2="178" y2="136" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar93)"/>
+    <text x="120" y="92" fill="var(--muted)" font-size="9">Bearer 密钥</text>
+    <line x1="312" y1="136" x2="356" y2="136" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar93)"/>
+    <line x1="490" y1="136" x2="534" y2="136" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar93)"/>
+    <line x1="588" y1="96" x2="500" y2="70" stroke="var(--accent-3)" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#ar93)"/>
+    <line x1="425" y1="66" x2="425" y2="96" stroke="var(--accent-3)" stroke-width="1.6" stroke-dasharray="5 4"/>
+    <line x1="360" y1="55" x2="300" y2="96" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar93)"/>
+    <line x1="247" y1="172" x2="247" y2="212" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar93)"/>
+    <text x="16" y="266" fill="var(--muted)" font-size="9.5">图例：一次制度问答的完整链路——密钥进应用，应用检索知识库，召回分段拼上下文交模型，回答带引用原路返回（概念图）</text>
+  </svg>
+  </div>
+  <p>这条链上每一环出问题的排查路径，第 3 期都铺过了：回答发散是提示词与温度的事，引不对是检索的事，报错看应用日志与密钥权限。<strong>编排页只是把这些环节串成可视化的图，底层还是那套管线</strong>。</p>
+</section>
+
+<!-- ================= 05 实战④ API ================= -->
+<section>
+  <h2><span class="sec-num">05</span>实战④：发布 API，接入业务系统</h2>
+  <p>应用右上角"API 访问"生成密钥（app- 开头），业务系统侧十行代码都不用：</p>
+  <pre class="codeblock"><code>curl -X POST 'http://your-host/v1/chat-messages' \
+  -H 'Authorization: Bearer app-xxxxxx' \
+  -H 'Content-Type: application/json' \
+  -d '{"inputs": {}, "query": "年假怎么申请？",
+       "response_mode": "streaming", "user": "emp-1024"}'</code></pre>
+  <p><code>response_mode</code> 选 streaming 时以 SSE 流式返回，适合做对话界面；blocking 则一次性拿完整 JSON。回答取 <code>answer</code> 字段，引用在元数据里；<strong>多轮对话把返回的 conversation_id 带回来</strong>即可续接。安全口径官方原话：密钥只在后端使用，<strong>别嵌进前端代码</strong>；每个用户传独立的 user 标识，便于审计与会话隔离。知识库本身也有 Service API——文档增删可以程序化，内容更新不必人肉进界面。</p>
+  <p class="note">来源注记——docs.dify.ai API Reference Send Chat Message（2026-09-30 核对）：POST /chat-messages，inputs、query、user 必填，response_mode 默认 blocking 可选 streaming；Agent 类应用仅支持 streaming。</p>
+</section>
+
+<!-- ================= 06 源码① 目录地图 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>源码导读①：仓库目录地图，认出"发动机舱"</h2>
+  <p>读源码第一站永远是目录地图，先建立"哪是门面、哪是引擎"的空间感：</p>
+  <pre class="codeblock"><code>dify/ 顶层（main，2026-09-30 核对）
+├── api/          Python 后端（Flask + Celery）
+│   ├── app.py / app_factory.py    入口与应用工厂
+│   ├── controllers/  接口层：路由与参数校验
+│   ├── services/     服务层：业务编排
+│   ├── models/       ORM 模型
+│   └── core/         "发动机舱"★ 本期重点
+├── web/          Next.js 前端（画布）
+└── docker/       compose 部署配置</code></pre>
+  <figure style="margin:1rem 0">
+    <img src="../img/0093-dify-in-action-source-reading/dify-api-core-tree.png" alt="api/core 目录实拍" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">
+    <figcaption style="font-size:.85rem;color:var(--muted);margin-top:.4rem">api/core 目录实拍：agent、app、rag、workflow、tools、plugin、mcp、ops 等子目录一字排开——第 3 期讲的每个概念在这都有一个"户口"（github.com/langgenius/dify，main，2026-09-30 截图）</figcaption>
+  </figure>
+  <p><strong>分层是经典三层</strong>：controllers 收请求、services 编排业务、models 管数据，core 是被服务层调用的能力内核。读码路线跟着调用链走：从 controllers 找到对话接口，顺藤摸到 services，再进 core——与浏览器里点一次"发送消息"的路径完全同构。</p>
+</section>
+
+<!-- ================= 07 源码② workflow 引擎 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>源码导读②：workflow 执行引擎，图怎么跑起来</h2>
+  <p>api/core/workflow 是全仓库最值得精读的目录，它把"画布存图、引擎跑图、变量池传数据"落成了三组代码：</p>
+  <pre class="codeblock"><code>api/core/workflow/（main，2026-09-30 核对）
+├── workflow_entry.py      执行入口：一次运行从这里开始
+├── graph_topology.py      图拓扑：解析画布结构与执行顺序
+├── node_factory.py        节点工厂：按类型实例化节点
+├── node_runtime.py        节点运行时：单节点的执行状态
+├── variable_pool_initializer.py  变量池：跨节点数据存取
+├── human_input_*.py       人审：表单、策略、适配
+├── nodes/                 各类节点的实现
+└── generator/             运行输出的流式生成</code></pre>
+  <p>读这个目录的方法：<strong>顺着"一次运行"的生命周期读</strong>——entry 拿到图 → topology 解析出执行顺序 → factory 逐个造节点 → runtime 执行单节点、读写变量池 → generator 把增量输出流给前端。人审模块是亮点：流程暂停、表单回收、恢复执行，把"人在回路"做成了引擎的一等公民。</p>
+  <figure style="margin:1rem 0">
+    <img src="../img/0093-dify-in-action-source-reading/dify-core-workflow-tree.png" alt="api/core/workflow 目录实拍" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">
+    <figcaption style="font-size:.85rem;color:var(--muted);margin-top:.4rem">api/core/workflow 实拍：generator、nodes 两个子目录加 graph_topology、node_factory、node_runtime、human_input 系列、变量与模板文件——目录即架构（main，2026-09-30 截图）</figcaption>
+  </figure>
+</section>
+
+<!-- ================= 08 源码③ 模型抽象 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>源码导读③：模型运行时抽象，插件接住一切</h2>
+  <p>Dify 1.0 起模型与工具全部插件化，core 里的落点是 <code>plugin</code> 目录加一个独立进程：<strong>api 只含插件体系的客户端接口</strong>，真正的模型调用发生在 compose 里的 <code>plugin_daemon</code> 容器。调用链是：应用 → core/plugin 的接口封装 → 本地回环调 plugin_daemon → 对应供应商插件 → 上游模型 API。读码三个要点：<strong>其一</strong>，core 里没有 if-else 区分供应商——<strong>模型差异全部沉淀在插件侧，平台侧只有统一契约</strong>；<strong>其二</strong>，core/plugin 与 core/model_manager.py 管"选哪个模型、走哪个凭据"，与"怎么调"彻底分离；<strong>其三</strong>，这条隔离带就是"换模型不改应用"的源码证据——平台只依赖契约，供应商只是契约的实现者。</p>
+  <p class="note">来源注记——仓库 api/core 目录（main，2026-09-30 核对）：core/plugin 为插件体系接口、model_manager.py 为模型管理入口；docker/docker-compose.yaml 中 plugin_daemon 为独立服务容器（2026-09-30 核对）。</p>
+</section>
+
+<!-- ================= 09 读码方法论 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>读码方法论：三站读码的三条通用手艺</h2>
+  <ul>
+    <li><strong>先读目录再读文件：</strong>目录结构是架构的第一手表达——api 三层加 core 内核、workflow"目录即架构"，都是先看目录看出来的；</li>
+    <li><strong>顺着一条运行时链路读：</strong>从入口到出口追一次完整调用（点一次发送消息、跑一次工作流），比按文件名顺序翻有效十倍；</li>
+    <li><strong>找"隔离带"：</strong>大型开源项目最值钱的是抽象边界——workflow 的变量池、plugin 的接口契约，读懂隔离带就读懂了设计者的取舍。</li>
+  </ul>
+  <p>这套手艺不止用于 Dify：任何"平台 + 引擎 + 插件"结构的系统（规则引擎、网关、CI/CD）都能照此拆解。<strong>这就是收官期想留给你的东西：不止会用一个工具，而是一套读平台类源码的眼光</strong>。</p>
+</section>
+
+<!-- ================= 10 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. 召回测试发现"命中的段落被切碎"，该调哪？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，重排在查询段，解决的是排序不是切块。","对的：这是入库段的问题——调大分段、加重叠，或上父子分段。","不对，换生成模型与检索命中无关。"]'>
+        <li class="quiz-option">加重排模型</li>
+        <li class="quiz-option">入库段：调大分段、加重叠，或用父子分段</li>
+        <li class="quiz-option">换更强的生成模型</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 业务系统接入 Dify 应用，会话续接靠什么？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，user 标识用于区分最终用户与会话隔离。","不对，密钥只做鉴权，不标识会话。","对的：把返回的 conversation_id 带回下一轮请求即可续接同一会话。"]'>
+        <li class="quiz-option">每轮都传同一个 user 字段</li>
+        <li class="quiz-option">在密钥里附带会话信息</li>
+        <li class="quiz-option">把返回的 conversation_id 带回下一轮请求</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. "换模型不改应用"在源码层的证据是？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：平台侧只有统一契约，模型差异全部沉淀在插件侧（plugin_daemon），供应商只是契约的实现者。","不对，core 里恰恰没有区分供应商的 if-else。","不对，应用层不感知供应商切换。"]'>
+        <li class="quiz-option">平台只依赖统一契约，供应商差异全在插件侧实现</li>
+        <li class="quiz-option">core 里用 if-else 区分各家供应商</li>
+        <li class="quiz-option">应用层为每个供应商写适配代码</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 11 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">11</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：制度问答助手要接入正式业务系统了——密钥、用户标识、流式与阻断、审计，各要注意什么？给一份接入清单。</summary>
+    <div class="details-body">
+      <p>按官方口径逐项过。<strong>密钥治理：</strong>app- 密钥只在后端持有，前端绝不落地；密钥按应用隔离，一个应用一把，泄露即吊销重发；调用走内网或加网关限流，别把 Dify 接口直接暴露公网。<strong>用户标识：</strong>每轮请求带独立且稳定的 user 值（工号或系统内 ID），这是官方设计的会话隔离与审计粒度——不要全系统共用一个 user，否则会话串线、审计也无法归因。<strong>响应模式：</strong>对话界面选 streaming（SSE 流式，体验好），系统间调用选 blocking（一次拿全，好处理）；注意 Agent 类应用只支持 streaming，选型时就该想清楚下游怎么消费。<strong>会话与上下文：</strong>多轮把 conversation_id 带回来，超时或换话题时重开会话；上下文长度有上限，历史别无限堆。<strong>审计与回滚：</strong>应用日志页看每轮调用的引用命中与成本；提示词或知识库大改后，用固定问题集回归测试再放量；知识库文档走 Service API 程序化更新，更新记录留痕。<strong>兜底：</strong>接口失败的业务侧降级路径（转人工、返回兜底话术）必须在接入设计里，LLM 应用进生产链路的第一原则是<strong>它挂了，业务还能走</strong>。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：读完 workflow 引擎的目录结构，"节点只做一件事、数据走变量池、执行靠图驱动"这套设计，你能举出一个自己领域里的同构系统吗？隔离带画在哪？</summary>
+    <div class="details-body">
+      <p>Java 架构师手边就有现成同构物。<strong>例一，Spring Cloud Data Flow / 流水线编排：</strong>任务节点各干一件事，数据经消息或上下文传递，执行靠编排器驱动——隔离带画在"任务实现"与"编排调度"之间，对应 Dify 的 nodes 目录与引擎本体分离。<strong>例二，Camunda/Flowable 工作流引擎：</strong>流程定义是图（BPMN），引擎按图推进，变量域（variable scope）对应变量池，用户任务对应人审节点——Dify 的 human_input 模块几乎就是它的轻量翻版。<strong>例三，网关插件链：</strong>每个 filter 只做一件事（鉴权、限流、改写），上下文对象在链上传递，责任链驱动执行——变量池对应 context 对象，节点工厂对应 filter 的注册装配。共同规律三条：<strong>其一</strong>，把"做什么"（节点实现）与"何时做"（图驱动）拆开，两者才能各自演进；<strong>其二</strong>，跨节点数据收口到一个有边界的容器（变量池/上下文），避免节点间隐式耦合；<strong>其三</strong>，人工干预做成一等公民（人审节点/用户任务），自动化与人审在同一个模型里表达。反过来看，这套设计也有代价——图执行引入了调度开销与调试复杂度，简单顺序场景用它就是杀鸡用牛刀。<strong>读开源源码的最终产出，是你自己架构里"哪里该学、哪里该弃"的判断力</strong>。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 12 收官要点 ================= -->
+<section>
+  <h2><span class="sec-num">12</span>收官要点</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>实战链闭环：<strong>建库 → 召回测试 → 编排 → 发布 API</strong>，每一步都能回扣第 3 期的概念地图；</li>
+      <li>RAG 调优口诀实战版：<strong>切碎调入库、捞歪调查询</strong>，改一次配置就重测一轮；</li>
+      <li>接入纪律：密钥只在后端、user 标识归因到人、会话靠 conversation_id 续接、失败要有业务降级；</li>
+      <li>源码三站：<strong>目录地图、workflow 引擎（图 + 节点工厂 + 变量池 + 人审）、模型抽象（插件接住一切）</strong>；</li>
+      <li>读平台类源码的三条手艺：<strong>先读目录、顺链路追一次、找隔离带</strong>——比工具本身更保值。</li>
+    </ul>
+  </div>
+  <p>Dify 四期到此收官。想继续深挖，去官方文档与 GitHub 仓库（docs.dify.ai / github.com/langgenius/dify，v1.17.1 口径，2026-09-30 核对）；回<strong>课程目录</strong>还有十几个系列等你拆。</p>
+  <p><strong>Primary source：</strong><a href="https://docs.dify.ai/" target="_blank" rel="noopener">Dify 官方文档（docs.dify.ai）</a>——本期实战步骤与 API 口径出自官方文档（v1.17.1，2026-09-30 核对）；源码结构出自 <a href="https://github.com/langgenius/dify" target="_blank" rel="noopener">GitHub 仓库 main 分支</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev">← 上一期：<a href="0092-dify-core-concepts.html">核心概念与整体架构</a></span>
+  <a class="next" href="../index.html">回课程目录 ↗</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

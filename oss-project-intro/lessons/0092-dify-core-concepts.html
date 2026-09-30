@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Dify 系列第 3 期：核心概念与整体架构 | 2026-09-30</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0092</span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0091 · Dify 系列第 3 期 / 共 4 期 · 下一期:0093 · <a href="https://dify.ai" target="_blank" rel="noopener">dify.ai ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · DIFY 系列第 3 期：核心概念与整体架构</p>
+  <h1>Dify 核心概念与整体架构：应用、画布、管线与插件</h1>
+  <p class="subtitle">上一期跑起来了 Dify，这期拆开看里面。五个概念撑起全部认知：<strong>五种应用类型</strong>（聊天助手、文本生成、Agent、Chatflow、工作流）是入口选择；<strong>编排引擎</strong>把画布存成图、按图执行、用变量池传数据；<strong>RAG 管线</strong>把"入库四道工序、查询三步"讲成一条流水线；<strong>模型供应商抽象</strong>靠插件体系做到换模型不改应用；<strong>插件生态</strong>用六类插件把平台能力摊开。最后一张源码地图，为第 4 期读码铺路。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 开源 LLM 应用开发平台 · Python / TypeScript · Dify Open Source License</span>
+    <span class="tag">📦 基于 v1.17.1（官方 Latest，2026-09-10 发布）</span>
+    <span class="tag-date">📅 2026-09-30 · 第 3 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 应用类型 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>五种应用类型：先分"对话"还是"单次"</h2>
+  <p>Dify 工作台里建应用，官方分五种类型。选型口诀先记住一句：<strong>先问任务是"多轮对话"还是"单次执行"，再问要不要模型自主决策</strong>。</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>类型</th><th>形态</th><th>适合场景</th></tr></thead>
+    <tbody>
+      <tr><td>聊天助手 Chatbot</td><td>提示词驱动的对话，可挂知识库与工具</td><td>日常问答、客服、助手的默认首选</td></tr>
+      <tr><td>文本生成 Text Generator</td><td>单次提示词出结构化文本</td><td>摘要、翻译、改写、文案批量生产</td></tr>
+      <tr><td>Agent 智能体</td><td>模型自主推理并调用工具，多步完成任务</td><td>步骤无法预先写死的开放任务</td></tr>
+      <tr><td>Chatflow 聊天流</td><td>多轮对话画成流程图，分支可控</td><td>流程复杂、要精确控制的多轮对话</td></tr>
+      <tr><td>Workflow 工作流</td><td>单次执行的自动化流水线</td><td>批处理、文档抽取、RAG 应用编排</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>两个易混点：Chatflow 与聊天助手的差别在<strong>控制粒度</strong>——前者每个环节都是画布上的节点，分支、循环、人审都可控；Agent 与工作流的差别在<strong>决策权</strong>——Agent 让模型自己决定下一步，工作流的每一步都是你编排好的。API 侧五种类型对应不同接口模式（chat、completion、agent、advanced-chat、workflow），发布后按类型调用。</p>
+  <p class="note">来源注记——docs.dify.ai 应用构建章节与 API Reference（2026-09-30 核对）：五种类型与 API 模式（chat / agent-chat / completion / advanced-chat / workflow / agent）以官方口径为准。</p>
+</section>
+
+<!-- ================= 02 编排引擎 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>编排引擎：画布存图，引擎跑图，变量池传数据</h2>
+  <p>画布背后是一个图执行引擎，三句话心智模型：<strong>画布上存的是一张有向图</strong>——节点加连线就是执行顺序；<strong>运行时按图推进</strong>——逐节点执行、流式输出、分支与循环都由图结构表达；<strong>数据不在节点里，在变量池</strong>——系统变量、环境变量、各节点输出统一入池，下游节点按名字引用。还有个容易被忽略的能力：<strong>人审节点</strong>，流程跑到关键处可以停下来收表单，人确认后继续——自动化与人工把关在同一条流水线里共存。</p>
+  <figure style="margin:1rem 0">
+    <img src="../img/0092-dify-core-concepts/dify-docs-workflow.png" alt="官方 Workflow 101 教程第 1 课" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">
+    <figcaption style="font-size:.85rem;color:var(--muted);margin-top:.4rem">官方教程 Workflow 101 第 1 课：What is a Workflow——官方比喻"工作流就像菜谱"：输入是食材，步骤是做法，产出是菜；全教程 10 课，从第一个工作流一路到发布与监控（来源：docs.dify.ai，2026-09-30 截图）</figcaption>
+  </figure>
+  <p class="note">来源注记——仓库 api/core/workflow 目录（main，2026-09-30 核对）：workflow_entry.py 执行入口、graph_topology.py 图拓扑、node_factory.py 与 node_runtime.py 节点抽象、variable_pool_initializer.py 变量池、human_input_adapter.py 等人审模块——概念与源码一一对应。</p>
+</section>
+
+<!-- ================= 03 节点家族 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>节点家族：七个节点拼出八成流程</h2>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>节点</th><th>职责</th><th>什么时候用</th></tr></thead>
+    <tbody>
+      <tr><td>LLM</td><td>调用大模型生成、总结、判断</td><td>一切要"动脑子"的环节</td></tr>
+      <tr><td>知识检索</td><td>从知识库召回相关分段</td><td>RAG 应用标配</td></tr>
+      <tr><td>条件分支</td><td>按变量值走不同路径</td><td>一切 if-else 逻辑</td></tr>
+      <tr><td>迭代</td><td>对数组逐项执行子流程</td><td>批量文档、多条结果处理</td></tr>
+      <tr><td>模板转换</td><td>变量拼装成文本</td><td>组织上下文与输出格式</td></tr>
+      <tr><td>HTTP 请求</td><td>调用外部接口</td><td>接业务系统与第三方服务</td></tr>
+      <tr><td>代码执行</td><td>沙箱内跑 Python</td><td>格式转换与自定义逻辑</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>节点设计的值得学的一点：<strong>每个节点只做一件事，数据交换全部走变量池</strong>——这与 Unix "一个工具干一件事" 的哲学同源，也是画布能自由组合的原因。第 4 期读码会看到，每种节点在源码里就是一个独立模块，由节点工厂统一实例化。</p>
+</section>
+
+<!-- ================= 04 RAG 管线 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>RAG 管线：入库四道工序，查询三步</h2>
+  <div class="diagram">
+  <svg viewBox="0 0 760 270" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar92" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="14" y="24" width="150" height="64" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="89" y="48" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">文档入库</text>
+    <text x="89" y="68" text-anchor="middle" fill="var(--muted)" font-size="9.5">PDF · 网页 · 文本</text>
+    <rect x="196" y="24" width="150" height="64" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="271" y="48" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">① 抽取 + 清洗</text>
+    <text x="271" y="68" text-anchor="middle" fill="var(--muted)" font-size="9.5">统一成纯文本</text>
+    <rect x="378" y="24" width="150" height="64" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="453" y="48" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">② 分段</text>
+    <text x="453" y="68" text-anchor="middle" fill="var(--muted)" font-size="9.5">按长度切块留重叠</text>
+    <rect x="560" y="24" width="186" height="64" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="653" y="48" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">③ 嵌入 + 索引</text>
+    <text x="653" y="68" text-anchor="middle" fill="var(--muted)" font-size="9.5">向量化入默认向量库</text>
+    <line x1="164" y1="56" x2="192" y2="56" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar92)"/>
+    <line x1="346" y1="56" x2="374" y2="56" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar92)"/>
+    <line x1="528" y1="56" x2="556" y2="56" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar92)"/>
+    <text x="380" y="118" fill="var(--muted)" font-size="10" text-anchor="middle">—— 入库段（一次性）｜查询段（每次提问） ——</text>
+    <rect x="120" y="140" width="150" height="64" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="195" y="164" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">用户提问</text>
+    <text x="195" y="184" text-anchor="middle" fill="var(--muted)" font-size="9.5">应用或 API 进入</text>
+    <rect x="318" y="140" width="150" height="64" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="393" y="164" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">④ 召回 + 重排</text>
+    <text x="393" y="184" text-anchor="middle" fill="var(--muted)" font-size="9.5">捞候选，挑最相关</text>
+    <rect x="516" y="140" width="150" height="64" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="591" y="164" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">⑤ 生成作答</text>
+    <text x="591" y="184" text-anchor="middle" fill="var(--muted)" font-size="9.5">拼上下文，带引用</text>
+    <line x1="270" y1="172" x2="314" y2="172" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar92)"/>
+    <line x1="468" y1="172" x2="512" y2="172" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar92)"/>
+    <path d="M653,92 C653,150 500,120 468,158" fill="none" stroke="var(--accent-3)" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#ar92)"/>
+    <text x="612" y="122" fill="var(--muted)" font-size="9.5">查询时检索</text>
+    <text x="16" y="244" fill="var(--muted)" font-size="9.5">图例：入库段四道工序（抽取、清洗、分段、嵌入索引），查询段三步（召回、重排、生成）——目录名核对自仓库 api/core/rag（extractor / cleaner / splitter / embedding / retrieval / rerank，2026-09-30）</text>
+  </svg>
+  </div>
+  <p>把 RAG 拆成两段看，调优就有了抓手：<strong>入库段</strong>决定"知识长什么样"——抽取清洗把各种格式变纯文本，分段按长度切块、留重叠防截断，嵌入把每段变向量写进索引库；<strong>查询段</strong>决定"回答靠什么"——召回捞回候选分段，重排挑出最相关的几段，拼进上下文交给模型作答并附引用。<strong>回答不对，先分清是入库段切坏了，还是查询段捞歪了</strong>——这句口诀值回本期票价。</p>
+</section>
+
+<!-- ================= 05 检索策略 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>检索策略：三种半，生产默认混合加重排</h2>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>策略</th><th>怎么召回</th><th>适合</th></tr></thead>
+    <tbody>
+      <tr><td>向量检索</td><td>语义相似度找分段</td><td>问法与原文说法不一致也能命中</td></tr>
+      <tr><td>全文检索</td><td>关键词匹配</td><td>术语、型号、编号等精确词</td></tr>
+      <tr><td>混合检索 + 重排</td><td>两路候选合并，重排模型精选</td><td>生产环境默认推荐，精度最稳</td></tr>
+      <tr><td>父子分段</td><td>子段做检索命中，父段整体作答</td><td>长文档要完整上下文</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>语义检索与关键词检索是一对互补：向量检索<strong>懂意思</strong>但会漏精确词，全文检索<strong>认字面</strong>但不懂同义改写，混合检索把两路候选合并后交重排模型精选，是官方推荐的生产默认。另有<strong>元数据过滤</strong>——按文档属性先筛后检索，多部门知识库隔离场景很好用。这些开关都在知识库设置里，改完用召回测试验证，正是上一期说过的闭环。</p>
+  <p class="note">来源注记——docs.dify.ai 知识库章节（2026-09-30 核对）：Hybrid Search and Rerank、Parent-child Retrieval、Metadata Filtering 均为官方功能口径。</p>
+  <figure style="margin:1rem 0">
+    <img src="../img/0092-dify-core-concepts/dify-docs-knowledge-create.png" alt="官方知识库创建文档" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">
+    <figcaption style="font-size:.85rem;color:var(--muted);margin-top:.4rem">官方《Create a Ready-to-Use Knowledge Base》四步：上传文件或同步 Notion/网页 → 配置分段并预览 → 指定索引方式与检索设置 → 等待处理完成；产品截图可见分段长度 500、高质量索引、向量检索（来源：docs.dify.ai，2026-09-30 截图）</figcaption>
+  </figure>
+</section>
+
+<!-- ================= 06 模型抽象 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>模型供应商抽象：换模型，不改应用</h2>
+  <p>Dify 最值钱的抽象在这一层：<strong>应用只认统一接口</strong>——生成、嵌入、重排、语音各有各的接口契约，模型差异全部被插件吸收。架构上三层接力：应用层发出统一调用 → <strong>模型抽象层</strong>按接口契约转发 → <strong>plugin_daemon 插件守护进程</strong>分发给具体供应商插件——云端闭源（OpenAI、Anthropic 等）、本地开源（Ollama、Xinference 等）、自建网关（OpenAI 兼容接口）一律即插即用。<strong>换模型 = 市场里装插件 + 设置里点一下，应用一行不改</strong>。配套还有凭据池与负载均衡：同一供应商多把密钥轮着用，工作区内模型全局共享。</p>
+  <p class="note">来源注记——docs.dify.ai 模型配置章节（2026-09-30 核对）：供应商经 Integrations 或 Marketplace 安装，模型 workspace 级共享，支持凭据池、优先级与多密钥负载均衡；Dify 1.0（2025-02）起模型与工具全面插件化。</p>
+</section>
+
+<!-- ================= 07 插件生态 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>插件生态：六类插件，一个市场</h2>
+  <figure style="margin:1rem 0">
+    <img src="../img/0092-dify-core-concepts/dify-marketplace.png" alt="Dify 官方插件市场" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">
+    <figcaption style="font-size:.85rem;color:var(--muted);margin-top:.4rem">marketplace.dify.ai：按 Models / Tools / Data Source / Agent Strategy / Triggers / Extensions 六类导航；热门插件如 OpenAI（97 万+ 安装）、OpenRouter（24 万+ 安装）、PaddleOCR（4.3 万+ 安装）（2026-09-30 截图）</figcaption>
+  </figure>
+  <ul>
+    <li><strong>Models 模型：</strong>语言、嵌入、重排、语音模型的接入件——模型抽象的具体落点；</li>
+    <li><strong>Tools 工具：</strong>搜索、OCR、云服务 API 封装，Agent 与工作流直接挂载；</li>
+    <li><strong>Data Source 数据源：</strong>外部数据同步进知识库的管道；</li>
+    <li><strong>Agent Strategy 策略：</strong>智能体的推理决策框架，可换装；</li>
+    <li><strong>Triggers 触发器：</strong>定时与事件驱动，让流程自己跑起来；</li>
+    <li><strong>Extensions 扩展：</strong>内容审查、存储等平台级能力扩展。</li>
+  </ul>
+  <p>生态健康度一眼可判：<strong>你要的能力，市场里有没有人做好了</strong>——有，装；没有，插件开发有官方脚手架，自己造一个也不难。</p>
+</section>
+
+<!-- ================= 08 整体架构 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>整体架构：一套栈，四层职责</h2>
+  <p>把第 2 期 compose 起的那支舰队按职责归拢成四层，架构讨论就有了共同语言：</p>
+  <ul>
+    <li><strong>接入层：</strong>nginx 与 web——管理界面、编排画布、WebApp 的入口，默认 80 端口；</li>
+    <li><strong>应用层：</strong>api（Flask）与 worker（Celery）——五类应用、编排引擎、异步任务跑在这里；</li>
+    <li><strong>能力层：</strong>RAG 管线与 plugin_daemon——检索、模型、工具、策略的能力供给；</li>
+    <li><strong>存储层：</strong>postgres 管元数据、redis 管缓存与队列、向量库管分段索引。</li>
+  </ul>
+  <p>顺带校准一个"旧教程坑"：<strong>2025 年 2 月的 v1.0 是条分界线</strong>，此前模型与工具是平台内置组件，此后全面改为插件架构——看到"内置模型供应商""内置工具"这类说法的老文章，思路可参考、步骤别照抄；装模型装工具一律走市场，接口细节以当前版本文档为准。</p>
+</section>
+
+<!-- ================= 09 源码地图 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>源码地图：第 4 期的读码路线图</h2>
+  <pre class="codeblock"><code>dify/ 仓库顶层（main，2026-09-30 核对）
+├── api/          Python 后端（Flask + Celery，pyproject 管依赖）
+│   └── core/     "发动机舱"：各引擎都在这
+│       ├── workflow/   编排引擎：图、节点、变量池、人审
+│       ├── rag/        检索管线：抽取、清洗、分段、召回、重排
+│       ├── agent/      智能体策略
+│       ├── tools/      工具运行时
+│       └── plugin/     插件体系接口
+├── web/          Next.js 前端（画布在这里）
+└── docker/       compose 部署全套配置</code></pre>
+  <p>第 4 期按这张地图走三站：<strong>仓库目录地图 → workflow 执行引擎 → 模型运行时抽象</strong>，边读边回扣本期的概念。读源码先读目录结构再读入口文件，api 模块入口是 app.py，Flask 应用工厂在 app_factory.py——这门手艺第 4 期现场演示。</p>
+  <p class="note">来源注记——github.com/langgenius/dify 仓库顶层与 api/core 目录（main，2026-09-30 核对）；api 入口文件 app.py / app_factory.py / celery_entrypoint.py 见仓库 api 目录。</p>
+</section>
+
+<!-- ================= 10 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. 多轮对话、流程复杂、要精确控制每个环节，选哪种应用类型？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，聊天助手控制粒度粗，不适合复杂流程。","对的：Chatflow 聊天流把多轮对话画成流程图，分支循环人审都可控。","不对，工作流是单次执行，不适合多轮对话形态。"]'>
+        <li class="quiz-option">聊天助手 Chatbot</li>
+        <li class="quiz-option">Chatflow 聊天流</li>
+        <li class="quiz-option">Workflow 工作流</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 用户抱怨"回答引错了出处"，按管线口诀先查哪？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，换模型解决的是生成质量，不是检索命中。","不对，重排在查询段，先分清是哪段的问题再动手。","对的：先分清是入库段切坏了（分段嵌入），还是查询段捞歪了（召回重排），再对症下药。"]'>
+        <li class="quiz-option">直接换更强的生成模型</li>
+        <li class="quiz-option">直接加重排模型</li>
+        <li class="quiz-option">先分清入库段切坏还是查询段捞歪，再对症调</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. Dify 换模型供应商，应用侧要做的事是？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：模型走统一接口加插件，换供应商只是装插件加设置里切换，应用不改。","不对，应用只认统一接口，不需要改调用代码。","不对，不需要迁移知识库，嵌入模型选择与供应商解耦。"]'>
+        <li class="quiz-option">什么都不用改：装新供应商插件，设置里切换即可</li>
+        <li class="quiz-option">改所有应用的调用代码</li>
+        <li class="quiz-option">重建全部知识库</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 11 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">11</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：Agent 与 Workflow 的本质差别是"决策权归属"——这个差别如何决定运维与评测方式的不同？</summary>
+    <div class="details-body">
+      <p><strong>Workflow 的决策权在你手里</strong>：每一步走哪条路都是编排时定死的，运行时只是"按图施工"。它的行为是<strong>确定的</strong>——同样的输入走同样的路径，所以评测用<strong>路径覆盖</strong>思维：把分支条件枚举成用例，每个分支跑通即验收；运维看的是节点耗时、失败重试这类工程指标。<strong>Agent 的决策权在模型手里</strong>：同一个问题，模型可能先搜索再查库，也可能直接作答，路径是运行时涌现的。它的行为是<strong>概率的</strong>——评测思路必须换成<strong>结果分布</strong>思维：同一批问题跑 N 次，看成功率、步数分布、工具调用成本，而不是盯单次路径；运维要加的不是"哪个节点慢了"，而是<strong>护栏</strong>——最大步数、工具白名单、超时熔断、敏感操作人审。这组差别对架构决策的启示：任务路径<strong>能写死的绝不交给模型自主</strong>——Workflow 可预测、可回归、成本可控；只有路径真的无法预先枚举时才上 Agent，并且从一开始就按"概率系统"设计评测与护栏。<strong>把确定性流程交给图，把开放性任务交给 Agent，把两者的边界画清楚，是 LLM 应用架构里第一性的分诊动作</strong>。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：向量检索"懂语义"却漏精确词，全文检索"认字面"却不懂改写——你的知识库该选哪种？给出可操作的决策与验证流程。</summary>
+    <div class="details-body">
+      <p>先做<strong>语料画像</strong>，回答两个问题。<strong>第一，用户的问法长什么样？</strong>如果是客服、制度问答这类"口语问法对书面文档"，语义鸿沟大，向量检索收益高；如果是运维手册、合规条款这类"术语对术语"，字面精确匹配才是主战场。<strong>第二，文档里的关键信息是什么形态？</strong>型号、编号、错误码、法规条款号——这些精确 token 一旦被语义检索"意译"掉，就是致命漏召。操作流程三步：<strong>第一步，默认混合</strong>——没有反证就用混合检索加重排，两路互补是期望成本最低的起点；<strong>第二步，构造对照问题集</strong>——故意写两类极端问题，一类"换个说法问"（考验语义），一类"精确念编号"（考验字面），各十条；<strong>第三步，召回测试跑分</strong>——同一问题集在向量、全文、混合三档下各跑一遍，看命中与排序，用数据说话。两个加分项：知识库带元数据属性时加<strong>过滤条件</strong>，先按部门或产品线筛小范围再检索，精度立涨；长文档场景验证<strong>父子分段</strong>——用子段保命中精度、用父段保上下文完整。记住流程的收尾动作：<strong>每次调整分段或检索配置，召回测试必须重跑</strong>，否则你永远不知道这次"优化"伤了多少原本命中的问题。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 12 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">12</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>五种应用类型一句话分诊：<strong>先分对话还是单次，再看决策权给谁</strong>——聊天助手、文本生成、Agent、Chatflow、工作流；</li>
+      <li>编排引擎三句话：<strong>画布存图、引擎跑图、变量池传数据</strong>，人审节点可插；</li>
+      <li>RAG 管线两段：<strong>入库四道工序</strong>（抽取、清洗、分段、嵌入）、<strong>查询三步</strong>（召回、重排、生成）；回答不对先分清哪段的锅；</li>
+      <li>模型抽象与插件：<strong>换模型不改应用</strong>，六类插件一个市场；v1.0（2025-02）是插件化分界线，旧教程勿照抄；</li>
+      <li>源码地图三站：<strong>仓库目录 → workflow 引擎 → 模型抽象</strong>，第 4 期按图读码。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 4 期《实战与源码导读》收官——企业知识库问答端到端：建知识库、调召回测试、发布 API 接入业务系统；源码读 workflow 执行引擎与模型运行时抽象。</p>
+  <p><strong>Primary source：</strong><a href="https://docs.dify.ai/" target="_blank" rel="noopener">Dify 官方文档（docs.dify.ai）</a>——本期应用类型、管线功能与插件口径均出自官方文档（v1.17.1，2026-09-30 核对）；源码结构见 <a href="https://github.com/langgenius/dify" target="_blank" rel="noopener">GitHub 仓库</a>，插件市场见 <a href="https://marketplace.dify.ai/" target="_blank" rel="noopener">marketplace.dify.ai</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev">← 上一期：<a href="0091-dify-quickstart.html">5 分钟跑起来 Dify</a></span>
+  <a class="next" href="0093-dify-in-action-source-reading.html">下一期：实战与源码导读 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

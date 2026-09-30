@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · PostgreSQL 系列第 4 期：实战：商品中心，一张库装下表+文档+向量 | 2026-09-30</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0073</span>
+  <span><a href="../index.html">课程目录</a> · 上一期:<a href="0072-postgresql-core-concepts-architecture.html">0072</a> · PostgreSQL 系列第 4 期 / 共 5 期 · 下一期:<a href="0074-postgresql-source-reading.html">0074</a> · <a href="https://www.postgresql.org/" target="_blank" rel="noopener">postgresql.org ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · POSTGRESQL 系列第 4 期：实战场景</p>
+  <h1>实战:商品中心——一张库装下表 + 文档 + 向量</h1>
+  <p class="subtitle">第 1 期说过"数据不动、能力挂载",这期把它落成可运行的 SQL。场景是一个典型的电商<strong>商品中心</strong>:商品主表要标准关系结构,商品详情是灵活多变的 JSON 文档,商品描述还要向量化做"语义找货"。拼图式架构要主库 + 搜索引擎 + 向量库三件套;PG 的答案是 <strong>jsonb + GIN 索引</strong>存文档、<strong>pgvector + HNSW 索引</strong>做相似度,三形态同库同事务。基于 <strong>v18.6(官方 Latest,2026-08-13 发布)</strong>与 pgvector 0.8.6,全部命令可照抄运行。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🐘 开源关系型数据库 · C · PostgreSQL License</span>
+    <span class="tag">📦 基于 v18.6（官方 Latest，2026-08-13 发布）</span>
+    <span class="tag-date">📅 2026-09-30 · 第 4 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景与痛点 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>场景:商品中心的三种数据形态</h2>
+  <p>商品中心是检验"一库多能"的最好考场,因为它天然长着三副面孔:<strong>关系形态</strong>——SKU、类目、价格、库存,结构稳定、强约束、要事务;<strong>文档形态</strong>——商品详情(品牌、规格、卖点、适配清单)因品类而异,手机有颜色和内存,笔记本有屏幕和接口,硬塞进列里要么天天改表、要么一堆 NULL;<strong>向量形态</strong>——把商品描述喂给嵌入模型变成向量,支撑"打字懒的无线鼠标"这类语义搜索。三副面孔,三种存储天性。</p>
+  <p>拼图式架构的解法是三件套:主库存表、搜索引擎存文档、向量库存向量,再加两条同步链路把它们粘起来——<strong>同步延迟、一致性对账、三套运维,件件都是长期利息</strong>(第 1 期的痛点在这里具象化)。PG 的解法是:三形态进同一张库,甚至同一张表,用 <code>jsonb</code> 承接文档、用 pgvector 承接向量,<strong>一次事务写全,一个备份全覆盖,一条 SQL 混合查</strong>。</p>
+</section>
+
+<!-- ================= 02 总览 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>总览:一张表,三副面孔</h2>
+  <div class="diagram">
+  <svg viewBox="0 0 760 250" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar73" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="180" y="86" width="400" height="104" rx="12" fill="var(--card)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="380" y="112" text-anchor="middle" fill="var(--ink)" font-size="13" font-weight="700">products 商品表(一张表三副面孔)</text>
+    <text x="380" y="136" text-anchor="middle" fill="var(--muted)" font-size="10">关系列:id · sku · category · price(CHECK/UNIQUE 约束)</text>
+    <text x="380" y="158" text-anchor="middle" fill="var(--muted)" font-size="10">文档列:attrs jsonb → GIN 索引</text>
+    <text x="380" y="180" text-anchor="middle" fill="var(--muted)" font-size="10">向量列:embedding vector(n) → HNSW 索引</text>
+    <rect x="10" y="24" width="160" height="50" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="90" y="45" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">标准 CRUD/事务</text>
+    <text x="90" y="62" text-anchor="middle" fill="var(--muted)" font-size="9">下单扣减 · 价格变更</text>
+    <rect x="10" y="106" width="160" height="50" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="90" y="127" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">文档条件查询</text>
+    <text x="90" y="144" text-anchor="middle" fill="var(--muted)" font-size="9">按品牌/规格/标签过滤</text>
+    <rect x="10" y="188" width="160" height="50" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="90" y="209" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">语义找货</text>
+    <text x="90" y="226" text-anchor="middle" fill="var(--muted)" font-size="9">描述向量化 · 相似度 Top-5</text>
+    <line x1="170" y1="49" x2="216" y2="100" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar73)"/>
+    <line x1="170" y1="131" x2="176" y2="136" stroke="var(--accent-3)" stroke-width="0"/>
+    <line x1="170" y1="131" x2="216" y2="138" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar73)"/>
+    <line x1="170" y1="213" x2="216" y2="176" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar73)"/>
+    <text x="620" y="52" fill="var(--muted)" font-size="9.5">写路径:一次事务同时写三种形态,</text>
+    <text x="620" y="70" fill="var(--muted)" font-size="9.5">无同步链路、无对账任务</text>
+    <text x="14" y="168" fill="var(--muted)" font-size="9.5">GIN 索引服务文档查询,HNSW 索引服务向量检索——两条索引各自挂载,互不干扰</text>
+  </svg>
+  </div>
+  <p>看懂这张图,本期的骨架就立住了:<strong>关系列守约束,文档列管灵活,向量列管语义</strong>;GIN 与 HNSW 两条索引各管各的查询入口。下面三节,每种形态一段可运行的最小实现。</p>
+</section>
+
+<!-- ================= 03 形态一 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>形态一:标准关系表,约束照旧是骨架</h2>
+  <pre class="codeblock"><code>CREATE TABLE products (
+  id          bigserial PRIMARY KEY,
+  sku         text UNIQUE NOT NULL,
+  category    text NOT NULL,
+  price       numeric(10,2) CHECK (price >= 0),
+  stock       int  DEFAULT 0,
+  created_at  timestamptz DEFAULT now()
+);</code></pre>
+  <p>没有任何惊喜,这正是重点:<strong>PG 的关系能力就是"标准 SQL 完全体"</strong>——主键、唯一、检查约束、外键照常用,事务语义比多数 MySQL 版本更严(DDL 可回滚)。下单扣库存、改价、盘点,这些主路逻辑写在这里,与任何经典关系库无异。后面两形态都是往这张表上"加列",而不是另起炉灶——<strong>加法思维,是单库方案的地基</strong>。</p>
+</section>
+
+<!-- ================= 04 形态二 jsonb ================= -->
+<section>
+  <h2><span class="sec-num">04</span>形态二:jsonb 文档列与 GIN 索引</h2>
+  <p>官方文档对两种 JSON 类型的界定很清楚:<code>json</code> 存输入原文,每次处理都要重新解析;<code>jsonb</code> 存<strong>分解后的二进制格式</strong>,写入略慢、处理显著更快,<strong>而且支持索引</strong>——所以业务文档列默认选 jsonb。</p>
+  <figure>
+    <img src="../img/0073-postgresql-json-pgvector-in-action/pg-docs-jsonb.png" alt="官方文档 JSON Types 页">
+    <figcaption>postgresql.org/docs/18/datatype-json.html(2026-09-30 截图):8.14 JSON Types——jsonb 以 decomposed binary format 存储,显著加快处理并支持索引;不保留键序与重复键;官方建议多数应用优先 jsonb</figcaption>
+  </figure>
+  <pre class="codeblock"><code>ALTER TABLE products ADD COLUMN attrs jsonb;
+UPDATE products SET attrs =
+  '{"brand":"尼客","color":"黑色","tags":["无线","轻量"]}'
+WHERE sku = 'NK-M01';
+
+-- 包含查询:attrs 中含 brand=尼客 的行
+SELECT sku, attrs->>'color' AS color
+FROM products
+WHERE attrs @> '{"brand":"尼客"}';
+
+-- 给文档列加 GIN 索引,包含查询从全表过滤变索引命中
+CREATE INDEX idx_products_attrs ON products USING gin (attrs);</code></pre>
+  <p>三个动作记住文档形态:<strong>加列、写文档、建 GIN</strong>。<code>@&gt;</code> 是包含查询符——右边那个 JSON 文档的全部键值都出现在左边,才算命中;GIN 索引把"逐行解析再过滤"变成"倒排直接定位",商品规格筛选这类查询从毫秒级全表变成索引级。键名随手加、品类差异随便长,表结构一动不动。</p>
+  <p class="note">来源注记——jsonb 与 GIN 见官方文档 8.14 JSON Types 与 jsonb Indexing 小节(postgresql.org/docs/18/datatype-json.html,2026-09-30 核对):jsonb 二进制存储支持索引;GIN 默认 jsonb_ops,另有仅服务包含查询的 jsonb_path_ops。</p>
+</section>
+
+<!-- ================= 05 形态三 pgvector ================= -->
+<section>
+  <h2><span class="sec-num">05</span>形态三:pgvector 向量列与相似度查询</h2>
+  <p>pgvector 自述只一句话:<strong>"Open-source vector similarity search for Postgres"——把向量和你的其他数据存在一起</strong>。支持 PostgreSQL 13 及以上,装法是 <code>CREATE EXTENSION</code>(数据库里执行)或镜像方式部署;当前版本 0.8.6,Star 23.2k。</p>
+  <figure>
+    <img src="../img/0073-postgresql-json-pgvector-in-action/pg-github-pgvector.png" alt="GitHub pgvector/pgvector 仓库">
+    <figcaption>github.com/pgvector/pgvector(2026-09-30 截图):About 原文 Open-source vector similarity search for Postgres;Star 23.2k · Fork 1.3k · 42 tags,Dockerfile 与 META.json 显示版本 bump 至 0.8.6</figcaption>
+  </figure>
+  <pre class="codeblock"><code>CREATE EXTENSION vector;
+
+ALTER TABLE products ADD COLUMN embedding vector(4);
+UPDATE products SET embedding = '[0.1, 0.7, 0.2, 0.9]'
+WHERE sku = 'NK-M01';
+-- 生产维度随嵌入模型:768 / 1536 等,vector 类型可存 16000 维
+
+-- 语义找货:余弦距离最近的前 5 个商品
+SELECT sku, embedding <=> '[0.1, 0.7, 0.2, 0.9]' AS distance
+FROM products
+ORDER BY embedding <=> '[0.1, 0.7, 0.2, 0.9]'
+LIMIT 5;</code></pre>
+  <p>描述文本在应用侧经嵌入模型转成向量后写入 <code>embedding</code> 列;查询时把用户意图同样向量化,按距离运算符排序取 Top-5。距离算子按需选:<code>&lt;-&gt;</code> 欧氏距离、<code>&lt;=&gt;</code> 余弦距离、<code>&lt;#&gt;</code> 负内积——文本语义检索通常用余弦。<strong>注意这条查询里没有任何同步、没有任何跨库:商品行和它的向量在同一行里</strong>。</p>
+</section>
+
+<!-- ================= 06 HNSW 索引 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>索引选型:HNSW 对 IVFFlat</h2>
+  <p>向量一多,精确遍历就是全表扫描——得靠近似最近邻(ANN)索引。pgvector 内置两种,官方 README 给的取舍描述非常直白:</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>维度</th><th>HNSW(多层图)</th><th>IVFFlat(倒排分桶)</th></tr></thead>
+    <tbody>
+      <tr><td>查询性能</td><td>更好(速度-召回权衡更优)</td><td>较低</td></tr>
+      <tr><td>构建时间/内存</td><td>更慢、更占内存</td><td>更快、更省</td></tr>
+      <tr><td>空表建索引</td><td>可以(无训练步骤)</td><td>不行(需要先有数据训练分桶)</td></tr>
+      <tr><td>一句话选法</td><td>读多、质量敏感的默认款</td><td>数据巨大、写入节奏可控时用</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <figure>
+    <img src="../img/0073-postgresql-json-pgvector-in-action/pg-github-pgvector-hnsw.png" alt="pgvector README HNSW 小节">
+    <figcaption>github.com/pgvector/pgvector#hnsw(2026-09-30 截图):README 原文——HNSW 创建多层图,查询性能优于 IVFFlat(speed-recall tradeoff),构建更慢、内存更多,支持空表建索引;按距离函数选 operator class(vector_cosine_ops 等)</figcaption>
+  </figure>
+  <pre class="codeblock"><code>CREATE INDEX ON products USING hnsw (embedding vector_cosine_ops);
+SET hnsw.ef_search = 100;   -- 候选列表宽度,默认 40:调大换召回率</code></pre>
+  <p>两条实操细节:<strong>一,索引必须按距离函数选 operator class</strong>(余弦查询就建 <code>vector_cosine_ops</code>);<strong>二,ef_search 是"精度旋钮"</strong>,调大召回率升、速度降,压测找到业务可接受的平衡点。维度上限也记一笔:vector 类型可存 16000 维,但索引只支持到 2000 维——嵌入模型选型时就把维度规划进去。</p>
+  <p class="note">来源注记——pgvector README(pgvector/pgvector,2026-09-30 核对):HNSW 与 IVFFlat 取舍、hnsw.ef_search 默认 40;vector 上限 16000 维、索引 2000 维(halfvec 索引可达 4000 维)。</p>
+</section>
+
+<!-- ================= 07 与拼图架构对比 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>对账:一库式对拼图式,不吹不黑</h2>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>维度</th><th>PG 一库式(jsonb + pgvector)</th><th>拼图式(主库 + ES + 向量库)</th></tr></thead>
+    <tbody>
+      <tr><td>一致性</td><td>同库同事务,写全或全无</td><td>异步同步,延迟窗口 + 对账任务</td></tr>
+      <tr><td>运维面</td><td>一套部署、监控、备份</td><td>三套组件版本、容量、故障域</td></tr>
+      <tr><td>混合查询</td><td>一条 SQL:条件 + 文档 + 排序</td><td>应用层多次查询再聚合</td></tr>
+      <tr><td>天花板</td><td>超大向量规模与极端 QPS 受限</td><td>各组件可独立无限横向扩</td></tr>
+      <tr><td>团队要求</td><td>吃透 PG 调优(vacuum/索引)</td><td>吃透三个产品的运维</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>结论口径与第 1 期一致,但这期可以给得更具体:<strong>中小规模(百万级到千万级商品)、检索形态以"结构条件 + 文档过滤 + 语义相似"混合为主,一库式的总成本显著更低</strong>;当向量规模到了数亿级、或检索需要多路召回的复杂策略时,专用向量库的架构优势才开始盖过拼图的同步成本。<strong>先一库,后拆分——拆分应该是规模化成功的勋章,而不是起步的负担</strong>。</p>
+</section>
+
+<!-- ================= 08 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. 业务文档列选 jsonb 而不是 json,官方给出的核心理由是?</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对,jsonb 写入反而略慢(有转换开销),快的是处理侧。","不对,两者都不保留键序的是 jsonb,json 才保留原文键序。","对的:jsonb 存分解后的二进制格式,处理显著更快,且支持索引;官方建议多数应用优先 jsonb。"]'>
+        <li class="quiz-option">jsonb 写入更快</li>
+        <li class="quiz-option">jsonb 保留键顺序与重复键</li>
+        <li class="quiz-option">jsonb 二进制存储处理更快,且支持索引</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 文本语义检索按余弦距离建 HNSW 索引,正确的写法是?</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对,operator class 与距离函数必须配套,默认选错会直接建不上或查询用不上。","对的:USING hnsw (embedding vector_cosine_ops),余弦查询配 vector_cosine_ops,再用 ef_search 调精度。","不对,IVFFlat 建索引需要先有数据训练分桶,空表建不了。"]'>
+        <li class="quiz-option">USING hnsw (embedding),函数无所谓</li>
+        <li class="quiz-option">USING hnsw (embedding vector_cosine_ops)</li>
+        <li class="quiz-option">空表先建 IVFFlat 再迁 HNSW</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 什么信号出现,才值得把向量能力拆到专用向量库?</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的:数亿级向量、极端 QPS 或多路召回复杂策略,专用库的扩展优势才盖过拼图的同步成本。","不对,百万级向量 pgvector + HNSW 是成熟区间,提前拆是给自己加同步链路。","不对,维度 1536 是常见嵌入模型输出,vector 类型可存 16000 维,索引支持 2000 维,完全够用。"]'>
+        <li class="quiz-option">向量到数亿级、极端 QPS 或需要多路召回复杂策略</li>
+        <li class="quiz-option">商品刚到百万级就该拆,越早越好</li>
+        <li class="quiz-option">嵌入模型是 1536 维,pgvector 存不了</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 09 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>思考题(点击展开解析)</h2>
+  <details class="q-card">
+    <summary>思考一:商品详情从"宽表列"迁到 jsonb 列,哪些能力变强了?哪些变弱了?给出迁移前的自查清单。</summary>
+    <div class="details-body">
+      <p>变强的部分:<strong>模式灵活</strong>——品类差异不再逼你加列或堆 NULL,新属性上线不改表;<strong>半结构化查询</strong>——GIN + 包含查询让"按任意规格筛"变成索引级操作;<strong>文档完整性</strong>——一个商品的详情天然是一个文档,读写都以整体为单位,不存在"十几个稀疏列"的语义破碎。变弱的部分:<strong>列级约束没了</strong>——jsonb 内部字段没有 CHECK、没有 NOT NULL、没有外键,数据质量从"库强制"变成"应用自觉";<strong>统计与类型弱化</strong>——对内部字段做范围统计、类型精确匹配都比关系列别扭,优化器的选择面也窄;<strong>更新粒度变粗</strong>——改一个字段要重写整个文档(有 jsonb_set 可做局部改,但语义与锁行为和列更新不同);<strong>行变宽</strong>——大文档影响缓冲池效率与 TOAST 行为。自查清单五问:一,这些字段是否需要数据库级唯一/外键约束?需要则留关系列;二,是否要按它们做高频范围查询与聚合?是则留关系列;三,写入路径是否高频改单个字段?是则谨慎;四,文档大小是否可控(几百字节到几 KB)?超大的先压缩或外置;五,团队是否理解 GIN 的写放大与维护成本?<strong>一句话:约束走关系列,灵活走 jsonb,别把数据库的纪律当成负担扔掉</strong>。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二:运营要求"标题模糊搜索 + 规格筛选 + 语义找货"三合一,都压在这一张 products 表上。给出索引与查询的落地设计,并指出每一步的代价。</summary>
+    <div class="details-body">
+      <p>三条检索路径,三套索引,一份数据。<strong>第一路,规格与属性筛选</strong>:attrs jsonb 建 GIN(默认 jsonb_ops 支持存在符与包含查询;若只有包含查询,可换 jsonb_path_ops,索引更小更快但能力面窄)。代价:GIN 写放大明显,商品高频上下架时写入吞吐下降,要监控 GIN 的 pending list 与清理。<strong>第二路,标题模糊搜索</strong>:轻量方案是 pg_trgm 扩展给 title 建 GIN trgm 索引,LIKE '%关键词%' 也能走索引;重一点就上全文检索(tsvector 列 + GIN)。代价:trgm 索引体积随词长增长,中文要配合分词或按字切分,召回质量需要用真实查询语料调。<strong>第三路,语义找货</strong>:embedding 列建 HNSW(vector_cosine_ops),ef_search 从默认 40 起按召回率压测上调。代价:HNSW 构建慢、内存占用高,大批量导入后要预留重建窗口,空表可先建是它的温柔。<strong>组合查询的写法</strong>:一条 SQL 里 AND 三路条件,规划器会选 BitmapAnd 组合各索引,排序用距离或混合分。代价:多谓词的选择率估计变难,统计信息要保鲜(定时 ANALYZE),必要时用 CTE 固化中间结果。<strong>架构层面的清醒:三路都压一张表,换来的是零同步;代价是这张表的写入路径与索引维护成为全系统最需要压测的地方——上线前用生产级数据量把三条索引的写入开销一起量</strong>。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 10 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话:</strong></p>
+    <ul>
+      <li>商品中心三形态:关系列守约束、attrs jsonb 存文档、embedding 向量管语义——一张表三副面孔;</li>
+      <li>jsonb 选型口诀:官方建议多数应用优先 jsonb——二进制存储、处理快、可索引(@&gt; 包含查询 + GIN);</li>
+      <li>pgvector:CREATE EXTENSION 即得,<code>&lt;=&gt;</code> 余弦距离 Top-5 语义找货;HNSW 索引按距离函数配 operator class,ef_search 是精度旋钮(默认 40);</li>
+      <li>HNSW 对 IVFFlat:查询性能与空表建索引是 HNSW 强项,构建慢、内存高是它的价;IVFFlat 快而省但需训练数据;</li>
+      <li>拆分时机:数亿级向量、极端 QPS、多路召回复杂策略才拆专用库——先一库,后拆分,拆分是规模化的勋章。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告(系列收官):</strong>第 5 期《架构与源码导读》——src/backend 目录地图、一条查询的执行器路径、heap 存储的 MVCC 实现,以及给 Java 工程师的 C 语言读码路线,把前四期的架构图落到代码上。</p>
+  <p><strong>Primary source:</strong><a href="https://www.postgresql.org/docs/18/datatype-json.html" target="_blank" rel="noopener">JSON Types(官方文档)</a>、<a href="https://github.com/pgvector/pgvector" target="_blank" rel="noopener">pgvector 官方仓库与 README</a>——本期类型界定、索引取舍、参数默认值均出自两处原文(jsonb/官方文档 v18.6,pgvector 0.8.6,均 2026-09-30 核对)。</p>
+</section>
+
+<nav class="lesson-nav">
+  <a class="prev" href="0072-postgresql-core-concepts-architecture.html">← 上一期:核心概念与整体架构</a>
+  <a class="next" href="0074-postgresql-source-reading.html">下一期:架构与源码导读 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对,再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

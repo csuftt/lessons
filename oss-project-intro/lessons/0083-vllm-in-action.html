@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · vLLM 系列第 4 期：压测与容量，一块显卡能扛多少并发 | 2026-09-30</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0083</span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0082 · vLLM 系列第 4 期 / 共 5 期 · 下一期:0084 · <a href="https://docs.vllm.ai/en/latest/" target="_blank" rel="noopener">docs.vllm.ai ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · VLLM 系列第 4 期：实战 · 压测与容量</p>
+  <h1>vLLM 实战：压测一块卡——吞吐、延迟与显存的三本账</h1>
+  <p class="subtitle">"一块显卡到底能扛多少并发？"——这是引入 vLLM 后第一个要向老板交代的数字。上一期你看懂了精算师的原理，这期继续，用官方压测工具 <code>vllm bench serve</code> 给一块卡做体检：先学会发压与读数（吞吐、首字延迟、逐字延迟、P99），再搞懂<strong>显存的三本账</strong>——权重固定开销、KV 缓存池、运行时激活，最后落到两个最实用的决策：<code>--max-model-len</code> 怎么取舍、下一张卡怎么选。本期不堆指标名词，每一步都回答"这个数字决定你账单上的哪一行"。（基于 v0.30.0，2026-09-30 核对）</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🚀 开源 LLM 推理引擎 · Python · Apache-2.0</span>
+    <span class="tag">📦 基于 v0.30.0（官方 Latest，2026-09-22 发布）</span>
+    <span class="tag-date">📅 2026-09-30 · 第 4 期</span>
+    <span class="tag time">⏱ 预计阅读 13 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 三本账 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>先立框架：显存的三本账</h2>
+  <p>一块卡能扛多少并发，答案藏在显存的三本账里。<strong>第一本，权重账</strong>：模型参数 × 每参数字节数，BF16 就是 2 字节——7B 模型约 14 GB，这笔钱是固定房租，服务一起就得付。<strong>第二本，KV 缓存账</strong>：第 2 期讲过分页管理，vLLM 按显存水位（默认 0.92）圈出一整块池子，扣掉权重和激活后全给 KV 缓存——<strong>这笔是弹性大头，并发的天花板由它决定</strong>。<strong>第三本，激活账</strong>：前向计算过程中的中间张量，随批次大小波动，通常只占几个 GB，但它是水位不能开满 1.0 的原因之一。三本账的关系一句话：<strong>水位圈出总额，权重是房租，激活是水电，剩下全给 KV 池；池子 ÷ 单条请求份额 = 并发上限</strong>。压测的意义，就是把这个纸面公式校准成真实数字。</p>
+</section>
+
+<!-- ================= 02 压测工具 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>官方压测器：vllm bench serve</h2>
+  <p>vLLM 自带压测工具，新版本已收编成官方 CLI 子命令 <code>vllm bench serve</code>（老仓库里的 benchmark_serving.py 脚本同源）。用法两步：先把被测服务起好，再发压：</p>
+  <pre class="codeblock"><code># 1) 起被测服务（参数按你生产口径配）
+vllm serve Qwen/Qwen2.5-7B-Instruct --max-model-len 8192
+
+# 2) 另开终端发压：1000 条请求，限速每秒 5 条到达
+vllm bench serve \
+  --backend openai --host 127.0.0.1 --port 8000 \
+  --model Qwen/Qwen2.5-7B-Instruct \
+  --dataset-name random --random-input-len 512 --random-output-len 256 \
+  --num-prompts 1000 --request-rate 5</code></pre>
+  <p>几个关键参数的含义：<code>--dataset-name random</code> 用随机文本造请求（默认值），要贴近真实对话可换 <code>sharegpt</code> 数据集；<code>--num-prompts</code> 是总请求数（默认 1000）；<code>--request-rate</code> 是到达速率，<strong>默认 inf 表示所有请求零点齐发</strong>——那是"极限压满"口径，想模拟生产到达规律就给个数字（泊松过程）；<code>--max-concurrency</code> 能直接卡住同时在途的请求数。压完结果直接打在终端，也可 <code>--save-result</code> 存档。</p>
+  <figure>
+    <img src="../img/0083-vllm-in-action/vllm-docs-bench-serve.png" alt="vLLM 压测 CLI 官方文档">
+    <figcaption>vLLM 仓库 docs/benchmarking/cli.md（v0.30.0，docs.vllm.ai 同源发布）：Benchmark CLI 文档——--num-prompts 默认 1000、--request-rate 默认 inf（零点齐发）、--dataset-name 默认 random、--max-concurrency 限制在途并发</figcaption>
+  </figure>
+  <p class="note">来源注记——github.com/vllm-project/vllm 仓库 docs/benchmarking/cli.md（v0.30.0 tag，2026-09-30 截图核对）；参数名、默认值与到达过程（泊松/伽马）口径同 docs.vllm.ai CLI 文档。</p>
+</section>
+
+<!-- ================= 03 读数 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>读数：四个指标与两根曲线</h2>
+  <p>压测输出一屏数字，工程上只盯四个。<strong>请求吞吐（Request throughput）</strong>：每秒完成几条请求，直接决定一块卡值多少钱；<strong>TTFT</strong>：首 token 延迟，用户按下回车到看见第一个字的等待，交互体验的生死线；<strong>TPOT / ITL</strong>：每 token 生成间隔，决定"字往外蹦"的流畅感；<strong>成功请求数</strong>：压满时出现的失败请求是过载信号，不能装看不见。四者关系遵守一根铁律：<strong>吞吐与延迟是跷跷板</strong>。到达速率从低往高压，吞吐先跟着爬升、然后走平（卡饱和），而 TTFT 与 P99 延迟会先缓慢爬升、在饱和点附近<strong>垂直起飞</strong>——容量规划要找的就是"吞吐已接近上限、延迟还没起飞"的那个工作点，而不是极限吞吐数字。</p>
+  <div class="diagram">
+  <svg viewBox="0 0 760 320" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar83" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <line x1="70" y1="270" x2="700" y2="270" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar83)"/>
+    <line x1="70" y1="270" x2="70" y2="40" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar83)"/>
+    <text x="690" y="292" fill="var(--muted)" font-size="10">到达速率 →</text>
+    <text x="34" y="52" fill="var(--muted)" font-size="10" transform="rotate(-90 34 52)">数值</text>
+    <path d="M70,258 C180,180 300,110 470,80 L560,74" stroke="var(--accent)" stroke-width="2.5" fill="none"/>
+    <text x="586" y="70" fill="var(--accent)" font-size="10.5" font-weight="700">吞吐：爬升后走平</text>
+    <path d="M70,252 C220,244 340,236 430,210 C500,188 530,120 556,58" stroke="var(--accent-3)" stroke-width="2.5" fill="none" stroke-dasharray="7 5"/>
+    <text x="562" y="52" fill="var(--accent-3)" font-size="10.5" font-weight="700">P99 延迟：饱和点起飞</text>
+    <line x1="470" y1="80" x2="470" y2="270" stroke="var(--muted)" stroke-width="1.2" stroke-dasharray="4 4"/>
+    <circle cx="470" cy="80" r="5" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="470" y="292" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">工作点</text>
+    <text x="480" y="150" fill="var(--muted)" font-size="9.5">吐量接近上限、延迟未起飞</text>
+    <text x="24" y="312" fill="var(--muted)" font-size="9.5">图例：概念曲线（非实测数据）——容量规划的工作点在"吞吐走平与延迟起飞"之间，留出余量应对流量毛刺</text>
+  </svg>
+  </div>
+  <p>实操建议：<strong>阶梯式发压</strong>——从生产预估速率的一半开始，每轮加倍（限速 5、10、20、inf 各跑一轮），记录每档的吞吐与 P99，画出你这块卡自己的两根曲线；生产水位建议压在"P99 延迟起飞点"的一半流量以内，给流量毛刺与重试风暴留缓冲。</p>
+</section>
+
+<!-- ================= 04 显存账细算 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>显存账细算：KV 池能换多少并发</h2>
+  <p>把第 01 节的框架变成可计算的算术。KV 缓存每 token 占用 = <strong>2（K 与 V）× 层数 × KV 头数 × 头维度 × 每元素字节数</strong>。以 Qwen2.5-7B 这类 GQA 架构为例（32 层、8 个 KV 头、头维度 128、BF16 两个字节），每 token 约 128 KB；8K 上下文（8192 token）的单条请求约吃 1 GB KV。一块 80 GB 的卡按 0.92 水位圈到约 73.6 GB，扣权重约 15 GB、激活预留数 GB，KV 池约 55 GB——<strong>理论上限约 55 条 8K 并发</strong>（示例为纸面算术，真实上限以你自己的压测为准）。这个算法的工程价值在于<strong>三个旋钮各自怎么动</strong>：</p>
+  <ul>
+    <li><strong>压 --max-model-len</strong>：单条份额从 8K 降到 4K，并发直接翻倍——业务其实用不满 8K 上下文时，这是最便宜的一次扩容；</li>
+    <li><strong>上 KV 量化</strong>：FP8 缓存每元素字节减半，池子等效翻倍，长上下文场景的救命稻草；</li>
+    <li><strong>换大显存卡</strong>：并发与池子线性走，但单价与运维档位要重算——这就是下一节的选卡问题。</li>
+  </ul>
+  <p class="note">来源注记——KV 占用公式与层数/头数参数出自模型架构公开配置与 PagedAttention 论文口径（2026-09-30 核对）；0.92 默认水位见 docs.vllm.ai CLI 文档；示例算术仅作方法演示，非实测数据。</p>
+</section>
+
+<!-- ================= 05 选卡与取舍 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>选卡与参数取舍：一张决策表</h2>
+  <p>把三本账折成选卡与调参的决策表（按 2026-09-30 官方支持清单口径，T4 至 B200 均在列）：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>场景</th><th>推荐起步</th><th>理由与关键参数</th></tr></thead>
+    <tbody>
+      <tr><td>验证与演示</td><td>T4（16 GB）</td><td>算力 7.5 达标、便宜易租；7B 以下小模型 + 量化版，压测口径全流程先跑通</td></tr>
+      <tr><td>小团队在线服务</td><td>L4 / A10（24 GB）</td><td>7B 量化 + 4K~8K 上下文能开出几十路并发；盯 TTFT 调 --max-model-len</td></tr>
+      <tr><td>生产主力</td><td>A100/H100（40/80 GB）</td><td>显存与带宽双大，KV 池给足；H 卡优先 FP8，权重与 KV 双省</td></tr>
+      <tr><td>超大模型</td><td>多卡 TP / B200</td><td>70B+ 用 --tensor-parallel-size 切卡，或新一代卡单卡扛</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>两条取舍纪律。其一，<strong>上下文长度按业务真实分布定</strong>：日志里 P95 对话长度若是 2K，把 --max-model-len 拉到模型上限 128K 只会白白稀释并发——上限给"长尾留个门"，日常水位靠业务分布说话。其二，<strong>换卡先换算法</strong>：量化、压上下文、KV 量化三个旋钮都是零硬件成本的扩容，压测确认硬件真成瓶颈后再谈采购——采购申请里附上两根曲线，比任何文字都有说服力。</p>
+  <figure>
+    <img src="../img/0083-vllm-in-action/vllm-benchmarks-readme.png" alt="vLLM 仓库 benchmarks 目录 README">
+    <figcaption>github.com/vllm-project/vllm 仓库 benchmarks/ 目录：vllm bench serve 背后的官方压测套件，另有数据集准备与离线吞吐压测等配套脚本</figcaption>
+  </figure>
+  <p class="note">来源注记——github.com/vllm-project/vllm 仓库 benchmarks 目录（v0.30.0 tag，2026-09-30 截图）；显卡支持清单见 docs.vllm.ai Installation → GPU 页 Requirements。</p>
+</section>
+
+<!-- ================= 06 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. vllm bench serve 的 --request-rate 默认值是？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，默认不是匀速固定值。","对的：默认 inf，所有请求在零点同时发出，这是极限压满口径；给数字则按泊松过程模拟生产到达。","不对，没有每秒一条的默认值，速率要显式给。"]'>
+        <li class="quiz-option">每秒 1 条</li>
+        <li class="quiz-option">inf（全部请求零点齐发）</li>
+        <li class="quiz-option">每秒 100 条</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 压测发现 P99 延迟随速率"垂直起飞"，说明什么？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，起飞点是饱和信号，不是网络抖动可以解释的。","不对，过载时失败会增加，但起飞本身发生在失败大量出现之前。","对的：服务逼近饱和点，队列在堆积——生产水位应压在起飞点流量的一半以内，留出缓冲。"]'>
+        <li class="quiz-option">网络抖动，与服务无关</li>
+        <li class="quiz-option">请求失败太多导致</li>
+        <li class="quiz-option">服务逼近饱和点，应在起飞点以内留余量定水位</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. 业务 P95 对话只有 2K token，却按模型上限 128K 配 --max-model-len，后果是？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：单条请求的 KV 份额按上限预留，并发被稀释 64 倍——上限应贴近业务长尾并留门，而不是拉满。","不对，答案质量与上下文上限无直接关系。","不对，显存按池管理，崩不了，但并发被严重浪费。"]'>
+        <li class="quiz-option">单条 KV 份额虚高，并发上限被严重稀释</li>
+        <li class="quiz-option">回答质量自动变好</li>
+        <li class="quiz-option">显存直接溢出崩溃</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 07 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：业务方要求"单卡扛 100 路并发、8K 上下文、7B 模型"。用三本账算一算，这个需求现实吗？怎么跟业务方谈？</summary>
+    <div class="details-body">
+      <p>先算账再谈判。<strong>权重账</strong>：7B BF16 约 14 GB，量化 4bit 约 4 GB——这笔没有悬念。<strong>KV 账</strong>：GQA 架构 7B 每 token 约 128 KB（FP16 KV），单条 8K 上下文约 1 GB；100 路并发需要约 100 GB 的 KV 池。<strong>结论一</strong>：即使 H100 80 GB 加 4bit 权重（KV 池约 70 GB），100 路 8K 也差一口气——<strong>纸面就不成立，除非动三个旋钮</strong>。旋钮一，压上下文：如果业务 P95 对话实际 2K，按 4K 上限配，单条份额减半，70 GB 池能开约 35→70 路，逼近目标；旋钮二，KV 量化：FP8 缓存池等效翻倍，80 GB 卡也能摸到 100 路 8K；旋钮三，两卡 TP：池子合并翻倍，稳稳达标但成本翻倍。<strong>结论二：需求不是"行不行"，而是"每一项都要花钱"</strong>——100 路是钱、8K 是钱、7B 也是钱，三者乘起来的账单要业务方签字。<strong>谈判策略</strong>：把"8K 上限"改问成"P95 多长"（大概率 2K 出头），把"100 路并发"改问成"峰值 QPS 与到达分布"（大概率均值 5、峰值 30），需求瞬间从"不可能"变成"一张 L4 都可能够"。容量谈判的本质：<strong>用分布数据替代最坏假设，用三本账把模糊需求翻译成采购清单</strong>。最后记得留半倍余量——你压测出来的数字是均值，流量不认识均值。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：压测结果"极限吞吐 20 路、零点齐发口径"，业务方直接拿去当容量承诺，埋着什么雷？</summary>
+    <div class="details-body">
+      <p>这颗雷的引线叫<strong>开环压测（open-loop）</strong>。零点齐发（--request-rate inf）意味着所有请求无视服务状态同时涌入，服务只能排队硬扛——测出的是"极限姿势下的最高吞吐"，对应延迟曲线早已垂直起飞的那一点。<strong>雷一：工作点错位。</strong>生产流量是闭环的，用户等首字、超时重试；把 20 路当承诺，真实流量 18 路时 TTFT 可能已经数秒起步，体验崩了吞吐数字却"没超承诺"。<strong>雷二：重试风暴放大器。</strong>闭环系统里慢请求触发用户重试，重试进一步推高到达速率——开环压测永远测不出这个正反馈，它只存在于生产。<strong>雷三：口径不可复现。</strong>零点齐发的排序有随机性，两次压测数字对不上，容量评审会变成吵架现场。<strong>正确姿势</strong>：容量承诺用<strong>限速阶梯压测</strong>的结论给出——"到达速率 X 以内，P99 首字 Y 秒、吞吐 Z 路，成功率 100%"三件套同时报；把"齐发极限"只用于了解硬件天花板，不进入承诺文档。一句话：<strong>容量不是吞吐数字，是"速率-延迟-成功率"三元组在工作点上的取值</strong>——把这个口径写进容量文档，你在第一次大促前就赢了一半。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 08 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>三本账框架：<strong>水位圈总额，权重是房租，激活是水电，KV 池定并发天花板</strong>；</li>
+      <li>压测用官方 CLI：<code>vllm bench serve</code>，--request-rate 默认齐发是极限口径，生产口径要限速；</li>
+      <li>四个读数：吞吐、TTFT、TPOT、成功率——<strong>工作点在吞吐走平与 P99 起飞之间</strong>；</li>
+      <li>KV 算术：每 token 约 2×层×KV头×头维×字节，8K 上下文 7B 约一条 1 GB，池子除它得并发；</li>
+      <li>三个零成本旋钮：压 --max-model-len、上 KV 量化、调批量——先旋钮后采购。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 5 期《架构与源码导读》收官——打开 vLLM 仓库画目录地图，跟着一条请求走进引擎：LLM 类与 serve 双入口、EngineCore 的调度循环、块池与注意力后端，最后给一份工程师的读码路线。</p>
+  <p><strong>Primary source：</strong><a href="https://docs.vllm.ai/en/latest/cli/bench/serve.html" target="_blank" rel="noopener">vllm bench serve 官方文档</a> 与 <a href="https://github.com/vllm-project/vllm/tree/main/benchmarks" target="_blank" rel="noopener">仓库 benchmarks 目录</a>——本期工具用法与参数口径出自官方（v0.30.0，2026-09-30 核对）；示例算术仅作方法演示。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev">← 上一期：核心概念与整体架构</span>
+  <a class="next" href="0084-vllm-source-reading.html">下一期：架构与源码导读 →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

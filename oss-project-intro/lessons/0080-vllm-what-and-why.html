@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · vLLM 系列第 1 期：一篇论文起家，把显存算到极致 | 2026-09-30</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0080</span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0079 · Apache Flink 架构与源码导读 · vLLM 系列第 1 期 / 共 5 期 · 下一期:0081 · <a href="https://vllm.ai/" target="_blank" rel="noopener">vllm.ai ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · VLLM 系列第 1 期：认识项目</p>
+  <h1>vLLM 是什么：一篇论文起家，把显存算到极致</h1>
+  <p class="subtitle">今天开启新项目 vLLM——GitHub About 原文 <strong>A high-throughput and memory-efficient inference and serving engine for LLMs</strong>，面向大模型的高吞吐、省显存推理与服务引擎。它的出身在开源项目里相当罕见：不是从工具脚本长起来的，而是<strong>从一篇操作系统味道的论文起家</strong>——PagedAttention 把虚拟内存分页的思想搬进 GPU 显存，把推理服务浪费掉的 60%～80% 显存压到 4% 以内，同一块卡塞下多得多的并发请求。一句话心智模型：<strong>vLLM 是一位"显存精算师"——把每 GB 显存算到极致的生产级推理引擎</strong>。本期结束，你能答上四个问题：大模型推理为什么贵、PagedAttention 省在哪一环、vLLM 与 Ollama 的赛道差在哪、什么信号出现时该把它请进你的架构。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🚀 开源 LLM 推理引擎 · Python · Apache-2.0</span>
+    <span class="tag">📦 基于 v0.30.0（官方 Latest，2026-09-22 发布）</span>
+    <span class="tag-date">📅 2026-09-30 · 第 1 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 痛点 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>痛点：大模型推理，贵在"显存墙"</h2>
+  <p>大模型生成文字是<strong>自回归</strong>的：一个词一个词往外吐，吐每个词都要回头"看"一遍前文。为了不重复计算，系统把前文每层的中间结果（Key 和 Value）缓存下来，这就是 <strong>KV 缓存</strong>。麻烦在于这笔账有两重属性：<strong>大</strong>——官方博客给过数字，LLaMA-13B 一条序列的 KV 缓存最多能吃到 1.7 GB；<strong>动态</strong>——它随对话长度实时生长，而请求什么时候说完，谁也预测不了。</p>
+  <p>早期推理框架的应对是<strong>按最大长度静态预留</strong>：不管这条请求最后生成 10 个词还是 2000 个词，显存先按上限圈好。结果就是官方博客的结论——<strong>60%～80% 的显存被碎片和超量预留浪费掉</strong>。显存是显卡上最贵的资源，浪费它等于直接烧钱：同一块卡同时只能服务寥寥几条请求，吞吐上不去，单请求账单下不来。<strong>大模型推理的成本问题，本质是一块显存的管理问题</strong>——这就是 vLLM 出场的地方。</p>
+</section>
+
+<!-- ================= 02 是什么 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>是什么：官方定位与一句话心智模型</h2>
+  <p>vLLM 诞生于 UC Berkeley（2023 年，作者含 Woosuk Kwon、Zhuohan Li、Ion Stoica 等），Apache-2.0 许可，商用零负担。GitHub About 一句话定位：<strong>面向大模型的高吞吐、省显存推理与服务引擎</strong>——注意两个词都有："inference"管离线批量生成，"serving"管在线服务，它两头都扛。到 2026-09-30 核对时，主仓库 Star 约 93.0k、Fork 约 22.8k，在大模型基础设施开源项目里是第一梯队的流量。</p>
+  <p>一句话心智模型：<strong>vLLM 是显存精算师</strong>。它有两门看家本领：一是 <strong>PagedAttention</strong>，把操作系统分页管理内存的思想搬到 GPU 显存，KV 缓存按小块（页）按需分配，浪费压到 4% 以内；二是 <strong>Continuous Batching（连续批处理）</strong>，请求随到随进批、说完即退，不必等整批一起起飞降落。两门本领合力，把"一块卡能扛多少并发"这个数字翻着倍地往上抬。</p>
+  <figure>
+    <img src="../img/0080-vllm-what-and-why/vllm-github-repo.png" alt="vLLM GitHub 仓库主页">
+    <figcaption>vllm-project/vllm：Star 93.0k · Fork 22.8k · Apache-2.0 license · About 原文 A high-throughput and memory-efficient inference and serving engine for LLMs，侧栏 Releases 106 个版本、Latest 为 v0.30.0</figcaption>
+  </figure>
+  <p class="note">来源注记——github.com/vllm-project/vllm 仓库页（2026-09-30 截图核对）：About 自述、Star/Fork 数、Apache-2.0 许可、Releases 106 · Latest v0.30.0。</p>
+</section>
+
+<!-- ================= 03 起家故事 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>起家故事：一篇论文，一个引擎，一条赛道</h2>
+  <p>2023-06-20，团队在官方博客发文 <em>vLLM: Easy, Fast, and Cheap LLM Serving with PagedAttention</em>：对比当时主流方案，vLLM 把吞吐最高提到 HuggingFace Transformers 的 <strong>24 倍</strong>、TGI 的 <strong>3.5 倍</strong>——不改动任何模型结构，纯靠显存管理。同年 9 月，方法论以论文形式登上系统领域顶会 SOSP 2023（arXiv 编号 2309.06180）。</p>
+  <p>落地速度同样值得一提：LMSYS（Chatbot Arena 背后团队）把它接成自家服务后端，扛住日均约 3 万、峰值约 6 万的请求量，<strong>省下一半 GPU</strong>。从论文到生产标配，vLLM 只用了不到两年——今天各家云厂商的模型托管服务和大量推理网关，底层都有它的身影。一个"用操作系统老办法解决新硬件新问题"的样本： paging 不是新发明，把它搬到显存上的人改变了赛道。</p>
+  <figure>
+    <img src="../img/0080-vllm-what-and-why/vllm-blog-paged-attention.png" alt="vLLM 官方博客 PagedAttention 宣发文章">
+    <figcaption>blog.vllm.ai 2023-06-20 官宣文：vLLM utilizes PagedAttention…delivers up to 24x higher throughput than HuggingFace Transformers, up to 3.5x higher throughput than TGI——作者含 Woosuk Kwon、Zhuohan Li、Ion Stoica 等</figcaption>
+  </figure>
+  <p class="note">来源注记——vllm.ai/blog/2023-06-20-vllm 官方博客（2026-09-30 截图核对）：24x/3.5x 吞吐对比、LMSYS 日均 30K/峰值 60K 请求、GPU 用量减半；论文 arXiv 2309.06180（SOSP 2023）。</p>
+</section>
+
+<!-- ================= 04 心智模型图 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>心智模型：显存精算师怎么干活</h2>
+  <div class="diagram">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar80" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="16" y="106" width="140" height="76" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="86" y="134" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">客户端请求</text>
+    <text x="86" y="154" text-anchor="middle" fill="var(--muted)" font-size="9.5">OpenAI 兼容接口</text>
+    <text x="86" y="170" text-anchor="middle" fill="var(--muted)" font-size="9.5">HTTP :8000</text>
+    <rect x="210" y="106" width="180" height="76" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="300" y="130" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">EngineCore 调度</text>
+    <text x="300" y="150" text-anchor="middle" fill="var(--muted)" font-size="9.5">Scheduler 连续批处理</text>
+    <text x="300" y="166" text-anchor="middle" fill="var(--muted)" font-size="9.5">请求随到随进批</text>
+    <rect x="444" y="30" width="180" height="70" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="534" y="54" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">KV 缓存分页管理</text>
+    <text x="534" y="74" text-anchor="middle" fill="var(--muted)" font-size="9.5">块表按需分配物理块</text>
+    <text x="534" y="90" text-anchor="middle" fill="var(--muted)" font-size="9.5">浪费 4% 以内</text>
+    <rect x="444" y="184" width="180" height="70" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="534" y="208" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">GPU Worker 执行</text>
+    <text x="534" y="228" text-anchor="middle" fill="var(--muted)" font-size="9.5">每卡一个 Worker 进程</text>
+    <text x="534" y="244" text-anchor="middle" fill="var(--muted)" font-size="9.5">PagedAttention 算子</text>
+    <rect x="668" y="106" width="80" height="76" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="708" y="134" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">流式返回</text>
+    <text x="708" y="154" text-anchor="middle" fill="var(--muted)" font-size="9.5">逐词吐出</text>
+    <line x1="156" y1="144" x2="206" y2="144" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar80)"/>
+    <line x1="390" y1="130" x2="440" y2="78" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar80)"/>
+    <line x1="390" y1="160" x2="440" y2="212" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar80)"/>
+    <line x1="624" y1="72" x2="664" y2="120" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar80)"/>
+    <line x1="624" y1="216" x2="664" y2="168" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar80)"/>
+    <text x="415" y="92" fill="var(--muted)" font-size="9.5">登记块表</text>
+    <text x="415" y="205" fill="var(--muted)" font-size="9.5">按块表读缓存</text>
+    <text x="16" y="284" fill="var(--muted)" font-size="9.5">图例：调度层决定"谁上批"，分页层决定"显存怎么省"，执行层负责算——三层分工，同一条流水线（概念图，第 3 期拆架构）</text>
+  </svg>
+  </div>
+  <p>这张图是全系列的地图：<strong>调度层</strong>（EngineCore 里的 Scheduler）做连续批处理，新请求不必等旧请求说完就能上批；<strong>分页层</strong>给每条请求记一张"块表"，KV 缓存按需分配到不连续的物理块上，逻辑连续、物理打散；<strong>执行层</strong>的 GPU Worker 按块表去读缓存做注意力计算。第 01 节那堵"显存墙"，就是被这三层流水线合力拆掉的。</p>
+</section>
+
+<!-- ================= 05 尝鲜链 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>用起来的样子：三步尝鲜链</h2>
+  <p>先看清形状，第 2 期再亲手跑。以下三步对照官方 Quickstart（docs.vllm.ai，2026-09-30 核对）。</p>
+  <p><strong>第一步，安装</strong>——官方推荐 uv 环境，一条命令装完（pip 亦可，预编译轮子默认按 CUDA 12.9 构建）：</p>
+  <pre class="codeblock"><code># 官方 Quickstart（uv 环境，自动匹配本机 CUDA）
+uv venv --python 3.12 --seed
+uv pip install vllm --torch-backend=auto</code></pre>
+  <p><strong>第二步，一条命令起服务</strong>——起的就是 OpenAI 兼容服务器，默认监听 8000 端口：</p>
+  <pre class="codeblock"><code>vllm serve Qwen/Qwen2.5-1.5B-Instruct
+# 等待日志出现 Application startup complete（约 2~3 分钟）</code></pre>
+  <p><strong>第三步，curl 一发对话</strong>——路径、报文与 OpenAI API 同构，存量应用改个地址就能切：</p>
+  <pre class="codeblock"><code>curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/json" \
+  -d '{"model": "Qwen/Qwen2.5-1.5B-Instruct",
+       "messages": [{"role": "user", "content": "你好，介绍下你自己"}]}'</code></pre>
+  <p class="note">来源注记——docs.vllm.ai Quickstart 与 Installation → GPU 页（2026-09-30 核对）：安装命令、vllm serve 默认端口 8000、启动就绪日志口径均出自官方文档。</p>
+</section>
+
+<!-- ================= 06 与 Ollama 对比 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>与 Ollama 怎么分：本地玩 vs 生产扛流量</h2>
+  <p>很多人第一次听说 vLLM 都会问：它和 Ollama 什么关系？答案是<strong>两条赛道</strong>。Ollama 的靶心是"把模型跑在自己电脑上"，门槛压到一条命令；vLLM 的靶心是"让一台 GPU 服务器扛住最大化的并发流量"，把资源利用率压到极致。只做技术对比，不看品牌：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>维度</th><th>Ollama（本地玩）</th><th>vLLM（生产扛流量）</th></tr></thead>
+    <tbody>
+      <tr><td>定位</td><td>个人电脑的模型管家，消费级硬件优先</td><td>服务器级推理引擎，数据中心硬件优先</td></tr>
+      <tr><td>运行环境</td><td>macOS / Windows / Linux 开箱即用</td><td>Linux 原生（Windows 走 WSL），CUDA 环境</td></tr>
+      <tr><td>显存管理</td><td>按模型加载，够用就好</td><td>分页管理 KV 缓存，显存利用率拉满</td></tr>
+      <tr><td>批处理</td><td>少量请求为主，不做深度批处理优化</td><td>连续批处理，吞吐是核心指标</td></tr>
+      <tr><td>上手门槛</td><td>一条命令，零配置</td><td>要懂显卡、显存、启动参数</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>选型口径一句话：<strong>给自己的电脑配个随叫随到的助手，找 Ollama；给线上业务扛并发、省显卡账单，找 vLLM</strong>。两者甚至常在同一家公司共存：开发机用前者调提示词，生产集群用后者扛流量。</p>
+</section>
+
+<!-- ================= 07 版本口径 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>版本口径：月度节奏，认准 Latest</h2>
+  <p>vLLM 发版很勤：以 2026-09-30 核对口径，GitHub 已挂出 106 个版本标签，最近三次为 v0.30.0（2026-09-22，Latest）、v0.29.0（2026-09-09）、v0.28.0（2026-08-26）——<strong>大约两到四周一个次版本</strong>，读文档、查 issue 时先对齐版本号是基本纪律。本系列五期全部锚定 v0.30.0。</p>
+  <figure>
+    <img src="../img/0080-vllm-what-and-why/vllm-github-releases.png" alt="vLLM GitHub Releases 页面">
+    <figcaption>github.com/vllm-project/vllm/releases：Latest 标签挂在 v0.30.0（2026-09-22），本期 762 commits、315 位贡献者；列表另见 v0.29.0、v0.28.0 等月度版本线</figcaption>
+  </figure>
+  <p>动手前的环境底线，全部出自官方安装文档（2026-09-30 核对）：<strong>操作系统</strong>——Linux 原生支持，Windows 需走 WSL；<strong>Python</strong>——3.10～3.13；<strong>NVIDIA 显卡</strong>——计算能力 7.5 及以上（T4、RTX 20 系、A100、L4、H100、B200 均在列）；<strong>CUDA</strong>——预编译轮子默认按 12.9 构建，另提供 12.8 与 13.0 构建，Blackwell 卡（B200/GB200）至少 CUDA 12.8。AMD（ROCm 6.3+）、Apple Silicon、Intel XPU 亦有官方支持路径，生产主力仍是 NVIDIA。</p>
+  <p class="note">来源注记——github.com/vllm-project/vllm/releases 与 docs.vllm.ai Installation → GPU 页（2026-09-30 核对）：版本号与发布日期、CUDA/Python/显卡要求、Windows 走 WSL 的口径均出自官方。</p>
+</section>
+
+<!-- ================= 08 架构师视角 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>架构师视角：什么信号出现时请它出场</h2>
+  <p>vLLM 是"重"工具：环境要 Linux 加 CUDA，参数要自己调。值不值得引入，给一个三问框架：</p>
+  <ul>
+    <li><strong>并发量问：</strong>在线服务的并发请求是否已经上百、或按规划将上百？是 → 静态批与逐请求推理的浪费会直接体现在账单上，该看 vLLM；个人工具、内部十来人轻量使用 → 先不必；</li>
+    <li><strong>显存账问：</strong>同款卡是否总在"塞不下更多请求"与"显存大量闲置"之间反复横跳？是 → 分页管理的收益从第一天开始计；</li>
+    <li><strong>运维面问：</strong>团队有没有人养得起 GPU 服务器（驱动、CUDA 版本、监控、扩缩容）？没有 → 从托管服务或云厂商推理产品起步，别裸奔自建。</li>
+  </ul>
+  <p>第 2 期讲 5 分钟跑起来、第 3 期讲核心概念与整体架构、第 4 期讲压测与容量实战、第 5 期源码导读收官——学完这五期，上面三问你有能力自己回答。</p>
+</section>
+
+<!-- ================= 09 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. vLLM 在 GitHub About 里对自己的一句话定位是？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，训练框架是另一条赛道，vLLM 主打推理与服务。","不对，模型托管平台是云厂商的形态，About 里说的是引擎。","对的：A high-throughput and memory-efficient inference and serving engine for LLMs，高吞吐、省显存的推理与服务引擎。"]'>
+        <li class="quiz-option">面向大模型的微调与训练框架</li>
+        <li class="quiz-option">开箱即用的大模型托管平台</li>
+        <li class="quiz-option">面向大模型的高吞吐、省显存推理与服务引擎</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 早期推理框架的"显存墙"，根源是？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，模型权重是固定开销，真正被浪费的是 KV 缓存。","对的：KV 缓存大而动态，按最大长度静态预留导致 60%～80% 显存被碎片和超量预留浪费。","不对，显卡带宽影响速度，但『墙』指的是容量利用率问题。"]'>
+        <li class="quiz-option">模型权重文件太大，加载不动</li>
+        <li class="quiz-option">KV 缓存大而动态，静态预留浪费 60%～80% 显存</li>
+        <li class="quiz-option">显卡算力带宽不足，计算太慢</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. PagedAttention 的核心灵感来自？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：官方博客原话，灵感来自操作系统的虚拟内存与分页——序列像进程、词像字节，KV 缓存切成小块按需分配。","不对，数据库缓冲池是近亲，但官方口径的出处是操作系统分页。","不对，与网络协议的分组思想无关。"]'>
+        <li class="quiz-option">操作系统的虚拟内存与分页管理</li>
+        <li class="quiz-option">数据库的缓冲池淘汰算法</li>
+        <li class="quiz-option">网络协议里的分组交换</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 10 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一：PagedAttention 把 KV 缓存浪费从 60%～80% 压到 4% 以内，"省出来"的显存应该拿去换什么？</summary>
+    <div class="details-body">
+      <p>这是一道容量规划的权衡题，省出来的显存有三种花法，对应三种业务诉求。<strong>第一种，换并发。</strong>同款卡塞进更多请求，单卡吞吐直接抬升——这是大多数在线服务的默认选择，vLLM 的连续批处理会自动把新增显存变成更大的批次，无需人工干预。<strong>第二种，换上下文长度。</strong>用 <code>--max-model-len</code> 把可服务的最大序列拉长，长文档问答、长代码补全这类场景直接受益；代价是每条请求的 KV 缓存上限变大，能同时容纳的并发数下降——本质上是在"宽"和"深"之间做交换。<strong>第三种，换模型规格。</strong>显存富余后可以升级到参数更大的模型，或给多实例腾出余量；但要记住权重是固定开销，模型一大，弹性空间反而变小。<strong>工程上的正确姿势是留一份弹性</strong>：不要把省出的显存全部押注在某一维上——给峰值流量留 buffer、给版本升级留余量，比把利用率压到 100% 更重要。官方默认把显存水位定在 0.92 而不是 1.0，就是这个逻辑（默认值口径见第 3 期）。一句话：<strong>精算师的价值不是把账算满，而是把每一份余量都花在刀刃上</strong>。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：在线客服业务，日均 5 万次调用、峰值并发约 20，用 7B 级开源模型。选 Ollama、云端 API 还是自建 vLLM？给出决策链。</summary>
+    <div class="details-body">
+      <p>按"合规 → 成本 → 运维 → 弹性"四步走。<strong>第一步，合规定边界。</strong>对话内容是否含敏感数据、能否出本机？不能出 → 云端 API 出局，候选收敛到本地两条；能出 → 云端 API 保留，且往往是省心之选。<strong>第二步，算成本账。</strong>日均 5 万次、按平均 500 词估算，云 API 按量计费全年是一笔可观的流水；自建路线一张消费级或入门级数据中心卡（如一块 24 GB 显存的卡跑 7B 量化模型）即可覆盖，硬件一次性投入后边际成本极低——量越大，自建越划算。<strong>第三步，盘运维能力。</strong>有没有人管 Linux + CUDA 环境、盯显存水位、做模型升级？有 → vLLM 路线成立，峰值并发 20 配合连续批处理单卡即可稳住；没有 → Ollama 这类低门槛方案先顶上，代价是吞吐上限和并发能力明显弱一档，业务增长后大概率要二次迁移。<strong>第四步，留弹性。</strong>客服流量有明显峰谷（工作日白天为峰），自建方案要评估夜间的资源闲置是否可接受，或把离线批量任务（质检、摘要）安排进低谷时段摊平成本。<strong>综合结论：这个量级恰好卡在分界线上</strong>——合规可出本机且团队无 GPU 运维人力，选云端 API 最务实；数据不能出门或成本敏感且有人力，自建 vLLM 是一年内必然到达的终点，Ollama 可以作为开发期的本地玩具先上场。架构决策的依据从来不是工具热度，而是合规、成本、运维三条约束的交集。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 11 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">11</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>vLLM = 面向大模型的高吞吐、省显存推理与服务引擎（基准 v0.30.0，2026-09-22），UC Berkeley 出品、Apache-2.0；</li>
+      <li>痛点根源：<strong>KV 缓存大而动态</strong>，静态预留让 60%～80% 显存被浪费——推理的成本问题本质是显存管理问题；</li>
+      <li>看家本领两件套：<strong>PagedAttention</strong>（显存分页，浪费压到 4% 以内）+ <strong>Continuous Batching</strong>（连续批处理，随到随进批）；</li>
+      <li>与 Ollama 是两条赛道：<strong>本地玩找管家，生产扛流量找精算师</strong>，开发与生产可以共存；</li>
+      <li>环境底线：Linux 原生（Windows 走 WSL）、Python 3.10～3.13、NVIDIA 计算能力 7.5+、默认 CUDA 12.9 轮子。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 2 期《5 分钟跑起来》——装上 vLLM，一条命令起 OpenAI 兼容服务，curl 收到第一句回答，顺手讲清三个最常用的启动参数：模型怎么指、上下文长度怎么控、显存水位怎么调。</p>
+  <p><strong>Primary source：</strong><a href="https://docs.vllm.ai/en/latest/" target="_blank" rel="noopener">vLLM 官方文档（docs.vllm.ai）</a>——本期版本口径、安装要求与命令均出自官方文档与仓库（v0.30.0，2026-09-30 核对）；起家故事见 <a href="https://vllm.ai/blog/2023-06-20-vllm" target="_blank" rel="noopener">官方博客官宣文</a>，论文见 <a href="https://arxiv.org/abs/2309.06180" target="_blank" rel="noopener">arXiv 2309.06180（SOSP 2023）</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev">← 上一期：0079 · Apache Flink 架构与源码导读</span>
+  <a class="next" href="0081-vllm-quickstart.html">下一期：5 分钟跑起来 vLLM →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

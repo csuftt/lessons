@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开源项目入门 · Dify 系列第 1 期：Dify 是什么，画布装下 LLM 应用的重复劳动 | 2026-09-30</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">OSS PROJECT INTRO · 0090</span>
+  <span><a href="../index.html">课程目录</a> · 上一期:0089 · Dify 系列第 1 期 / 共 4 期 · 下一期:0091 · <a href="https://dify.ai" target="_blank" rel="noopener">dify.ai ↗</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">OSS PROJECT INTRO · DIFY 系列第 1 期：认识项目</p>
+  <h1>Dify 是什么：画布装下 LLM 应用的重复劳动</h1>
+  <p class="subtitle">今天开启新项目 Dify——官网自述 <strong>The Platform for Production-Ready Agentic Workflows</strong>，生产级智能体工作流平台；GitHub 自述更直白：开源 LLM 应用开发平台。大模型火了这几年，每个团队都在重复造同样的轮子：接模型、写提示词、拼 RAG 检索、挂工具调用、补日志观测——十个人做十个应用，九成工作是雷同的。Dify 的答案是把这九成收进一个平台：可视化编排画布、RAG 管线、Agent、模型管理、应用观测一站式交付，应用做完一键发布成 WebApp 和 REST API。一句话心智模型：<strong>Dify 是 LLM 应用的"开发到运营"一站式工作台——画布上拖出原型，API 里长出产品</strong>。本期结束，你能答上四个问题：它是什么、解决了谁的什么痛、云版与自托管怎么选、为什么 Java 架构师也值得认识它。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 开源 LLM 应用开发平台 · Python / TypeScript · Dify Open Source License</span>
+    <span class="tag">📦 基于 v1.17.1（官方 Latest，2026-09-10 发布）</span>
+    <span class="tag-date">📅 2026-09-30 · 第 1 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 痛点 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>痛点：LLM 应用开发，九成是重复劳动</h2>
+  <p>一个"拿大模型干活"的应用，无论表面多花哨，拆开都是同一副骨架：<strong>调模型</strong>（选型、密钥、限流重试、多供应商切换）、<strong>编排提示词</strong>（写、测、改版本、A/B 对比）、<strong>接知识</strong>（文档解析、分段、向量化、召回、重排）、<strong>挂工具</strong>（搜索、数据库、内部系统）、<strong>可观测</strong>（日志、追踪、成本统计）。用 Spring 生态打个比方：这就像每个项目都手写一遍连接池、对象映射和配置管理——不是做不出，是<strong>每家都在低水平重复</strong>。</p>
+  <p>更痛的是从原型到生产那一跳：团队用脚本demo验证了想法，接业务时要重写工程件——会话管理、流式输出、知识库增量更新、权限审计，一个都不能少。<strong>LLM 应用的门槛不在"能不能跑通"，而在"跑通之后那一长串工程化补课"</strong>。Dify 出场的理由，就是把这串补课变成平台自带的能力。</p>
+</section>
+
+<!-- ================= 02 是什么 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>是什么：官方定位与一句话心智模型</h2>
+  <p>Dify 是 <strong>langgenius 团队 2023 年开源的 LLM 应用开发平台</strong>：后端 Python（Flask 加 Celery 的经典组合），前端 Next.js/TypeScript，Dify Open Source License（基于 Apache 2.0 附加条件，第 06 节细说）。官网对它的描述是："构建智能体工作流与 RAG 管线，配备丰富的 AI 模型与工具支持，一个协作工作台；部署上云、VPC 或自托管，团队从原型到生产不必重建技术栈。"仓库 README 则说它把 AI 工作流、RAG 管线、Agent 能力、模型管理、可观测性组合在一个界面里。</p>
+  <figure style="margin:1rem 0">
+    <img src="../img/0090-dify-what-and-why/dify-site-home.png" alt="Dify 官网首页：The Platform for Production-Ready Agentic Workflows" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">
+    <figcaption style="font-size:.85rem;color:var(--muted);margin-top:.4rem">Dify 官网首页：The Platform for Production-Ready Agentic Workflows；副题原文 Build Agentic workflows, RAG pipelines, with rich AI model and tool support on one collaborative workspace（来源：dify.ai，2026-09-30 截图）</figcaption>
+  </figure>
+  <p>一句话心智模型：<strong>Dify 是 LLM 应用的"一站式工作台"——把调模型、编排、检索、发布这些横向能力做成公共设施，应用团队只补最后那一点点业务差异</strong>。原型阶段，产品经理在画布上拖节点；工程阶段，后端拿它发布的 REST API 当服务用。低代码与硬编码之间，它给了一条中间道路。</p>
+  <p class="note">来源注记——dify.ai 官网首页与 GitHub langgenius/dify 仓库（2026-09-30 核对）：Star 约 157.5k · Fork 约 24.8k · 178 个版本标签 · 主语言 Python 与 TypeScript；仓库定位原文 Build Agentic workflows, RAG pipelines, with rich AI model and tool support on one collaborative workspace。</p>
+</section>
+
+<!-- ================= 03 心智模型图 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>心智模型：一张画布，四件套</h2>
+  <div class="diagram">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar90" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <rect x="250" y="16" width="260" height="44" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="380" y="43" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">业务系统 / 最终用户</text>
+    <rect x="150" y="98" width="460" height="128" rx="12" fill="var(--card)" stroke="var(--accent)" stroke-width="2"/>
+    <text x="380" y="122" text-anchor="middle" fill="var(--ink)" font-size="13" font-weight="700">Dify 平台（编排 · 检索 · 发布 一站式）</text>
+    <rect x="172" y="138" width="130" height="70" rx="9" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="237" y="160" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">可视化编排</text>
+    <text x="237" y="176" text-anchor="middle" fill="var(--muted)" font-size="9.5">工作流 / 聊天流画布</text>
+    <text x="237" y="192" text-anchor="middle" fill="var(--muted)" font-size="9.5">Agent 与提示词</text>
+    <rect x="315" y="138" width="130" height="70" rx="9" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="380" y="160" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">RAG 管线</text>
+    <text x="380" y="176" text-anchor="middle" fill="var(--muted)" font-size="9.5">知识库 · 分段嵌入</text>
+    <text x="380" y="192" text-anchor="middle" fill="var(--muted)" font-size="9.5">召回重排</text>
+    <rect x="458" y="138" width="130" height="70" rx="9" fill="var(--accent-soft)" stroke="var(--line)"/>
+    <text x="523" y="160" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">发布运营</text>
+    <text x="523" y="176" text-anchor="middle" fill="var(--muted)" font-size="9.5">WebApp · REST API</text>
+    <text x="523" y="192" text-anchor="middle" fill="var(--muted)" font-size="9.5">日志与标注</text>
+    <rect x="16" y="108" width="100" height="108" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="66" y="140" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">模型供应商</text>
+    <text x="66" y="160" text-anchor="middle" fill="var(--muted)" font-size="9.5">云端闭源</text>
+    <text x="66" y="176" text-anchor="middle" fill="var(--muted)" font-size="9.5">本地开源</text>
+    <text x="66" y="196" text-anchor="middle" fill="var(--muted)" font-size="9.5">按插件接入</text>
+    <rect x="644" y="108" width="100" height="108" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="694" y="140" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">插件与工具</text>
+    <text x="694" y="160" text-anchor="middle" fill="var(--muted)" font-size="9.5">搜索 · 数据库</text>
+    <text x="694" y="176" text-anchor="middle" fill="var(--muted)" font-size="9.5">内部系统</text>
+    <text x="694" y="196" text-anchor="middle" fill="var(--muted)" font-size="9.5">市场一键装</text>
+    <line x1="380" y1="60" x2="380" y2="94" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar90)"/>
+    <text x="405" y="80" fill="var(--muted)" font-size="9.5">WebApp / API 调用</text>
+    <line x1="116" y1="162" x2="146" y2="162" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar90)"/>
+    <text x="96" y="98" fill="var(--muted)" font-size="9.5">统一接入</text>
+    <line x1="614" y1="162" x2="640" y2="162" stroke="var(--accent-3)" stroke-width="2" marker-end="url(#ar90)"/>
+    <text x="618" y="98" fill="var(--muted)" font-size="9.5">按需挂载</text>
+    <text x="16" y="262" fill="var(--muted)" font-size="9.5">图例：模型走统一接入层（换供应商不改应用），能力走插件市场（生态扩展），对外只暴露 WebApp 与 API 两张脸（概念图，第 3 期拆架构）</text>
+  </svg>
+  </div>
+  <p>这张图的关键在<strong>"统一"二字</strong>：模型供应商被抽象成统一接入层，今天用云端闭源模型、明天换本地开源模型，应用侧一行不改——第 3 期会看到这套抽象如今落在插件体系上；能力侧的检索、工具、Agent 都是即插即用的公共件；对外则只有两张脸：给人用的 WebApp，给程序用的 REST API。<strong>平台把横向能力收走，团队把精力还给业务</strong>。</p>
+</section>
+
+<!-- ================= 04 尝鲜链 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>用起来的样子：一条命令与三个入口</h2>
+  <p>先看形状，第 2 期再亲手跑。对照官方部署文档（docs.dify.ai，2026-09-30 核对），自托管的全套环境一条命令拉起——官方前置要求仅两核 CPU、4 GiB 内存、Docker Compose 2.24 以上：</p>
+  <pre class="codeblock"><code>git clone https://github.com/langgenius/dify.git
+cd dify/docker &amp;&amp; cp .env.example .env
+docker compose up -d      # 一套栈：API/Worker/前端/向量库…</code></pre>
+  <p>起来之后有三个入口：<strong>浏览器开 http://localhost</strong>，第一次进 <code>/install</code> 页设置管理员账号；之后是工作台——建聊天助手、编排工作流、挂知识库都在这里；第三个入口是<strong>每应用一把钥匙的 Service API</strong>，官方口径"你发布的每个应用都是一个 REST API，知识库也是"，业务系统拿 Bearer 令牌就能调用。</p>
+  <figure style="margin:1rem 0">
+    <img src="../img/0090-dify-what-and-why/dify-docs-app-create.png" alt="Dify 官方文档首页：Choose How You Run Dify——Dify Cloud 与 Self-Host 两条路" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">
+    <figcaption style="font-size:.85rem;color:var(--muted);margin-top:.4rem">官方文档首页 Choose How You Run Dify：左 Dify Cloud（托管平台，免费 Sandbox 计划），右 Self-Host（社区版，Docker Compose 数分钟部署）（来源：docs.dify.ai，2026-09-30 截图）</figcaption>
+  </figure>
+  <p class="note">来源注记——docs.dify.ai 《Deploy Dify with Docker Compose》与 API Reference Get Started（2026-09-30 核对）：前置 CPU ≥ 2 Core、RAM ≥ 4 GiB、Docker Compose 2.24.0+；默认经 nginx 暴露 80 端口；管理员初始化地址 http://localhost/install；Service API 鉴权原文 Every request carries the key as a Bearer token。</p>
+</section>
+
+<!-- ================= 05 云版 vs 自托管 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>三条部署路径：云版、自托管与企业版</h2>
+  <p>Dify 官方给三条路。<strong>Dify Cloud</strong>：开箱即用的托管平台，免费 Sandbox 计划自带常用模型额度，适合零成本试水；<strong>社区版自托管</strong>：Docker Compose 几分钟起一套，数据全在自己手里，本系列四期都走这条路；<strong>企业版</strong>：官方或合作伙伴提供，多工作区、SSO、高可用这些组织级能力。选型口径一句话：<strong>练手用云版，数据敏感或要深度定制选自托管，组织级管控找企业版</strong>。</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>维度</th><th>Dify Cloud</th><th>社区版自托管</th></tr></thead>
+    <tbody>
+      <tr><td>上手成本</td><td>注册即用，零部署</td><td>一条 docker compose 命令（2 核 4 GiB 起）</td></tr>
+      <tr><td>数据边界</td><td>在官方托管环境</td><td>全栈落在自己机房 / 内网</td></tr>
+      <tr><td>模型接入</td><td>自带额度 + 自接密钥</td><td>完全自配，本地开源模型也行</td></tr>
+      <tr><td>适合阶段</td><td>原型验证、轻量使用</td><td>生产接入、私有化交付</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">来源注记——docs.dify.ai 首页 Choose How You Run Dify 与 Cloud / Self-Host 两章节（2026-09-30 核对）：Cloud 口径原文 Start building right away on the managed platform. No installation, free Sandbox plan included；Self-Host 口径原文 Run the open-source Community Edition on your own infrastructure. Deploy with Docker Compose in minutes。</p>
+</section>
+
+<!-- ================= 06 许可边界 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>开源许可的边界：Apache 2.0 加了什么</h2>
+  <p>Dify 用的是<strong>Dify Open Source License——基于 Apache 2.0 附加了条件</strong>，不是严格 OSI 认证开源。附加条件主要指向一件事：<strong>不得绕过授权把 Dify 用作多租户 SaaS 对外转售</strong>；此外移除或修改Logo与版权信息需要遵守相应条款。换句话说：<strong>内部使用、自用服务、二次开发、教学研究统统自由，唯一要避开的是"拿它开一家多租户平台公司"这类商业模式</strong>。对架构师这是个必须提前看清的点——选型进方案前把许可条款过一遍，避免生产落地后才发现边界。</p>
+  <figure style="margin:1rem 0">
+    <img src="../img/0090-dify-what-and-why/dify-github-repo.png" alt="GitHub langgenius/dify 仓库页：About、License、Star 数据" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:8px">
+    <figcaption style="font-size:.85rem;color:var(--muted);margin-top:.4rem">GitHub langgenius/dify 仓库：侧栏 License 为 Dify Open Source License；Star 157.5k · Fork 24.8k · 178 Tags（2026-09-30 截图）</figcaption>
+  </figure>
+  <p class="note">来源注记——github.com/langgenius/dify 仓库侧栏与 LICENSE 文件（2026-09-30 核对）：许可原文 the Dify Open Source License, based on Apache 2.0 with additional conditions；具体条款以仓库 LICENSE 文本为准。</p>
+</section>
+
+<!-- ================= 07 受众 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>受众：为什么 Java 架构师也值得认识它</h2>
+  <p>一个常见误解：Dify 是"不写代码的人玩的玩具"。恰好相反，<strong>它同时伺候三类人，而架构师是收益最大的那类</strong>：</p>
+  <ul>
+    <li><strong>不写代码的业务与产品：</strong>画布上拖节点就能攒出可用的问答、抽取、审批助手，需求验证从"提排期"变成"下午就试"；</li>
+    <li><strong>算法与提示词工程师：</strong>提示词版本、模型对比评测、检索调优（混合检索加重排）都在平台里，不再散落各处的脚本；</li>
+    <li><strong>后端工程师与架构师：</strong>把它当成<strong>LLM 层的"基础设施中间件"</strong>——业务系统经 REST API 调用编排好的能力，Spring Cloud 那套微服务照旧，模型与检索的脏活累活外包给 Dify；要深度定制时它还是开源的，源码就在仓库里。</li>
+  </ul>
+  <p>对照你熟悉的世界：Spring Boot 把 Servlet 与事务的样板代码收走，Dify 把 LLM 应用的样板工程收走——<strong>定位不同，"把重复劳动平台化"的思路一脉相承</strong>。本系列第 4 期实战就是把它接进业务系统的完整链路。</p>
+</section>
+
+<!-- ================= 08 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>随堂小测</h2>
+  <div class="quiz">
+    <p class="q-tag">每题点击选项立即反馈 · 共 3 题</p>
+    <div class="quiz-q">
+      <p class="quiz-question">1. Dify 的官方定位是？</p>
+      <ul class="quiz-options" data-answer="1" data-notes='["不对，Dify 不绑定单一模型厂商，模型供应商是可插拔的。","对的：开源 LLM 应用开发平台，编排、RAG、Agent、模型管理、观测一站式。","不对，它是应用开发平台，本身不训练大模型。"]'>
+        <li class="quiz-option">一家大模型厂商的官方推理框架</li>
+        <li class="quiz-option">开源 LLM 应用开发平台：编排、RAG 管线、Agent 一站式</li>
+        <li class="quiz-option">自研大模型的训练平台</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">2. 社区版自托管的官方前置要求是？</p>
+      <ul class="quiz-options" data-answer="2" data-notes='["不对，官方最低线没那么高。","不对，那是生产规模的建议，不是官方最低前置。","对的：官方部署文档口径 CPU ≥ 2 Core、RAM ≥ 4 GiB、Docker Compose 2.24.0+。"]'>
+        <li class="quiz-option">16 核 64 GiB 内存起步，必须独立物理机</li>
+        <li class="quiz-option">必须 Kubernetes 集群才能部署</li>
+        <li class="quiz-option">CPU ≥ 2 核、内存 ≥ 4 GiB、Docker Compose 2.24.0+</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q">
+      <p class="quiz-question">3. Dify Open Source License 的边界是？</p>
+      <ul class="quiz-options" data-answer="0" data-notes='["对的：基于 Apache 2.0 附加条件，主要限制多租户 SaaS 转售场景。","不对，商用本身自由，附加条件不指向所有商用。","不对，内部使用与二次开发都是自由的。"]'>
+        <li class="quiz-option">内部使用与二次开发自由，多租户 SaaS 转售受附加条件约束</li>
+        <li class="quiz-option">任何商用都要付费授权</li>
+        <li class="quiz-option">禁止修改源码后重新分发</li>
+      </ul>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 09 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>思考题（点击展开解析）</h2>
+  <details class="q-card">
+    <summary>思考一："每个 LLM 应用都在重复造轮子"——Dify 收走的是哪几类重复？哪些重复它收不走？这对选型意味着什么？</summary>
+    <div class="details-body">
+      <p>Dify 收走的是<strong>"横向通用件"的重复</strong>：其一，模型接入层——多供应商、密钥管理、限流重试、流式输出，一次抽象全部应用受益；其二，知识工程链——文档解析、分段、嵌入、索引、召回、重排，这条链自研没有三五个工程师月级投入做不稳；其三，编排与交互层——提示词版本管理、工作流执行、会话状态、WebApp 壳子；其四，运营件——日志追踪、标注回流、成本统计。<strong>这四类恰恰是每个应用都要、又都不构成业务差异的部分，平台化收益最大</strong>。它收不走的也有三层：<strong>业务逻辑本身</strong>——你的审批规则、领域话术、数据模型，平台无从代劳；<strong>深度性能定制</strong>——超大规模并发的推理优化、特殊硬件适配，那是 vLLM 这类推理栈的领地；<strong>强合规的私有协议对接</strong>——内部遗留系统的脏接口还得自己包。对选型的启示：评估 Dify 不是问"它能不能包办一切"，而是<strong>算两笔账——重复劳动占你项目工作量的比例，以及你的差异化恰好落在平台边界外的那部分有多少</strong>。重复占比高、差异化薄，平台收益大；反过来，差异化恰在检索与编排深水区的团队，自研或混合方案才有道理。</p>
+    </div>
+  </details>
+  <details class="q-card">
+    <summary>思考二：团队要上一个"内部制度问答助手"，直接让后端同学用 LangChain 之类框架自研，和用 Dify 起步，各自的成本结构长什么样？决策链怎么走？</summary>
+    <div class="details-body">
+      <p>先摆成本结构。<strong>自研路线：</strong>首月成本在管线搭建——文档解析、分段、嵌入、召回全链自写或拼开源件，之后每一轮"换模型、调分段、改提示词"都是代码变更加回归测试；人力是持续的，而且能力沉淀在个别工程师脑子里。<strong>Dify 路线：</strong>首月成本在部署与学习——一套 docker compose 加两天熟悉；之后调优在界面上完成，产品经理能直接参与改提示词、看日志，工程团队只剩 API 集成与权限审计两件事。<strong>再算长期账：维护主体不同——自研是"你的团队"维护，Dify 是"开源社区"维护加你的团队升级跟进</strong>，后者把大版本质量风险换成了版本节奏的依赖。决策链四步：<strong>第一步，数据边界。</strong>制度文档出不了内网？自托管 Dify 满足，路线成立。<strong>第二步，需求形态。</strong>标准问答加强检索，平台甜点区，选 Dify；若核心是复杂多轮状态机或特殊推理链，先做一周画布验证再定。<strong>第三步，团队能力。</strong>有专职算法工程师且预期长年迭代检索管线，自研有沉淀价值；没有，Dify 几乎是默认解。<strong>第四步，退出成本。</strong>Dify 的编排配置与知识库数据可导出，应用侧只耦合 REST API——将来要迁走，重写的是编排层不是业务系统，试错成本可控。<strong>结论：这类"知识问答"需求，从 Dify 起步、把自研留给真正差异化的场景，是期望成本最低的路径</strong>。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 10 要点与预告 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>本期要点与下期预告</h2>
+  <div class="card card-tip">
+    <p><strong>带走这五句话：</strong></p>
+    <ul>
+      <li>Dify = 开源 LLM 应用开发平台（基准 v1.17.1，2026-09-10），官网定位"生产级智能体工作流平台"，Star 约 157.5k；</li>
+      <li>心智模型：<strong>横向能力平台化</strong>——模型统一接入、编排画布、RAG 管线、发布运营四件套，团队只补业务差异；</li>
+      <li>三条部署路：云版练手、社区版 Docker Compose 自托管（2 核 4 GiB 起）、企业版管组织级管控；</li>
+      <li>许可边界：<strong>Apache 2.0 加附加条件</strong>——自用与二次开发自由，多租户 SaaS 转售受限，选型前必读 LICENSE；</li>
+      <li>对 Java 架构师它是"LLM 层的基础设施中间件"：业务系统走 REST API 集成，编排与检索的外包给平台。</li>
+    </ul>
+  </div>
+  <p><strong>下期预告：</strong>第 2 期《5 分钟跑起来》——docker compose 一条命令起全套栈，初始化管理员，建第一个聊天助手，挂一个知识库试出第一句带引用的回答。</p>
+  <p><strong>Primary source：</strong><a href="https://docs.dify.ai/" target="_blank" rel="noopener">Dify 官方文档（docs.dify.ai）</a>——本期定位、部署要求与许可口径均出自官网、官方文档与 GitHub 仓库（v1.17.1，2026-09-30 核对）；许可全文见 <a href="https://github.com/langgenius/dify/blob/main/LICENSE" target="_blank" rel="noopener">仓库 LICENSE 文件</a>。</p>
+</section>
+
+<nav class="lesson-nav">
+  <span class="prev">← 上一期：0089 · Apache RocketMQ 架构与源码导读</span>
+  <a class="next" href="0091-dify-quickstart.html">下一期：5 分钟跑起来 Dify →</a>
+</nav>
+
+<script>
+(function () {
+  var qs = document.querySelectorAll(".quiz-q");
+  qs.forEach(function (q) {
+    var opts = q.querySelectorAll(".quiz-option");
+    var fb = q.querySelector(".quiz-feedback");
+    var ans = parseInt(q.querySelector(".quiz-options").getAttribute("data-answer"), 10);
+    var notes = JSON.parse(q.querySelector(".quiz-options").getAttribute("data-notes") || "[]");
+    opts.forEach(function (o, i) {
+      o.addEventListener("click", function () {
+        if (q.classList.contains("answered")) return;
+        q.classList.add("answered");
+        opts[ans].classList.add("correct");
+        if (i !== ans) o.classList.add("wrong");
+        fb.className = "quiz-feedback show " + (i === ans ? "ok" : "no");
+        fb.textContent = (i === ans ? "✓ 回答正确。" : "✗ 不对，再想想。") + (notes[i] || notes[ans] || "");
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>
