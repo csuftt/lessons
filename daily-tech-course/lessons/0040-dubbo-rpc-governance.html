@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · Dubbo RPC 治理：从线程池防线到 Triple 协议现代化 | 2026-10-02</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0040</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0039-tdengine-data-subscription.html">上一期：TDengine 数据订阅</a> · <a href="https://www.bilibili.com/video/BV1h8a16wEaJ" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">SPRING CLOUD ALIBABA · SCA 系列第 5 讲（RPC 治理篇 · Dubbo）</p>
+  <h1>Dubbo RPC 治理：从线程池防线到 Triple 协议现代化</h1>
+  <p class="subtitle">上一讲在 <a href="0039-tdengine-data-subscription.html">TDengine</a> 把数据分发讲完，今天按排程开启 Spring Cloud Alibaba 的 Dubbo RPC 治理。<a href="0031-openfeign-service-call-governance.html">第 31 期</a>聊过调用方怎么"调得稳"，这期换到桌子另一边——<strong>Provider（服务提供方）怎么"扛得住"</strong>：一个默认 200 线程的线程池，怎么成了整个服务的可用性天花板；Dubbo 3 的应用级服务发现和 Triple 协议，又把这套老底子中间件现代化到了什么程度。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🟠 Spring Cloud Alibaba</span>
+    <span class="tag-date">📅 2026-10-02 · 第 40 期</span>
+    <span class="tag time">⏱ 预计阅读 11 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>一次 Thread pool EXHAUSTED：慢接口吃光公共线程池</h2>
+  <p>某会员服务（Dubbo Provider，3 实例）挂了 6 个下游消费方。大促前压测第 4 天，营销侧新上线一个"批量查会员"接口：一次请求带 2000 个会员号，单次要 800 毫秒。上线 10 分钟后监控报警，日志刷屏 <code>Thread pool is EXHAUSTED</code>——<strong>连一直健康的单笔查询接口也全线报错</strong>，故障 45 分钟。</p>
+  <p>复盘算三笔账。第一笔，<strong>线程池的天花板</strong>：Dubbo Provider 默认 <code>fixed</code> 线程池 200 个线程、<code>queues=0</code>（SynchronousQueue，不排队）——池满后新请求立即拒绝。批量接口单次 800ms，意味着每线程每秒只能处理 1.25 个请求，200 个线程的理论上限就是 <strong>250 QPS</strong>；而单笔查询只要 10ms，同样 200 线程理论上能扛 2 万 QPS。两类流量混在同一个池里，整体吞吐被最慢的那类拖到 250——<strong>一个慢接口，把快接口的地盘也占了</strong>。第二笔，<strong>queue=0 是设计者的选择</strong>：快速失败优于排队雪崩（对比 <a href="0031-openfeign-service-call-governance.html">第 31 期</a>Tomcat 线程池挂满的墨汁晕染），这次 JVM 没死、恢复很快，但"拒绝"本身就是给客户端的可用性事故。第三笔，<strong>监控缺位</strong>：线程池 activeCount 长期 190+ 无人看，慢接口是压死骆驼的最后一根草，不是第一根。</p>
+  <p>根因从来不是"线程池太小"，而是<strong>没有隔离、没有限流、没有按容量规划线程预算</strong>。这期把 Provider 侧的防线一次讲完，再往深看一层：Dubbo 3 的两个架构级现代化——应用级服务发现与 Triple 协议——值不值得你启动存量升级。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：一次调用在 Provider 身上走过的四道门</h2>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar40" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar40a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+    <text x="380" y="22" text-anchor="middle" fill="var(--muted)" font-size="13">Provider 处理路径：IO 线程与业务线程池分离，queue=0 快速失败</text>
+
+    <rect x="20" y="46" width="140" height="60" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="90" y="70" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">Consumer 请求</text>
+    <text x="90" y="90" text-anchor="middle" fill="var(--muted)" font-size="10.5">Triple / dubbo 协议</text>
+
+    <line x1="160" y1="76" x2="196" y2="76" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar40)"/>
+
+    <rect x="200" y="46" width="160" height="60" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="280" y="70" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">Netty IO 线程</text>
+    <text x="280" y="90" text-anchor="middle" fill="var(--muted)" font-size="10.5">decode 反序列化</text>
+
+    <line x1="360" y1="76" x2="396" y2="76" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar40)"/>
+    <text x="378" y="62" fill="var(--muted)" font-size="9.5">dispatcher=all</text>
+
+    <rect x="400" y="40" width="180" height="72" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="490" y="62" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">业务线程池（默认）</text>
+    <text x="490" y="80" text-anchor="middle" fill="var(--muted)" font-size="10.5">fixed · 200 线程 · queue=0</text>
+    <text x="490" y="97" text-anchor="middle" fill="var(--muted)" font-size="10.5">池满 → AbortPolicyWithReport</text>
+
+    <line x1="580" y1="76" x2="616" y2="76" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar40)"/>
+
+    <rect x="620" y="46" width="120" height="60" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="680" y="70" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">业务执行</text>
+    <text x="680" y="90" text-anchor="middle" fill="var(--muted)" font-size="10.5">慢 SQL / 外部 RPC</text>
+
+    <path d="M490,112 C490,140 280,138 280,152" fill="none" stroke="var(--accent)" stroke-dasharray="5 4" stroke-width="1.5" marker-end="url(#ar40a)"/>
+    <rect x="150" y="152" width="260" height="40" rx="8" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="280" y="177" text-anchor="middle" fill="var(--ink)" font-size="10.5">拒绝时打日志 + 自动 dump jstack（10 分钟节流）</text>
+
+    <rect x="20" y="216" width="720" height="94" rx="8" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="34" y="240" fill="var(--ink)" font-size="11" font-weight="700">两个架构级现代化（Dubbo 3）</text>
+    <text x="34" y="260" fill="var(--ink)" font-size="10.5">应用级服务发现：注册中心从"每个接口一份地址列表"变"每个应用一份实例列表"——工商银行实测节点间传输量 -90%，消费端常驻内存 -50% 以上</text>
+    <text x="34" y="278" fill="var(--ink)" font-size="10.5">Triple 协议：基于 HTTP/2，与 gRPC 生态互通，标准网关（Nginx/Envoy/APISIX）可直接代理，支持流式；3.3 起兼容 HTTP/1、HTTP/3</text>
+    <text x="34" y="296" fill="var(--ink)" font-size="10.5">默认动作：升级 3.x 即自动双注册/双订阅（register-mode=all · APPLICATION_FIRST），迁移完成切 FORCE_APPLICATION 释放内存</text>
+  </svg>
+  </div>
+
+  <h3>线程池：三道可调的闸</h3>
+  <p><strong>① 池本身</strong>：<code>dubbo.protocol.threads</code>（默认 200）、<code>queues</code>（默认 0）、<code>threadpool</code>（fixed/cached/eager/bounded）。经验：CPU 密集型 200 够用，IO 密集型按容量账推导（见 03 节），<strong>不建议用无界队列换吞吐</strong>——排队只是把拒绝变成延迟，代价更隐蔽。<strong>② 服务级限流</strong>：<code>@DubboService(executes = N)</code> 限制单个方法在 Provider 侧的最大并发，超了直接拒绝——这是 01 节事故的正解：批量接口 executes=50，就算它慢出天际也只占 50 个线程。<strong>③ 消费端背压</strong>：<code>@DubboReference(actives = N)</code> 限制调用方每个方法的并发上限——调用方自己先限流，比 Provider 被迫拒绝优雅得多。线程耗尽时 <code>AbortPolicyWithReport</code> 会拒绝并打印完整池状态，还自动 dump jstack（默认开启、10 分钟节流）——<strong>拿到 dump 文件第一件事看 200 个线程都卡在哪</strong>，答案通常不是"线程不够"。</p>
+
+  <h3>应用级服务发现：为什么它值得你升级</h3>
+  <p>Dubbo 2.x 接口级注册：一个应用 50 个接口 × 100 实例 = 注册中心 5000 条 URL，每个消费者还要按接口全量订阅、常驻内存随接口数线性膨胀。工商银行的规模（接口级地址数亿条）直接把注册中心存储与推送效率推到极限，消费端 Dubbo 框架常驻内存占比超 40%。Dubbo 3 应用级发现把粒度收敛到应用：<strong>注册中心只存"应用 → 实例列表"一份，接口到应用的映射放元数据</strong>。官方与工行联合压测：节点间数据传输量降 90%，消费端常驻内存——仅升 3.0 就降近 40%，切到应用级后降到原来的 30%，地址推送期 GC 几乎归零。迁移设计也很克制：升级即自动双注册/双订阅（默认 <code>APPLICATION_FIRST</code>，应用级订阅不到自动回落接口级），<strong>存量升级不用停机，全部消费方迁完再把开关切到 FORCE_APPLICATION 收掉接口级订阅的内存</strong>。</p>
+
+  <div class="callout">
+    <p class="callout-title">Triple 是什么</p>
+    <p>一句话：<strong>Dubbo 的 RPC 协议从私有 TCP 换到了 HTTP/2 标准轨道</strong>。收益三条——与 gRPC 协议互通（Protobuf IDL 定义服务，跨语言直接调）；Nginx/Envoy/APISIX 等标准网关可直接代理（老 dubbo 协议需要专门的协议转换插件）；原生支持流式调用。3.3 的 Triple X 进一步兼容 HTTP/1、HTTP/3，REST 风格访问无需网关转协议。存量 POJO 服务可以用 <strong>Wrapper 模式</strong>先切协议不动代码（序列化仍走 hessian2/fastjson2），新服务直接上 IDL 模式拿满跨语言与安全红利。</p>
+  </div>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：线程预算、协议选型与序列化红线</h2>
+
+  <h3>容量三笔账</h3>
+  <p><strong>线程账</strong>：需求并发 = 峰值 QPS × P99（秒）。6000 QPS × 50ms = 300 并发，单实例 200 线程 × 3 实例 = 600，余量 2 倍，健康；但混入 10% 的 800ms 批量请求后加权并发需求暴涨，慢接口永远应该单独隔离而不是共享大池。<strong>放大账</strong>：默认 <code>retries=2</code>（failover 集群容错，失败重试 2 次共 3 连发）——下游过载时重试是兴奋剂（<a href="0031-openfeign-service-call-governance.html">第 31 期</a>同款教训），<strong>非幂等写操作必须显式 retries=0</strong>。<strong>序列化账</strong>：大报文（批量接口的 2000 个会员号）序列化开销与网络放大都吃 IO 线程，报文预算要进接口契约评审。</p>
+
+  <h3>协议与治理参数速查</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>维度</th><th>dubbo 协议（存量）</th><th>Triple（新服务默认）</th></tr>
+    <tr><td>协议基础</td><td>私有 TCP 长连接</td><td>HTTP/2（3.3 起兼容 HTTP/1、HTTP/3）</td></tr>
+    <tr><td>跨语言</td><td>Dubbo 系 SDK</td><td>gRPC 生态互通，Protobuf IDL</td></tr>
+    <tr><td>网关代理</td><td>需专门协议转换</td><td>Nginx/Envoy/APISIX 直接代理，curl 可调</td></tr>
+    <tr><td>流式调用</td><td>不支持</td><td>原生 streaming</td></tr>
+    <tr><td>POJO 存量代码</td><td>—</td><td>Wrapper 模式免 IDL 平滑切</td></tr>
+  </table>
+  </div>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>参数</th><th>默认</th><th>架构含义</th></tr>
+    <tr><td><code>dubbo.protocol.threads / queues</code></td><td>200 / 0</td><td>快速失败优于排队；IO 密集型按容量账调，别靠无界队列</td></tr>
+    <tr><td><code>executes</code>（Provider）</td><td>不限制</td><td>方法级最大并发——慢接口隔离的正解</td></tr>
+    <tr><td><code>actives</code>（Consumer）</td><td>不限制</td><td>调用方背压，比 Provider 被迫拒绝优雅</td></tr>
+    <tr><td><code>timeout / retries</code></td><td>1000ms / 2</td><td>超时按下游 P99 调；非幂等写必须 retries=0</td></tr>
+    <tr><td><code>prefer-serialization</code></td><td>fastjson2,hessian2（3.2+）</td><td>序列化协商顺序，兼容旧版本回落 hessian2</td></tr>
+    <tr><td><code>serialize-check-status</code></td><td>STRICT（3.2+）</td><td>白名单强校验；升级观察期可临时 WARN</td></tr>
+  </table>
+  </div>
+
+  <h3>序列化即攻击面</h3>
+  <p>Dubbo 的反序列化是历史漏洞重灾区（CVE-2023-23638 等 RCE 都打在这里）。官方在 3.x 做了三次收口：<strong>3.2 默认序列化从 hessian2 切到 fastjson2</strong>（性能更好、原生支持 JDK17+），同时 <code>serialize-check-status</code> 默认升到 <strong>STRICT 白名单强校验</strong>（不在信任清单的类直接拒绝反序列化）；<strong>3.3 把默认支持的序列化收窄到 Hessian2 / Fastjson2 / Protobuf</strong>（移除了 JDK 序列化等高风险项）；而 Triple + Protobuf IDL 模式因为报文结构完全由 IDL 约束，<strong>天然免疫任意类反序列化</strong>——官方安全文档的原话是"该协议默认安全"。存量升级 3.2+ 的推荐姿势：先 <code>-Ddubbo.application.serialize-check-status=WARN</code> 观察日志无告警，再收紧 STRICT——直接强切可能把泛化调用的合法类拦在外面。</p>
+
+  <h3>版本坐标（2026-10）</h3>
+  <p>Java 线最新特性版 <strong>3.3.6</strong>（2025-11 发布，含 JDK 21/Loom 支持、Affinity 路由、HTTP/2 连接预取强化），<strong>3.2.19</strong> 为稳定维护线；JDK 8~21 全覆盖（3.2 线到 17）。2.7.x 已 EOL 多年——还在 2.7 的存量，升级不是选择题。SCA 集成注意版本配平：Spring Boot 3.x + SCA 2023.0.1.0+ + Dubbo 3.3.x 是新一代组合，JDK 8 存量用 Boot 2.7 + Dubbo 3.2.x 线先升级后换代。</p>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：三段落地</h2>
+
+  <h3>片段一：慢接口隔离——独立线程池 + executes 限流</h3>
+  <pre><code># application.yml：全局池按容量账调大，同时给批量接口独立预算
+dubbo:
+  protocol:
+    name: tri                      # Triple 协议，新服务默认
+    port: 50052
+    threads: 300                   # 容量账：6000QPS×50ms÷3实例≈100，×3 冗余
+    queues: 0                      # 保持快速失败，不排队
+
+@DubboService(executes = 50, timeout = 3000)   # 方法级并发上限 50
+public class MemberBatchServiceImpl implements MemberBatchService {
+    // 2000 个会员号的批量查询，慢且量小——隔离在这个预算里
+    // ...
+}</code></pre>
+
+  <h3>片段二：Triple + IDL 最小落地（跨语言与 curl 直调）</h3>
+  <pre><code>syntax = "proto3";
+service MemberService {
+  rpc getMember(GetMemberReq) returns (MemberResp);
+}
+// 生成代码后，Provider 侧与普通 Dubbo 服务无异
+@DubboService
+public class MemberServiceImpl implements MemberService { /* ... */ }
+
+# 消费端不写 Java 客户端也能直调——HTTP/2 标准轨道：
+curl --http2-prior-knowledge -d '{"memberId":"M1001"}' \
+     -H "Content-Type: application/json" \
+     http://member-svc:50052/org.demo.MemberService/getMember</code></pre>
+
+  <h3>片段三：序列化加固与线程池观测</h3>
+  <pre><code># ① 序列化协商：优先 fastjson2，旧版本消费方回落 hessian2
+dubbo.provider.prefer-serialization: fastjson2,hessian2
+# ② 升级观察期：先 WARN 看日志，确认无告警再收紧 STRICT
+# -Ddubbo.application.serialize-check-status=WARN
+# ③ 线程池观测：QoS 端口看池状态（或接 Micrometer 进 Grafana）
+telnet 127.0.0.1 22222   # ls / status 命令；EXHAUSTED 时自动 dump 的
+                          # jstack 文件在 user.home，直接看 200 线程卡在哪</code></pre>
+
+  <div class="warn">
+    <p><strong>五个必踩的坑：</strong>① <strong>queue 改大换取"不拒绝"</strong>——排队把故障从客户端可见的报错变成更隐蔽的延迟雪崩，拒绝是减压阀不是故障本身。② <strong>retries 用默认值跑写操作</strong>——默认 failover 重试 2 次，超时后同一笔扣减最多打 3 次，与 31 期传输层重试是同一条纪律。③ <strong>3.2 升级直接开 STRICT</strong>——泛化调用、跨团队 POJO 可能被白名单拦截，官方升级指南明确建议先 WARN 观察。④ <strong>双注册跑一年不切 FORCE_APPLICATION</strong>——接口级订阅的内存一分没省，迁移只做了一半。⑤ <strong>线程池只看 reject 报警</strong>——等 EXHAUSTED 再看就晚了，activeCount 长期 &gt;85% 就该启动容量评审。</p>
+  </div>
+
+  <div class="card card-tip">
+    <h4>✅ Dubbo Provider 体检清单</h4>
+    <p>☐ 线程池容量按"峰值 QPS × P99"推导过并留 2 倍余量　☐ 慢接口（P99 &gt; 200ms）已用 executes/独立 executor 隔离　☐ 高风险调用方配了 actives 背压　☐ 所有写操作显式 retries=0　☐ timeout 按下游 P99~P99.9 分层配置（全局 1s 只是兜底）　☐ activeCount/池拒绝数进监控（&gt;85% 告警）　☐ EXHAUSTED 自动 dump 的 jstack 有归档与复盘机制　☐ 序列化：prefer-serialization 显式声明 + STRICT 白名单落地　☐ 跨网络边界/对外暴露的接口走 Triple IDL 或网关层鉴权　☐ 存量 3.x 双注册迁移有截止日期，迁完切 FORCE_APPLICATION</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>queue=0 是刻意设计</strong>：fixed 200 线程 + 不排队 = 快速失败优于排队雪崩；但快速失败只是保住 JVM，可用性要靠隔离（executes）与背压（actives）挣回来。</li>
+    <li><strong>线程池是被慢接口打爆的，不是被流量打爆的</strong>：800ms 批量接口把 200 线程的理论吞吐钉在 250 QPS——隔离永远优先于扩池。</li>
+    <li><strong>应用级服务发现是 Dubbo 3 最大的架构红利</strong>：注册中心传输量 -90%、消费端内存 -50%+（工行实测）；升级即双注册，迁完切 FORCE_APPLICATION 才算收割完成。</li>
+    <li><strong>Triple 把 RPC 搬上标准轨道</strong>：HTTP/2 + gRPC 互通 + 标准网关可代理；新服务默认 Triple，存量 Wrapper 模式免 IDL 平滑过渡。</li>
+    <li><strong>序列化即攻击面</strong>：3.2 默认 fastjson2 + STRICT 白名单、3.3 收窄默认序列化集；Triple IDL 模式天然免疫反序列化 RCE——高安全场景的不二选。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目一：会员服务 3 实例（threads=300/实例），大促目标 6000 QPS，单笔查询 P99=50ms；营销批量接口 P99=800ms，占比 10%（600 QPS）。① 算一算：现状线程预算扛得住吗？瓶颈先出现在哪里？② 设计隔离方案：executes、actives、独立线程池怎么组合？③ 有人提议把 queues 改成 10000"先不报错"，给出你的裁决。<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>两笔账分开算。</strong>单笔查询：6000×90%=5400 QPS × 0.05s = 270 并发需求；批量：600 QPS × 0.8s = <strong>480 并发需求</strong>——合计 750，而供给是 3×300=900，理论上"总账"够（余量仅 1.2 倍，已经不健康）。真正的雷在分布：如果两类流量共享线程池，抢占是随机的——批量请求到达得早一点，480 个线程位置被占满，单笔查询的 270 并发需求里有相当部分落在"池满拒绝"上，<strong>可用性事故不是发生在总需求超供给时，而是发生在共享池被慢流量稀释时</strong>。大促一旦超预期 20%，直接击穿。</p>
+      <p>② <strong>三层组合拳，各管一段。</strong>Provider 侧 <code>executes</code>：批量接口按"目标延迟内能处理的量"给预算——600 QPS×0.8s=480 并发是它的"应得"，但业务上批量是低优先级，压到 executes=300（每实例 100）足够；单笔查询可给独立线程池（<code>@DubboService(executor=...)</code> 指向专属 Executor）或至少不设限。消费端 <code>actives</code>：营销应用对批量接口的并发上限压到 300，把背压前移到调用方——调用方限流失败可以本地降级（返回缓存、异步补齐），比 Provider 拒绝后干等好。容量余量恢复到 2 倍以上。这套与 <a href="0001-sentinel-circuit-breaking.html">第 1 期</a>Sentinel 的 Warm Up + 隔离是互补关系：Sentinel 管入口总量，Dubbo 原生参数管方法级预算，别用两套工具做同一件事。</p>
+      <p>③ <strong>否决，理由三段。</strong>其一，排队不消灭故障只改造故障：600 QPS 的批量需求不会因为排队变成 300，延迟从"立即报错"变成"排队 3 秒后超时报错"，错误率统计还更好看了——监控反而被污染。其二，内存账：10000 深度队列 × 每任务附带请求上下文，瞬时内存膨胀可达 GB 级，把"拒绝问题"升级成"OOM 问题"。其三，正确方向是把预算花在隔离与背压上（第②问），而不是给共享池加缓冲。唯一例外场景：短时毛刺（秒级突发）可用 <code>eager</code> 线程池（先扩线程再入队）平滑，但那是"扩"不是"排"。</p>
+    </div>
+  </details>
+
+  <details class="q-card">
+    <summary>题目二：你在治理一套 2.7 存量（40 个应用、注册中心 ZooKeeper、消费端框架内存占比 35%），立项升级 Dubbo 3.3。① 给出升级路径的关键四步与每步的验收标准。② dubbo 协议要不要同步切 Triple？给出灰度策略。③ 切完序列化 STRICT 第一天，三个跨团队泛化调用接口报 ClassNotFound 类校验异常，怎么处置？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>四步走，每步带验收。</strong>第一步，依赖升级 2.7→3.3（<code>com.alibaba</code> 坐标换 <code>org.apache.dubbo</code>，注解 @Service→@DubboService）：验收是单应用回归通过——3.x 对 2.x 协议层完全兼容，可灰度任意数量应用。第二步，双注册双订阅（升级后默认 register-mode=all / APPLICATION_FIRST）：验收在注册中心与元数据中心看到应用级数据完整、消费端调用零异常，同时用 <a href="0029-skywalking-tracing.html">链路追踪</a>抽样核对流量正常。第三步，逐应用切 FORCE_APPLICATION：验收是消费端框架常驻内存显著回落（工行数据是从 40% 级降到 15% 级量变），ZooKeeper 上接口级地址条目开始减少。第四步，收口 register-mode=instance（只注册应用级）：验收是注册中心存储与推送量下降 90% 量级，2.7 存量全部清零后下线接口级兼容逻辑。全程不停机——双注册双订阅的迁移模型就是为这个设计的。</p>
+      <p>② <strong>协议切换单独立项，与版本升级解耦。</strong>版本升级是刚需（2.7 EOL），协议切换是优化项，混在一起出问题无法定位。灰度策略：Provider 双协议发布（<code>dubbo.protocol.protocols</code> 配 tri + dubbo 两个协议，同服务双端口暴露），消费端逐应用配 <code>dubbo.consumer.protocol=tri</code> 切换；存量 POJO 用 Triple Wrapper 模式（序列化走 hessian2/fastjson2，不写 IDL、不改代码），验证稳定后再对高价值接口引入 IDL 模式（跨语言需求、对外暴露的接口优先）。网关侧同步验证：Triple 走标准 HTTP/2 代理后，可以顺势把 <a href="0032-spring-cloud-gateway.html">第 32 期</a>的入口治理策略延伸到 RPC 层。切换验收：两侧协议的 P99 对比、序列化兼容性回归、gRPC 跨语言冒烟。</p>
+      <p>③ <strong>这是 STRICT 白名单的预期行为，不是升级事故。</strong>根因：泛化调用不经过字节码扫描，类信任清单（AutoTrustSerializeClass 递归信任服务接口相关的包）对跨团队 POJO 覆盖不全，STRICT 把"清单外"全部拒绝。处置三步：临时降级 <code>-Ddubbo.application.serialize-check-status=WARN</code> 恢复业务（WARN 只黑名单拦截、清单外记日志）；按日志提示把三个接口的 POJO 包补进信任清单（<code>dubbo.application.trust-serialize-package</code> 或调 TrustSerializeClassLevel 放宽到公共包层级）；观察一周无新增告警再收回 STRICT。要避免的两个极端：一是被报警吓住把全局永久停在 WARN（等于放弃 RCE 防线，等于白升级）；二是为了"彻底"给全包 <code>*</code> 白名单（等于没有白名单）。长期正解是推动跨团队接口走 IDL 模式——结构由契约约束，跳出"用类清单防类攻击"的猫鼠游戏，这也是官方安全文档的推荐方向。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>Apache Dubbo 官方文档 · 序列化机制（类检查机制 STRICT/WARN、prefer-serialization 协商、安全基线）：<br>
+    <a href="https://dubbo.apache.org/zh-cn/overview/mannual/java-sdk/reference-manual/serialization/serialization/" target="_blank" rel="noopener">dubbo.apache.org · Serialization</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>调用方视角的超时与重试治理在 <a href="0031-openfeign-service-call-governance.html">第 31 期</a>（OpenFeign，本期 retries 纪律与它同构）；限流熔断的定量方法见存档期 <a href="0001-sentinel-circuit-breaking.html">第 1 期</a>；Dubbo 生态的链路追踪（字节码注入零代码接入）在 <a href="0029-skywalking-tracing.html">第 29 期</a>；分布式事务的 XID 透传（Dubbo Filter 链）在 <a href="0018-seata-distributed-transaction.html">第 18 期</a>。下一期按过渡排程进入 MySQL——ShardingSphere 分库分表（Spring Cloud Alibaba 主线告一段落，进阶主题后面再回来）。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0039-tdengine-data-subscription.html">← 上一期：TDengine 数据订阅</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 40 期 · Spring Cloud Alibaba 系列 · 下一期预告：MySQL——ShardingSphere 分库分表（SCA 主线告一段落，进阶主题后面再回来）</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
