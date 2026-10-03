@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · ShardingSphere 分库分表：单表 3 亿行订单库的拆分工程 | 2026-10-03</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0041</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0040-dubbo-rpc-governance.html">上一期：Dubbo RPC 治理</a> · <a href="https://www.bilibili.com/video/BV1EbHh6gEMj" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">MYSQL · MySQL 系列第 4 讲（扩展性篇 · 分库分表）</p>
+  <h1>ShardingSphere 分库分表：单表 3 亿行订单库的拆分工程</h1>
+  <p class="subtitle">上一讲聊了 <a href="0040-dubbo-rpc-governance.html">Dubbo Provider 的线程池防线</a>，今天按过渡排程回到 MySQL 主线，讲单机数据库的天花板问题：单表 3 亿行之后，索引再优化、硬件再堆，P99 也压不住了——<strong>分库分表不是性能优化的续集，而是一次不可逆的架构决策</strong>。这一讲从一次"索引优化到头、容量倒排 11 个月见顶"的复盘讲起：什么信号说明必须分片、分片键怎么选（一错定终身）、为什么 8 库 64 表比 4 库 4 表更抗未来、绑定表和广播表怎么救跨库 JOIN，最后用 ShardingSphere-JDBC 把这些决策落成配置，讲清扩容迁移 Pipeline 的四阶段与割接窗口怎么算。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🐬 MySQL</span>
+    <span class="tag-date">📅 2026-10-03 · 第 41 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>一次"优化到头"的复盘：3 亿行订单表的容量倒排</h2>
+  <p>某电商订单库，订单表单表 3.2 亿行、约 400GB。大促前一个月压测，P99 从 8 毫秒劣化到 46 毫秒。团队第一反应是老三样：慢 SQL 治理（<a href="0019-mysql-explain-index-failure.html">第 19 期</a>的 EXPLAIN 判读又做了一轮）、索引重建、热点 SQL 加缓存。结果压测结论很扎心：<strong>没有任何一条慢 SQL——每条查询都走了索引</strong>，但 P99 就是下不去。</p>
+  <p>复盘算容量倒排账，三个数字摆上桌：① <strong>B+ 树高度账</strong>：3 亿行 × 主键 16 字节 + 指针 6 字节，非叶子节点单页约可放 400+ 个键指针，三层 B+ 树可索引约 400 × 400 × 500（叶子页按 500 行估）= <strong>8000 万到 1 亿行</strong>——3 亿行意味着部分索引已经长到四层，一次主键点查多一次页读取；二级索引更惨，回表路径同步变长。② <strong>缓冲池账</strong>：热数据（活跃订单 + 索引上层节点）约 180GB，实例 buffer pool 只配了 64GB，命中率从 99.9% 掉到 97%——<strong>看起来只掉了不到 3 个点，但意味着每秒几万次磁盘随机读</strong>，这就是 P99 劣化而慢日志干净的真因：没有慢 SQL，只有"不在内存里"的 SQL。③ <strong>增量账</strong>：业务年增长 60%，日增订单 300 万行，<strong>11 个月后突破 5 亿行</strong>，届时四层索引全覆盖、备份窗口超过 6 小时、DDL（如加列）在 3 亿行表上 gh-ost 也要跑一整晚。结论：索引优化治标，垂直扩容（换 512GB 内存的机器）治一阵，<strong>只有水平拆分治本</strong>。</p>
+  <p>另一个方向的教训同样值得记：同年另一个业务库只有 800 万行，团队"顺手"也上了分库分表——8 个库、每库 16 张表，128 个分表 servicing 800 万行数据，<strong>平均每表 6 万行</strong>。查询不带分片键就广播 8 个库，运维复杂度翻了几倍，业务团队怨声载道。<strong>分片是给容量问题的答案，不是给性能焦虑的答案</strong>——单表 2000 万行以内、缓冲池放得下热数据，优化索引和缓存永远是更便宜的选择。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：分片键、分片数与路由的数学</h2>
+
+  <h3>分片键：一错定终身的选择</h3>
+  <p>分片键（sharding key）决定每行数据落到哪个库哪张表，选择标准只有一条：<strong>最高频的查询维度</strong>。订单场景三类典型查询——用户查自己的订单（按 user_id）、商家查自己店铺的订单（按 merchant_id）、运营查全局（时间/状态维度）。带分片键的查询路由到单库单表（一次索引点查），不带分片键的查询广播全部分片再归并（代价 ×N）。所以分片键选 user_id，用户侧查询全部单库路由，商家侧和运营侧就要走异构索引（见 03 节）。<strong>反例是把 order_id 选做分片键</strong>：订单号是雪花 ID，随机分布很均匀，但几乎没有"只按订单号"的业务查询不带用户上下文——结果所有用户维度的查询都广播，分片白分了。</p>
+  <p>两个硬约束：① 分片键一旦上线就不能改——数据按它散布在所有分片上，换键等于全量重分布（要走一遍 04 节的扩容迁移）。② 分片键值要尽量均匀且不可变：按 merchant_id 分片会碰到大商户倾斜（一个头部商户顶 30% 流量，单分片过热）；用可变字段（如手机号换绑）做分片键，更新分片键值等于跨分片搬数据，绝大多数分片中间件（含 ShardingSphere）<strong>不支持更新分片键值</strong>。</p>
+
+  <h3>路由：从 SQL 到分片的映射</h3>
+  <div class="diagram">
+  <svg viewBox="0 0 760 340" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar41" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar41a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+    <text x="380" y="22" text-anchor="middle" fill="var(--muted)" font-size="13">两级路由：db = user_id % 8，table = (user_id / 8) % 8 —— 8 库 64 表</text>
+
+    <rect x="20" y="48" width="180" height="64" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="110" y="72" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">应用：INSERT 订单</text>
+    <text x="110" y="92" text-anchor="middle" fill="var(--muted)" font-size="10.5">user_id = 12345</text>
+
+    <line x1="200" y1="80" x2="236" y2="80" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar41)"/>
+    <text x="218" y="66" fill="var(--muted)" font-size="9.5">SQL</text>
+
+    <rect x="240" y="48" width="200" height="64" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="340" y="72" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">ShardingSphere 解析路由</text>
+    <text x="340" y="92" text-anchor="middle" fill="var(--muted)" font-size="10.5">提取 user_id → 计算两个坐标</text>
+
+    <line x1="440" y1="80" x2="476" y2="80" stroke="var(--accent)" stroke-width="1.5" marker-end="url(#ar41a)"/>
+    <text x="458" y="60" fill="var(--muted)" font-size="9.5">路由</text>
+
+    <rect x="480" y="40" width="120" height="80" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="540" y="64" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">db_1（12345%8=1）</text>
+    <text x="540" y="84" text-anchor="middle" fill="var(--muted)" font-size="10">t_order_6</text>
+    <text x="540" y="102" text-anchor="middle" fill="var(--muted)" font-size="10">(12345/8)%8=6</text>
+
+    <rect x="480" y="140" width="120" height="44" rx="10" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="540" y="159" text-anchor="middle" fill="var(--muted)" font-size="9.5">db_0 · t_order_*</text>
+    <text x="540" y="175" text-anchor="middle" fill="var(--muted)" font-size="9.5">（user_id%8=0 的行）</text>
+
+    <rect x="620" y="140" width="120" height="44" rx="10" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="680" y="159" text-anchor="middle" fill="var(--muted)" font-size="9.5">db_2 ~ db_7 …</text>
+    <text x="680" y="175" text-anchor="middle" fill="var(--muted)" font-size="9.5">（其余 6 个库）</text>
+
+    <rect x="20" y="216" width="720" height="108" rx="8" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="34" y="240" fill="var(--ink)" font-size="11" font-weight="700">两级取模的扩容红利：库数与表数解耦</text>
+    <text x="34" y="260" fill="var(--ink)" font-size="10.5">单级取模 4 表 → 8 表：每行的新位置 = id%8，与旧位置 id%4 几乎全错开 → 全量数据搬迁</text>
+    <text x="34" y="278" fill="var(--ink)" font-size="10.5">两级取模 8 库 64 表 → 16 库 64 表：表坐标 (id/8)%8 不变，只是库坐标 id%8 → id%16 拆细</text>
+    <text x="34" y="296" fill="var(--ink)" font-size="10.5">旧 db_x 里 id%16 ∈ {x, x+8} 的两半，各搬去新库——库级扩容只动一半数据，表不动</text>
+    <text x="34" y="314" fill="var(--ink)" font-size="10.5">这就是"先建足逻辑表数、库数按需翻倍"策略的数学根据</text>
+  </svg>
+  </div>
+
+  <h3>分片数：一步到位比精准匹配更划算</h3>
+  <p>"8 库 64 表是不是过度设计？现在才 3 亿行，4 库 4 表每表 2000 万不是刚好？"——<strong>错在把分片数当容量规划做精准匹配</strong>。分片的边际成本极低（一个逻辑表就是一张物理表，64 张表对运维是配置不是负担），而扩容成本极高（全量数据迁移 + 割接，见 04 节）。经验公式：<strong>按 3~5 年后的数据量倒推目标表数，让单表落在 2000 万~5000 万行区间</strong>。3 亿行 × 年增 60% × 3 年 ≈ 12 亿行，64 表 = 单表 1900 万，刚好。库数决定写入吞吐与存储上限，64 表先建足、8 库起步、未来翻到 16 库只搬一半数据——两级取模的解耦红利就在上图。反面案例是 4 库 4 表起步，两年后单表破亿被迫二次扩容，全量重分布走了一年才敢割接。</p>
+
+  <h3>归并：广播查询的代价模型</h3>
+  <p>不带分片键的查询（运营后台查全量订单）广播到 8 个库，ShardingSphere 把各分片结果拉回内存归并。<code>COUNT/SUM/MAX/MIN</code> 可以下推到各分片算完再汇总（代价 = N 次索引扫描）；<code>AVG</code> 被改写成 SUM/COUNT 二次计算；<code>ORDER BY ... LIMIT offset, size</code> 最贵——<strong>每个分片都要返回 offset+size 行</strong>，全局第 1000 页（offset=10000，size=10）时 8 个库各吐 10010 行、共 8 万行进内存，排序后丢掉 79990 行。深分页数学：<strong>传输量 ≈ 分片数 × (offset + size)</strong>，线性放大。解法是游标分页（<code>WHERE create_time &gt; last ORDER BY create_time LIMIT 10</code>，带排位键翻页）或把复杂查询导去 ES/宽表（见 03 节异构索引）。聚合类查询同理：每一条 GROUP BY 都要全分片扫——<strong>分片把 OLTP 的路修宽了，把 OLAP 的路修窄了</strong>。</p>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：分片后的四个补丁与形态选型</h2>
+
+  <h3>四个"分片后遗症"的补丁</h3>
+  <p><strong>① 跨库 JOIN → 绑定表 + 广播表。</strong>订单表和订单明细表都按 order_id 的宿主 user_id 分片、配置成绑定表（binding table），ShardingSphere 保证同 user_id 的订单和明细落同一库，JOIN 路由到单库本地执行；字典表（地区码、类目配置）用广播表（broadcast table）每个库存全量副本，任何库都能本地 JOIN，写入时框架同步到全部分片。<strong>不配绑定表，订单 × 明细的 JOIN 就是笛卡尔积路由</strong>：8 库 × 8 库 = 64 种组合全试一遍。② <strong>全局唯一主键 → 雪花算法。</strong>分片后各表自增主键必然冲突，ShardingSphere 内置 SNOWFLAKE 生成器：41 bit 时间戳（纪元 2016-11，可用到 2086 年）+ 10 bit 工作进程 ID + 12 bit 序列（单机单毫秒 4096 个）。两个坑：worker-id 在集群模式下自动分配不重复，单机模式默认 0——多实例务必显式分配；<strong>用雪花 ID 做分片键取模时，同一毫秒内的 ID 低位序列连续、模 2 的结果会倾斜</strong>，官方建议配 max-vibration-offset 抖动打散。③ <strong>跨库事务 → 能不跨就不跨。</strong>按 user_id 分片后，同一用户的订单、明细、状态流转天然同库同事务（本地事务保住）——这本身就是分片键选对的红利；确实要跨库（扣款 + 出单分属两个分片键域），ShardingSphere 支持 XA（强一致、性能差）与 BASE（柔性事务），架构上的正解是<strong>按业务边界重新切分，让核心链路回到单库</strong>，跨域用最终一致（对账 + 补偿，与 <a href="0018-seata-distributed-transaction.html">第 18 期 Seata</a> 同一套思路）。④ <strong>异构索引 → 一份数据多份视图。</strong>商家侧按 merchant_id 查、运营侧任意维度查，正解不是广播而是<strong>把订单数据同步出第二份、第三份视图</strong>：binlog → <a href="0039-tdengine-data-subscription.html">CDC（第 39 期同款链路）</a>→ 按 merchant_id 重分片的从属集群，或进 ES 支持任意组合查询。主库只服务最高频的 user_id 维度，其他维度各自物化——<strong>空间换路由自由度</strong>。</p>
+
+  <h3>JDBC vs Proxy：两种接入形态</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>维度</th><th>ShardingSphere-JDBC</th><th>ShardingSphere-Proxy</th></tr>
+    <tr><td>形态</td><td>应用内 jar 包（增强版 JDBC 驱动）</td><td>独立代理进程（伪装成 MySQL）</td></tr>
+    <tr><td>性能损耗</td><td>低（进程内路由，无额外跳数）</td><td>较高（多一跳网络 + 代理自身开销）</td></tr>
+    <tr><td>连接数开销</td><td>高（每个应用直连全部分片库）</td><td>低（应用只连 Proxy，Proxy 收敛连接池）</td></tr>
+    <tr><td>语言支持</td><td>仅 Java</td><td>任意（MySQL/PostgreSQL 协议）</td></tr>
+    <tr><td>升级影响</td><td>随应用发版重启</td><td>独立升级，应用无感</td></tr>
+    <tr><td>适用</td><td>Java OLTP 首选</td><td>异构语言 / DBA 运维入口 / OLAP</td></tr>
+  </table>
+  </div>
+  <p>官方定位就是混合部署：OLTP 走 JDBC（去中心化、低损耗），运维与杂 query 走 Proxy（静态入口、任意客户端可连），两者通过同一注册中心共享分片规则。3 亿行订单库场景：交易链路 Java 服务全部 JDBC；数据团队用 NavicAT/DBeaver 连 Proxy 做核对与导出。<strong>连接数是 JDBC 形态的隐性账</strong>：每个应用实例对 8 个分片库各持一个连接池，20 个实例 × 8 库 × 10 连接 = 1600 连接，分片库的 max_connections 与每库从库数要按这个模型核对（好在 8 库各自独立，不会聚到一台 MySQL 上）。</p>
+
+  <h3>版本坐标（2026-10）</h3>
+  <p>Apache ShardingSphere 当前发布版 <strong>5.5.3</strong>（2026-03-01 发布）：修复 8 组 20 个 CVE（gRPC/Netty/Logback 等三方依赖）、消除 DistSQL 并发安全风险、JDBC URL 支持直连 ZooKeeper/ETCD 注册中心拉配置（本地 YAML 可以退役）、新增 ShardingSphere-MCP Server（AI 应用受控访问数据库）。<strong>5.5.4 开发中</strong>（2026-08 董事会报告：分片键生成器 DistSQL 管理、全局自增、OpenJDK 26/GraalVM JDK25 兼容）。5.x 线架构稳定（ JDBC 与 Proxy 同内核），新项目直接 5.5.x，4.x 存量建议随大版本窗口升级。</p>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：YAML 落地与扩容迁移</h2>
+
+  <h3>片段一：ShardingSphere-JDBC 最小可用配置</h3>
+  <pre><code># pom: shardingsphere-jdbc &lt;= 5.5.x；Spring Boot 3 用 5.5.3
+dataSources:
+  ds_0: {dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+         url: jdbc:mysql://10.0.0.11:3306/order_db_0, username: app, password: ...}
+  ds_1: {dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+         url: jdbc:mysql://10.0.0.12:3306/order_db_1, username: app, password: ...}
+  # ... ds_2 ~ ds_7 同构，8 库
+rules:
+- !SHARDING
+  tables:
+    t_order:
+      actualDataNodes: ds_${0..7}.t_order_${0..7}   # 8 库 64 表
+      databaseStrategy:
+        standard: {shardingColumn: user_id, shardingAlgorithmName: db_mod}
+      tableStrategy:
+        standard: {shardingColumn: user_id, shardingAlgorithmName: tbl_mod}
+      keyGenerateStrategy: {column: order_id, keyGeneratorName: snowflake}
+    t_order_item:                                     # 订单明细
+      actualDataNodes: ds_${0..7}.t_order_item_${0..7}
+      databaseStrategy:
+        standard: {shardingColumn: user_id, shardingAlgorithmName: db_mod}
+      tableStrategy:
+        standard: {shardingColumn: user_id, shardingAlgorithmName: tbl_mod}
+  bindingTables: [t_order, t_order_item]              # 绑定表：JOIN 单库化
+  broadcastTables: [t_region, t_category]             # 广播表：字典本地 JOIN
+  shardingAlgorithms:
+    db_mod:  {type: INLINE, props: {algorithm-expression: ds_${user_id % 8}}}
+    tbl_mod: {type: INLINE, props: {algorithm-expression: t_order_${(user_id / 8) % 8}}}
+  keyGenerators:
+    snowflake: {type: SNOWFLAKE,
+                props: {max-vibration-offset: 7}}     # 抖动打散低位倾斜
+props:
+  sql-show: true</code></pre>
+  <p>注意 t_order_item 的表名在 tbl_mod 表达式里要写 <code>t_order_item_${...}</code>（本例为聚焦主表用同一算法名，落地时每张逻辑表各配自己的表达式或用 MOD 算法参数区分）。应用侧拿到的是 <code>DataSource</code>，MyBatis/JPA 零改造；<code>sql-show: true</code> 打开路由日志，压测阶段逐条核对广播 SQL。</p>
+
+  <h3>片段二：验证路由——三条查询三种命运</h3>
+  <pre><code>-- ① 带分片键：单库单表路由（Actual SQL: ds_1.t_order_6）
+SELECT * FROM t_order WHERE user_id = 12345 ORDER BY create_time DESC LIMIT 10;
+
+-- ② 不带分片键：广播 8 库 × 8 表 = 64 路归并
+SELECT COUNT(*) FROM t_order WHERE status = 'PAID' AND create_time > '2026-10-01';
+
+-- ③ 绑定表 JOIN：路由到 ds_1，本地执行
+SELECT o.order_id, i.sku_id FROM t_order o
+JOIN t_order_item i ON o.order_id = i.order_id
+WHERE o.user_id = 12345;</code></pre>
+
+  <h3>片段三：扩容迁移——Pipeline 四阶段与割接窗口</h3>
+  <p>8 库扛不住要扩 16 库，不能停机搬数据。ShardingSphere 5.x 的数据迁移/扩缩容走 Pipeline（通过 Proxy 以 DistSQL 驱动），四个阶段：<strong>准备</strong>（校验连通性、统计存量数据量、记录 binlog 位点、按数据量分片任务）→ <strong>存量迁移</strong>（JDBC 分片并行拉取、按新规则写入新集群）→ <strong>增量同步</strong>（订阅解析源库 binlog，把迁移期间的增量按新规则持续回放到新集群）→ <strong>割接</strong>（源库短暂只读或熔断写入，等增量追平，经注册中心把规则与流量切到新集群）。<strong>割接只读窗口秒级到分钟级</strong>，取决于增量追平速度与是否做数据核对。三条使用规范红线：不支持无主键表与复合主键表的扩缩容（迁移按主键切分任务）；目标必须是全新集群（不能在原存储节点上就地扩）；迁移期间双集群并存，<strong>冗余资源按目标集群全量预备</strong>。</p>
+
+  <div class="warn">
+    <p><strong>五个必踩的坑：</strong>① <strong>800 万行就分片</strong>——分片数与数据量错配，广播查询把性能做负，128 张表平均 6 万行是给运维找活。② <strong>分片键选了 order_id</strong>——随机均匀是好哈希，但业务查询几乎都带 user_id 不带 order_id，全量广播，分片等于白分。③ <strong>不配绑定表</strong>——订单 JOIN 明细笛卡尔积路由 64 组合，一次 JOIN 变 64 次。④ <strong>深分页直接 LIMIT 100000, 10</strong>——8 分片各吐 100010 行共 80 万行进内存，归并线程 OOM。⑤ <strong>双级取模公式写错扩容翻车</strong>——表坐标表达式与库数不满足解耦关系（如 db=id%8、tbl=id%8 同级），扩库时表坐标全变，"只搬一半"的红利归零，退化为全量迁移。</p>
+  </div>
+
+  <div class="card card-tip">
+    <h4>✅ 分库分表上线体检清单</h4>
+    <p>☐ 分片决策有容量倒推（3~5 年数据量 × 单表 2000 万~5000 万行目标）　☐ 分片键 = 最高频查询维度，且值分布均匀、业务上不可变　☐ 两级路由公式满足库表解耦（表坐标与库数无关）　☐ 逻辑表数一步建足（64 表），库数按吞吐起步（8 库）　☐ 绑定表清单覆盖所有同域 JOIN，字典表全部广播表化　☐ 主键生成器集群模式 worker-id 不重复 / 单机显式分配　☐ 运营/商家维度已建异构索引（CDC → 从属集群或 ES），主库无全维度查询　☐ 深分页接口已改游标或导 ES　☐ JDBC 形态连接数模型已核对（实例数 × 分片库数 × 池大小 vs max_connections）　☐ 扩容演练走过一次 Pipeline，割接窗口与回滚预案有实测数字</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>分片是容量决策不是性能决策</strong>：B+ 树三层撑约 1 亿行、热数据超过 buffer pool 命中率每掉 1 个点都是磁盘随机读——这些信号才值得分片；2000 万行以内，索引与缓存永远更便宜。</li>
+    <li><strong>分片键一错定终身</strong>：选最高频查询维度（订单=user_id），不选"哈希均匀但没人查"的维度（order_id）；选错 = 全量广播，扩容迁移 = 一次小型搬家工程。</li>
+    <li><strong>分片数一步到位</strong>：边际成本极低、扩容成本极高；8 库 64 表两级取模，未来扩 16 库只搬一半数据——库表解耦是设计出来的，不是碰运气。</li>
+    <li><strong>分片后遗症用架构补丁治</strong>：JOIN 用绑定表/广播表、主键用雪花、跨库事务靠分片键域切分规避、多维度查询靠 CDC 异构索引空间换自由。</li>
+    <li><strong>扩容走 Pipeline 四阶段</strong>：存量 + binlog 增量 + 秒级割接窗口；无主键表不支持、目标须全新集群、双集群冗余是显式成本。</li>
+  </ul>
+</section>
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目一：订单库现状 2.4 亿行、日增 200 万、年增 40%，压测 P99 22ms（buffer pool 128GB/热数据 150GB）。① 用容量倒推判断：该不该分片？给出推理链。② 若分片，分片键与分片数怎么定？给出 3 年后的数字。③ DBA 提出"先垂直扩容换 512GB 内存机器顶一年"，评估这个方案。<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>三个信号已亮两个半，该分。</strong>B+ 树账：2.4 亿行接近三层上限（约 1 亿）两倍多，主键与核心二级索引四层化，点查多一次页读；缓冲池账：热数据 150GB > 128GB buffer pool，<strong>热数据已经装不下</strong>，命中率必然随流量波动——P99 22ms 且压测时劣化就是这个缺口在放大；增量账：年增 40%，2.4 亿 → 3 年后约 6.6 亿行，四层索引全覆盖 + 备份窗口失控。缓冲池缺口是"半个信号"因为它可以用垂直扩容续命，但增量账决定了续命有时限。<strong>决策：分，但分片数按 3 年后规模设计，当下先垂直扩容顶住迁移窗口期</strong>——两件事不冲突。</p>
+      <p>② <strong>分片键 user_id</strong>（C 端查单是最高频路径，且订单的写路径天然带 user_id 上下文）；商家维度走异构索引（CDC → merchant_id 从属集群），运营维度走 ES。<strong>分片数倒推</strong>：3 年后 6.6 亿行 ÷ 目标单表 3000 万 ≈ 220 张逻辑表，取整 <strong>256 表</strong>（2 的幂，取模友好）；库数按写入吞吐与存储：6.6 亿行 × 1.3KB ≈ 850GB，单库 200~300GB 健康，<strong>8 库起步</strong>（每库 32 表、约 100GB），写入翻倍时扩 16 库。两级路由：db = user_id % 8、tbl = (user_id / 8) % 32——扩 16 库时表坐标不变、库坐标拆细，只搬一半数据。</p>
+      <p>③ <strong>可行但不完整，作为过渡方案打 70 分。</strong>收益：512GB buffer pool > 150GB 热数据 3 倍余量，命中率回到 99.9% 量级，P99 立刻回落——花小钱买 12~18 个月。缺陷一：增量账没消失，年增 40% 意味着 18~24 个月后热数据逼近 250GB、问题回归，而<strong>届时数据量从 2.4 亿涨到 3.5 亿+，迁移工程量放大近半</strong>——垂直扩容买的不是时间，是利息。缺陷二：单机 512GB 是 MySQL 单实例的实践上限区，再往上没有下一档（1024GB 的单实例故障切换窗口、复制追平时间都失控），这条路是断头路。裁决：可以买这 12 个月，但<strong>迁移立项必须与扩容同时启动</strong>，用扩容续来的窗口把分片做完，而不是用它推迟决策——"先顶一年"失败的项目，多半败在把"顶"当成了"解"。</p>
+    </div>
+  </details>
+
+  <details class="q-card">
+    <summary>题目二：订单系统已按 user_id 分 8 库 64 表，运营后台要上"全量订单多维检索"（任意状态/时间/金额组合 + 深分页到 10 万条）。① 直接在分片集群上实现这个需求，会发生什么？② 设计正确的架构，说明数据链路与一致性边界。③ 检索集群故障时运营说"我直接查主库行不行"，你的答复。<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>三重代价叠加。</strong>广播：任意组合查询不带 user_id，8 库 64 表全路由，单次查询变 64 次索引扫描 + 归并；归并内存：深分页 LIMIT 100000, 10 时每分片吐 100010 行、64 表合计 <strong>640 万行进归并线程</strong>，JVM 堆直接打爆（对应正文 02 节数学：传输量 ≈ 分片数 × (offset+size)，此处再乘表数）；无索引可用：金额/状态/时间的任意组合没有联合索引能覆盖，各分片退化为大范围扫描，一条"检索"拖垮整库——<strong>分片集群是 OLTP 引擎，这个需求是 OLAP 需求，硬塞就是拿生产库做全表扫描实验</strong>。</p>
+      <p>② <strong>异构索引是正解：主库管写，检索集群管查。</strong>链路：分片集群 binlog → CDC（Flink CDC/Canal，与 <a href="0039-tdengine-data-subscription.html">39 期数据订阅</a>、<a href="0020-cache-db-consistency.html">20 期 binlog 失效</a>同一族技术）→ 写入 Elasticsearch（任意维度组合 + 游标/scroll 深翻页天然支持）。一致性边界：ES 是<strong>最终一致</strong>，CDC 链路延迟通常秒级——运营检索场景"3 秒前的订单可能还没出现"完全可接受，但要在产品上明确这个语义（比如检索页标注数据延迟）；订单详情页/支付链路仍走分片主库强一致读。<strong>关键设计：写入路径单一（只写 MySQL，CDC 单向扇出），ES 只读</strong>——不存在双向同步的冲突问题，一致性治理简化为"CDC 延迟监控 + 对账"（按小时 count 对账，差值超阈值告警，39 期同款方案）。</p>
+      <p>③ <strong>不行，但给替代方案。</strong>直接查主库 = 把①的三重代价原样落到生产分片上，一次深分页就可能触发归并 OOM 影响交易链路——这是拿 OLTP 基础设施给运营工具兜底，方向反了。分层答复：秒级可用性需求不存在（运营检索不是交易），正确动作是<strong>恢复 ES</strong>：ES 多副本挂一半仍可查，全挂则 CDC 停止消费、binlog 保留期（如 7 天）内数据不丢，ES 恢复后自动追平——RPO=0、RTO=ES 集群重建时间。若 ES 短期修不好且运营有紧急核对需求，给<strong>降级白名单通道</strong>：只允许按 user_id 前缀/明确时间窗的点查（走分片键路由），由 DBA 在 Proxy 上执行——把"运营直连主库"变成"受控的、带分片键的、限流的应急通道"。<strong>架构师在这里守的不是权限，是"OLTP 引擎不被 OLAP 流量打死"的边界</strong>。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>Apache ShardingSphere 官方文档 · 分片特性（分片键/分片策略/绑定表/广播表/路由引擎）：<br>
+    <a href="https://shardingsphere.apache.org/document/current/en/features/sharding/" target="_blank" rel="noopener">shardingsphere.apache.org · Data Sharding</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>分片前的索引与慢 SQL 治理在 <a href="0019-mysql-explain-index-failure.html">第 19 期</a>（EXPLAIN 判读），热点行并发控制在 <a href="0034-mysql-row-lock-mvcc.html">第 34 期</a>（行锁与 MVCC），分片库自身的高可用（每个分片库都是一套主从/InnoDB Cluster）在 <a href="0033-mysql-ha-failover.html">第 33 期</a>；异构索引的 CDC 链路与 <a href="0039-tdengine-data-subscription.html">第 39 期数据订阅</a>、<a href="0020-cache-db-consistency.html">第 20 期缓存一致性</a>同族。下一期继续 MySQL 主线——InnoDB 崩溃恢复：redo log、undo log 与两阶段落盘的生死时速（MySQL 过渡排程收尾期，之后进十类循环取 Kubernetes）。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0040-dubbo-rpc-governance.html">← 上一期：Dubbo RPC 治理</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 41 期 · MySQL 系列 · 下一期预告：MySQL——InnoDB 崩溃恢复：redo/undo 与两阶段落盘</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
