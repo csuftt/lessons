@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · InnoDB 崩溃恢复：redo/undo 与两阶段落盘 | 2026-10-04</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0042</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0041-shardingsphere-sharding.html">上一期：ShardingSphere 分库分表</a> · <a href="https://www.bilibili.com/video/BV1nvHz6MEou" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">MYSQL · MySQL 系列第 5 讲（可靠性篇 · 崩溃恢复）</p>
+  <h1>InnoDB 崩溃恢复：redo/undo 与两阶段落盘</h1>
+  <p class="subtitle">上一讲用 <a href="0041-shardingsphere-sharding.html">ShardingSphere</a> 把单表 3 亿行拆成了 8 库 64 表，这期继续 MySQL 主线，钻进每个分片库的肚子里面：<strong>断电的那一瞬间，InnoDB 里正在飞的事务都去哪了？重启之后，它凭什么敢说"已提交的一行不丢、未提交的一行不留"？</strong>这一讲从一次"主库重启 47 分钟 + 丢 1.2 秒订单"的双重复盘讲起：WAL 为什么用顺序写换随机写、redo 与 binlog 的两阶段提交如何互相作证、torn page 为什么 redo 救不了要靠 doublewrite、以及架构师最关心的两笔账——崩溃恢复的 RTO 怎么估、双 1 参数什么时候敢放宽。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🐬 MySQL</span>
+    <span class="tag-date">📅 2026-10-04 · 第 42 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>同一年里的两次断电：一次慢，一次丢</h2>
+  <p><strong>第一次断电：主库重启 47 分钟。</strong>某订单库凌晨机房 UPS 切换失败，整机断电，02:13 拉起主库，03:00 才恢复服务。复盘 error log，47 分钟拆成两段：<strong>redo 重放约 30 分钟</strong>——这套库为了压测时避开 checkpoint 抖动，redo 容量曾被调到 48GB，断电时 checkpoint 落后 21GB（checkpoint age = 当前写入位置 − 最后检查点），恢复要把这 21GB 日志逐条重放，且涉及的数据页大量不在内存，随机页读把重放速率拖到约 12MB/s 的有效速度；<strong>开库之后还有 2 小时的后台回滚</strong>——断电时有个跑了 40 分钟的批量 DELETE 未提交，官方文档的口径：回滚耗时可达事务运行时长的 3~4 倍，这段时间该事务持有的行锁与 undo 链还在，业务上那批数据"看得见改不动"。</p>
+  <p><strong>第二次断电：丢 1.2 秒已提交订单。</strong>另一套库为了冲压测分数，把 <code>innodb_flush_log_at_trx_commit</code> 改成 2、<code>sync_binlog</code> 改成 0（下文合称"放开双 1"）。半年后一次 30 秒断电，重启后对账发现主库少了 1.2 秒内的 3400 笔已提交订单——redo 只保证"每秒刷一次"，binlog 交给操作系统缓存。更麻烦的是从库：<strong>OS 把 binlog 提前刷出去了，从库比主库多 3400 笔</strong>，复制线程立刻撞上主键冲突（Error 1062）中断，最后以 binlog 为权威把这批数据补回主库、重建复制关系才收场。一笔性能参数，欠下的是数据一致性 + 半天修复工时。</p>
+  <p>两次断电踩的是同一组机制的两侧：<strong>恢复太慢（redo 积压 + 大事务回滚）与恢复太丢（落盘时机放松）</strong>。这期把 InnoDB 崩溃恢复的机制一次讲透，你才知道这两笔账分别在哪儿、怎么管。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：WAL、两阶段提交与恢复裁决</h2>
+
+  <h3>一次 UPDATE 的写路径：为什么是 WAL</h3>
+  <p>UPDATE 一行时，InnoDB 同时做四件事：把 buffer pool 里的数据页改掉并标脏；把旧值写进 <strong>undo log</strong>（回滚用，也是 <a href="0034-mysql-row-lock-mvcc.html">第 34 期 MVCC</a> 的版本链）；把"某页某处改成了什么"的物理变更写进 <strong>redo log buffer</strong>；Server 层再把逻辑变更写进 <strong>binlog cache</strong>。注意：此刻磁盘上的数据文件一个字节都没动。</p>
+  <p>如果每次提交把脏页直接刷盘——一个事务可能改了几百个分散在磁盘各处的 16KB 页，全是随机写；而把这些变更先顺序追加到 redo log，一次 fsync 通常只落几百字节到几 KB。<strong>用少量顺序写换掉大量随机写，先日志后数据（Write-Ahead Logging），这是 InnoDB 写入吞吐的地基</strong>。代价是：数据文件长期落后于 redo，崩溃后必须靠"重放日志"把页补到崩溃瞬间的状态——恢复时长与日志积压量成正比，这就是 01 节那 30 分钟的来源。</p>
+
+  <h3>提交时刻：redo 与 binlog 的两阶段提交</h3>
+  <p>redo log 在引擎层，binlog 在 Server 层，两套日志必须一致，否则崩溃恢复后主库的状态和从库重放 binlog 的结果会对不上。COMMIT 时刻的协调流程：</p>
+  <div class="diagram">
+  <svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar42" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar42a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+    <text x="380" y="22" text-anchor="middle" fill="var(--muted)" font-size="13">COMMIT 时刻的 2PC 与崩溃恢复裁决：binlog 是最终裁判</text>
+
+    <rect x="20" y="44" width="200" height="70" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="120" y="68" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">① Prepare</text>
+    <text x="120" y="88" text-anchor="middle" fill="var(--muted)" font-size="10.5">redo 落盘，事务盖 PREPARE 印</text>
+    <text x="120" y="104" text-anchor="middle" fill="var(--muted)" font-size="10.5">（fsync #1，双 1 时）</text>
+
+    <line x1="220" y1="79" x2="256" y2="79" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar42)"/>
+
+    <rect x="260" y="44" width="200" height="70" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="360" y="68" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">② 写 binlog 并 fsync</text>
+    <text x="360" y="88" text-anchor="middle" fill="var(--muted)" font-size="10.5">事务带 XID 写入 binlog</text>
+    <text x="360" y="104" text-anchor="middle" fill="var(--muted)" font-size="10.5">（fsync #2，双 1 时）</text>
+
+    <line x1="460" y1="79" x2="496" y2="79" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar42)"/>
+
+    <rect x="500" y="44" width="240" height="70" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="620" y="68" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">③ Commit</text>
+    <text x="620" y="88" text-anchor="middle" fill="var(--muted)" font-size="10.5">redo 写 COMMIT 标记</text>
+    <text x="620" y="104" text-anchor="middle" fill="var(--muted)" font-size="10.5">（无需即时 fsync）</text>
+
+    <rect x="20" y="140" width="720" height="88" rx="8" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="34" y="163" fill="var(--ink)" font-size="11" font-weight="700">崩溃后重启的裁决规则（ redo 先全部前滚，再按 XID 定生死）</text>
+    <text x="34" y="183" fill="var(--ink)" font-size="10.5">redo 前滚：从最后 checkpoint 起重放全部日志（含未提交事务的），把页恢复到崩溃瞬间</text>
+    <text x="34" y="201" fill="var(--ink)" font-size="10.5">PREPARE 印 + binlog 里有完整 XID → 提交（binlog 在从库生效了，主库必须有，主从不裂）</text>
+    <text x="34" y="219" fill="var(--ink)" font-size="10.5">PREPARE 印 + binlog 里没有 XID → 用 undo 回滚（从库没见过它，主库也不能留）</text>
+
+    <rect x="20" y="244" width="340" height="70" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="190" y="268" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">恢复后尽快开连接</text>
+    <text x="190" y="286" text-anchor="middle" fill="var(--muted)" font-size="10.5">redo 重放完成后即接受连接</text>
+    <text x="190" y="302" text-anchor="middle" fill="var(--muted)" font-size="10.5">未提交事务的回滚转后台异步执行</text>
+
+    <rect x="400" y="244" width="340" height="70" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="570" y="268" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">为什么 binlog 当裁判</text>
+    <text x="570" y="286" text-anchor="middle" fill="var(--muted)" font-size="10.5">从库、备份、PITR 全部以 binlog 为准</text>
+    <text x="570" y="302" text-anchor="middle" fill="var(--muted)" font-size="10.5">主库向 binlog 对齐 = 向全世界对齐</text>
+  </svg>
+  </div>
+  <p>两阶段提交解释了 01 节第二次断电的惨状：redo 放在 OS 缓存（flush=2）而 binlog 恰好先被 OS 刷出——重启后主库 redo 里没有那 1.2 秒，前滚不出那批事务；binlog 里却有完整 XID。按裁决规则这些事务"该提交"（binlog 有 XID），但 redo 的物理变更根本没落盘，页上重放不出来——于是主库丢、从库有。<strong>双 1 不是仪式感，是让"redo 落盘"永远不晚于"binlog 落盘"的顺序保证</strong>——反过来的交错（binlog 先落、redo 未落）就是主库丢、从库有的裂开现场。</p>
+
+  <h3>redo 修不了的伤：torn page 与 doublewrite</h3>
+  <p>redo 重放的前提是页面上有个"旧版本"打底。但 InnoDB 页 16KB，磁盘原子写单位通常只有 4KB——断电时一页可能写了前 8KB 后 8KB 还是旧的，这种"半新半旧页"上 redo 无从下手（它记录的是"对旧版本做什么"，不存整页快照）。<strong>doublewrite 两步写</strong>治这个病：脏页刷盘前先把整批页顺序写进双写区并 fsync，成功后才写回数据文件真实位置——第二步写到一半崩了，恢复时从双写区拿完整副本。<strong>顺序写开销约 5~10%（社区实测口径），换来的是"任何一页在磁盘上永远有一个完整版本"。</strong>MySQL 8.0.20 起双写区从系统表space独立成 <code>#ib_*.dblwr</code> 文件（每 buffer pool 实例 2 个、每批最多 128 页），8.0.30 起还支持 DETECT_ONLY 等模式——生产库没有"整栈原子写保证"的证据时，别关它。</p>
+
+  <h3>参数速查：双 1 与它的两个邻居</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>参数</th><th>取值</th><th>崩溃时的语义</th></tr>
+    <tr><td rowspan="3"><code>innodb_flush_log_at_trx_commit</code></td><td>1（默认）</td><td>每次提交 redo 真落盘，已提交事务不丢</td></tr>
+    <tr><td>2</td><td>每次提交只写 OS 缓存——MySQL 进程崩了不丢，<strong>断电丢</strong></td></tr>
+    <tr><td>0</td><td>每秒刷一次，宕机丢最近约 1 秒已提交事务</td></tr>
+    <tr><td rowspan="3"><code>sync_binlog</code></td><td>1（默认）</td><td>每次提交 binlog fsync，主从一致的地基</td></tr>
+    <tr><td>N（&gt;1）</td><td>攒 N 个事务刷一次，崩溃丢最多 N 个事务的 binlog</td></tr>
+    <tr><td>0</td><td>交给 OS，binlog 可能先于 redo 落盘 → 主少从多</td></tr>
+  </table>
+  </div>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：恢复时长的三笔账与组提交</h2>
+
+  <h3>崩溃恢复 RTO 怎么估</h3>
+  <p><strong>① redo 重放账</strong>：恢复时长 ≈ checkpoint age ÷ 有效重放速率。checkpoint age 由"写入速率 × checkpoint 落后程度"决定——redo 容量越大，page cleaner 越从容、日常越流畅，但崩溃时的最大积压也越大；8.0.30 起 <code>innodb_redo_log_capacity</code> 支持运行时动态调整（默认仅 100MB，生产常配 4~16GB，#innodb_redo 目录下维护 32 个文件滚动），<strong>大促前调大、大促后调回</strong>，让"日常吞吐"与"最坏恢复时长"两头都顾住。重放速率受数据页是否在内存影响极大：buffer pool 冷启动的随机页读是主要瓶颈（01 节的 12MB/s 就是这么来的），NVMe 与大内存能直接改善 RTO。<strong>② 大事务回滚账</strong>：官方口径回滚耗时可达事务运行时长的 3~4 倍——40 分钟的批量 DELETE，恢复后要做好 2 小时"数据看得见改不动"的预案。虽然 8.0 起 redo 重放完就开连接、回滚在后台跑，但行锁与 undo 还在，业务影响是真的。<strong>大事务纪律因此是可靠性纪律</strong>，不只是性能纪律（与 <a href="0034-mysql-row-lock-mvcc.html">34 期长事务治理</a>同源）。<strong>③ 切换竞速账</strong>：主库崩溃时，高可用系统面临"在本机重启恢复（RTO=恢复时长，RPO=0）"还是"切到从库（RTO 秒级，RPO 看复制模式）"的选择——这正是 <a href="0033-mysql-ha-failover.html">第 33 期</a>切换工程的输入参数：<strong>恢复时长估不出来，切换策略就是拍脑袋</strong>。把"满容量的 redo 重放 + 最大日常事务的回滚"写进演练剧本，一年至少实测一次。</p>
+
+  <h3>双 1 的性能焦虑，交给组提交</h3>
+  <p>双 1 意味着每次提交最多两次 fsync，这是很多团队放宽参数的理由。但 MySQL 5.6 起 binlog 组提交（BLGC）把并发事务的提交攒成批：flush → sync → commit 三阶段，同一批事务只由 leader 线程做一次 fsync，follower 免费搭车——并发越高，单事务均摊的 fsync 成本越低。可以主动凑批：<code>binlog_group_commit_sync_delay</code>（微秒，提交前等一小会儿收集更多事务）与 <code>binlog_group_commit_sync_no_delay_count</code>（凑够 N 个立即走），两者是"或"的关系。经验：写入密集场景 delay 配 100~1000 微秒，TPS 常能涨 30% 以上，代价是单事务提交延迟增加同量级——<strong>用几百微秒换掉一次 fsync 的毫秒级等待，通常是划算的</strong>。组提交 + NVMe 之后，双 1 的吞吐损失在多数 OLTP 场景已可接受，"为了压测分数放开双 1"在现代硬件上越来越站不住脚。</p>
+
+  <h3>版本坐标（2026-10）</h3>
+  <p>MySQL 当前三条线：<strong>8.4 LTS</strong>（8.4.11，支持到 2032-04，存量主力）、<strong>9.7 LTS</strong>（9.7.2，2026-04 GA，新项目首选）、<strong>26.x Innovation</strong>（26.7.0 起，日历版本制 YY.M.P，季度演进）；8.0 已于 2026-04 EOL。本讲的 redo capacity（8.0.30+）、独立 doublewrite 文件（8.0.20+）、后台并行回滚在 8.4/9.x 全部可用；26.x 的 InnoDB 继续在并发恢复路径上做改进。存量大头还在 8.0 的团队，升级窗口前至少把 <code>innodb_log_file_size</code>/<code>innodb_log_files_in_group</code>（已废弃）换成 <code>innodb_redo_log_capacity</code> 口径，别把老参数带进新版本。</p>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：参数落地、恢复观测与极端通道</h2>
+
+  <h3>片段一：可靠性参数块（my.cnf）</h3>
+  <pre><code>[mysqld]
+# 双 1：已提交不丢、主从不裂（金融与交易库的默认姿势）
+innodb_flush_log_at_trx_commit = 1
+sync_binlog = 1
+
+# redo 容量：8.0.30+ 单参数动态管理，32 文件滚动
+# 经验：够 1 小时写入量；大促前可在线调大，事后调回控恢复时长
+innodb_redo_log_capacity = 8G
+
+# 脏页刷新节奏：决定 checkpoint 推进速度（恢复积压的另一头）
+innodb_io_capacity = 2000        # 按 SSD 实测 IOPS 配，别用默认 200
+innodb_io_capacity_max = 4000
+
+# doublewrite：保持开启（默认）；有整栈原子写证据才允许评估关闭
+innodb_doublewrite = ON
+
+# 组提交凑批：写入密集场景的免费午餐
+binlog_group_commit_sync_delay = 200        # 微秒
+binlog_group_commit_sync_no_delay_count = 0 # 只按 delay 凑批</code></pre>
+  <p>验证与在线调整：<code>SELECT @@innodb_redo_log_capacity;</code>；扩容窗口 <code>SET GLOBAL innodb_redo_log_capacity = 32*1024*1024*1024;</code> 立即生效、后台平滑收敛。监控三件套：<code>Innodb_redo_log_current_lsn</code>、<code>Innodb_redo_log_checkpoint_lsn</code>（两者差值即实时 checkpoint age）、<code>Innodb_data_pending_fsyncs</code>——把 checkpoint age 做成告警项，持续逼近容量就是恢复时长的红色预警。</p>
+
+  <h3>片段二：读懂一次崩溃恢复（error log 三段式）</h3>
+  <pre><code>[InnoDB] Starting crash recovery.            # 判定为异常关闭，进入恢复
+[InnoDB] Applying a batch of 123456 redo log records ...  # 重放进度按批次打印
+[InnoDB] Rolling back trx n:4711 ...        # 开库后后台回滚未提交事务
+
+# 估算本次恢复要多久（开库前只能看 log，开库后可查状态）：
+SHOW GLOBAL STATUS LIKE 'Innodb_redo_log%';
+# current_lsn - checkpoint_lsn = 待重放量；按上一次实测重放速率折算分钟数
+# 注意：aut_increment 计数器 8.0 起 redo 化，恢复后不会回退（crash-safe）</code></pre>
+  <p>演练纪律：每次计划内维护重启，顺手记录"checkpoint age → 实际重放时长"，给自己的库标定重放速率——真出事时你才能在 30 秒内报出"预计 X 分钟开库"，这比让领导看着黑屏等要有用得多。</p>
+
+  <h3>片段三：极端通道——innodb_force_recovery 阶梯</h3>
+  <p>恢复本身失败（页损坏、undo 损坏）导致起不来库时，才动 <code>innodb_force_recovery</code>：1（忽略检查失败页）→ 2（阻止主后台线程运行）→ 3（强制回滚关闭）→ 4（跳过 undo）→ 5（跳过回滚并冻结 binlog）→ 6（保留脏页状态起库，可能二次损坏）。<strong>4 以上只许 dump 数据、不许写业务，dump 完立即导出重建</strong>——它是"把尸体抬出来验尸"的通道，不是修复工具。配套认知：<code>innodb_fast_shutdown</code> 0/1/2 分别是慢关（全刷脏页，重启最快）、默认（刷日志不刷页）、只刷 log 文件——版本升级/重大变更前手动 <code>SET GLOBAL innodb_fast_shutdown=0</code> 再关库，能把下次启动的恢复成本提前付掉。</p>
+
+  <div class="warn">
+    <p><strong>五个必踩的坑：</strong>① <strong>为压测分数放开双 1 且忘了改回</strong>——半后断电丢已提交事务 + 主从裂开，修复成本远超压测收益。② <strong>redo 容量只调大不评估恢复账</strong>——48GB 满积压在冷缓存上重放就是 30 分钟起步，容量与重放速率要一起进容量规划。③ <strong>批量 DELETE 一把梭</strong>——回滚时长 3~4 倍于运行时长，崩溃恢复被单事务拖死；大改走"分批 + 提交"或 <a href="0041-shardingsphere-sharding.html">41 期 CDC</a> 类方案。④ <strong>拿 innodb_force_recovery=6 当修复手段</strong>——起库成功不等于数据健康，4+ 必须 dump 重建。⑤ <strong>关 doublewrite 换 5~10% 写性能</strong>——没有存储栈原子写的书面保证，省的是性能、赌的是整库。</p>
+  </div>
+
+  <div class="card card-tip">
+    <h4>✅ 崩溃恢复体检清单</h4>
+    <p>☐ 双 1 在核心库生效且有配置基线（防"临时放宽"变永久）　☐ redo 容量按"1 小时写入量"配置，checkpoint age 有告警　☐ 重放速率有本机标定值（最近一次维护重启记录在案）　☐ 最大日常事务的回滚时长估过，跑批任务分批提交　☐ doublewrite 开启（或关闭理由 = 存储栈原子写书面证据）　☐ 组提交凑批参数在写入密集库评估过　☐ 高可用切换预案包含"本机恢复 vs 切从库"的判据（与 33 期演练联动）　☐ force_recovery 阶梯写入值班手册，4+ 只 dump 的红线加粗　☐ 大促扩容窗口含"事后调回 redo 容量"的检查项　☐ 半同步/强一致从库的 RPO 语义与双 1 语义对齐过（别两头松）</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>WAL 用顺序写换随机写</strong>：提交只 fsync redo（几百字节），脏页慢慢刷；代价是崩溃后要重放——恢复时长与 checkpoint age 成正比，它是容量规划的一部分，不是意外。</li>
+    <li><strong>两阶段提交，binlog 是裁判</strong>：redo PREPARE → binlog fsync → commit；崩溃恢复前滚全部 redo 后按 XID 裁决——binlog 有就提交、没有就回滚，主库永远向 binlog 对齐，主从才不裂。</li>
+    <li><strong>双 1 是顺序保证不是仪式感</strong>：它确保 redo 落盘不晚于 binlog；放开它省的是毫秒，赌上的是"主少从多 + 复制断裂"，现代硬件上有组提交，不值得。</li>
+    <li><strong>torn page 靠 doublewrite 不靠 redo</strong>：16KB 页对 4KB 原子写，半页写坏后 redo 无从重放；双写区约 5~10% 顺序写开销，是页完整性的保险，生产默认不动。</li>
+    <li><strong>恢复 RTO = 重放账 + 回滚账</strong>：redo 容量管积压上限、重放速率靠硬件与缓存、大事务回滚 3~4 倍——三个数都标定过，切换决策（本机恢复 vs 切从库）才有依据。</li>
+  </ul>
+</section>
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目一：两套库，两副参数。核心交易库 A（双 1 + 半同步 AFTER_SYNC），用户行为日志库 B（flush=2、sync_binlog=100，DBA 说"日志丢了能重采"）。① 断电后 B 库主从分别会发生什么？分两种落盘交错情况推演。② B 库从库复制中断后的修复路径？③ "日志丢了能重采"这个论证哪里不成立？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>交错情况一（常见）：redo 未落、binlog 也未刷出</strong>——这批事务两边都没有，主从一致地"丢最多 100 个事务 + 1 秒"，业务上日志缺口，属于 DBA 声称的场景。<strong>交错情况二（小概率但必然发生）：binlog 先于 redo 落盘</strong>（sync_binlog=100 时攒批刷 binlog 与 flush=2 的 OS 缓存刷盘节奏完全无关，交错无法控制）——从库执行了、主库前滚不出来，<strong>主少从多</strong>，从库撞 1062 中断。注意：这个"对不上"不是丢日志，是<strong>主从不一致</strong>——重采补不回从库已经多出来的行。② 修复路径：以 binlog 为权威——用 <code>mysqlbinlog</code> 定位从库多出的 XID 段，确认这批事务在主库确实缺失后，把该段 applied 到主库（或直接以从库为源反向补齐），再 <code>CHANGE REPLICATION SOURCE</code> 重定位位点；若无法精确定位，从库重建更省事。生产纪律：先停从库 SQL 线程止损，再对账，别让不一致继续放大。③ 论证的漏洞在于<strong>把"数据可丢"等同于"两边可以不一致"</strong>。日志业务能容忍丢（重采/缺口），但复制架构不能容忍主从裂开——裂开后从库不可用于切换（一切换就把多出的数据放大成主库状态），高可用降级为单点。正确姿势：要放松就两参一起放松且接受"一致地丢"（flush=0 + sync_binlog=0，两边同时按秒窗口丢），或者给日志库换成"可丢"的架构（先写 Kafka 再异步入库，丢在入库前而不是入库中）——<strong>参数语义要跟架构语义对齐，而不是各自表述</strong>。</p>
+    </div>
+  </details>
+
+  <details class="q-card">
+    <summary>题目二：历史数据归档，单表 2 亿行要删掉 5000 万。开发提的方案是凌晨一个大事务 <code>DELETE FROM t WHERE create_time &lt; '2023-01-01'</code>，"跑 40 分钟就完了"。① 从崩溃恢复视角列出这个方案的三个风险。② 设计分批删除方案，给出批大小与间隔的取舍逻辑。③ 假设它已经上线、且昨天断电时正跑到一半——今天你面对的是什么局面，怎么处置？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>风险一：回滚账</strong>。断电/中断时 40 分钟的大事务回滚要 2 小时+（官方口径 3~4 倍），期间行锁与 undo 占用，相关行的其他写入全部排队——删除的是历史数据没人写，但<strong>锁的是行、影响的是表上所有并发路径的预期</strong>。<strong>风险二：undo 膨胀账</strong>。5000 万行的前镜像撑爆 undo 表空间（默认 2 个 rollback segment 文件自动扩展），MVCC 旧版本链拉长，全库的快照读都变慢（34 期长事务的放大版）。<strong>风险三：复制延迟账</strong>。大事务在 binlog 里是一个巨型 event，从库单线程回放期间延迟线性堆积，切换窗口（33 期）在这个时段形同虚设。② <strong>分批方案</strong>：按主键游标切批，<code>DELETE ... WHERE id BETWEEN x AND x+batch LIMIT batch</code>（或 <code>WHERE id &gt; last LIMIT n</code>），每批 2000~10000 行、批间 sleep 100~500ms——批大小的上限由三个约束取小：单批 binlog 尺寸别让从库回放超过 1 秒（复制延迟可观测）、单批持锁时间别超过几十毫秒（不撞业务超时）、单批回滚代价可接受（秒级）。5000 万行 ÷ 5000/批 × 0.3s ≈ 50 分钟，<strong>总时长没变，但每一秒系统都可中断、可恢复、可切换</strong>——批式化买的不是速度是"可停"。更进一步：删除是为了归档的话，用"分批 SELECT OUTFILE + 分批 DELETE"或 gh-ost 换表，把大删除变成 DDL 流量。③ <strong>今天的局面</strong>：主库重启后 redo 前滚完成、开库正常，但后台有个运行 40 分钟事务的回滚在跑（预计 2 小时+），表现：<code>SHOW PROCESSLIST</code> 里有回滚线程、information_schema.innodb_trx 长事务告警、被删一半的表上大量行持有锁——业务对这批行的写操作超时。<strong>处置：什么都不做，等它滚完</strong>（官方明确：回滚不可取消，kill 无效）；要评估的是业务影响面（历史表大概率没人写，影响可控）。如果这个回滚把生产拖得不可接受，才评估 force_recovery=3（强制回滚后关闭）——注意 3 是温和档，4 以上就是 dump 重建的节奏了。<strong>真正的教训在事前：把"大事务 = 恢复时长 × 4 的定时炸弹"写进发布检查单</strong>。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>MySQL 官方文档 · The InnoDB Doublewrite Buffer 与 Redo Log：<br>
+    <a href="https://dev.mysql.com/doc/refman/8.4/en/innodb-doublewrite-buffer.html" target="_blank" rel="noopener">dev.mysql.com · InnoDB Doublewrite Buffer</a>（配套阅读：<a href="https://dev.mysql.com/doc/refman/8.4/en/innodb-redo-log.html" target="_blank" rel="noopener">Redo Log</a>、<a href="https://dev.mysql.com/doc/refman/8.4/en/innodb-recovery.html" target="_blank" rel="noopener">InnoDB Recovery</a>）</p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>undo 的另一重身份（MVCC 版本链与长事务治理）在 <a href="0034-mysql-row-lock-mvcc.html">第 34 期</a>；崩溃恢复时长如何喂给"本机恢复 vs 切从库"的切换决策在 <a href="0033-mysql-ha-failover.html">第 33 期</a>；分片之后每个分片库仍然各自跑这一整套机制，见 <a href="0041-shardingsphere-sharding.html">第 41 期</a>；主从一致性的消息层同构（at-least-once 与幂等）见 <a href="0021-pulsar-message-reliability.html">第 21 期</a>。MySQL 过渡排程到此告一段落，进按需回归池；下一期起进十类循环——<strong>Kubernetes 主线开启：从 Pod、Deployment 到 Service 的控制循环</strong>。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0041-shardingsphere-sharding.html">← 上一期：ShardingSphere 分库分表</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 42 期 · MySQL 系列 · 下一期预告：Kubernetes——Pod、Deployment 与 Service 的控制循环</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
