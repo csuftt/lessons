@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · Kubernetes 三件套：Pod、Deployment 与 Service 的控制循环 | 2026-10-05</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0043</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0042-innodb-crash-recovery.html">上一期：InnoDB 崩溃恢复</a> · <a href="https://www.bilibili.com/video/BV1FyHn6JEEz" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">KUBERNETES · Kubernetes 系列第 3 讲（核心机制篇 · 控制循环）</p>
+  <h1>Kubernetes 三件套：Pod、Deployment 与 Service 的控制循环</h1>
+  <p class="subtitle">上一讲聊了 <a href="0042-innodb-crash-recovery.html">InnoDB 断电后的崩溃恢复</a>，MySQL 过渡排程到此告一段落，今天按十类循环开启 Kubernetes 主线。这一讲不背三件套的 API，而是讲它们背后的同一个引擎：<strong>控制循环</strong>——"观测实际、对比期望、执行调谐"的死循环。从一个"改了 replicas 不生效、发布卡 15 分钟、扩容接不住流量"的连环现场讲起，把三件套拆开看每个循环各自 reconcile 什么、失联时靠什么兜底（重建 vs 重启 vs 只改名单），最后落到声明式接口对架构设计的迁移——把"调"的冲动交给控制循环。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">☸️ Kubernetes</span>
+    <span class="tag-date">📅 2026-10-05 · 第 43 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>一次"重启风暴"的复盘：三条告警，三个循环</h2>
+  <p>某平台周一夜例行发布：运营后台升级新版本，发布平台卡了 15 分钟没有进展，值班同学按老习惯登上节点 <code>docker restart</code> 了一个"看起来卡死"的业务容器——10 分钟后三条告警齐爆：<strong>发布停滞</strong>（rollout 无进展）、<strong>内存飙红</strong>、<strong>5xx 尖刺</strong>。复盘还原时间线，三件事其实踩的是三个不同的控制循环：</p>
+  <p><strong>第一件：kubectl edit 改了 replicas 没生效。</strong>新同学直接在测试集群 <code>kubectl edit deployment admin-web</code> 把副本从 4 改成 8，页面一保存觉得"应该扩了"，立刻压测——QPS 没涨。原因不玄：<strong>API Server 只是把期望写进了 etcd，真正干活的是 Deployment 控制器</strong>，它 watch 到变化后要经过"新建 ReplicaSet → ReplicaSet 控制器创建 Pod → 调度器绑定节点 → kubelet 拉镜像起容器 → 就绪探针通过"整条链路，镜像 800MB、首次拉取加启动约 3 分钟。人觉得"没反应"，机器觉得"正在调谐"。这条链路里任何一环慢（拉镜像、Pending 等资源、探针不过），肉眼看到的都是"卡住"。</p>
+  <p><strong>第二件：登节点 docker restart 容器。</strong>这正是压垮骆驼的一根手指：<code>docker restart</code> 把容器杀了重来，<strong>node 上容器重启不等于 Pod 重建</strong>——Pod 对象还在、status 还算 Running，kubelet 按容器重启计数处理。但这个容器的进程内存里堆着十几万个长连接会话，重启等于原地蒸发；更糟的是<strong>发布正卡在等它就绪</strong>：readinessProbe 一直不过，Deployment 控制器认为新版本"没有进展"（15 分钟 &gt; progressDeadlineSeconds 默认 600 秒），Progressing 条件翻成 False。二进制时代"进程卡了就重启"的肌肉记忆，在声明式世界里按下去的是连环雷。</p>
+  <p><strong>第三件：副本终于扩上去了，流量却没接住。</strong>新增 Pod 全部 Ready，但 QPS 全压在老 Pod 上。排查发现 Service 的 selector 与新 Pod 的 label 不匹配（团队改了 label 约定，Service 没同步）——<strong>EndpointSlice 名单里根本没有新 Pod</strong>。副本数是 Deployment 的循环管的，"谁能接流量"是端点控制器的循环管的，两个循环各管各的账。<strong>K8s 里没有一个"总控"替你检查所有环节，它只是一堆各司其职的控制循环在各自收敛</strong>——你得知道每个循环管哪段。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：一切皆控制循环</h2>
+
+  <h3>控制循环：观测 → 对比 → 调谐</h3>
+  <p>K8s 的每个控制器（Deployment、ReplicaSet、端点、节点、kubelet……）本质都是同一段程序骨架：<strong>while(true) { 实际状态 = 观测(); 差异 = 对比(期望状态, 实际状态); if (差异) 执行动作消除差异; }</strong>。期望状态存在 etcd 里（spec 字段），实际状态从集群观测而来（status 字段），控制器不断把实际推向期望。两个工程含义值得刻进肌肉记忆：</p>
+  <ul>
+    <li><strong>幂等是前提</strong>：循环每轮都可能重跑同样的调谐逻辑，所有动作必须做多少次效果一样——这也解释了为什么 K8s 的 API 设计成"声明期望"而不是"执行命令"。</li>
+    <li><strong>水平触发而非边缘触发</strong>：控制器不依赖"错过一次事件就完蛋"，而是定期全量对比。事件（watch）只是加速收敛的提示，就算漏了事件，下一轮 reconcile 也会补上。这是它对消息丢失、组件重启天然免疫的原因——<strong>与边缘触发（收到变更事件才动作一次）相比，水平触发慢半拍但绝不会漏</strong>。</li>
+  </ul>
+
+  <h3>三件套：三个循环，一张指挥链</h3>
+  <div class="diagram">
+  <svg viewBox="0 0 760 400" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar43" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar43a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+    <text x="380" y="22" text-anchor="middle" fill="var(--muted)" font-size="13">三件套指挥链：每层控制器 reconcile 自己的"期望 vs 实际"</text>
+
+    <!-- Deployment 层 -->
+    <rect x="20" y="44" width="330" height="86" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="185" y="68" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">Deployment 控制器</text>
+    <text x="185" y="88" text-anchor="middle" fill="var(--muted)" font-size="10.5">期望：replicas + pod 模板（镜像/探针/资源）</text>
+    <text x="185" y="106" text-anchor="middle" fill="var(--muted)" font-size="10.5">调谐：模板变了 → 造新 ReplicaSet、缩旧 ReplicaSet</text>
+
+    <line x1="185" y1="130" x2="185" y2="160" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar43)"/>
+    <text x="196" y="150" fill="var(--muted)" font-size="10">owned by（OwnerReference）</text>
+
+    <!-- ReplicaSet 层 -->
+    <rect x="20" y="164" width="330" height="86" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="185" y="188" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">ReplicaSet 控制器</text>
+    <text x="185" y="208" text-anchor="middle" fill="var(--muted)" font-size="10.5">期望：selector 命中的 Ready Pod 数 = replicas</text>
+    <text x="185" y="226" fill="var(--muted)" font-size="10.5" text-anchor="middle">调谐：少了建 Pod，多了删 Pod（按 label 选）</text>
+
+    <line x1="185" y1="250" x2="185" y2="280" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar43)"/>
+    <text x="196" y="270" fill="var(--muted)" font-size="10">created by（OwnerReference）</text>
+
+    <!-- Pod 层 -->
+    <rect x="20" y="284" width="330" height="86" rx="10" fill="var(--card)" stroke="var(--ok)"/>
+    <text x="185" y="308" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">kubelet（节点上的控制循环）</text>
+    <text x="185" y="328" text-anchor="middle" fill="var(--muted)" font-size="10.5">期望：本节点该跑哪些 Pod（spec 完整语义）</text>
+    <text x="185" y="346" text-anchor="middle" fill="var(--muted)" font-size="10.5">调谐：起容器、跑探针、挂卷、按 restartPolicy 重启</text>
+
+    <!-- 右侧 Service -->
+    <rect x="410" y="164" width="330" height="86" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="575" y="188" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">端点控制器（Service 背后）</text>
+    <text x="575" y="208" text-anchor="middle" fill="var(--muted)" font-size="10.5">期望：selector 命中且 Ready 的 Pod 进 EndpointSlice</text>
+    <text x="575" y="226" text-anchor="middle" fill="var(--muted)" font-size="10.5">调谐：就绪加地址、失联/退出摘地址（kube-proxy 订阅）</text>
+
+    <!-- RS 与 Pod 的 label 关系 -->
+    <path d="M350,207 C382,207 396,190 406,180" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#ar43a)"/>
+    <text x="418" y="140" fill="var(--accent)" font-size="10.5">label selector 匹配（松耦合，非 ownership）</text>
+
+    <rect x="410" y="284" width="330" height="86" rx="8" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="575" y="308" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">调谐要经过一串异步组件</text>
+    <text x="575" y="328" text-anchor="middle" fill="var(--muted)" font-size="10.5">调度器绑节点 → kubelet 拉镜像 → 探针转 Ready</text>
+    <text x="575" y="346" text-anchor="middle" fill="var(--muted)" font-size="10.5">→ EndpointSlice 更新 → kube-proxy/网关收名单</text>
+    <text x="575" y="364" text-anchor="middle" fill="var(--muted)" font-size="10.5">全链路秒级，不是瞬时——"改了没生效"多半在链路上</text>
+  </svg>
+  </div>
+  <p><strong>Deployment 不直接管 Pod，Service 也不"属于" Deployment</strong>——这条指挥链上每层只看自己的期望：Deployment 控制器比对 pod 模板，模板一变就新建一个 ReplicaSet（旧版本缩到 0、新版本扩到目标，这就是滚动更新的全部）；ReplicaSet 控制器数 Pod，少了建多了删，靠的是 label selector 这根"松耦合绳"；端点控制器看的是 Service 的 selector 与 Pod 的就绪状态，与 Deployment 互不知晓。01 节第三个现象（扩了副本不接流量）正是"两根绳没系到一起"：ReplicaSet 的 selector 命中了新 Pod，Service 的 selector 没有。</p>
+
+  <h3>Pod 生命周期：进入侧与退出侧</h3>
+  <p>Pod 是调谐的最小单元，它的"生死簿"值得整段记住。<strong>进入侧</strong>：Pending（等调度/等资源）→ ContainerCreating（拉镜像、起容器）→ init 容器按序跑完（sidecar 容器是带 <code>restartPolicy: Always</code> 的特殊 init 容器，1.29 起默认可用、1.33 GA：保证先于业务容器启动、晚于业务容器终止）→ 主容器起 → startupProbe（慢启动保护）→ readinessProbe 通过才算 Ready、进 EndpointSlice 名单。<strong>没 Ready 的 Pod 不接流量</strong>——这是滚动发布不雪崩的基石（进入侧细节与 0024 期无损三板斧衔接）。</p>
+  <p><strong>退出侧</strong>（宽限期默认 30 秒）：<code>kubectl delete</code> 后 Pod 进 Terminating；<strong>同时两件事并行发生</strong>——端点控制器把它从 EndpointSlice 摘除（可能带 serving 条件）+ kubelet 在节点上执行 preStop hook → 发 SIGTERM → 等 <code>terminationGracePeriodSeconds</code>（默认 30s）→ 超时 SIGKILL 强杀。Java 应用要接住 SIGTERM 做优雅停机（Spring Boot 3.x 的 graceful shutdown），长连接服务把 preStop sleep 与宽限期一起调大。<strong>退出侧的经典坑：宽限期是"preStop + SIGTERM 处理"共享的预算</strong>——preStop sleep 15s + 应用排空 20s &gt; 30s，后半段被 SIGKILL 截断，连接蒸发。1.28+ EndpointSlice 提供 serving/terminating 条件，kube-proxy 可以更精细地排空，但应用侧配合依然是主力。</p>
+
+  <h3>版本演进坐标（2026-10）</h3>
+  <p>当前在维护分支 1.35/1.36/1.37（最新 1.37.0，2026-08-26 发布；1.34 将于 2026-10-27 EOL）。与本讲相关的近期变化：<strong>原生 sidecar 容器</strong>（KEP-753）1.33 GA——init 容器写 <code>restartPolicy: Always</code> 即成 sidecar，先启动后退出，解决 Job 被常驻容器卡住与 sidecar 启动竞态两个老问题；<strong>Pod 资源原地调整</strong>（KEP-1287）1.35 GA——改 CPU/内存 requests/limits 不再必须重建 Pod，kubelet 通过 resize 子资源原地生效（Java 运行时尚不能热感知内存缩容，生产慎用缩内存）；Pod 级 <code>metadata.generation/observedGeneration</code>（KEP-5067）1.35 GA，可以精确判断 kubelet 是否已处理 spec 变更。<strong>三件套 API 本身稳定多年，控制循环模型自 1.0 未变</strong>——这讲的内容在 1.25~1.37 全部适用。</p>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构视角：分层自愈与容量账</h2>
+
+  <h3>分层自愈：Pod 进程崩溃与节点宕机，是两套完全不同的兜底</h3>
+  <p>控制循环的收敛速度差异，就是故障恢复速度的差异。把三层兜底各自的"检测者—恢复动作—典型时长"摆开：</p>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>故障</th><th>谁检测</th><th>恢复动作</th><th>典型收敛</th></tr>
+    <tr><td>容器进程崩溃（exit）</td><td>kubelet（节点上）</td><td>按 restartPolicy 重启容器，<strong>Pod 不重建、IP 不变</strong></td><td>秒级（backoff 10s 起指数退避）</td></tr>
+    <tr><td>容器假死（不退出的坏）</td><td>kubelet + livenessProbe</td><td>杀容器重启；探针没配 = 假死无人管</td><td>探针周期 × 失败阈值，通常 30~90s</td></tr>
+    <tr><td>整节点宕机</td><td>控制平面（node controller）</td><td>节点打 NotReady → 超时后 Pod 标 Terminating → 别的节点<strong>重建</strong> Pod（新 IP）</td><td>约 40s~5min（级联删除等 API 排队会拉长）</td></tr>
+  </table>
+  </div>
+  <p>三个数字直接进容量与预案：单容器崩溃业务几乎无感；节点故障的流量恢复要按分钟计——<strong>这意味着"节点级冗余"（反亲和 + 多副本打散）不是可选项</strong>。副本数低于故障域数量（比如 2 副本全在同一节点），一次节点维修就是一次可用性事故。另有 01 节踩过的坑作对照：登节点 docker restart 是"三套兜底之外的人治"——kubelet 的重启计数器会记录它，但 EndpointSlice 那一侧只认 Ready 条件，中间的状态缝隙只有应用自己承受。</p>
+
+  <h3>发布策略的容量账：maxSurge 与 maxUnavailable</h3>
+  <p>滚动更新的两个参数是<strong>同一笔容量预算的两种花法</strong>：maxUnavailable 是"更新期间允许少几个"（牺牲可用性），maxSurge 是"允许临时多几个"（牺牲资源）。默认双 25%：10 副本发布时最多少 2.5→2 个（向下取整）、临时多 2.5→3 个（向上取整）。三种典型配法：</p>
+  <ul>
+    <li><strong>零容量损失</strong>（生产核心服务）：maxSurge=1、maxUnavailable=0——新 Pod Ready 之前不删旧 Pod，代价是发布期间集群要多养副本；前提是集群有余量，Pod Pending 会让 rollout 卡死。</li>
+    <li><strong>资源紧张</strong>：maxSurge=0、maxUnavailable=1——先删一个再建一个，不占额外资源但发布窗口内容量 -1。</li>
+    <li><strong>快进快出</strong>（测试环境）：maxSurge/maxUnavailable 放大（50%/50%），大步替换。</li>
+  </ul>
+  <p>配套参数同样记三个：<code>minReadySeconds</code>（Pod Ready 后再"观察"几秒才算可用，防"刚 Ready 又挂"的抖动混进发布，默认 0 建议给 10~30）；<code>progressDeadlineSeconds</code>（默认 600s，超时把 Progressing 标 False——<strong>它只报告不回滚</strong>，卡住的 rollout 要人来 <code>rollout undo</code>）；<code>revisionHistoryLimit</code>（保留几个旧 ReplicaSet 供回滚，默认 10）。单副本服务想不丢流量发布，必须 maxSurge≥1 且 maxUnavailable=0——默认 25%/25% 在单副本下等效 maxUnavailable=1，发布瞬间零容量。</p>
+
+  <h3>声明式思维：把"调"的冲动交给循环</h3>
+  <p>三件套背后是 K8s 的根本设计哲学：<strong>API 只接受"期望"，循环负责"到达"</strong>。这对微服务架构设计的迁移是：进程内自愈逻辑（重启线程池、自旋拉配置）可以下沉为"Pod 重启 + ConfigMap 热更新"；多副本进程守门（自己写选举、自己管成员名单）可以用 Deployment + Service 的"副本与名单"循环替代；发布流程从"脚本一步步调"变成"改模板等收敛 + rollout status 验收"。编排系统的价值不在"帮你启动"，而在<strong>持续收敛</strong>——你睡觉时节点挂了，它在工作。反过来，所有"绕过 API 直接操作节点"的习惯（docker restart、手改容器配置）都是在循环的观测范围外打洞，出问题时控制平面还一脸无辜。</p>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：一份"敢上生产"的 Deployment 清单</h2>
+
+  <h3>片段一：Deployment 主体（发布策略 + 探针 + 优雅停机）</h3>
+  <pre><code>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-api
+spec:
+  replicas: 4
+  revisionHistoryLimit: 5          # 保留 5 个旧 RS，回滚够用
+  minReadySeconds: 15              # Ready 后观察 15s 才算可用
+  progressDeadlineSeconds: 300     # 5 分钟无进展即报 False
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1                  # 零容量损失发布
+      maxUnavailable: 0
+  selector:
+    matchLabels: { app: order-api }
+  template:
+    metadata:
+      labels: { app: order-api }   # Service selector 必须命中这里
+    spec:
+      terminationGracePeriodSeconds: 45   # preStop+排空的总预算
+      containers:
+      - name: app
+        image: registry.example.com/order-api:v1.4.2
+        ports: [ { containerPort: 8080 } ]
+        readinessProbe:            # 进入侧：没过不进名单
+          httpGet: { path: /actuator/health/readiness, port: 8080 }
+          periodSeconds: 3
+          failureThreshold: 3
+        livenessProbe:             # 假死检测：过了杀容器重启
+          httpGet: { path: /actuator/health/liveness, port: 8080 }
+          periodSeconds: 10
+          failureThreshold: 6      # 60s 容忍，避免误杀慢启动
+        startupProbe:              # 慢启动保护：没过之前不跑上面两个
+          httpGet: { path: /actuator/health/liveness, port: 8080 }
+          periodSeconds: 5
+          failureThreshold: 24     # 最多等 2 分钟 JVM 预热
+        lifecycle:
+          preStop:                 # 退出侧：等名单摘除再收连接
+            exec: { command: [ "sh", "-c", "sleep 10" ] }
+        resources:
+          requests: { cpu: 500m, memory: 1Gi }
+          limits:   { cpu: "2",  memory: 2Gi }</code></pre>
+  <p>四个探针/钩子的分工一句话：<strong>startup 管"启动多久没好算异常"、readiness 管"现在能不能接流量"、liveness 管"要不要杀掉重来"、preStop 管"退场前把台步走完"</strong>。Spring Boot 从 3.x 起 actuator 就绪/存活探针端点开箱即用（readiness/liveness group），Java 侧不用自己写健康页。</p>
+
+  <h3>片段二：Service 与发布验证三板斧</h3>
+  <pre><code>apiVersion: v1
+kind: Service
+metadata:
+  name: order-api
+spec:
+  selector: { app: order-api }   # 与 Pod label 对齐——01 节的事故点
+  ports:
+  - port: 80
+    targetPort: 8080
+
+# 发布验证三板斧（CI 里固化）：
+kubectl rollout status deployment/order-api --timeout=300s
+kubectl get endpointslice -l kubernetes.io/service-name=order-api \
+  -o custom-columns=NAME:.metadata.name,ENDPOINTS:.endpoints
+kubectl describe deployment order-api | grep -A3 Conditions</code></pre>
+  <p>验证顺序有讲究：rollout status 等"收敛完成"（失败时非零退出码，正好做流水线闸门）；endpointslice 直接看"谁在名单上"（新 Pod 在不在、地址对不对）；Conditions 看 Progressing 的 reason——<code>ProgressDeadlineExceeded</code> 说明新版本起不来，先 <code>rollout undo</code> 止血再排查。<strong>记住 01 节的教训：发布卡住时先看事件（kubectl describe）定位卡在哪一环，而不是登节点重启容器</strong>——那是在"观测链路"上制造新噪声。</p>
+
+  <h3>片段三：ConfigMap 变更的收敛通道（rollout restart）</h3>
+  <pre><code># envFrom 挂载的 ConfigMap 改了，Pod 不会自动重读 —— 触发一轮滚动重建：
+kubectl rollout restart deployment/order-api
+# 原理：给 pod 模板打 kubectl.kubernetes.io/restartedAt 时间戳注解
+# 模板哈希变了 → Deployment 认为"新版本" → 新建 ReplicaSet 滚动替换
+# 遵守同一套 maxSurge/maxUnavailable，全程无损
+
+# 验证注解与历史：
+kubectl get deployment order-api -o jsonpath='{.spec.template.metadata.annotations}'
+kubectl rollout history deployment/order-api</code></pre>
+  <p>这是声明式模型的漂亮应用：<strong>"重启全部副本"没有专门的 API，靠改模板触发滚动更新实现</strong>——同一套控制循环复用出新的运维语义。代价是每次 restart 都会占用一个 revision（历史里会看到一串 restartedAt），revisionHistoryLimit 记得别配太小；文件挂载（volume 挂 ConfigMap）的更新是原子符号切换、约 1 分钟内自动生效，不需要 restart——两种挂载方式的收敛语义不同，选型时想清楚。</p>
+
+  <div class="warn">
+    <p><strong>五个必踩的坑：</strong>① <strong>把"改了 replicas 立刻压测"当基线</strong>——收敛是异步链路（建 Pod→调度→拉镜像→探针），给收敛留预算，容量预案按"分钟级到位"设计。② <strong>登节点 docker restart</strong>——绕过 API 的"人治"制造三不管状态缝隙；进程级排障进容器（kubectl exec），副本级处置走 API（rollout restart / delete pod）。③ <strong>宽限期没算总账</strong>——preStop sleep + 应用排空共享 terminationGracePeriodSeconds，超了被 SIGKILL，长连接业务把预算和 preStop 一起调。④ <strong>livenessProbe 配得比启动还严</strong>——没有 startupProbe 的 JVM 大堆应用，慢启动被 liveness 误杀，CrashLoopBackOff 死循环（backoff 10s→20s→40s…最长 5min）。⑤ <strong>Service selector 与 Pod label 改不同步</strong>——副本扩得再多也不接流量；label 约定变更要走检查单，endpointslice 核对进发布验证。</p>
+  </div>
+
+  <div class="card card-tip">
+    <h4>✅ 三件套体检清单</h4>
+    <p>☐ 所有面向流量的 Deployment 三探针齐全（startup/readiness/liveness 各司其职）　☐ preStop + terminationGracePeriodSeconds 按应用排空时长算过总账　☐ 生产核心服务 maxUnavailable=0 + maxSurge≥1，单副本服务尤其　☐ minReadySeconds 非零（10~30s）防就绪抖动混进发布　☐ progressDeadlineSeconds 有监控告警（Progressing=False 不是无人看的摆设）　☐ 副本打散：反亲和让副本跨节点/可用区，副本数 &gt; 最大单故障域　☐ Service selector 与 Pod label 有 CI 校验　☐ rollout status 进流水线闸门（非零退出码挡住失败发布）　☐ revisionHistoryLimit 与回滚演练每季度一次　☐ 改 ConfigMap 的生效通道（envFrom→restart / 挂载→自动）团队人人知道</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>一切皆控制循环</strong>：观测实际、对比期望、执行调谐；幂等 + 水平触发，漏事件不漏收敛。看懂一个 K8s 组件，先找它的"期望是什么、向谁观测、怎么调谐"。</li>
+    <li><strong>三件套是指挥链不是全家桶</strong>：Deployment 管模板（造新 RS 滚动）、ReplicaSet 管副本数（label 选 Pod）、端点控制器管名单（谁 Ready 谁进 EndpointSlice）——扩容不接流量，先查两根 selector 绳是否系到一起。</li>
+    <li><strong>Pod 生死簿</strong>：进入侧 init/sidecar → startup → readiness 才接流量；退出侧摘名单与 preStop+SIGTERM 并行、共享宽限期预算（默认 30s）。进入退出两端配齐，发布才谈得上无损。</li>
+    <li><strong>自愈是分层的，收敛速度差三个量级</strong>：容器崩溃秒级重启（IP 不变）、节点宕机分钟级重建（新 IP）；副本跨故障域打散是分钟级恢复的前提，不是锦上添花。</li>
+    <li><strong>声明式是思维迁移</strong>：API 只接受期望，循环负责到达；"重启全部副本"都能用改模板复用滚动更新实现——绕过 API 直接操作节点，是在循环观测范围外打洞。</li>
+  </ul>
+</section>
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目一：支付网关 3 副本跨 3 可用区部署，maxUnavailable=0、maxSurge=1，readinessProbe 每秒探测。周五晚发布 v2，rollout 卡在 1/3，Progressing 翻 False（ProgressDeadlineExceeded）。事件日志：新 Pod 镜像拉取超时重试三次失败。① 此时服务当前容量是多少，有没有流量损失风险？② 给出止血动作序列。③ 镜像仓库故障期间，如何避免每个版本都这样卡 10 分钟？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>容量仍是 3 副本满额，无流量损失</strong>——这正是 maxUnavailable=0 的语义：新 Pod 不 Ready，旧 Pod 一个都不删；maxSurge=1 只是让第 4 个 Pod（新版本）尝试起来，它卡在 ImagePullBackOff，旧版本 3 副本继续服务。发布"卡"不等于服务"伤"，两件事要分开汇报——值班时最容易把 rollout 卡顿误报成可用性事故，引发过度处置。② <strong>止血序列</strong>：第一步 <code>kubectl rollout undo deployment/pay-gateway</code>——回滚是新建/扩回旧 ReplicaSet（旧 RS 还在，revisionHistoryLimit 没清零的话秒级起 Pod，因为旧镜像节点上通常有缓存）；第二步确认新 RS 缩到 0、事件里出现 ScaledDown；第三步把 Progressing=False 与镜像拉取超时的根因转给镜像仓库侧排查。<strong>注意顺序</strong>：先止血再查因，undo 不影响现场（RS 与事件都还在）。等仓库恢复后重新发布即可，rollback 的 v2 不需要"清理"。③ 三个改进方向：<strong>镜像预热</strong>——发布前用 daemonset 或 kubectl 的 image prefetch 类工具（如 kube-fledged/cri-dockerd 缓存方案，或干脆先 <code>docker pull</code> 到节点）把新镜像拉到目标节点，把"拉镜像"从发布关键路径上摘掉；<strong>progressDeadlineSeconds 分场景</strong>——300s 对"镜像仓库挂了"这种系统性故障太长，核心服务可压到 120~180s 让失败更快可见（代价：慢启动应用要配好 startupProbe 防误判）；<strong>发布前置检查</strong>——CI 里加 <code>kubectl create --dry-run</code> + 镜像存在性校验（registry API 查 manifest），把 ImagePullBackOff 拦在发布之前。更深一层：ImagePullBackOff 的 backoff 是 10s 起指数退避到 5 分钟封顶，三个节点各自退避，恢复后重试不同步——别指望"仓库恢复后立刻全好"，必要时 rollout restart 踢一轮。</p>
+    </div>
+  </details>
+
+  <details class="q-card">
+    <summary>题目二：消息推送服务单副本跑在 K8s，长连接（WebSocket）10 万条，terminationGracePeriodSeconds 默认 30s，没有 preStop。发布时网关侧批量 502，客户端疯狂重连把新 Pod 打垮。① 还原这次事故的时间线（谁先谁后）。② 设计修复方案（preStop、宽限期、应用侧排空、客户端退避各给结论）。③ 领导问"能不能改成 Deployment 多副本 + 就绪排空一劳永逸"——多副本化要补齐哪些课？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>时间线</strong>：T0 发布触发，maxUnavailable=25% 在单副本下取整为 1，旧 Pod 直接进 Terminating；T0+摘名单与 SIGTERM 并行开始——但<strong>名单摘除要传播到网关（订阅异步，1~2s），而应用没配 preStop、收到 SIGTERM 立刻停止接受新连接并开始关闭存量</strong>；T0+1~2s 名单还没摘干净，网关仍在把新连接路由过来 → 批量 502（这是 0024 期讲过的"名单传播窗口"，本讲退出侧的完整版）；T0+5~10s 十万长连接被同时关闭（30s 宽限期内应用扛不住就粗暴断），客户端按默认策略立即重连，重连风暴打向"刚 Ready 不久、连接表还没预热"的新 Pod → 新 Pod 过载，级联雪崩。<strong>根因有两个叠加：退出侧没做排空衔接 + 客户端没有退避纪律</strong>。② <strong>修复方案</strong>：<strong>preStop</strong> sleep 10~15s——把"进程感知终止"推迟到名单传播完成之后，这一条消灭大部分 502；<strong>宽限期</strong>按"preStop + 应用主动排空时长"算总账：10 万连接分批关（应用每 100ms 关 1000 个约 10s），配 terminationGracePeriodSeconds=60~90；<strong>应用侧排空</strong>：SIGTERM handler 里先标记不健康（主动让 readiness 失败，双保险）→ 停止接受新连接 → 按批关闭存量 → 处理完 in-flight 消息再退出（WebSocket 网关通常还该给客户端发 close frame 带着重连提示，把"被断"变"礼貌告别"）；<strong>客户端退避</strong>：指数退避 + 抖动（jitter），这是服务端管不到的最后一公里——推送类 SDK 必须内置，否则任何服务端优化都会被重连风暴吃掉。③ <strong>多副本化要补的课</strong>：其一，<strong>状态外置</strong>——单副本往往意味着内存态（连接路由表、设备在线状态），多副本前先把状态挪到 Redis/消息中间件（本课程 Redis 系列与 Pulsar 系列都是为这一步铺的路）；其二，<strong>连接均衡</strong>——10 万连接此前无差别挂在一个副本，多副本后要确认接入层（LB/网关）按连接数或一致性哈希分摊，避免"新副本起来了但旧副本的连接不迁移"造成假均衡；其三，<strong>发布策略</strong>——多副本后 maxUnavailable=0/maxSurge=1 才有意义，配合上面 ② 的退出侧改造，逐副本替换；其四，<strong>容量按重连风暴设计</strong>——一个副本挂掉，它的连接会瞬间涌向其余副本 × 客户端重连放大，峰值容量按"单副本故障 + 全量重连"校核（N+1 不是拍脑袋的 N+1）。做完这些，"一劳永逸"才成立——否则多副本只是把单点事故变成随机分布的事故。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>Kubernetes 官方文档 · Pod Lifecycle 与 Kubernetes 架构原则：<br>
+    <a href="https://kubernetes.io/zh-cn/docs/concepts/workloads/pods/pod-lifecycle/" target="_blank" rel="noopener">kubernetes.io · Pod 的生命周期</a>（配套阅读：<a href="https://kubernetes.io/zh-cn/docs/concepts/architecture/controller/" target="_blank" rel="noopener">控制器原理</a>、<a href="https://kubernetes.io/zh-cn/docs/concepts/workloads/controllers/deployment/" target="_blank" rel="noopener">Deployment</a>）</p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>Pod 就绪之后流量怎么进来（EndpointSlice 名单、kube-proxy、入口网关）在 <a href="0024-k8s-ingress-service-traffic.html">第 24 期</a>；副本数量怎么随负载伸缩（HPA 指标选型与容量规划）在 <a href="0016-k8s-hpa.html">第 16 期</a>——本期讲"三件套怎么转"，那两期讲"流量与容量两个方向的进阶"。下一期继续 Kubernetes 主线：ConfigMap 与 Secret 的配置管理机制。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0042-innodb-crash-recovery.html">← 上一期：InnoDB 崩溃恢复</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 43 期 · Kubernetes 系列 · 下一期预告：Kubernetes——ConfigMap 与 Secret 配置管理</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
