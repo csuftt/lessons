@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · MQTT 协议精要与 EMQX 集群：QoS、遗嘱与共享订阅 | 2026-10-07</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0045</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0044-k8s-configmap-secret.html">上一期：ConfigMap 与 Secret</a> · <a href="https://www.bilibili.com/video/BV1xEpT6XEe7" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">IOT · 物联网系列第 1 讲（接入协议篇）</p>
+  <h1>MQTT 协议精要与 EMQX 集群：QoS、遗嘱与共享订阅</h1>
+  <p class="subtitle">Kubernetes 主线告一段落，按十类循环今天开启物联网线。物联网架构师面对的第一个分叉不是选哪个时序库、上不上边缘计算，而是<strong>几百万台设备用什么姿势连上来</strong>。这一讲从一次"断网 30 秒、恢复后平台雪崩 40 分钟"的复盘讲起：MQTT 不只是"轻量的发布订阅"，它的 <strong>QoS 分级、会话与遗嘱、共享订阅</strong>才是把消息平台从"能跑"带到"能扛事故"的三根梁；再往上看 EMQX 集群怎么用 Core/Replicant 分层把单集群做到亿级连接，以及负载均衡、重连风暴这些"协议参数决定架构命运"的工程细节。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">📡 IoT 平台</span>
+    <span class="tag-date">📅 2026-10-07 · 第 45 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>一次"断网 30 秒"事故：恢复那一刻才是灾难的开始</h2>
+  <p>某充电桩运营平台，30 万台桩通过四层 LB 接入 4 节点 EMQX 集群，上报主题 <code>evse/+/status</code>，后端 8 个消费者实例订阅同一主题写库。某个机房上游光缆被挖断，设备侧重连 30 秒后网络恢复。真正的故障从恢复那刻开始，持续 40 分钟，复盘出三笔账：</p>
+  <p><strong>第一笔，重连风暴。</strong>30 万台桩几乎同时检测到断线、立刻重连，全部挤进恢复后的几秒窗口。每条重连要重跑 TCP 三次握手 + TLS 握手 + CONNECT 认证——单条新连接的成本大约相当于几十次心跳，是平时平稳负载的几十倍密度。4 个节点的 CPU 在恢复后第一分钟直接打满，正常心跳超时，<strong>更多设备被误判掉线、触发更多重连</strong>，正反馈雪崩。</p>
+  <p><strong>第二笔，离线判定迟到 90 分钟。</strong>设备端 keepalive 设了 1 小时，服务端按协议要等 <code>1.5 × keepalive</code>（90 分钟）无心跳才判死。运营大屏上，断网期间"在线率"纹丝不动——监控失真比故障本身更可怕，因为工单是靠在线率驱动的。</p>
+  <p><strong>第三笔，下游被打了 8 倍流量。</strong>后端 8 个消费者用的是<strong>普通订阅</strong>：每条状态消息被投递 8 次，8 个实例各写一遍库再靠去重表兜底。平时量小没事，重连后设备把断线期间积压的状态一口气补发，下游写入直接被放大 8 倍压垮。</p>
+  <p>三笔账指向同一个根因：<strong>把 MQTT 当"带消息队列的 HTTP"用</strong>。只用了发布订阅，QoS、会话、遗嘱、共享订阅这些协议能力一个没碰——broker 集群化了，架构还是单机思维。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：MQTT 的契约——QoS、会话与遗嘱</h2>
+
+  <h3>三要素：主题路由、长连接、轻包头</h3>
+  <p>MQTT 的核心契约：通信双方<strong>不互相寻找，只对主题发布和订阅</strong>（设备找主题，不找设备）；一条 TCP 长连接上跑全部消息（一次握手，终身复用，这是它和 HTTP 最大的分野）；固定报文头最小 2 字节，让 4G/NB-IoT 下的流量费可以忽略。理解 MQTT 的所有特性，都从"设备可能随时掉线、网络可能随时丢包、设备端资源可能极度受限"这三个假设出发。</p>
+
+  <h3>QoS 三档：投递保证与代价的阶梯</h3>
+  <div class="diagram">
+  <svg viewBox="0 0 760 400" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar45" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <text x="380" y="24" text-anchor="middle" fill="var(--muted)" font-size="13">QoS 三档的报文交互：箭头越多，保证越强，代价越高</text>
+
+    <!-- QoS0 -->
+    <rect x="20" y="46" width="720" height="88" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="46" y="72" fill="var(--ink)" font-size="12" font-weight="700">QoS 0 · 最多一次（发完就忘）</text>
+    <line x1="200" y1="98" x2="540" y2="98" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar45)"/>
+    <text x="370" y="90" text-anchor="middle" fill="var(--muted)" font-size="10.5">PUBLISH（无确认，网络丢了就丢了）</text>
+    <text x="46" y="122" fill="var(--muted)" font-size="10.5">适合：高频采样、允许丢样本的遥测流</text>
+
+    <!-- QoS1 -->
+    <rect x="20" y="148" width="720" height="100" rx="10" fill="var(--card)" stroke="var(--ok)" stroke-width="1.5"/>
+    <text x="46" y="174" fill="var(--ink)" font-size="12" font-weight="700">QoS 1 · 至少一次（PUBLISH → PUBACK，未确认则重传）</text>
+    <line x1="200" y1="200" x2="540" y2="200" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar45)"/>
+    <line x1="540" y1="224" x2="200" y2="224" stroke="var(--ok)" stroke-width="1.5" marker-end="url(#ar45)"/>
+    <text x="370" y="192" text-anchor="middle" fill="var(--muted)" font-size="10.5">PUBLISH（带报文标识符）</text>
+    <text x="370" y="240" text-anchor="middle" fill="var(--ok)" font-size="10.5">PUBACK（重传 ⇒ 可能重复，业务侧要幂等）</text>
+
+    <!-- QoS2 -->
+    <rect x="20" y="262" width="720" height="104" rx="10" fill="var(--card)" stroke="var(--warn, #b45309)" stroke-width="1.5"/>
+    <text x="46" y="288" fill="var(--ink)" font-size="12" font-weight="700">QoS 2 · 恰好一次（四步握手 + 服务端去重）</text>
+    <line x1="200" y1="310" x2="540" y2="310" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar45)"/>
+    <line x1="540" y1="330" x2="200" y2="330" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar45)"/>
+    <line x1="200" y1="350" x2="540" y2="350" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar45)"/>
+    <line x1="540" y1="30" x2="540" y2="30" stroke="none"/>
+    <text x="370" y="304" text-anchor="middle" fill="var(--muted)" font-size="10.5">PUBLISH →</text>
+    <text x="466" y="304" fill="transparent">.</text>
+    <text x="370" y="326" text-anchor="middle" fill="var(--muted)" font-size="10.5">← PUBREC　PUBREL →</text>
+    <text x="370" y="356" text-anchor="middle" fill="var(--muted)" font-size="10.5">← PUBCOMP（两对交互 + 去重状态，最贵）</text>
+  </svg>
+  </div>
+
+  <p>最容易被忽略的一条：<strong>QoS 是两段接力，不是端到端保证</strong>。设备→broker、broker→订阅端，两段各自独立协商 QoS，实际投递取两者较小值。设备用 QoS 1 发、后端用 QoS 0 订，broker 落盘确认后转发这一跳可以静默丢弃——断电重启的边缘网关上，丢的恰恰是最后一批最重要的数据。另一条：QoS 1 的重传语义意味着<strong>重复是设计内行为</strong>，"至少一次"+"幂等写入"是一对，缺一个就是重复订单或重复告警。</p>
+
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>档位</th><th>保证</th><th>代价</th><th>典型场景</th></tr>
+    <tr><td>QoS 0</td><td>最多一次</td><td>无确认，最快</td><td>高频遥测采样、秒级状态流</td></tr>
+    <tr><td>QoS 1</td><td>至少一次（可能重复）</td><td>一次确认 + 重传队列</td><td>计费事件、告警、状态变更（配幂等）</td></tr>
+    <tr><td>QoS 2</td><td>恰好一次</td><td>四步握手 + 去重状态</td><td>低频高价值指令（下发计费参数）</td></tr>
+  </table>
+  </div>
+
+  <h3>会话、遗嘱与保留：为"随时掉线"设计的三个机制</h3>
+  <p><strong>会话（Session）</strong>：MQTT 5.0 把 3.1.1 的 cleanSession 拆成两个正交参数——<code>clean_start</code>（这次连接是否重建会话）与 <code>session_expiry_interval</code>（断连后会话保留多久，含订阅关系与 QoS≥1 的积压消息）。设备掉线重连，订阅自动恢复、断线期间的消息按 QoS 补投，这是 01 节"补发"的来源——它是特性不是 bug，代价要算进下游容量。<strong>遗嘱（Will Message）</strong>：连接时预埋一条"身后事"消息，设备非正常掉线（Keep Alive 超时、网络错误、没发 DISCONNECT 就断开）由 broker 代发——这是服务端感知设备离线的唯一可靠通道；MQTT 5.0 的 <code>will_delay_interval</code> 给它加了缓冲：延迟期内重连成功则遗嘱取消，专治弱网闪断的"假死误报"，但注意它与会话到期取<strong>先到者</strong>——会话先过期，遗嘱立即发出。<strong>保留消息（Retained）</strong>：broker 替主题存住最后一条消息，新订阅者上线立即拿到——设备在线状态主题配"遗嘱 offline + 每次上线发 retained online"，就是一份服务端白送的设备状态快照。</p>
+</section>
+
+<!-- ================= 03 架构 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构视角：共享订阅、EMQX 集群与重连风暴防御</h2>
+
+  <h3>共享订阅：broker 内置的消费者负载均衡</h3>
+  <p>01 节第三笔账的正解。<code>$share/g1/evse/+/status</code> 语义是：<strong>组间广播、组内均衡</strong>——同名组 g1 内 8 个消费者分摊消息（每条只投组内一个），不同组各拿全量一份。EMQX 不等 MQTT 5.0，3.1.1 客户端一样能用 <code>$share</code> 前缀，服务端原生实现。分发策略：<code>round_robin</code>（默认，逐条轮询）、<code>random</code>、<code>sticky</code>（粘住一个直到其下线）、<code>hash_clientid</code>/<code>hash_topic</code>（按发布者或主题哈希）、<code>local</code>（优先同节点，省跨节点转发）。策略选择的一个硬约束：<strong>共享订阅只保证均衡，不保证顺序</strong>——同设备消息被轮询到不同消费者，到达顺序可能交叉；对"同一充电桩的状态必须按序处理"的业务，用 <code>hash_clientid</code> 把同一设备钉到同一消费者，或者接受业务层乱序容忍。</p>
+
+  <h3>EMQX 集群：Core/Replicant 分层，亿级连接的拓扑</h3>
+  <div class="diagram">
+  <svg viewBox="0 0 760 360" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar45b" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <text x="380" y="24" text-anchor="middle" fill="var(--muted)" font-size="13">Mria 架构：Core 全互联管写，Replicant 星型承接连接（官方实测 23 节点 1 亿连接）</text>
+
+    <!-- LB -->
+    <rect x="20" y="130" width="110" height="100" rx="10" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="75" y="170" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">四层 LB</text>
+    <text x="75" y="190" text-anchor="middle" fill="var(--muted)" font-size="10.5">按连接分发</text>
+    <text x="75" y="207" text-anchor="middle" fill="var(--muted)" font-size="10.5">不做会话</text>
+
+    <!-- Replicants -->
+    <rect x="180" y="52" width="150" height="64" rx="10" fill="var(--card)" stroke="var(--ok)" stroke-width="1.5"/>
+    <text x="255" y="78" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">Replicant × N</text>
+    <text x="255" y="97" text-anchor="middle" fill="var(--muted)" font-size="10">承接 MQTT 连接/消息</text>
+    <rect x="180" y="244" width="150" height="64" rx="10" fill="var(--card)" stroke="var(--ok)" stroke-width="1.5"/>
+    <text x="255" y="270" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">Replicant × N</text>
+    <text x="255" y="289" text-anchor="middle" fill="var(--muted)" font-size="10">无状态 · 可弹性伸缩</text>
+
+    <!-- Core triangle -->
+    <line x1="620" y1="80" x2="700" y2="130" stroke="var(--accent)" stroke-width="1.5"/>
+    <line x1="700" y1="180" x2="620" y2="230" stroke="var(--accent)" stroke-width="1.5"/>
+    <line x1="590" y1="80" x2="590" y2="230" stroke="var(--accent)" stroke-width="1.5"/>
+    <rect x="480" y="52" width="140" height="56" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="550" y="76" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">Core 1</text>
+    <text x="550" y="94" text-anchor="middle" fill="var(--muted)" font-size="10">路由表/会话注册</text>
+    <rect x="660" y="128" width="90" height="56" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="705" y="152" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">Core 2</text>
+    <text x="705" y="170" text-anchor="middle" fill="var(--muted)" font-size="10">写事务</text>
+    <rect x="480" y="228" width="140" height="56" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="550" y="252" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">Core 3</text>
+    <text x="550" y="270" text-anchor="middle" fill="var(--muted)" font-size="10">建议 3 个起步</text>
+
+    <!-- arrows LB->Replicant, Replicant->Core -->
+    <line x1="130" y1="150" x2="180" y2="95" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar45b)"/>
+    <line x1="130" y1="210" x2="180" y2="265" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar45b)"/>
+    <line x1="330" y1="95" x2="480" y2="80" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar45b)"/>
+    <line x1="330" y1="265" x2="480" y2="240" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar45b)"/>
+    <text x="400" y="62" fill="var(--muted)" font-size="10.5">RLOG 异步复制（读本地副本路由）</text>
+    <text x="405" y="302" fill="var(--muted)" font-size="10.5">写转交 Core，订阅路由全集群同步</text>
+    <text x="380" y="345" text-anchor="middle" fill="var(--muted)" font-size="10.5">≤7 节点全 Core 即可；大集群 Core 只做数据层（Core+Replicant 为企业版能力）</text>
+  </svg>
+  </div>
+
+  <p>4.x 时代 Mnesia 全互联拓扑把集群卡在 3~7 节点；5.0 起 Mria 架构把节点分成两种角色：<strong>Core</strong> 全互联组成数据层，跑写事务、存路由表与会话注册表；<strong>Replicant</strong> 星型挂在 Core 后面，承接全部 MQTT 连接，本地有只读副本所以路由极快，无状态可随时增删。写压力不再随节点数平方增长——官方 23 节点集群实测 1 亿 MQTT 连接 + 每秒百万消息，这是"单集群亿级"的底气。集群内消息路由的机制值得记住：<strong>订阅表分片存在各节点本地（谁的订阅谁存），路由表和主题树由 Core 维护全集群同步</strong>——消息发布到哪个节点，该节点查路由表把消息转发到有订阅者的节点，各节点再查本地订阅表投递。版本坐标（2026-10）：开源 5.x 仍是生产主力线（5.8 起企业版还有跨集群 Cluster Linking），6.x 已 GA 且持续加码（6.2 引入 A2A 智能体互联等），企业版 6.0 对持久会话做了内部重构——升级 6.x 前先核对新版变更说明。</p>
+
+  <h3>容量与高可用：把 01 节的三笔账算在事前</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>维度</th><th>规划要点</th><th>经验参考</th></tr>
+    <tr><td>连接容量</td><td>每连接一个 Erlang 进程，按内存压测定节点上限</td><td>官方单节点参考百万级；别拿它当承诺，用自己的报文尺寸压</td></tr>
+    <tr><td>消息吞吐</td><td>按 QoS 档位分别压（QoS1 吞吐约为 QoS0 的一半量级）</td><td>重连补发峰值 = 设备数 × 断线时长 × 上报频率</td></tr>
+    <tr><td>集群网络</td><td>Core 间延迟 &lt;10ms，同私有网络部署</td><td>超过 100ms 集群不可用；分区自动愈合 autoheal 默认开</td></tr>
+    <tr><td>接入层</td><td>四层 LB 分发 + 节点故障时客户端重连即迁移</td><td>LB 摘除节点有窗口，客户端必须带退避重连</td></tr>
+  </table>
+  </div>
+  <p>重连风暴的解药一半在客户端协议参数里：<strong>指数退避 + 随机抖动（jitter）</strong>把 30 万台设备的重连从"同一秒"摊开成几十秒甚至几分钟；服务端再配连接速率限制削峰。这两行参数，比多加两个节点便宜得多——架构师的价值在于把 01 节的事故在参数评审阶段就拦下来。长连接入口的南北向链路设计（LB 选型、四层/七层、与网关的关系）与 <a href="0024-k8s-ingress-service-traffic.html">第 24 期流量入口三道门</a>同构，可对照读。</p>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：一套"敢上生产"的 EMQX 配置与消费者</h2>
+
+  <h3>片段一：emqx.conf 关键参数（HOCON 格式）</h3>
+  <pre><code>listeners.tcp.default {
+  bind = "0.0.0.0:1883"
+  max_connections = 1024000      # 按压测定的单节点上限，别用默认无限
+  limiter.max_conn_rate = "1000/s"  # 重连风暴削峰：每秒最多接受新连接
+}
+mqtt {
+  keepalive_multiplier = 1.5     # Keep Alive 超时倍数，默认即 1.5
+  session_expiry_interval = 2h   # MQTT 3.x 客户端的会话保留时长
+  max_inflight = 32              # QoS1/2 在途报文窗口，弱网设备可调小
+  shared_subscription = true
+  shared_subscription_strategy = round_robin
+}
+cluster {
+  discovery_strategy = dns       # 或 static / etcd / k8s
+  autoheal = true                # 网络分区自动愈合，默认开
+  autoclean = 5m                 # 离线节点自动清出集群
+}</code></pre>
+  <p>这套配置的三个意图：<code>max_conn_rate</code> 把 01 节的重连风暴在 accept 阶段削峰（超出的连接排队而非打崩节点）；<code>session_expiry_interval</code> 按业务离线模式定——充电桩 2 小时够覆盖一次弱网闪断，车联网可能要一周；共享订阅策略默认轮询，强顺序业务改 <code>hash_clientid</code>。</p>
+
+  <h3>片段二：mosquitto 客户端验证遗嘱与共享订阅</h3>
+  <pre><code># 设备端：连接时预埋遗嘱 + MQTT5 延迟发布（30 秒内重连则不发）
+mosquitto_pub -h broker.example.com -p 1883 \
+  -i evse-001 --qos 1 -t evse/evse-001/status -m online -r \
+  --will-topic evse/evse-001/status --will-payload offline --will-qos 1 --will-retain \
+  -D connect session-expiry-interval 3600 \
+  -D connect will-delay-interval 30
+
+# 消费端：两个终端各起一个，同组共享订阅（消息在两者间均衡）
+mosquitto_sub -t '$share/g1/evse/+/status' -q 1 -C 5
+mosquitto_sub -t '$share/g1/evse/+/status' -q 1 -C 5</code></pre>
+  <p>验证三件事：拔网线（不发 DISCONNECT）30 秒后遗嘱落地、订阅 <code>evse/evse-001/status</code> 立即收到 retained 的 offline/online 快照、两个消费者分摊而非重复收到消息——三样都对，协议层才算真正配通。</p>
+
+  <h3>片段三：Java 共享订阅消费者（Paho）</h3>
+  <pre><code>MqttConnectionOptions opts = new MqttConnectionOptions();
+opts.setUserName("consumer-1");
+opts.setAutomaticReconnect(true);            // 内置指数退避重连，别自己写定时器
+opts.setSessionExpiryInterval(3600L);        // MQTT5：断连后会话保留 1h
+opts.setCleanStart(false);                   // 重连续约会话，订阅自动恢复
+client.connect(opts);
+// 共享订阅：g1 组内负载均衡；QoS1 = at-least-once，handler 必须幂等
+client.subscribe(new String[]{"$share/g1/evse/+/status"},
+                 new int[]{1}, (topic, msg) -> {
+    handleIdempotent(new String(msg.getPayload())); // 按设备ID+序号去重
+});</code></pre>
+
+  <div class="warn">
+    <p><strong>五个必踩的坑：</strong>① <strong>普通订阅当负载均衡用</strong>——多实例消费同一主题是广播不是分摊，下游放大 N 倍，共享订阅才是正解。② <strong>QoS 1 不做幂等</strong>——重传是设计内行为，去重键（设备 ID + 报文序号）必须在消费侧落地。③ <strong>keepalive 设几小时图省流量</strong>——离线判定 = 1.5 × keepalive，监控失真比省下的流量贵得多；电池设备可用"上报即当心跳"的模式折中。④ <strong>会话过期时间一刀切</strong>——会话是 broker 内存真金白银，2 小时和一周的容量差一个量级，按设备离线模式分层设置。⑤ <strong>客户端不带退避重连</strong>——固定间隔重连等于把风暴摊平成持续压制，必须指数退避 + 随机抖动。</p>
+  </div>
+
+  <div class="card card-tip">
+    <h4>✅ MQTT 接入层体检清单</h4>
+    <p>☐ 消费者全部走共享订阅，分发策略与顺序性要求匹配（轮询 vs 哈希）　☐ QoS 按消息价值分级：遥测 0 / 事件 1 / 指令 2，且两段 QoS 都核对过　☐ QoS 1 消费侧幂等去重落地并有测试　☐ keepalive × 会话过期 × 遗嘱延迟三参数按设备类型建模，不是一刀切　☐ 设备状态主题用 retained + 遗嘱组成快照，新订阅即得状态　☐ 客户端重连 = 指数退避 + jitter，压测过断网恢复场景　☐ 服务端 max_conn_rate 削峰已配，重连风暴演练过　☐ 集群 Core 同私有网络（&lt;10ms），分区 autoheal 演练过　☐ 断线补发峰值容量算过（设备数 × 断线时长 × 频率），下游扛得住　☐ LB 后节点摘除窗口与客户端重连窗口对齐过</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>MQTT 的三根梁：QoS、会话与遗嘱、共享订阅</strong>——只把 pub/sub 用起来是"消息的 HTTP"，三根梁用齐才是为"随时掉线的设备"设计的协议。</li>
+    <li><strong>QoS 是两段接力不是端到端</strong>：设备→broker 与 broker→订阅端各自协商，取小者生效；QoS 1 的重复是设计内行为，幂等是消费侧义务不是可选项。</li>
+    <li><strong>共享订阅 = broker 内置消费者负载均衡</strong>：组间广播、组内均衡，EMQX 上 3.1.1 客户端即可用；它保证均衡不保证顺序，强顺序用 hash_clientid。</li>
+    <li><strong>EMQX 集群的分层是亿级连接的关键</strong>：Core 全互联管写，Replicant 星型无状态承接连接；官方 23 节点实测 1 亿连接——拓扑选对，扩容才有空间。</li>
+    <li><strong>重连风暴在参数评审阶段就要拦下</strong>：客户端指数退避 + jitter、服务端连接速率限制、会话容量按补发峰值算——三行参数顶两个节点。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目一：电池供电的 NB-IoT 水表，每 15 分钟上报一次读数，单条消息约 200 字节，走蜂窝网络按流量计费。① keepalive 怎么定？在线判定的时效要求与电池/流量预算怎么折中？② 读数上报用 QoS 几？说出你的完整推理，包括漏一条读数和重复一条读数各自的业务后果。③ 平台侧如何设计"设备在线状态"，让运维大屏既及时又少误报？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>keepalive 的折中</strong>：如果 keepalive 设 15 分钟（贴着上报周期），判定窗口 1.5×15≈22 分钟，流量成本只是每天多几次 PINGREQ（几个字节）；但如果追求"5 分钟内发现设备掉线"，keepalive 得压到 3~4 分钟，心跳频率翻数倍。NB-IoT 设备多数时间在 PSM/eDRX 深睡，<strong>根本没有"在线"的连续语义</strong>——正确的建模是"最后上报时间"而非"连接在线"：以 2~3 个上报周期未见数据判"通信异常"，keepalive 本身可以放到 1 小时甚至不依赖（靠上报即心跳）。② <strong>QoS 推理</strong>：水表读数漏一条，下次读数可补算（用量是可差分的），重复一条则可能被重复计费——但 QoS1 的重复用"表 ID + 上报时间戳/序号"去重几乎零成本。QoS2 四步握手在 NB-IoT 高误码率网络下重传概率高、交互次数多，流量和功耗都翻倍，为"恰好一次"付出的代价值不回那张水费账单。<strong>正解：QoS 1 + 消费侧幂等</strong>——这正是"QoS 1 + 幂等是标配"的教科书场景。计费指令下发（改价、阀门控制）才值得 QoS 2。③ <strong>状态设计</strong>：上报时发 retained 的 <code>last-seen</code> 到状态主题 + 遗嘱对本场景其实帮不大（NB-IoT 不维护长连接），大屏以"最后上报时间 + 3 周期窗口"驱动在线/异常/失联三态；长连接设备（充电桩、网关）则用"遗嘱 retained offline + 上线 retained online + will_delay_interval 盖住闪断"，两套模型不要混用——<strong>设备在线的定义必须跟着供电与网络模型走</strong>，这是物联网线与互联网架构最大的思维差异之一。</p>
+    </div>
+  </details>
+
+  <details class="q-card">
+    <summary>题目二：你负责的充电桩平台按 01 节架构扩到 600 万台设备：4 节点 EMQX（全 Core）+ 四层 LB，某区域光缆被挖断，预计影响 200 万台设备、断网 90 秒后恢复。① 估算恢复时刻的冲击：新连接速率、TLS 握手 CPU、下游补发流量各是什么量级，瓶颈最可能先在哪一层炸？② EMQX 集群和 LB 各能挡住什么、挡不住什么？③ 给一套分层防御方案，标明每层各拦哪部分冲击，并说明哪些必须在设备端固件里预埋（意味着现在没做就来不及了）。<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐问拆解</h4>
+      <p>① <strong>量级估算</strong>：200 万设备若在同一秒重连，即 200 万 conn/s 的 CONNECT 风暴——每条含 TCP 握手、TLS 非对称解密（CPU 密集，是平稳心跳的几十倍密度）、认证查询（若认证走 MySQL/Redis 后端，这本身就是一个每秒百万级的查询风暴）。下游补发：设备每 10 秒一条状态 × 断线 90 秒 ≈ 每台补 9 条 × 200 万 = 1800 万条在数秒内涌入；若消费者是普通订阅 8 实例，就是 1.44 亿次投递。<strong>最先炸的通常是接入层 CPU（TLS）与认证后端</strong>，然后是 EMQX 会话创建（新会话=写事务走 Core），最后是下游。<strong>关键洞察：每一层炸掉都会制造更多超时，反过来制造更多重连，正反馈是风暴的本质</strong>。② <strong>分工边界</strong>：LB 能挡——慢启动摘除故障节点、连接速率限制（部分 LB 支持）、健康检查快速摘除；挡不住——它不认识 MQTT，会话在 broker 上，认证风暴和补发风暴直接穿透。EMQX 能挡——<code>max_conn_rate</code> 在 accept 阶段削峰、共享订阅挡住下游放大、cluster autoheal 保集群自身；挡不住——200 万设备同一秒发起的握手照样先把 CPU 打满（速率限制是"排队"不是"消失"），认证后端打挂它也无能为力。③ <strong>分层防御</strong>：设备固件层（<strong>现在必须预埋，事后无法补救</strong>）——指数退避 + 随机抖动（如基础 1s、系数 2、抖动 ±50%，上限 5 分钟），把 200 万设备的重连摊成几分钟的长尾；重连时优先连"上次节点"（可用 DNS/节点列表）避免全量打到 LB。接入层——LB 连接速率限制 + EMQX <code>max_conn_rate</code> 双保险；TLS 会话复用（session resumption）把握手成本降一个量级。认证层——认证数据本地缓存（EMQX 内置认证缓存），认证后端挂了走降级策略而非拒绝。核心层——会话过期别太长（200 万 × 2h 会话是真实内存），共享订阅确保下游不放大。下游层——按"补发峰值 = 设备数 × 断线时长 × 频率"做容量与入口限流，消费幂等兜底。<strong>演练</strong>：生产环境拿一个可用性要求低的区域，主动拔一次——没演练过的防御方案等于没有。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>EMQX 官方文档 · MQTT 配置与共享订阅（含集群 Mria 架构章）：<br>
+    <a href="https://docs.emqx.com/zh/emqx/latest/configuration/mqtt.html" target="_blank" rel="noopener">docs.emqx.com · MQTT Configuration</a>（配套阅读：<a href="https://docs.emqx.com/zh/emqx/latest/deploy/cluster/mria-introduction.html" target="_blank" rel="noopener">集群架构与 Mria</a>、MQTT 5.0 协议规范 <a href="https://docs.oasis-open.org/mqtt/mqtt/v5.0/mqtt-v5.0.html" target="_blank" rel="noopener">OASIS mqtt-v5.0</a>）</p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>长连接入口的南北向链路与 LB 选型和 <a href="0024-k8s-ingress-service-traffic.html">第 24 期 Kubernetes 流量入口三道门</a>同构；消息投递语义（at-least-once 与幂等）与 <a href="0021-pulsar-message-reliability.html">第 21 期 Pulsar 消息可靠性</a>互为映照。下一期继续物联网线：千万级设备长连接网关架构。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0044-k8s-configmap-secret.html">← 上一期：ConfigMap 与 Secret</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 45 期 · 物联网系列 · 下一期预告：千万级设备长连接网关架构</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
