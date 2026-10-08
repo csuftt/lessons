@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · Agent 编排：把大模型应用从 if-else 泥潭捞出来（LangGraph 视角） | 2026-10-09</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0047</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0046-iot-long-connection-gateway.html">上一期：长连接网关架构</a> · <a href="https://www.bilibili.com/video/BV1FnpW64EzS" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">AI · AI 大模型应用系列第 4 讲（Agent 编排篇）</p>
+  <h1>Agent 编排：把大模型应用从 if-else 泥潭捞出来</h1>
+  <p class="subtitle">物联网主线的两讲告一段落，今天回到 AI 线，聊一个工程味最重的题目：Agent 编排。0027 期我们把单个工具调用循环讲透了——模型表态、代码动手；但业务的真实流程从来不是一个循环：要分支、要循环重试、要等人审批、半夜发版还不能把跑到一半的会话打死。<strong>编排层的本质，是把"流程控制权"从提示词里拿回代码</strong>。这一讲从一次"半夜发版打死长任务"的连环事故讲起：图执行模型（状态、节点、条件边）怎么替代 if-else 嵌套，检查点（checkpoint）怎么让 Agent 像工作流引擎一样"断点续跑"，以及最贵的那条铁律——<strong>恢复即重放，副作用节点必须幂等</strong>。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🤖 AI 大模型应用</span>
+    <span class="tag-date">📅 2026-10-09 · 第 47 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>一次"半夜发版打死长任务"的连环事故</h2>
+  <p>团队做一个供应商对账 Agent：读邮件里的对账单 → OCR 抽取 → 与 ERP 台账比对 → 差异超过阈值走人工复核 → 通过后自动生成凭证写入财务系统。初版用最顺手的写法：一个 Python 主循环，按步骤调模型、调工具，会话历史塞 Redis，流程控制全靠提示词里那句"请判断下一步做什么"。</p>
+  <p>上线一个月，三件事连环爆：</p>
+  <p><strong>第一件：半夜发版，长任务团灭。</strong>对账任务一跑就是 20~40 分钟（大量 OCR 与台账查询）。发版重启进程，跑到第 7 步的任务全部蒸发——会话历史在 Redis 里，但"流程走到哪一步、下一步该进哪个分支"这个执行位置没人存。只能整单重跑：OCR 重付费、模型重推理，一晚上白烧的 token 账单肉眼可见。</p>
+  <p><strong>第二件：提示词流程控制漂移。</strong>十个步骤的顺序写在提示词里，模型大多数时候照办，但每月总有几十单"创造性走位"：跳过台账比对直接生成凭证、人工复核没等结果就往下跑。每修一次提示词，回归测试全靠人肉点一遍——<strong>流程逻辑活在自然语言里，就永远没有确定性</strong>。</p>
+  <p><strong>第三件：重复写入财务系统。</strong>一次任务在"生成凭证"节点超时重试，外部接口实际已受理，重试又提交了一笔——同一个供应商同一张对账单，两张凭证。财务的月结对出来的那一刻，这个问题才被发现。</p>
+  <p>复盘结论：<strong>三件事都不是模型问题，是编排层缺位</strong>。你需要的其实是工作流引擎的老能力——确定性的流转、持久化的执行位置、失败后的断点恢复——只不过这个工作流里的某些"步骤"由大模型来决策。这就是 Agent 编排框架要解的问题，也是 LangGraph 这类图运行时的定位。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：图、超步与检查点</h2>
+
+  <h3>心智模型：节点是代码，边是确定性，只有少数节点里坐着模型</h3>
+  <p>LangGraph 的执行模型三件套：<strong>状态（State）</strong>是一个共享数据结构（TypedDict 或 Pydantic 模型），带着 reducer 规则定义"多个节点写同一个键时怎么合并"；<strong>节点（Node）</strong>是普通函数，读状态、返回状态更新——可以是 LLM 调用、工具执行，也可以是纯确定性代码（校验、路由、落库）；<strong>边（Edge）</strong>是流转规则，条件边（conditional edge）就是一个普通函数，读状态返回下一跳——<strong>分支逻辑是代码函数，不是提示词</strong>。图允许循环（重试、反思、重规划都天然表达），执行采用 Pregel 风格的超步（super-step）模型：每个超步内所有可运行节点并行执行，跑完统一合并状态、写一次检查点，再进下一个超步。这与 0043 期讲的 Kubernetes 控制循环"观测-对比-调谐"是同一种工程审美：<strong>期望与实际都在一个可检查的数据结构里，每轮推进可观测、可重放</strong>。</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 350" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar47" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar47a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent-3)"/>
+      </marker>
+    </defs>
+    <text x="380" y="22" text-anchor="middle" fill="var(--muted)" font-size="13">对账 Agent 编排图：确定性主干 + 少数模型决策点 + 人审中断 + 失败重试环</text>
+
+    <!-- START -->
+    <rect x="20" y="60" width="90" height="40" rx="18" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="65" y="85" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">START</text>
+    <line x1="110" y1="80" x2="142" y2="80" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar47)"/>
+
+    <!-- OCR -->
+    <rect x="146" y="56" width="110" height="48" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="201" y="77" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">ocr_extract</text>
+    <text x="201" y="93" text-anchor="middle" fill="var(--muted)" font-size="9.5">确定性：调 OCR API</text>
+    <line x1="256" y1="80" x2="288" y2="80" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar47)"/>
+
+    <!-- LLM compare -->
+    <rect x="292" y="56" width="120" height="48" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="352" y="77" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">llm_compare</text>
+    <text x="352" y="93" text-anchor="middle" fill="var(--muted)" font-size="9.5">模型：差异归因分类</text>
+    <line x1="412" y1="80" x2="444" y2="80" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar47)"/>
+
+    <!-- route -->
+    <path d="M500,80 C530,80 530,60 560,56" fill="none" stroke="var(--muted)" stroke-width="1.2" stroke-dasharray="4 3"/>
+    <rect x="448" y="56" width="120" height="48" rx="10" fill="var(--card)" stroke="var(--ok)" stroke-width="1.5"/>
+    <text x="508" y="77" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">route（条件边）</text>
+    <text x="508" y="93" text-anchor="middle" fill="var(--muted)" font-size="9.5">代码：差异&gt;阈值? 人数?</text>
+
+    <!-- human review -->
+    <rect x="600" y="40" width="130" height="52" rx="10" fill="var(--card)" stroke="var(--accent-3)" stroke-width="1.5"/>
+    <text x="665" y="62" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">human_review</text>
+    <text x="665" y="78" text-anchor="middle" fill="var(--muted)" font-size="9.5">interrupt() 中断等待审批</text>
+
+    <!-- post voucher -->
+    <rect x="600" y="130" width="130" height="48" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="665" y="151" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">post_voucher</text>
+    <text x="665" y="167" text-anchor="middle" fill="var(--muted)" font-size="9.5">幂等键写入财务系统</text>
+
+    <line x1="665" y1="92" x2="665" y2="126" stroke="var(--accent-3)" stroke-width="1.6" marker-end="url(#ar47a)"/>
+    <text x="690" y="112" fill="var(--muted)" font-size="9.5">审批通过，恢复执行</text>
+
+    <!-- retry loop back to llm_compare -->
+    <path d="M640,154 C560,150 480,140 412,104" fill="none" stroke="var(--accent-3)" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#ar47a)"/>
+    <text x="500" y="132" fill="var(--muted)" font-size="9.5">超时/瞬态失败 → RetryPolicy 重试环</text>
+
+    <!-- checkpoint bar -->
+    <rect x="20" y="220" width="722" height="56" rx="8" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="381" y="242" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">Checkpointer（每个超步结束落一次快照：thread_id → checkpoint 链）</text>
+    <text x="381" y="260" text-anchor="middle" fill="var(--muted)" font-size="10.5">InMemorySaver（开发）/ SqliteSaver（单机）/ PostgresSaver（生产）· RedisSaver（高吞吐低延迟）</text>
+    <line x1="380" y1="196" x2="380" y2="216" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar47)"/>
+
+    <!-- bottom notes -->
+    <rect x="20" y="292" width="340" height="44" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="190" y="310" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">恢复：同 thread_id 重新 invoke</text>
+    <text x="190" y="326" text-anchor="middle" fill="var(--muted)" font-size="9.5">从最后成功的超步续跑，成功节点不重付 token</text>
+    <rect x="400" y="292" width="342" height="44" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="571" y="310" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">时间旅行：get_state_history 回溯任意快照</text>
+    <text x="571" y="326" text-anchor="middle" fill="var(--muted)" font-size="9.5">改状态再推演（fork），审计留痕天然齐全</text>
+  </svg>
+  </div>
+
+  <h3>检查点：把"执行位置"变成持久化数据</h3>
+  <p>编译图时挂一个 checkpointer，每个超步边界自动把完整状态快照写进存储，按 <code>thread_id</code> 组织成链（同一个 thread 的历史快照像 git log，可以回看、可以 fork）。持久化三档可调：<code>sync</code>（下一步开始前落盘，最安全）、<code>async</code>（默认，边跑下一步边落盘）、<code>exit</code>（只在结束/中断时落一次，最快但中间进度不保）。生产已知的一笔账：一张 40KB 的文档上下文被每个超步全量序列化，2000 次运行后 checkpoints 两张表涨过 1.2GB，且<strong>没有内建 TTL/保留策略</strong>——上线前就要把清理任务（按 thread 年龄 DELETE + VACUUM）排进计划。大对象别进 State，放对象存储、快照里存引用。</p>
+
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>能力</th><th>机制</th><th>没有它会怎样（01 节事故对照）</th></tr>
+    <tr><td>断点续跑</td><td>同 thread_id 恢复，从最后成功超步继续；同超步内已成功节点的写入以 pending writes 保存，恢复时不重跑</td><td>发版重启 = 任务团灭，整单重跑重付费（第一件事故）</td></tr>
+    <tr><td>确定性流转</td><td>条件边是代码函数；流程结构显式写在图里</td><td>流程活在提示词里，模型"创造性走位"，改提示词靠人肉回归（第二件事故）</td></tr>
+    <tr><td>人机协同</td><td>节点内 interrupt() 暂停 → 状态已持久化 → 进程可退出；审批后同 thread 恢复继续</td><td>人审结果与流程状态两张皮，等待期间占着进程</td></tr>
+    <tr><td>时间旅行</td><td>get_state_history 拉任意历史快照，可改状态 fork 重推</td><td>"第 6 步为什么走错分支"只能靠翻日志脑补</td></tr>
+    <tr><td>循环预算</td><td>recursion_limit 封顶超步数（默认很高，务必显式设小）</td><td>两个节点互相踢皮球，token 烧到天亮</td></tr>
+  </table>
+  </div>
+
+  <div class="note">
+    <p><strong>最重要的那条语义，值得单独一行：</strong>LangGraph 的检查点落在<strong>超步边界</strong>，不在节点内部的任意一行代码上。<strong>恢复 = 从节点开头整段重放</strong>——包括节点里的 LLM 调用、API 请求、interrupt 本身。有团队在生产中实锤过：进程在扣款工具调用完成后、检查点写入前被杀，恢复后节点从头重放，<strong>同一笔扣款打了两次</strong>（外部账单里两行 created_at 相差 89 秒的同 ID 扣款记录）。这就是 01 节第三件事故的机制版，解法见下一节。</p>
+  </div>
+</section>
+
+<!-- ================= 03 架构 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构视角：选型、副作用治理与容量</h2>
+
+  <h3>选型判断：什么时候根本不该上编排框架</h3>
+  <p>先说反例：<strong>一次提示词 + 一两次工具调用的线性链，二十行循环代码比任何框架都好读</strong>——为了"显得 Agentic"给线性流程套图，是白白交复杂度税。上图运行时的信号有三个：要<strong>循环/反思/重规划</strong>（图天然表达环）、要<strong>长时间挂起等人或等事件</strong>（interrupt + 持久化状态让"暂停"零成本）、要<strong>崩溃后从断点恢复</strong>（for 循环进程一死全丢）。三个信号一个都没有，就别上。Java 团队还有一层考虑：LangGraph 主体是 Python 生态，JVM 上的对应物是 Spring AI Alibaba Graph / LangChain4j（后者无原生 checkpointer，有状态编排能力弱一档）——<strong>编排层选型本质上是给团队选运行时</strong>，语言边界、运维栈、可观测体系都要一起算，别只比功能表。</p>
+
+  <h3>副作用治理：幂等是恢复的入场费</h3>
+  <p>把"恢复即重放"当公理，节点分两类治理：<strong>纯函数节点</strong>（读状态、算结果、无外部副作用）随便重放，零成本；<strong>副作用节点</strong>（写库、扣款、发邮件、生成凭证）必须幂等。工程上三选一或组合：</p>
+  <ul class="steps">
+    <li><strong>确定性幂等键：</strong>从稳定状态派生键（如 <code>thread_id + 节点名 + 超步号</code>，或业务键如"对账单 ID + 凭证类型"），调用外部 API 时随请求携带——支付网关类接口原生支持幂等键，重复提交返回首次结果；</li>
+    <li><strong>意图记录 + 对账：</strong>调用前先在事务库里写"意图记录"，调用后回写结果；恢复时先查意图表，已完成的直接跳过——适合不支持幂等键的老旧内部接口；</li>
+    <li><strong>结构隔离：</strong>把副作用挪到 interrupt 之后的独立节点——先中断展示"我将执行 X"，人确认后恢复，副作用节点执行前状态已落检查点，这一跳不会因恢复重放。</li>
+  </ul>
+  <p>另有两条配套纪律：<strong>副作用节点别读墙钟做分支</strong>（重放时世界已变，now() 会走出不同路径——要判断"睡了七天世界变了没"，用醒来后先查外部事实再决定）；<strong>同 thread 并发要自己串行化</strong>（webhook 重试和用户点击同时恢复同一个 thread，框架不替你加锁，出双写别怪引擎）。</p>
+
+  <h3>版本与容量账</h3>
+  <p>版本坐标（2026-10）：LangGraph 与 LangChain 于 2025-10-22 同步发 1.0（LangChain 1.0 的 create_agent 就构建在 LangGraph 上，老的 AgentExecutor 已弃用、维护到 2026 年 12 月）；当前线 langgraph 1.2.12（2026-09-21）。生态数据：与 LangChain 合计月下载约 9000 万，Uber、摩根大通、BlackRock、思科在生产使用。容量与成本账别漏四笔：① <strong>检查点存储账</strong>——每超步全量序列化 State，长对话 × 大上下文 = 表膨胀主力，规划清理任务与大对象外置；② <strong>延迟账</strong>——大 State 的检查点写延迟在本地 Postgres 16 上慢尾（P95+）能到 110~180ms/步，扇出并行分支的图这笔开销是乘法；③ <strong>token 账</strong>——恢复不重跑成功节点省的是大头，但重放失败节点照样重付该节点的模型调用费；④ <strong>人审挂起账</strong>——interrupt 挂起的 thread 不占进程但占存储，要配超时降级（超时自动 resume 一个"默认驳回"值，别无限期挂着）。</p>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：一个敢上生产的对账 Agent 骨架</h2>
+
+  <h3>片段一：图定义 + 检查点 + 幂等键（Python，节选）</h3>
+  <pre><code>from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.postgres import PostgresSaver
+from typing_extensions import TypedDict, Annotated
+import operator
+
+class ReconState(TypedDict):
+    statement_id: str
+    ocr_text: str
+    diff: float
+    voucher_id: str | None      # 幂等锚点：已写入则跳过
+
+def ocr_extract(s: ReconState):            # 纯副作用，可重放
+    return {"ocr_text": call_ocr(s["statement_id"])}
+
+def llm_compare(s: ReconState):            # 模型节点：差异归因
+    return {"diff": model_classify(s["ocr_text"])}
+
+def route(s: ReconState):                  # 条件边：代码管流转
+    return "human_review" if s["diff"] &gt; 500 else "post_voucher"
+
+def post_voucher(s: ReconState):           # 副作用节点：幂等键护体
+    if s["voucher_id"]:                    # 重放保护
+        return {}
+    vid = create_voucher(s["statement_id"],
+        idem_key=f"{s['statement_id']}:voucher")
+    return {"voucher_id": vid}
+
+g = StateGraph(ReconState)
+g.add_node("ocr_extract", ocr_extract)
+g.add_node("llm_compare", llm_compare, retry=retry_policy())
+g.add_node("human_review", human_review)   # 内部 interrupt()
+g.add_node("post_voucher", post_voucher)
+g.add_edge(START, "ocr_extract")
+g.add_edge("ocr_extract", "llm_compare")
+g.add_conditional_edges("llm_compare", route)
+g.add_edge("human_review", "post_voucher")
+g.add_edge("post_voucher", END)
+
+with PostgresSaver.from_conn_string(DB_URI) as cp:
+    cp.setup()                              # 首次建表
+    app = g.compile(checkpointer=cp)</code></pre>
+  <p>三个细节值回票价：<code>voucher_id</code> 进 State 本身就是幂等锚点（重放时先查再写）；<code>retry=retry_policy()</code> 只管瞬态失败（超时/限流），业务错误走条件边进异常分支，别混；条件边 <code>route</code> 是纯代码——<strong>阈值 500 这个业务规则写在代码里、进 git、有 code review，而不是写在提示词里靠模型自觉</strong>。</p>
+
+  <h3>片段二：发版不断任务——恢复与清理</h3>
+  <pre><code># 发版前：进程自然退出，什么都不用做（状态已在 Postgres）
+# 发版后：同 thread_id 恢复，从最后成功超步继续
+cfg = {"configurable": {"thread_id": f"recon:{stmt_id}"}}
+result = app.invoke(None, cfg)     # input=None = 断点续跑
+
+# 夜间清理（上线前就配好，检查点表没有内建 TTL）
+# DELETE FROM checkpoints WHERE created_at &lt; now() - interval '30 days';
+# 之后 VACUUM;  -- 2000 次运行能涨 1.2GB，不清理迟早爆
+
+# 人审超时降级：cron 扫挂起超 24h 的 thread，
+# app.update_state(cfg, {"review": "timeout_reject"}) 后 resume</code></pre>
+
+  <h3>片段三：Java 团队的对应姿势（Spring AI Alibaba Graph 要点）</h3>
+  <pre><code>// Spring AI Alibaba Graph：OverAllState + KeyStrategy 对应 State+reducer
+// 异步节点 + 条件边 + 编排持久化，概念与 LangGraph 一一对应
+StateGraph graph = new StateGraph("recon")
+    .addNode("ocr", nodeAync(ocrNode))
+    .addNode("review", humanReviewNode)      // 人审中断
+    .addConditionalEdges("compare", s -&gt;
+        s.diff() &gt; 500 ? "review" : "post")
+    .compile(true);                           // 持久化编排状态
+// 关键判断：Java 主栈 + K8s 运维体系成熟 → 图逻辑留在 JVM；
+// Python 生态新特性最快 → 算法侧做独立微服务被图当工具节点调用</code></pre>
+
+  <div class="warn">
+    <p><strong>五个必踩的坑：</strong>① <strong>拿 InMemorySaver 上生产</strong>——重启全丢，"为什么发版后对话全没了"十有八九是它；② <strong>副作用节点不设幂等</strong>——恢复即重放是语义不是 bug，重复扣款/重复凭证早晚对上你；③ <strong>recursion_limit 用默认值</strong>——两个节点互相路由成环，一夜 token 烧穿，显式设个几十；④ <strong>interrupt() 包进 try/except</strong>——它靠抛特殊异常实现暂停，裸 except 会把"暂停"吞掉；⑤ <strong>检查点表不管不顾</strong>——没有内建 TTL，大 State 全量序列化，不清理就是慢性存储事故。</p>
+  </div>
+
+  <div class="card card-tip">
+    <h4>✅ Agent 编排层体检清单</h4>
+    <p>☐ 上图框架前确认三个信号：要循环/要挂起等人/要断点恢复——线性链就写循环　☐ checkpointer 选型明确：生产 PostgresSaver（跨实例共享 + SQL 可审计），InMemory 只配开发　☐ 副作用节点全部过幂等：幂等键派生规则登记在册，或意图记录+对账兜底　☐ 副作用与 interrupt 的顺序审过一遍：先中断后执行，不在同节点混排　☐ recursion_limit 显式设置并告警；RetryPolicy 只管瞬态失败　☐ 检查点清理任务上线前配好（保留窗口 + VACUUM），State 里不放大数据（外置存引用）　☐ thread_id 从服务端会话派生，不接受客户端传值（伪造 = 跨用户状态泄漏）　☐ 同 thread 并发调用有串行化手段（锁/队列分区）　☐ 人审挂起配了超时降级路径　☐ 图结构变更当作数据库 schema 变更对待：加字段可选化、删字段先排空存量 thread</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>编排层把流程控制权拿回代码：</strong>状态+节点+条件边三件套，分支是函数不是提示词；图允许循环，超步边界统一合并状态、落检查点。</li>
+    <li><strong>检查点 = 可持久化的执行位置：</strong>同 thread_id 恢复断点续跑，成功节点不重付 token；挂起等人、时间旅行审计都是它的副产品。</li>
+    <li><strong>恢复即重放，幂等是入场费：</strong>检查点落在超步边界，节点内副作用整段重放——幂等键/意图记录/结构隔离三选一，别赌运气。</li>
+    <li><strong>三个信号再上框架：</strong>要循环、要挂起、要恢复，一个都没有就写二十行循环；Java 主栈评估 Spring AI Alibaba Graph，选型选的是运行时不是功能表。</li>
+    <li><strong>两笔隐形账：</strong>检查点存储无内建 TTL（上线前配清理）；thread_id 是安全边界也是并发边界——服务端派生 + 同 thread 串行化。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目一：你们的退款 Agent 用 LangGraph 构建，节点结构是"校验 → interrupt 人审 → 执行退款 → 通知"。上线后财务投诉：某笔退款执行了两次。给出完整的机制解释与三层修复方案，并说明为什么"把退款挪进人审节点之后"只能算部分修复。<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 逐层拆解</h4>
+      <p><strong>机制解释：</strong>检查点落在超步边界。人审通过后恢复执行，退款节点开始运行——外部支付接口受理了请求，但进程恰好在"接口返回成功"与"节点返回状态更新、检查点落盘"之间被杀（发布重启/OOM/节点驱逐）。恢复时运行时从最后检查点重放，退款节点<strong>从函数第一行整段重跑</strong>，接口再次被调用——两次真实扣款。这不是框架 bug，是"检查点粒度在超步、不在代码行"的既定语义：节点内部的执行进度对运行时不可见。<strong>三层修复：</strong>① <strong>接口层幂等键</strong>——退款请求携带确定性幂等键（退款单号，或 thread_id+节点+超步号派生），支付网关识别重复请求返回首次结果，这是根治层，前提是外部接口支持；② <strong>意图记录层</strong>——节点执行前先在事务库写"退款意图"（含幂等键，与业务库同事务），执行后回写结果；重放时先查意图表，已完成的把结果直接填回状态跳过调用——接口不支持幂等键时的等价物，代价是多一次库写与对账逻辑；③ <strong>状态锚点层</strong>——把"退款单号"作为字段写进 State，节点开头检查该字段非空即返回（本文片段一的 voucher_id 模式）——最轻量，但保护窗口比②小：进程死在"接口已受理、状态未回写"之间时锚点还没写入，依然会重放，需要②的意图记录把窗口堵死。<strong>为什么"挪到人审之后"只是部分修复：</strong>interrupt 之后、副作用之前确实有一个已落盘的检查点，它消除的是"人审等待期间进程重启导致副作用提前/重复触发"这一类问题；但副作用节点<strong>自身执行中途</strong>被杀的窗口依然存在（上面的机制解释原样成立）。它改善的是概率与场景，不是语义。真正的顺序纪律应该是：副作用独占一个节点、幂等三件套护体、节点内先查锚点再动手——顺序隔离 + 幂等双保险，缺一不可。</p>
+    </div>
+  </details>
+
+  <details class="q-card">
+    <summary>题目二：公司主栈 Java（Spring Cloud Alibaba + K8s，Prometheus/Grafana/SkyWalking 可观测体系现成），现在要建跨 6 个业务域的工单处置 Agent：多分支、两处人审、要求发版不打断在途工单。团队里 Python 只有两位算法工程师。给出你的编排层技术选型与部署架构，并设计"月度幻觉复盘会"需要的三类数据从哪来。<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 选型推理与架构</h4>
+      <p><strong>选型：</strong>图编排留在 JVM——Spring AI Alibaba Graph（OverAllState/条件边/持久化编排与 LangGraph 概念一一对应，复用 Spring 生态的事务、安全、注册配置中心与现成可观测体系）；算法侧快速迭代的新能力（新模型适配、复杂抽取）由两位 Python 工程师做成独立微服务，被图当作工具节点通过 OpenFeign 调用——语言边界即团队边界，别让 Java 团队维护 Python 编排运行时，也别逼算法工程师用 Java 写图。<strong>部署架构：</strong>编排服务作为普通 Spring Boot 应用进 K8s（副本 ×2+，走公司标准发布流程）；持久化状态用现有 MySQL 加表（工单 thread 表 + 检查点表，DBA 体系内备份审计）——Postgres 若公司没有运维体系就别为一项功能引入新数据库；发版流程按 0043 期发布纪律：preStop 等在途超步跑完（一个超步秒级），副本逐个滚动，在途工单靠持久化检查点在新副本上恢复——"发版不打断"由"检查点在数据库、进程可随意牺牲"保证，与 0046 期"连接无状态化"同构：状态外置，节点可牺牲。<strong>三类复盘数据来源：</strong>① <strong>路由正确性</strong>——条件边的分支决策在节点日志里结构化落库（工单号、走哪条边、状态快照哈希），月度抽样比对人工判断；② <strong>模型节点质量</strong>——每个模型节点的输入输出对（脱敏后）进对象存储，接评测集跑准确率/幻觉率趋势（为将来 AI 线的 RAGAS/评测期铺数据地基）；③ <strong>工程健康度</strong>——检查点表大小、重放次数（幂等键命中数 = 重放发生次数，这是"恢复即重放"语义的直接观测指标）、人审挂起时长分布、超时降级触发数——全部从现有 Prometheus/Grafana 加埋点出面板。复盘会的产出应该是：哪些分支阈值要调（改代码走发布）、哪些模型节点提示词要升级（进评测回归，不直接上生产）——<strong>把"提示词变更"也纳入变更管理，是 01 节第二件事故的终极答案</strong>。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>LangGraph 官方文档 · 持久化与检查点（docs.langchain.com/oss/python/langgraph/checkpointers）：<br>
+    <a href="https://docs.langchain.com/oss/python/langgraph/checkpointers" target="_blank" rel="noopener">docs.langchain.com · LangGraph Checkpointers</a>（配套阅读：<a href="https://langchain-ai.github.io/langgraph/" target="_blank" rel="noopener">LangGraph 官方站</a>、<a href="https://docs.spring.io/spring-ai/reference/api/graph.html" target="_blank" rel="noopener">Spring AI Alibaba Graph 文档</a>）</p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>AI 线往期：<a href="0025-rag-retrieval-augmented-generation.html">0025 RAG 检索增强</a>、<a href="0026-embedding-vector-store.html">0026 Embedding 与向量库</a>、<a href="0027-function-calling.html">0027 Function Calling 工具调用</a>（本文的单步循环视角由它奠基）。跨线同构：<a href="0043-k8s-pod-deployment-service.html">0043 控制循环</a>（观测-对比-调谐的工程审美同源）、<a href="0046-iot-long-connection-gateway.html">0046 长连接网关</a>（状态外置、节点可牺牲的同一命题）。下一期继续 AI 线，预告主题：MCP 协议与工具生态。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0046-iot-long-connection-gateway.html">← 上一期：长连接网关架构</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 47 期 · AI 大模型应用系列 · 下一期预告：AI 线继续——MCP 协议与工具生态</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>

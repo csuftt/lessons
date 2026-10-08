@@ -20,5 +20,8 @@ daily-tech-course/.*.log
 daily-tech-course/.*.py
 daily-tech-course/.published-backup-*/
 
+# 视频课程本地产物（redis 深挖线，同上）
+redis-deep-dive/output/
+
 # 视频课程本地产物（oss 线）
 oss-project-intro/output/
