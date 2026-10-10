@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>技术栈学习 · 专题索引</title>
+<link rel="stylesheet" href="../assets/course.css">
+<style>
+  a.card {
+    display: block;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px 20px;
+    margin-bottom: 16px;
+    text-decoration: none;
+    color: var(--ink);
+    transition: border-color .15s;
+  }
+  a.card:active, a.card:hover { border-color: var(--accent); }
+  .card-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .card h2 { font-size: 1.08rem; margin: 0; border-bottom: none; padding-bottom: 0; }
+  .badge {
+    flex: none;
+    font-size: .78rem;
+    color: var(--muted);
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 2px 10px;
+    white-space: nowrap;
+  }
+  .card p { margin: 8px 0 10px; color: var(--muted); font-size: .92rem; }
+  .card .go { color: var(--accent); font-size: .9rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🧰 技术栈学习</h1>
+  <p class="sub">3 门深潜课 · 全部完结 · 为吃透一个具体技术域而设</p>
+
+  <p class="lead">这一栏收录"扎进一个具体技术域"的深潜课：一门语言（Go）、一套插件双栈（Kotlin + TS/React）、一个协议（zcode app-server API）。三门都已完结——学习目标一次达成，内容长期可用，工具大版本演进时会回来小修。</p>
+
+  <a class="card" href="../go-reading-course/index.html">
+    <div class="card-top"><h2>🐹 Go 精读课（Java 架构师视角）</h2><span class="badge">9 课</span></div>
+    <p>从零基础到读懂、评审任意中型 Go 项目：入口、错误处理、并发模型、context，最后附一份代码评审清单。</p>
+    <span class="go">进入课程 →</span>
+  </a>
+
+  <a class="card" href="../zcode-plugin-langs/index.html">
+    <div class="card-top"><h2>🧩 插件双栈语言课（Kotlin + TS/React）</h2><span class="badge">7 课</span></div>
+    <p>用 Java 映射法读懂 IDEA 插件两端：Kotlin 插件端（IntelliJ Platform）与 React/TypeScript webview 端，含 JCEF IPC 全链路。</p>
+    <span class="go">进入课程 →</span>
+  </a>
+
+  <a class="card" href="../zcode-protocol-course/index.html">
+    <div class="card-top"><h2>📡 zcode.cjs 协议课（app-server API 全操作）</h2><span class="badge">8 课</span></div>
+    <p>从零把 GUI 宿主接到 app-server 上：进程启动、会话生命周期、订阅事件流、切换模型、反向请求（审批/提问/浏览器）、fork/编辑历史、错误码避坑，按 API 操作类型分章。</p>
+    <span class="go">进入课程 →</span>
+  </a>
+
+  <footer>技术栈学习专题 · 三门课各自独立，按需进入</footer>
+</div>
+</body>
+</html>
