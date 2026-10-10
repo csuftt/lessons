@@ -11,3 +11,66 @@ body .wrap { max-width: var(--max-width); margin: 0 auto; }
 
 /* 栏目眉标：等宽小字，区别于课程线的 DAILY/系列门面 */
 .lesson-head .num { font-family: var(--font-mono); letter-spacing: .08em; }
+
+/* ===== 栏目专属组件（下期复用）===== */
+
+/* 生命周期步骤条：编号卡片 + 箭头连线；窄屏纵排 */
+.flow-strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin: 1.3rem 0; }
+.flow-step { position: relative; background: var(--card); border: 1px solid var(--line);
+  border-radius: 10px; padding: .8rem .9rem .85rem; }
+.flow-step .no { display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; border-radius: 50%; font-size: .78rem; font-weight: 700;
+  color: var(--card); background: var(--accent-3); margin-bottom: .45rem; font-family: var(--font-mono); }
+.flow-step .what { font-weight: 700; font-size: .92rem; margin: 0 0 .2rem; }
+.flow-step .how { font-family: var(--font-mono); font-size: .74rem; color: var(--accent);
+  margin: 0 0 .25rem; word-break: break-all; }
+.flow-step .why { font-size: .78rem; color: var(--muted); margin: 0; }
+.flow-step:not(:last-child)::after { content: "→"; position: absolute; right: -15px; top: 46%;
+  color: var(--accent-3); font-weight: 700; font-size: 1.05rem; z-index: 1; }
+
+/* 规则横幅：一句硬规则 + 一行解释；.warn 红档 */
+.rule { display: flex; gap: .7rem; align-items: flex-start; background: var(--note-bg);
+  border-left: 4px solid var(--accent-3); border-radius: 0 10px 10px 0;
+  padding: .8rem 1rem; margin: 1.15rem 0; }
+.rule.warn { background: var(--warn-bg); border-left-color: var(--bad); }
+.rule .mark { flex: none; font-size: 1rem; line-height: 1.6; }
+.rule .txt strong { display: block; margin-bottom: .15rem; }
+.rule .txt .why { font-size: .82rem; color: var(--muted); margin: 0; }
+
+/* Q&A 答疑卡：问题气泡 + 答案卡 */
+.qa { margin: 1.1rem 0; }
+.qa .q { display: inline-block; background: var(--accent-soft); color: var(--accent);
+  border-radius: 14px 14px 14px 4px; padding: .5rem .95rem; font-weight: 600; font-size: .92rem; }
+.qa .a { background: var(--card); border: 1px solid var(--line);
+  border-radius: 4px 14px 14px 14px; padding: .75rem 1rem; margin-top: .5rem; font-size: .9rem; }
+.qa .a p { margin: .3rem 0; }
+
+/* 终端实感代码窗：命令（$ 前缀）+ 回显交错，深底；.copy 一键复制纯命令 */
+.codeblock.term pre { background: #1E242C; border-radius: 0 0 var(--radius, 10px) var(--radius, 10px); }
+.codeblock.term code { color: #E8EAF0; }
+.codeblock.term .t-cmd { display: block; color: #E8EAF0; }
+.codeblock.term .t-cmd::before { content: "$ "; color: #6E7B8B; user-select: none; }
+.codeblock.term .t-out { display: block; color: #8B95A5; opacity: .92; }
+.codeblock.term .t-cmt { display: block; color: #7FA97A; opacity: .95; }
+.codeblock.term .t-ok { color: #8FCFA0; }
+.codeblock .copy { margin-left: auto; font-size: .72rem; color: var(--muted);
+  background: transparent; border: 1px solid var(--line); border-radius: 999px;
+  padding: 2px 10px; cursor: pointer; font-family: inherit; }
+.codeblock .copy:hover { color: var(--accent); border-color: var(--accent); }
+.codeblock .copy.done { color: var(--ok); border-color: var(--ok); }
+
+/* 三方案并排对比卡：.pick 高亮推荐位 */
+.vs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 1.25rem 0; }
+.vs .v { background: var(--card); border: 1px solid var(--line); border-top: 4px solid var(--muted);
+  border-radius: 10px; padding: .85rem .95rem; }
+.vs .v.pick { border-top-color: var(--accent); box-shadow: var(--shadow-sm, 0 4px 14px rgba(0,0,0,.06)); }
+.vs .v h4 { margin: 0 0 .3rem; font-size: .95rem; }
+.vs .v .use { font-size: .8rem; color: var(--muted); margin: 0 0 .45rem; }
+.vs .v .cost { font-size: .78rem; margin: 0; }
+.vs .v .cost b { color: var(--accent-3); font-weight: 600; }
+
+@media (max-width: 640px) {
+  .flow-strip, .vs { grid-template-columns: 1fr; }
+  .flow-step:not(:last-child)::after { content: "↓"; right: 50%; top: auto; bottom: -17px; }
+  .flow-strip { gap: 20px; }
+}

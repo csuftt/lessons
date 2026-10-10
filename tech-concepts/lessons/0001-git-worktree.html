@@ -77,68 +77,140 @@
   </svg>
   </div>
   <p>落到磁盘上是这样的：挂接目录（linked worktree）里没有 <code>.git</code> <strong>目录</strong>，只有一个 <code>.git</code> <strong>文件</strong>，内容一行 <code>gitdir: …/主目录/.git/worktrees/hotfix</code>，指回主仓库为本检出开的私有目录；HEAD、index 这些"每个检出一份"的数据就存在那里。两边看到的是<strong>同一个分支列表、同一套对象</strong>——在 <code>../hotfix</code> 里 <code>fetch</code>，主目录立刻可见；在主目录里建的分支，<code>../hotfix</code> 直接能检出。</p>
-  <p>顺带一提，绝大多数引用都是全局共享的，只有 <code>refs/bisect</code>、<code>refs/worktree</code>、<code>refs/rewritten</code> 这几个是每个检出私有——记住"HEAD 和暂存区独立、其余共享"这个主干就够了。这个模型是 Git 2.5（2015 年 7 月）引入的，早已是官方一等公民，不是什么实验性技巧。</p>
+  <p>主干记住一句话就够：<strong>HEAD 和暂存区独立，其余共享</strong>。这个模型是 Git 2.5（2015 年 7 月）引入的，早已是官方一等公民，不是什么实验性技巧。</p>
+  <details class="q-card">
+    <summary>深挖：哪些引用是每个检出私有的？<span class="chev">▶ 点击展开</span></summary>
+    <div class="details-body">
+      <p>绝大多数引用（<code>refs/heads/</code>、<code>refs/tags/</code>……）全局共享，但有三个例外是<strong>每个检出各一份</strong>：<code>refs/bisect</code>（二分调试的进度状态）、<code>refs/worktree</code>、<code>refs/rewritten</code>（变基时 <code>--autosquash</code> 改写的备份）。这带来一个实用推论：两个工作目录可以<strong>各自跑各自的 <code>git bisect</code></strong>，一边二分线上问题、一边继续开发，互不干扰。跨工作目录访问别人的 HEAD 也有专用语法：<code>main-worktree/HEAD</code>、<code>worktrees/&lt;名字&gt;/HEAD</code>（配合 <code>git rev-parse</code> 用）。日常用不到，知道有这回事即可。</p>
+    </div>
+  </details>
 </section>
 
 <!-- ================= 03 实战 ================= -->
 <section>
   <h2><span class="sec-num">03</span>实战：从创建到合并，走完一个来回</h2>
 
+  <div class="flow-strip">
+    <div class="flow-step"><span class="no">1</span>
+      <p class="what">建 worktree</p>
+      <p class="how">worktree add ../hotfix</p>
+      <p class="why">基准决定从哪分叉</p></div>
+    <div class="flow-step"><span class="no">2</span>
+      <p class="what">新目录里干活</p>
+      <p class="how">commit / push</p>
+      <p class="why">主目录半成品不动</p></div>
+    <div class="flow-step"><span class="no">3</span>
+      <p class="what">合回 master</p>
+      <p class="how">merge 或走 PR</p>
+      <p class="why">普通分支，照旧合并</p></div>
+    <div class="flow-step"><span class="no">4</span>
+      <p class="what">收尾</p>
+      <p class="how">remove + branch -d</p>
+      <p class="why">目录和分支分开收</p></div>
+  </div>
+
   <h3>从什么分支创建：基准规则</h3>
   <p><code>git worktree add</code> 的新分支<strong>从哪分叉，取决于你写不写基准</strong>：</p>
-  <div class="codeblock">
-    <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>基准的两种写法</span></div>
-    <pre><code class="language-bash"># 写基准：新分支 hotfix-1025 从 master 分叉（热修复要的就是这个）
-git worktree add ../hotfix -b hotfix-1025 master
-
-# 省略写法：自动建同名分支 hotfix，基准是当前 HEAD——
-# 主目录此刻在 feature 上，它就从 feature 分叉！
-git worktree add ../hotfix</code></pre>
+  <div class="codeblock term">
+    <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>基准的两种写法</span><button class="copy">复制命令</button></div>
+    <pre><code><span class="t-cmd">git worktree add ../hotfix -b hotfix-1025 master</span>
+<span class="t-out">Preparing worktree (new branch 'hotfix-1025')</span>
+<span class="t-out">HEAD is now at 3d8f21a</span>
+<span class="t-cmd">git worktree add ../hotfix</span>
+<span class="t-out">Preparing worktree (new branch 'hotfix')</span></code></pre>
   </div>
-  <p>省略写法的"基准是当前 HEAD"最容易被误解成"默认从 master"——<strong>不是</strong>。主目录检出着什么分支，省略写法就从什么分支分叉。延续当前思路开个平行工作区时这正合适；但热修复这种基准必须明确的场景，把 <code>master</code> 老老实实写全，别赌自己此刻在哪个分支。</p>
+  <p>上面带 <code>master</code> 的写法，新分支从 master 分叉；下面省略写法自动建同名分支 <code>hotfix</code>，但<strong>基准是当前 HEAD</strong>——主目录此刻在 feature 上，它就从 feature 分叉，<strong>不是"默认从 master"</strong>。延续当前思路开平行工作区时这正合适；热修复这种基准必须明确的场景，把 <code>master</code> 老老实实写全，别赌自己此刻在哪个分支。</p>
 
   <h3>开发完，怎么合回主分支</h3>
-  <p>这一步是新手最大的疑问，答案却出奇地简单：<strong>worktree 没有改变 Git 的任何分支模型，hotfix-1025 就是一个普通分支</strong>，合回 master 和你日常合并完全一样：</p>
-  <div class="codeblock">
-    <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>合并的常规两条路</span></div>
-    <pre><code class="language-bash"># 路一：本地直接合并（在主目录，或任何检出 master 的地方）
-git checkout master
-git merge hotfix-1025
-git push
-
-# 路二：在 ../hotfix 目录里推远端，走 PR / MR
-git push -u origin hotfix-1025</code></pre>
+  <p>答案出奇地简单：<strong>worktree 没有改变 Git 的任何分支模型，hotfix-1025 就是一个普通分支</strong>，合回 master 和你日常合并完全一样——两条路任选：</p>
+  <div class="codeblock term">
+    <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>合并的常规两条路</span><button class="copy">复制命令</button></div>
+    <pre><code><span class="t-cmt"># 路一：本地直接合并（在主目录，或任何检出 master 的地方）</span>
+<span class="t-cmd">git checkout master &amp;&amp; git merge hotfix-1025</span>
+<span class="t-out">Updating 3d8f21a..a91c4e2</span>
+<span class="t-out">Fast-forward</span>
+<span class="t-cmd">git push</span>
+<span class="t-cmt"># 路二：在 ../hotfix 目录里推远端，走 PR / MR</span>
+<span class="t-cmd">git push -u origin hotfix-1025</span></code></pre>
   </div>
-  <p>一个必须澄清的点：<strong><code>git worktree remove</code> 只删工作目录，不删分支</strong>——hotfix-1025 分支在 remove 之后依然存在，随时可以被再检出。确认这个分支彻底不要了，再用 <code>git branch -d hotfix-1025</code> 删掉。常见的完整节奏：热修复目录里提交 → push → 线上合并（或本地 merge）→ <code>worktree remove</code> 收掉目录 → <code>branch -d</code> 收掉分支。</p>
+  <div class="rule"><span class="mark">⚠</span><div class="txt">
+    <strong><code>git worktree remove</code> 只删工作目录，不删分支</strong>
+    <p class="why">remove 之后 hotfix-1025 依然存在，随时可再检出；确认不要了再 <code>git branch -d hotfix-1025</code></p>
+  </div></div>
+  <p>常见节奏就是开篇那条步骤条：热修复目录里提交 → push → 线上合并（或本地 merge）→ <code>worktree remove</code> 收目录 → <code>branch -d</code> 收分支。</p>
 
   <h3>管理命令四板斧</h3>
-  <div class="codeblock">
-    <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>日常管理</span></div>
-    <pre><code class="language-bash">git worktree list            # 一览所有工作区（主目录永远排第一）
-git worktree remove ../hotfix  # 用完就删（工作区必须干净）
-git worktree prune           # 手动 rm -rf 过目录的话，补一刀清账
-git worktree lock ../hotfix  # 目录在移动硬盘/网络挂载上时，防误清</code></pre>
+  <div class="codeblock term">
+    <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>日常管理</span><button class="copy">复制命令</button></div>
+    <pre><code><span class="t-cmd">git worktree list</span>
+<span class="t-out">G:/proj    3d8f21a [feature/new-checkout]</span>
+<span class="t-out">G:/hotfix  a91c4e2 [hotfix-1025]</span>
+<span class="t-cmd">git worktree remove ../hotfix</span>
+<span class="t-cmd">git worktree prune</span>
+<span class="t-cmt"># 手动 rm -rf 过目录才需要 prune 清账；remove 走的不用</span></code></pre>
   </div>
-  <p>两个补充行为：<strong><code>--detach</code></strong> 检出某个提交而不挂分支，适合考古——把旧版本跑起来复现 bug；<code>add</code> 给的分支名如果已存在，就直接检出那个分支（不新建），这也是并行评审的用法：把同事的分支检出成第二个目录，对照着看代码。</p>
+  <p>两个补充行为：<strong><code>--detach</code></strong> 检出某个提交而不挂分支，适合考古——把旧版本跑起来复现 bug；<code>add</code> 给的分支名如果已存在，就直接检出那个分支（不新建），这也是并行评审的用法：把同事的分支检出成第二个目录，对照着看代码。目录在移动硬盘或网络挂载上时，<code>git worktree lock</code> 锁一下，防止被 <code>prune</code> 当成废弃条目清掉。</p>
+
+  <h3>你问我答</h3>
+  <div class="qa">
+    <span class="q">主目录在 feature 上，执行省略写法的 <code>add ../x</code>，新分支从哪分叉？</span>
+    <div class="a"><p>从<strong>当前 HEAD</strong>——也就是 feature 的最新提交分叉。省略写法的基准永远是"你现在站在哪"，不是 master。想从 master 分叉，就把 <code>master</code> 显式写进命令。</p></div>
+  </div>
+  <div class="qa">
+    <span class="q">在 ../hotfix 里开发完，这些改动怎么进 master？</span>
+    <div class="a"><p>把 hotfix-1025 当普通分支处理：主目录 <code>checkout master</code> 后 <code>merge hotfix-1025</code>，或者直接 <code>push -u origin hotfix-1025</code> 走 PR。worktree 没有引入任何新的合并机制。</p></div>
+  </div>
+  <div class="qa">
+    <span class="q">remove 掉工作目录后，那个分支还在吗？</span>
+    <div class="a"><p>在。<code>remove</code> 只收走目录，分支原样保留——这是刻意设计：目录是一次性的，分支是资产。确认分支也不要了，再 <code>git branch -d</code> 删。</p></div>
+  </div>
 </section>
 
 <!-- ================= 04 规则与坑 ================= -->
 <section>
   <h2><span class="sec-num">04</span>规则与坑：为什么同一个分支只能检出一次</h2>
-  <p>第一条规则几乎每个人都会撞上：<strong>同一个分支，最多只能在一个 worktree 里检出</strong>。你在主目录检出着 <code>master</code>，再到别的 worktree <code>git worktree add ../x master</code>，Git 直接拒绝，提示该分支已在哪个目录检出。<code>--force</code> 能强行绕过，但别——原因写在模型里：分支引用是全局共享的，两处同时检出等于两个 HEAD 拴在同一根指针上，任何一边 commit、reset，另一边的工作区立刻"过期"，两边各改各的直接互相污染。Git 不是嫌麻烦，是这条约束在保护你。</p>
+  <div class="rule warn"><span class="mark">⛔</span><div class="txt">
+    <strong>同一个分支，最多只能在一个 worktree 里检出——add 会直接拒绝</strong>
+    <p class="why"><code>--force</code> 能强开，但两处检出会互相污染，别</p>
+  </div></div>
+  <p>几乎每个人都会撞上这条规则：你在主目录检出着 <code>master</code>，再到别的 worktree <code>git worktree add ../x master</code>，Git 直接拒绝，提示该分支已在哪个目录检出。这不是 Git 嫌麻烦：分支指针是全局共享的，两处同时检出等于两个 HEAD 拴在同一根指针上，任何一边 commit、reset，另一边的工作区立刻"过期"，两边各改各的直接互相污染。Git 是在模型层面保护你。</p>
   <p>其余的坑按踩中概率排：</p>
   <ul>
     <li><strong>构建产物不共享，成本 ×N</strong>：<code>node_modules</code>、<code>target</code>、<code>venv</code>、IDE 索引，每个工作目录各装各的。大仓库开三个 worktree，磁盘和依赖安装时间就是三份——这是一体两面：独立构建也保证了各工作区的产物互不污染。</li>
     <li><strong><code>remove</code> 只删干净的工作区</strong>：有未提交修改或未跟踪文件时会被拒绝，确认不要了再加 <code>--force</code>。反过来提醒你：真正想留下的东西，别靠"反正还有个 worktree 开着"来记忆。</li>
-    <li><strong>手动删目录要 <code>prune</code></strong>：直接 <code>rm -rf ../hotfix</code> 的话，<code>worktree list</code> 里会残留一个标着 prunable 的条目，<code>git worktree prune</code> 清账；平时不做也行，Git 会在垃圾回收时按过期策略自动清。</li>
+    <li><strong>手动删目录要 <code>prune</code></strong>：直接 <code>rm -rf ../hotfix</code> 的话，<code>worktree list</code> 里会残留一个标着 prunable 的条目，<code>git worktree prune</code> 清账。</li>
     <li><strong>submodule 用户悠着点</strong>：官方手册明确写了"多检出对 submodule 的支持不完整"，含 submodule 的项目不建议开多个检出；这类工作区不能 <code>move</code>，<code>remove</code> 还要 <code>--force</code>。</li>
-    <li><strong>配置默认只有一份</strong>：所有 worktree 共享 <code>.git/config</code>。确实需要每个工作区独立配置（比如不同的用户名）时，开 <code>extensions.worktreeConfig</code> 后用 <code>git config --worktree</code>。</li>
+    <li><strong>配置默认只有一份</strong>：所有 worktree 共享 <code>.git/config</code>，想让每个工作区有自己的用户名之类的配置，见下面折叠块。</li>
   </ul>
+  <details class="q-card">
+    <summary>深挖：per-worktree 配置怎么开？prune 的过期策略是什么？<span class="chev">▶ 点击展开</span></summary>
+    <div class="details-body">
+      <p><strong>独立配置</strong>：先 <code>git config extensions.worktreeConfig true</code> 打开开关，之后 <code>git config --worktree user.name "review-bot"</code> 写的配置就只作用于当前工作目录（存在 <code>.git/worktrees/&lt;名字&gt;/config.worktree</code>）。不开开关时 <code>--worktree</code> 参数会报错。</p>
+      <p><strong>prune 过期</strong>：手动删目录后不跑 <code>prune</code> 也没关系——垃圾回收会按 <code>gc.worktreePruneExpire</code>（默认 3 个月）自动清理掉失联条目；等不了就用 <code>git worktree prune --expire &lt;时间&gt;</code> 立刻按阈值清。</p>
+    </div>
+  </details>
 </section>
 
 <!-- ================= 05 怎么选 ================= -->
 <section>
   <h2><span class="sec-num">05</span>怎么选：stash、clone、worktree 的边界</h2>
+  <div class="vs">
+    <div class="v">
+      <h4>📦 stash</h4>
+      <p class="use">抽屉——一个目录里串行切换</p>
+      <p class="cost">适合 <b>几分钟的短暂切换</b>；栈攒多了失忆，pop 冲突两摊事缠住</p>
+    </div>
+    <div class="v">
+      <h4>🌍 clone</h4>
+      <p class="use">两个世界——完全独立的两套</p>
+      <p class="cost">适合 <b>长期独立副本、不同凭证</b>；磁盘全量翻倍，两边越用越漂</p>
+    </div>
+    <div class="v pick">
+      <h4>🗂️ worktree</h4>
+      <p class="use">多开窗口——同仓库多份检出</p>
+      <p class="cost">适合 <b>同一项目并行干活</b>；构建产物各一份，换来互不污染</p>
+    </div>
+  </div>
   <div class="tbl-wrap">
   <table>
     <tr><th></th><th>git stash</th><th>再 clone 一份</th><th>git worktree</th></tr>
@@ -224,5 +296,6 @@ git worktree lock ../hotfix  # 目录在移动硬盘/网络挂载上时，防误
 </footer>
 
 <script src="../assets/quiz.js"></script>
+<script src="../assets/content.js"></script>
 </body>
 </html>
