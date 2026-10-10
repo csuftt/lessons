@@ -82,30 +82,44 @@
 
 <!-- ================= 03 实战 ================= -->
 <section>
-  <h2><span class="sec-num">03</span>实战：四条命令走完一个来回</h2>
+  <h2><span class="sec-num">03</span>实战：从创建到合并，走完一个来回</h2>
+
+  <h3>从什么分支创建：基准规则</h3>
+  <p><code>git worktree add</code> 的新分支<strong>从哪分叉，取决于你写不写基准</strong>：</p>
   <div class="codeblock">
-    <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>hotfix 场景全流程</span></div>
-    <pre><code class="language-bash"># 1. 建热修复工作区：新目录 + 顺手建分支（-b 可省，见下）
+    <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>基准的两种写法</span></div>
+    <pre><code class="language-bash"># 写基准：新分支 hotfix-1025 从 master 分叉（热修复要的就是这个）
 git worktree add ../hotfix -b hotfix-1025 master
 
-# 2. 进去干活——主目录那摊半成品一个字都不用动
-cd ../hotfix
-vim src/order/CheckoutService.java
-git commit -am "fix: 下单失败，回滚扣库存顺序"
-
-# 3. 修完发布，目录不要了（工作区必须干净才让删）
-git worktree remove ../hotfix
-
-# 4. 万一是手动 rm -rf 删的目录，补一刀清账
-git worktree prune</code></pre>
+# 省略写法：自动建同名分支 hotfix，基准是当前 HEAD——
+# 主目录此刻在 feature 上，它就从 feature 分叉！
+git worktree add ../hotfix</code></pre>
   </div>
-  <p>几个行为细节值得知道：</p>
-  <ul>
-    <li><strong><code>add</code> 的省略形态</strong>：<code>git worktree add ../hotfix</code> 不写分支名时，自动以目录名建新分支——<code>hotfix</code> 分支不存在就从当前 HEAD 建，存在就直接检出。日常用这个快捷形态就够。</li>
-    <li><strong><code>--detach</strong>：检出某个提交而不挂分支。适合考古——比如检出三个月前的版本，本地把旧 bug 跑起来复现，与当前分支完全无关。</li>
-    <li><strong><code>list</strong>：主工作目录永远排第一行，挂接目录跟在后面。它比 <code>git branch</code> 更像"我的并行现场一览"。</li>
-    <li><strong><code>lock</code>：工作区放在移动硬盘或网络挂载上时锁一下，防止它因为"暂时访问不到"被 <code>prune</code> 当成废弃条目清掉。</li>
-  </ul>
+  <p>省略写法的"基准是当前 HEAD"最容易被误解成"默认从 master"——<strong>不是</strong>。主目录检出着什么分支，省略写法就从什么分支分叉。延续当前思路开个平行工作区时这正合适；但热修复这种基准必须明确的场景，把 <code>master</code> 老老实实写全，别赌自己此刻在哪个分支。</p>
+
+  <h3>开发完，怎么合回主分支</h3>
+  <p>这一步是新手最大的疑问，答案却出奇地简单：<strong>worktree 没有改变 Git 的任何分支模型，hotfix-1025 就是一个普通分支</strong>，合回 master 和你日常合并完全一样：</p>
+  <div class="codeblock">
+    <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>合并的常规两条路</span></div>
+    <pre><code class="language-bash"># 路一：本地直接合并（在主目录，或任何检出 master 的地方）
+git checkout master
+git merge hotfix-1025
+git push
+
+# 路二：在 ../hotfix 目录里推远端，走 PR / MR
+git push -u origin hotfix-1025</code></pre>
+  </div>
+  <p>一个必须澄清的点：<strong><code>git worktree remove</code> 只删工作目录，不删分支</strong>——hotfix-1025 分支在 remove 之后依然存在，随时可以被再检出。确认这个分支彻底不要了，再用 <code>git branch -d hotfix-1025</code> 删掉。常见的完整节奏：热修复目录里提交 → push → 线上合并（或本地 merge）→ <code>worktree remove</code> 收掉目录 → <code>branch -d</code> 收掉分支。</p>
+
+  <h3>管理命令四板斧</h3>
+  <div class="codeblock">
+    <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>日常管理</span></div>
+    <pre><code class="language-bash">git worktree list            # 一览所有工作区（主目录永远排第一）
+git worktree remove ../hotfix  # 用完就删（工作区必须干净）
+git worktree prune           # 手动 rm -rf 过目录的话，补一刀清账
+git worktree lock ../hotfix  # 目录在移动硬盘/网络挂载上时，防误清</code></pre>
+  </div>
+  <p>两个补充行为：<strong><code>--detach</code></strong> 检出某个提交而不挂分支，适合考古——把旧版本跑起来复现 bug；<code>add</code> 给的分支名如果已存在，就直接检出那个分支（不新建），这也是并行评审的用法：把同事的分支检出成第二个目录，对照着看代码。</p>
 </section>
 
 <!-- ================= 04 规则与坑 ================= -->
@@ -144,7 +158,8 @@ git worktree prune</code></pre>
     <li><strong>worktree = 共享本体 + 独立检出</strong>：对象库、分支引用、配置、远端只有一套；HEAD、暂存区、工作区文件每个目录一份。一个仓库，多个工作目录。</li>
     <li><strong>挂接目录里 <code>.git</code> 是文件不是目录</strong>：一行 gitdir 指回主仓库为本检出开的私有目录——这是识别 linked worktree 的最快办法。</li>
     <li><strong>同一分支只能检出一次，是引用模型的必然</strong>：分支指针全局共享，两处拴同一根指针必然互相污染，Git 从源头拦下。</li>
-    <li><strong>四板斧</strong>：<code>add</code>（省分支名自动以目录名建）、<code>list</code>、<code>remove</code>（要求干净）、<code>prune</code>（手动删目录后清账）。</li>
+    <li><strong>基准规则：写不写基准，决定从哪分叉</strong>：显式写 <code>master</code> 就从 master 分叉；省略写法基于当前 HEAD——主目录在 feature 上，新分支就从 feature 分叉。基准要明确的场景把基准写全。</li>
+    <li><strong>分支就是普通分支，合并照旧</strong>：合回 master 与日常完全一样（checkout + merge，或推远端走 PR）；<code>remove</code> 只删工作目录不删分支，分支确认不要了再 <code>branch -d</code>。</li>
     <li><strong>成本在心里</strong>：构建产物不共享，磁盘与依赖安装 ×N；submodule 项目慎用多检出。</li>
   </ul>
 </section>
@@ -168,11 +183,18 @@ git worktree prune</code></pre>
       <button class="quiz-opt">直接拒绝：分支引用全局共享，两处检出会互相污染</button>
       <p class="quiz-feedback"></p>
     </div>
-    <div class="quiz-q" data-answer="0">
-      <p class="q-text">3. 手动 rm -rf 删掉了一个挂接目录，git worktree list 里还有残留条目，该怎么办？</p>
-      <button class="quiz-opt">git worktree prune，清掉仓库里的检出记录</button>
-      <button class="quiz-opt">重新 clone 仓库，残留条目会随旧仓库作废</button>
-      <button class="quiz-opt">git worktree remove，它对已删除的目录同样有效</button>
+    <div class="quiz-q" data-answer="1">
+      <p class="q-text">3. 主目录正检出 feature 分支，执行 git worktree add ../x（省略写法），新分支 x 从哪里分叉？</p>
+      <button class="quiz-opt">master——省略时默认从主分支创建</button>
+      <button class="quiz-opt">当前 HEAD——主目录在 feature 上就从 feature 分叉</button>
+      <button class="quiz-opt">远端的默认分支 origin/HEAD</button>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q" data-answer="2">
+      <p class="q-text">4. 在 ../hotfix 里开发完并提交，怎么把这些改动合回 master？</p>
+      <button class="quiz-opt">worktree 有专用命令，把两个工作区合并到一起</button>
+      <button class="quiz-opt">先 remove ../hotfix，改动会自动合回主目录</button>
+      <button class="quiz-opt">就当普通分支处理：主目录 checkout master 后 merge，或推远端走 PR</button>
       <p class="quiz-feedback"></p>
     </div>
   </div>
