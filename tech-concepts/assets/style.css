@@ -1,0 +1,13 @@
+/* ============================================================
+   tech-concepts（技术概念手记）— 样式真身在 ../../assets/course.css
+   本栏目纪律：全站统一观感（纸白底/蓝主强调/自动深浅色），
+   这里只做排版基准与栏目专属微调，不另起炉灶。
+   ============================================================ */
+@import url("../../assets/course.css");
+
+:root { --max-width: 52rem; }
+html body { max-width: var(--max-width); }
+body .wrap { max-width: var(--max-width); margin: 0 auto; }
+
+/* 栏目眉标：等宽小字，区别于课程线的 DAILY/系列门面 */
+.lesson-head .num { font-family: var(--font-mono); letter-spacing: .08em; }

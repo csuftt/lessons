@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>技术概念手记 · git worktree：一个仓库，多个工作目录</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">TECH CONCEPT NOTES · 0001</span>
+  <span><a href="../index.html">栏目目录</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">工程效率 · Git</p>
+  <h1>git worktree：一个仓库，多个工作目录</h1>
+  <p class="subtitle">切分支的两难人人都遇到过：stash 攒着攒着就失忆，clone 一份又双倍臃肿。worktree 给的是中间档——<strong>对象库和分支只有一套，工作目录想要几个开几个</strong>。这篇从"为什么需要它"讲到"为什么同一个分支天生不能检出两次"，把这个概念一次吃透。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧰 Git / 工程效率</span>
+    <span class="tag-date">📅 2026-10-10 · 第 1 期</span>
+    <span class="tag time">⏱ 预计阅读 8 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>场景：改到一半，线上着火</h2>
+  <p>周五下午，你正在 <code>feature/new-checkout</code> 分支改一个跨五个文件的改动，工作区里全是没提交的半成品。这时群里弹出一句话：<strong>线上下单失败，需要立刻热修复</strong>。热修复要在干净的 <code>master</code> 上做，而你手里这摊东西既不能提交（没写完），又不能丢。</p>
+  <p>传统答案两个，各有各的难受：</p>
+  <p><strong>答案一：<code>git stash</code></strong>——把半成品塞进抽屉，切走修完再回来。麻烦在于 stash 是<strong>栈</strong>：紧急情况往往连环来（修着 master 又被叫去看一个配置问题），两三次 <code>stash</code> 之后，<code>git stash list</code> 里攒了一串 <code>WIP on feature/…</code>，哪个是哪摊事全靠猜；pop 时一旦撞上冲突，你的半成品和切回来的分支变更缠在同一片工作区里，解开比写完还费劲。更常见的是<strong>忘</strong>——三天后才发现 stash 里还压着东西。</p>
+  <p><strong>答案二：再 clone 一份</strong>——<code>git clone ../repo repo-hotfix</code>，彻底隔离，互不干扰。代价是一个仓库变两个世界：对象库全量复制一份（大仓库动辄上 GB），远端与凭证各配各的，两边各自 <code>fetch</code> 各自漂移，你还得记着哪边是"正身"。用一个仓库的纪律去维护两个仓库，图省事的工具反而制造了新的管理成本。</p>
+  <p>把两难摆开看：<strong>stash 是"一个工作目录上串行切换"，clone 是"两个仓库完全隔离"</strong>。真正想要的是中间那档——仓库还是同一个，工作目录多开几个，每个目录安安稳稳待在自己的分支上。这就是 <code>git worktree</code>。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：仓库的本体，与"检出"这件事</h2>
+  <p>要理解 worktree，先拆掉一个习惯性误解：<strong>Git 仓库的本体不是那个装着代码的目录，而是 <code>.git</code> 里的对象库和引用库</strong>。对象库（<code>objects/</code>）存的是不可变的内容寻址块——每个提交、每棵目录树、每个文件版本都在里面；引用库（<code>refs/</code>）存的是可移动的指针——分支和标签只是"指向某个提交的便签"。至于你眼睛看到的工作目录，它只是<strong>某个提交按 HEAD 展开出来的检出快照</strong>，配套一个暂存区（index）。</p>
+  <p>普通的 clone 里，<code>.git</code> 目录和主工作目录是绑死的：一个仓库本体，配一个检出。而 <code>git worktree add</code> 做的事，就是<strong>在共享同一个本体的前提下，再挂一个独立的检出</strong>：</p>
+  <div class="diagram">
+  <svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <text x="380" y="20" text-anchor="middle" fill="var(--muted)" font-size="13">一个仓库本体（主目录 .git），挂两个独立检出</text>
+
+    <!-- 主仓库本体 -->
+    <rect x="205" y="38" width="350" height="86" rx="10" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="380" y="60" text-anchor="middle" fill="var(--ink)" font-size="12.5" font-weight="700">仓库本体：主目录里的 .git</text>
+    <text x="380" y="80" text-anchor="middle" fill="var(--muted)" font-size="10">对象库 objects/（不可变，全量只有一份） · 引用库 refs/（分支指针）</text>
+    <text x="380" y="97" text-anchor="middle" fill="var(--muted)" font-size="10">config · 远端 remote · worktrees/&lt;名字&gt;/（各检出的私有数据）</text>
+    <text x="380" y="114" text-anchor="middle" fill="var(--muted)" font-size="10">任意一个检出里 fetch，所有检出立刻可见新对象</text>
+
+    <!-- 主 worktree -->
+    <line x1="300" y1="124" x2="180" y2="168" stroke="var(--muted)" stroke-width="1.4" marker-end="url(#ar1)"/>
+    <line x1="460" y1="124" x2="580" y2="168" stroke="var(--muted)" stroke-width="1.4" marker-end="url(#ar1)"/>
+    <rect x="40" y="172" width="280" height="118" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="180" y="194" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">主工作目录 ~/proj</text>
+    <text x="180" y="214" text-anchor="middle" fill="var(--muted)" font-size="10">.git 是目录（本体就在这）</text>
+    <text x="180" y="232" text-anchor="middle" fill="var(--muted)" font-size="10">HEAD = feature/new-checkout</text>
+    <text x="180" y="250" text-anchor="middle" fill="var(--muted)" font-size="10">index（暂存区）· 半成品修改</text>
+    <text x="180" y="272" text-anchor="middle" fill="var(--accent)" font-size="9.5">git init / clone 自动创建，不可 remove</text>
+
+    <!-- linked worktree -->
+    <rect x="440" y="172" width="280" height="118" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.4"/>
+    <text x="580" y="194" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">挂接工作目录 ../hotfix</text>
+    <text x="580" y="214" text-anchor="middle" fill="var(--muted)" font-size="10">.git 是文件：指回主目录的私有数据</text>
+    <text x="580" y="232" text-anchor="middle" fill="var(--muted)" font-size="10">HEAD = hotfix-1025</text>
+    <text x="580" y="250" text-anchor="middle" fill="var(--muted)" font-size="10">index（暂存区）· 独立修改</text>
+    <text x="580" y="272" text-anchor="middle" fill="var(--accent)" font-size="9.5">git worktree add 创建 · 用完 remove</text>
+
+    <text x="380" y="316" text-anchor="middle" fill="var(--muted)" font-size="10">共享：对象库 / 分支引用 / 配置 / 远端　　独立：HEAD / 暂存区 / 工作区文件</text>
+  </svg>
+  </div>
+  <p>落到磁盘上是这样的：挂接目录（linked worktree）里没有 <code>.git</code> <strong>目录</strong>，只有一个 <code>.git</code> <strong>文件</strong>，内容一行 <code>gitdir: …/主目录/.git/worktrees/hotfix</code>，指回主仓库为本检出开的私有目录；HEAD、index 这些"每个检出一份"的数据就存在那里。两边看到的是<strong>同一个分支列表、同一套对象</strong>——在 <code>../hotfix</code> 里 <code>fetch</code>，主目录立刻可见；在主目录里建的分支，<code>../hotfix</code> 直接能检出。</p>
+  <p>顺带一提，绝大多数引用都是全局共享的，只有 <code>refs/bisect</code>、<code>refs/worktree</code>、<code>refs/rewritten</code> 这几个是每个检出私有——记住"HEAD 和暂存区独立、其余共享"这个主干就够了。这个模型是 Git 2.5（2015 年 7 月）引入的，早已是官方一等公民，不是什么实验性技巧。</p>
+</section>
+
+<!-- ================= 03 实战 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>实战：四条命令走完一个来回</h2>
+  <div class="codeblock">
+    <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>hotfix 场景全流程</span></div>
+    <pre><code class="language-bash"># 1. 建热修复工作区：新目录 + 顺手建分支（-b 可省，见下）
+git worktree add ../hotfix -b hotfix-1025 master
+
+# 2. 进去干活——主目录那摊半成品一个字都不用动
+cd ../hotfix
+vim src/order/CheckoutService.java
+git commit -am "fix: 下单失败，回滚扣库存顺序"
+
+# 3. 修完发布，目录不要了（工作区必须干净才让删）
+git worktree remove ../hotfix
+
+# 4. 万一是手动 rm -rf 删的目录，补一刀清账
+git worktree prune</code></pre>
+  </div>
+  <p>几个行为细节值得知道：</p>
+  <ul>
+    <li><strong><code>add</code> 的省略形态</strong>：<code>git worktree add ../hotfix</code> 不写分支名时，自动以目录名建新分支——<code>hotfix</code> 分支不存在就从当前 HEAD 建，存在就直接检出。日常用这个快捷形态就够。</li>
+    <li><strong><code>--detach</strong>：检出某个提交而不挂分支。适合考古——比如检出三个月前的版本，本地把旧 bug 跑起来复现，与当前分支完全无关。</li>
+    <li><strong><code>list</strong>：主工作目录永远排第一行，挂接目录跟在后面。它比 <code>git branch</code> 更像"我的并行现场一览"。</li>
+    <li><strong><code>lock</code>：工作区放在移动硬盘或网络挂载上时锁一下，防止它因为"暂时访问不到"被 <code>prune</code> 当成废弃条目清掉。</li>
+  </ul>
+</section>
+
+<!-- ================= 04 规则与坑 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>规则与坑：为什么同一个分支只能检出一次</h2>
+  <p>第一条规则几乎每个人都会撞上：<strong>同一个分支，最多只能在一个 worktree 里检出</strong>。你在主目录检出着 <code>master</code>，再到别的 worktree <code>git worktree add ../x master</code>，Git 直接拒绝，提示该分支已在哪个目录检出。<code>--force</code> 能强行绕过，但别——原因写在模型里：分支引用是全局共享的，两处同时检出等于两个 HEAD 拴在同一根指针上，任何一边 commit、reset，另一边的工作区立刻"过期"，两边各改各的直接互相污染。Git 不是嫌麻烦，是这条约束在保护你。</p>
+  <p>其余的坑按踩中概率排：</p>
+  <ul>
+    <li><strong>构建产物不共享，成本 ×N</strong>：<code>node_modules</code>、<code>target</code>、<code>venv</code>、IDE 索引，每个工作目录各装各的。大仓库开三个 worktree，磁盘和依赖安装时间就是三份——这是一体两面：独立构建也保证了各工作区的产物互不污染。</li>
+    <li><strong><code>remove</code> 只删干净的工作区</strong>：有未提交修改或未跟踪文件时会被拒绝，确认不要了再加 <code>--force</code>。反过来提醒你：真正想留下的东西，别靠"反正还有个 worktree 开着"来记忆。</li>
+    <li><strong>手动删目录要 <code>prune</code></strong>：直接 <code>rm -rf ../hotfix</code> 的话，<code>worktree list</code> 里会残留一个标着 prunable 的条目，<code>git worktree prune</code> 清账；平时不做也行，Git 会在垃圾回收时按过期策略自动清。</li>
+    <li><strong>submodule 用户悠着点</strong>：官方手册明确写了"多检出对 submodule 的支持不完整"，含 submodule 的项目不建议开多个检出；这类工作区不能 <code>move</code>，<code>remove</code> 还要 <code>--force</code>。</li>
+    <li><strong>配置默认只有一份</strong>：所有 worktree 共享 <code>.git/config</code>。确实需要每个工作区独立配置（比如不同的用户名）时，开 <code>extensions.worktreeConfig</code> 后用 <code>git config --worktree</code>。</li>
+  </ul>
+</section>
+
+<!-- ================= 05 怎么选 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>怎么选：stash、clone、worktree 的边界</h2>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th></th><th>git stash</th><th>再 clone 一份</th><th>git worktree</th></tr>
+    <tr><td><strong>心智模型</strong></td><td>抽屉：一个目录里串行切换</td><td>两个世界：完全独立的两套</td><td>多开窗口：同仓库多份检出</td></tr>
+    <tr><td><strong>适合</strong></td><td>几分钟级别的短暂切换</td><td>长期独立副本、不同凭证/权限</td><td>并行任务各自要有活跃工作区</td></tr>
+    <tr><td><strong>主要成本</strong></td><td>栈失忆、pop 冲突</td><td>磁盘全量翻倍、两边漂移</td><td>构建产物与依赖各一份</td></tr>
+    <tr><td><strong>切换即时性</strong></td><td>要收拾现场才能走</td><td>目录即开即用</td><td>目录即开即用</td></tr>
+  </table>
+  </div>
+  <p>一句话记：<strong>短暂切换用 stash，陌生环境用 clone，同一项目里并行干活用 worktree</strong>。三个工具不是替代关系，是三种颗粒度。</p>
+</section>
+
+<!-- ================= 06 今日带走 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>今日带走</h2>
+  <ul class="key-points">
+    <li><strong>worktree = 共享本体 + 独立检出</strong>：对象库、分支引用、配置、远端只有一套；HEAD、暂存区、工作区文件每个目录一份。一个仓库，多个工作目录。</li>
+    <li><strong>挂接目录里 <code>.git</code> 是文件不是目录</strong>：一行 gitdir 指回主仓库为本检出开的私有目录——这是识别 linked worktree 的最快办法。</li>
+    <li><strong>同一分支只能检出一次，是引用模型的必然</strong>：分支指针全局共享，两处拴同一根指针必然互相污染，Git 从源头拦下。</li>
+    <li><strong>四板斧</strong>：<code>add</code>（省分支名自动以目录名建）、<code>list</code>、<code>remove</code>（要求干净）、<code>prune</code>（手动删目录后清账）。</li>
+    <li><strong>成本在心里</strong>：构建产物不共享，磁盘与依赖安装 ×N；submodule 项目慎用多检出。</li>
+  </ul>
+</section>
+
+<!-- ================= 07 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>随堂小测</h2>
+  <div class="quiz" data-title="git worktree">
+    <span class="quiz-score"></span>
+    <div class="quiz-q" data-answer="1">
+      <p class="q-text">1. 打开挂接工作目录 ../hotfix，里面的 .git 是什么？</p>
+      <button class="quiz-opt">一个完整仓库目录，与主目录的 .git 平级独立</button>
+      <button class="quiz-opt">一个文件，指回主仓库 .git/worktrees/ 下的私有目录</button>
+      <button class="quiz-opt">一个软链接，链接到主目录的 .git 目录本身</button>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q" data-answer="2">
+      <p class="q-text">2. 主目录正检出 master，又在 ../x 里执行 worktree add 检出 master，会发生什么？</p>
+      <button class="quiz-opt">正常创建，两个目录各自维护一份 master 的副本</button>
+      <button class="quiz-opt">正常创建，但第二个目录里 master 变为只读</button>
+      <button class="quiz-opt">直接拒绝：分支引用全局共享，两处检出会互相污染</button>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q" data-answer="0">
+      <p class="q-text">3. 手动 rm -rf 删掉了一个挂接目录，git worktree list 里还有残留条目，该怎么办？</p>
+      <button class="quiz-opt">git worktree prune，清掉仓库里的检出记录</button>
+      <button class="quiz-opt">重新 clone 仓库，残留条目会随旧仓库作废</button>
+      <button class="quiz-opt">git worktree remove，它对已删除的目录同样有效</button>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 08 延伸阅读 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>git worktree 官方手册（子命令全参数、共享/私有数据划分、submodule 限制与实现细节都在这）：<br>
+    <a href="https://git-scm.com/docs/git-worktree" target="_blank" rel="noopener">git-scm.com/docs/git-worktree</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 相关阅读</h4>
+    <p>配套概念：《Pro Git》第二版 7.3 节<a href="https://git-scm.com/book/zh/v2/Git-%E5%B7%A5%E5%85%B7-%E8%B4%AE%E8%97%8F%E4%B8%8E%E6%B8%85%E7%90%86" target="_blank" rel="noopener">《贮藏与清理》</a>（stash 体系的完整用法）——正是本期"两难"的另一端。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="../index.html">栏目目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>技术概念手记 · 第 1 期 · 下一期预告：git reflog——Git 的后悔药</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

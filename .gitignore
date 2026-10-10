@@ -25,3 +25,6 @@ redis-deep-dive/output/
 
 # 视频课程本地产物（oss 线）
 oss-project-intro/output/
+
+# 视频课程本地产物（tech-concepts 线）
+tech-concepts/output/

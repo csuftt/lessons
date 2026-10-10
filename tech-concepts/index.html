@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>技术概念手记 · 栏目索引</title>
+<link rel="stylesheet" href="assets/style.css">
+<style>
+  .course-list { list-style:none; padding-left:0; }
+  .course-list li { padding:.7rem .9rem; border:1px solid var(--line);
+    border-radius:6px; margin:.5rem 0; background:var(--card); transition:background .15s; }
+  .course-list li:hover { background: var(--accent-soft); }
+  .course-list a { color:var(--ink); font-weight:600; font-size:1rem; }
+  .course-list a:hover { color:var(--accent); text-decoration:none; }
+  .course-list .desc { display:block; font-size:.83rem; color:var(--muted); margin-top:.15rem; font-weight:400; }
+  .course-list .new { font-size:.7rem; color:var(--accent-2); border:1px solid var(--accent-2);
+    border-radius:999px; padding:1px 8px; margin-left:6px; vertical-align:2px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="lesson-head">
+  <div class="num">TECH CONCEPT NOTES</div>
+  <h1>技术概念手记</h1>
+  <div class="mission">天天在用、未必真讲得清 —— 每期吃透一个技术概念</div>
+</header>
+
+<p class="lead">这不是一门从零到一的课，而是一叠<strong>概念笔记</strong>：每个概念单独一期，从"为什么会有它"讲起，到它的工作原理、正确用法、边界与坑，最后给一组点击即判的自测题。每期 8 分钟读完，配套 B 站视频版（陆续补齐）。概念之间不设先修依赖，看到哪个感兴趣就从哪期进。</p>
+
+<h2>笔记列表</h2>
+<ol class="course-list">
+  <li><a href="lessons/0001-git-worktree.html">git worktree：一个仓库，多个工作目录</a><span class="new">NEW</span>
+    <span class="desc">stash 易失忆、clone 太臃肿——worktree 是中间档：对象库共享、检出独立。为什么同一分支天生不能检出两次，这篇讲透。</span></li>
+  <li style="opacity:.55; background:transparent;">
+    <span style="font-weight:600;">git reflog：Git 的后悔药（下期）</span>
+    <span class="desc">只要提交过，几乎没有真正丢掉的代码。</span></li>
+</ol>
+
+<div class="note">
+  <span class="h">怎么用这叠笔记</span>
+  1) 每期只讲一个概念，读完顺手把底部自测做了——答错的那题回正文再扫一眼。2) 每期末尾都有一个官方 primary source，想吃得更深就顺着读。3) 读的过程中卡住，随时回来问我——贴任意一段命令输出，我用这期的概念帮你解释。
+</div>
+
+<footer class="lesson-foot">
+  <p>技术概念手记 · 持续更新 · 学习笔记性质，欢迎指错</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+</div>
+</body>
+</html>
