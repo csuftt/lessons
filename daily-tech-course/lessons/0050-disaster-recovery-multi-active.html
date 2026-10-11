@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · 容灾架构与多活：RPO 与 RTO 不是口号是换算表 | 2026-10-12</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0050</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0049-distributed-design-patterns.html">上一期：分布式设计模式</a> · <a href="https://www.bilibili.com/video/BV1UXpD6EENg" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">架构运维 · 架构与中间件运维系列第 6 讲（容灾篇）</p>
+  <h1>容灾架构与多活：RPO 与 RTO 不是口号，是换算表</h1>
+  <p class="subtitle">上一讲把散装的分布式设计模式拼成了地图，这一期继续架构运维线，往上走一层——当故障不是"某个实例挂了"，而是<strong>整个机房、整个区域、甚至云厂商的控制面一起出事</strong>时，架构拿什么应对。两场真实大故障开局，然后讲透容灾的度量衡（RPO/RTO）、从容备到异地多活的五档阶梯、同城双活的落地细节（半同步的静默退化是最深的一口坑），最后给一套能直接拿去评审的演练与盘点清单。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧩 架构与中间件运维</span>
+    <span class="tag-date">📅 2026-10-12 · 第 50 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>两场大故障：一个炸了 3.5 小时，一个只挂 18 分钟</h2>
+  <p><strong>第一场：2023 年 11 月 12 日，阿里云。</strong>17:44 起，云产品控制台访问与管控 API 调用出现异常，故障波及全球所有地域——淘宝、钉钉、闲鱼、阿里云盘相继登上热搜，大量客户的业务跟着受影响，21:11 才全部恢复，全程约 <strong>3.5 小时</strong>。官方确认根因是"某个底层服务组件"（业内普遍指向鉴权类公共服务）。最值得架构师回味的是故障的形状：<strong>数据面大体正常</strong>—— ECS、RDS 上跑着的虚机和数据库大多还在工作；<strong>炸掉的是控制面</strong>——控制台登不进、API 调不动、想扩容想切流的人都只能干瞪眼。</p>
+  <p><strong>第二场：2016 年 4 月 11 日，Google Cloud。</strong>Compute Engine 全球多个区域同时失去网络连通性，<strong>18 分钟</strong>完全中断。事后 Google 给受影响客户赔偿了最高 25% 的月度账单，并公开了完整事故报告。18 分钟 vs 3.5 小时，差距不在运气，在于：Google 那次坏的是网络设备（数据面，自动恢复路径清晰）；阿里云这次坏的是全局共享的控制服务——<strong>它是所有客户共用的一个隐形单点</strong>。</p>
+  <div class="callout">
+    <span class="callout-title">这两场故障共同逼出的一个问题</span>
+    <p>你的系统挂在"单个云厂商、单个地域、两个可用区"上，自称双活。请问：机房没了怎么办？区域没了怎么办？<strong>云厂商的控制面没了怎么办？</strong>第三个问题在 2023 年 11 月 12 日之前，绝大多数容灾方案里连一行字都没有。</p>
+  </div>
+  <p>回答这三个问题，靠的不是"我们有多活架构"这句话，而是两张换算表：<strong>RPO（Recovery Point Objective，恢复点目标——能容忍丢多少数据）</strong>和 <strong>RTO（Recovery Time Objective，恢复时间目标——多久能恢复服务）</strong>。0017 期讲高可用时给过这两把尺子的定义，这一期把它们变成容灾选型的设计输入。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：度量衡、分级，和"容灾 ≠ 高可用"</h2>
+
+  <h3>先分清：高可用对付组件，容灾对付站点</h3>
+  <p><a href="0017-arch-ha-overview.html">0017 期</a>的高可用四层冗余模型，对付的是<strong>实例、节点、机架级</strong>的组件故障：频率高、爆炸半径小、秒级自动切换。容灾对付的是<strong>机房级、区域级、厂商级</strong>的灾难：频率低、爆炸半径大、恢复动作里往往有人工决策。两者不是替代关系，是上下层关系——没有 L1/L2 的高可用垫底，双活机房的日常抖动就能把你拖死；只有 L1/L2 而没有容灾，一场机房级事件就能让 0017 里算过的可用性数学全部作废。</p>
+
+  <h3>RPO 由复制模式决定，RTO 由预案成熟度决定</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>复制/备份模式</th><th>RPO 理论值</th><th>典型 RTO</th><th>代价</th></tr>
+    <tr><td>同步/半同步复制（同城）</td><td>0（提交即已传输）</td><td>分钟级</td><td>写延迟增加，跨机房链路成为写路径</td></tr>
+    <tr><td>异步复制（跨区域）</td><td>秒级 ~ 分钟级</td><td>分钟 ~ 小时级</td><td>灾难时可能丢数据，需对账补偿</td></tr>
+    <tr><td>定时备份（每日全量+binlog）</td><td>小时级（受备份频率限制）</td><td>小时 ~ 天级</td><td>最便宜，只能兜底不能扛在线业务</td></tr>
+    <tr><td>多数派共识跨城（如三地五中心）</td><td>0</td><td>&lt;30 秒</td><td>每笔写都要跨城同步，写延迟高、成本高</td></tr>
+  </table>
+  </div>
+  <p>这张表是选型的起点：<strong>业务说"一条都不能丢"，RPO 就必须是 0，异步复制直接出局；业务说"最多丢 5 分钟"，那花三倍价钱追 RPO=0 就是在烧钱。</strong>反过来，RTO 的敌人从来不是技术，是流程——2019 年某云厂商一地域故障时，不少"有灾备"的客户恢复花了半天，因为切流预案只存在于架构图上，谁也没演练过，DNS 的 TTL 设置、数据库账号权限、备端配置的时效性全是现场踩的坑。</p>
+
+  <h3>容灾能力五档阶梯（附官方口径数字）</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>档位</th><th>形态</th><th>RPO</th><th>RTO</th><th>成本量级</th></tr>
+    <tr><td>冷备</td><td>备端只有数据备份，无系统</td><td>小时级</td><td>天级</td><td>存储费</td></tr>
+    <tr><td>热备</td><td>备端系统常备、不接流量</td><td>分钟级</td><td>小时 → 分钟</td><td>约 ×1.5</td></tr>
+    <tr><td><strong>同城双活</strong></td><td>两机房对等、同时服务</td><td><strong>0</strong>（半同步）</td><td><strong>分钟级</strong></td><td>约 ×2</td></tr>
+    <tr><td>两地三中心</td><td>同城双活 + 异地灾备中心</td><td>同城 0 / 异地分钟级</td><td>分钟级</td><td>约 ×2.5</td></tr>
+    <tr><td>异地多活</td><td>多区域按单元对等服务</td><td>0（多数派跨城）或分钟级</td><td>分钟级</td><td>×3 起</td></tr>
+  </table>
+  </div>
+  <p>阶梯上每一格都有官方参照系：OceanBase 的容灾部署文档给出了从"同机房三副本"到"三地五中心"的完整对照——同城三机房（每机房一个 Zone）机房级故障 <strong>RPO=0、RTO&lt;30 秒</strong>；两地两中心主备库架构地域级故障 <strong>RPO&gt;0、RTO 分钟级</strong>；要到<strong>三地五中心五副本</strong>（前两城各两副本、第三城一副本，每笔事务至少同步到两个城市）才实现地域级故障 RPO=0。这张官方表把一个关键事实摆得很清楚：<strong>想跨城市不丢数据，必须让多数派跨城，写延迟的账单躲不掉</strong>——这就是绝大多数公司止步同城双活、异地只做灾备的根本原因。</p>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：同城双活参考形状与三个必须面对的坑</h2>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 400" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar50" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <text x="380" y="24" text-anchor="middle" fill="var(--muted)" font-size="13">同城双活参考形状：流量对半分，数据有主从</text>
+
+    <!-- GSLB -->
+    <rect x="270" y="42" width="220" height="46" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="380" y="61" text-anchor="middle" fill="var(--accent)" font-size="13" font-weight="700">GSLB 全局负载均衡（智能 DNS）</text>
+    <text x="380" y="79" text-anchor="middle" fill="var(--muted)" font-size="10.5">按机房健康度分流 50% / 50%</text>
+    <line x1="330" y1="88" x2="190" y2="130" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar50)"/>
+    <line x1="430" y1="88" x2="570" y2="130" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar50)"/>
+
+    <!-- Room A -->
+    <rect x="30" y="132" width="330" height="180" rx="12" fill="var(--card)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="195" y="157" text-anchor="middle" fill="var(--accent)" font-size="13.5" font-weight="700">机房 A（写主力）</text>
+    <rect x="48" y="170" width="140" height="34" rx="7" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="118" y="191" text-anchor="middle" fill="var(--ink)" font-size="10.5">应用 K8s 集群（50% 流量）</text>
+    <rect x="48" y="212" width="140" height="34" rx="7" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="118" y="233" text-anchor="middle" fill="var(--ink)" font-size="10.5">Nacos 3 节点（跨机房集群）</text>
+    <rect x="48" y="254" width="140" height="34" rx="7" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="118" y="275" text-anchor="middle" fill="var(--ink)" font-size="10.5">Redis 集群（本机房独立）</text>
+    <rect x="204" y="170" width="140" height="34" rx="7" fill="var(--code-bg)" stroke="var(--accent-3)" stroke-width="1.5"/>
+    <text x="274" y="191" text-anchor="middle" fill="var(--ink)" font-size="10.5">MySQL 主库（半同步）</text>
+    <rect x="204" y="212" width="140" height="34" rx="7" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="274" y="233" text-anchor="middle" fill="var(--ink)" font-size="10.5">Pulsar Broker（双机房混布）</text>
+    <rect x="204" y="254" width="140" height="34" rx="7" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="274" y="275" text-anchor="middle" fill="var(--ink)" font-size="10.5">MinIO 站点 A（纠删码双站点）</text>
+
+    <!-- Room B -->
+    <rect x="400" y="132" width="330" height="180" rx="12" fill="var(--card)" stroke="var(--accent-3)" stroke-width="1.5"/>
+    <text x="565" y="157" text-anchor="middle" fill="var(--accent-3)" font-size="13.5" font-weight="700">机房 B（对等候选写）</text>
+    <rect x="418" y="170" width="140" height="34" rx="7" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="488" y="191" text-anchor="middle" fill="var(--ink)" font-size="10.5">应用 K8s 集群（50% 流量）</text>
+    <rect x="418" y="212" width="140" height="34" rx="7" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="488" y="233" text-anchor="middle" fill="var(--ink)" font-size="10.5">Nacos 3 节点（跨机房集群）</text>
+    <rect x="418" y="254" width="140" height="34" rx="7" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="488" y="275" text-anchor="middle" fill="var(--ink)" font-size="10.5">Redis 集群（本机房独立）</text>
+    <rect x="574" y="170" width="140" height="34" rx="7" fill="var(--code-bg)" stroke="var(--accent-3)" stroke-width="1.5"/>
+    <text x="644" y="191" text-anchor="middle" fill="var(--ink)" font-size="10.5">MySQL 半同步从库</text>
+    <rect x="574" y="212" width="140" height="34" rx="7" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="644" y="233" text-anchor="middle" fill="var(--ink)" font-size="10.5">Pulsar Bookie（跨机架感知）</text>
+    <rect x="574" y="254" width="140" height="34" rx="7" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="644" y="275" text-anchor="middle" fill="var(--ink)" font-size="10.5">MinIO 站点 B（纠删码双站点）</text>
+
+    <!-- replication line -->
+    <line x1="344" y1="187" x2="574" y2="187" stroke="var(--accent-3)" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#ar50)"/>
+    <text x="459" y="178" text-anchor="middle" fill="var(--accent-3)" font-size="10">半同步复制（AFTER_SYNC）</text>
+
+    <!-- bottom note -->
+    <rect x="30" y="330" width="700" height="52" rx="10" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="380" y="351" text-anchor="middle" fill="var(--muted)" font-size="11.5">切流路径：GSLB 摘除机房 → 半同步从库升级主库 → 应用连接串指向新主（预案化、演练化）</text>
+    <text x="380" y="370" text-anchor="middle" fill="var(--muted)" font-size="11.5">容量基线：单机房常态承压 50%，故障时扛 100% 峰值（N+1 思想，见 0017）</text>
+  </svg>
+  </div>
+
+  <h3>坑一：半同步会"静默退化"，而且专挑坏天气退</h3>
+  <p>同城双活数据层的标配是 MySQL 半同步复制。它的手册语义很美好：主库提交时等待至少一个从库确认收到 binlog 才返回客户端。但有个参数的默认值决定了现实：<code>rpl_semi_sync_source_timeout</code>（MySQL 8.4 命名，8.0.26 前叫 <code>rpl_semi_sync_master_timeout</code>）<strong>默认 10000 毫秒</strong>——从库 10 秒内没应答，主库不会报错，而是<strong>悄悄降级回异步复制继续提交</strong>。这意味着你的 RPO 从 0 变成了"取决于复制延迟"，而且<strong>降级恰好发生在从库不健康或机房链路抖动的时候</strong>——正是你最需要它的时刻。生产纪律：超时改 2000~3000ms（快速感知+留抖动余量），并且<strong>对降级本身做高级别告警</strong>（监控 <code>Rpl_semi_sync_source_status</code> 从 ON 变 OFF、<code>Rpl_semi_sync_source_no_tx</code> 计数增长），把"半同步实际在不在岗"变成一块每天有人看的仪表盘，而不是配置文件里的一行自我安慰。</p>
+
+  <h3>坑二：缓存和消息不能照抄数据库的双活姿势</h3>
+  <p>Redis <strong>不要做跨机房主从</strong>——复制延迟叠加脑裂风险，切流时两边各说各话；正确姿势是两机房各自独立集群，以"缓存可重建"为原则，切流后接受短暂穿透回源（0017 思考题已推演过这条结论）。Pulsar 则相反，天然适合跨机房：BookKeeper 多副本加机架感知 placement，让写集合覆盖两机房，消息层无需任何双写。对象存储（MinIO）用<strong>双站点纠删码</strong>异步复制。<strong>每种数据资产的容灾姿势由它的可重建性决定</strong>，这是比"全都双活"省钱也稳得多的思路。</p>
+
+  <h3>坑三：控制面单点——2023 年那场故障的核心教训</h3>
+  <p>盘点你的全局共享服务：注册/配置中心、网关管控面、K8s API Server、监控告警、堡垒机、以及<strong>云厂商的控制面本身</strong>。这些组件挂掉时数据面也许还在跑，但你<strong>失去的是"改变系统的能力"</strong>——扩不了容、切不了流、改不了配置，甚至看不了监控。对策三层：① 切流入口与云控制面解耦（GSLB/DNS 服务别和业务同厂商同账号体系，至少留一条手工切换通道）；② 手工作业预案（机房型故障时的电话树、本地留存的账号与配置台账、不依赖云 API 的操作路径）；③ 数据面尽量自治（应用本地兜底的注册快照、配置快照——0002 期讲过的客户端容灾机制在这里第二次救你）。</p>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：半同步配置、切流演练、单点盘点</h2>
+
+  <h3>① MySQL 8.4 同城半同步（机房 A 主、机房 B 从）</h3>
+  <pre><code><span class="c-com"># 机房 A（主库）——8.4 新命名：rpl_semi_sync_source_*</span>
+INSTALL PLUGIN rpl_semi_sync_source SONAME 'semisync_source.so';
+SET GLOBAL rpl_semi_sync_source_enabled = 1;
+SET GLOBAL rpl_semi_sync_source_timeout = 3000;      <span class="c-com"># 默认 10s 太钝，3s 快速感知</span>
+SET GLOBAL rpl_semi_sync_source_wait_point = AFTER_SYNC;  <span class="c-com"># 无损模式：先收 ACK 再提交</span>
+<span class="c-com"># 机房 B（从库）</span>
+INSTALL PLUGIN rpl_semi_sync_replica SONAME 'semisync_replica.so';
+SET GLOBAL rpl_semi_sync_replica_enabled = 1;
+<span class="c-com"># 退化监控（放进 Prometheus 采集，任何一条触发都说明 RPO=0 已失守）：</span>
+<span class="c-com"># SHOW GLOBAL STATUS LIKE 'Rpl_semi_sync_source_status';   -- ON 才是半同步在岗</span>
+<span class="c-com"># SHOW GLOBAL STATUS LIKE 'Rpl_semi_sync_source_no_tx';    -- 降级后提交的事务计数</span>
+<span class="c-com"># SHOW GLOBAL STATUS LIKE 'Rpl_semi_sync_source_yes_tx';   -- 半同步成功提交计数</span></code></pre>
+  <p>两个细节别省：<code>wait_point=AFTER_SYNC</code>（默认值）保证所有客户端看到同一提交视图，主库故障切换不丢已确认事务；配置务必写进 my.cnf——半同步参数是动态的，重启丢配置后你的"双活"会静默变单机房加异步从库，监控却一切绿色。</p>
+
+  <h3>② 切流演练剧本（每季度至少一次真刀真枪）</h3>
+  <div class="steps">
+    <div class="step"><span class="step-n">1</span><p><strong>预检：</strong>两机房容量水位（B 机房能否扛 100% 峰值）、半同步状态 ON、复制延迟 &lt;1s、GSLB 健康检查配置正确、DNS TTL 已提前压到 60s 以下；</p></div>
+    <div class="step"><span class="step-n">2</span><p><strong>切流：</strong>低峰期 GSLB 将机房 A 权重逐步降为 0（先 50%→25%→0，观察 5 分钟再下一步）；确认 A 无流量后，B 机房从库执行 <code>STOP REPLICA; RESET REPLICA ALL;</code> 升级为可写主库，应用连接串通过配置中心切指新主；</p></div>
+    <div class="step"><span class="step-n">3</span><p><strong>验证：</strong>核心链路下单/支付冒烟、缓存命中率回稳曲线、消息积压消费进度、对账任务数据齐平——四项全绿才算切流成功；</p></div>
+    <div class="step"><span class="step-n">4</span><p><strong>回切与复盘：</strong>原主库修复后以新从库身份重建半同步，流量按预案切回（或保持新主，双写窗口内对账）；把演练中每一步的实际耗时记进 RTO 台账——<strong>声明的 RTO 与实测 RTO 的差距，就是下一次故障的 surprise 大小</strong>。</p></div>
+  </div>
+
+  <h3>③ 全局单点盘点表（评审时逐行过）</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>资产</th><th>容灾姿势</th><th>验证手段</th></tr>
+    <tr><td>注册/配置中心</td><td>跨机房集群 + 客户端本地快照兜底</td><td>断网启动测试（0002 期方法）</td></tr>
+    <tr><td>MySQL（交易库）</td><td>同城半同步，主从可切换</td><td>杀主库演练，核对 RPO/RTO 实测值</td></tr>
+    <tr><td>Redis</td><td>机房独立集群，可重建，不跨机房主从</td><td>单机房缓存全清的回源压测</td></tr>
+    <tr><td>Pulsar</td><td>Bookie 副本跨机房 placement</td><td>下线单机房 Bookie 验证读写不中断</td></tr>
+    <tr><td>对象存储/文件</td><td>双站点复制或跨可用区纠删码</td><td>抽样比对两站点对象一致性</td></tr>
+    <tr><td>GSLB/DNS</td><td>与业务云厂商解耦 + 手工切换通道</td><td>演练一次"云控制面不可用"场景</td></tr>
+    <tr><td>监控/告警/堡垒机</td><td>独立账号体系与最低限度本地部署</td><td>主监控不可用时的备用观测路径检查</td></tr>
+  </table>
+  </div>
+
+  <div class="card card-tip">
+    <h4>✅ 容灾体检清单（拿去对表）</h4>
+    <p>☐ RPO/RTO 有业务签字的数字，不是"尽量快"　☐ 半同步降级有告警且值班知道处置　☐ 切流剧本本季度真跑过一次　☐ 单机房可扛 100% 峰值有压测报告　☐ 缓存/消息/存储各有明确容灾姿势　☐ GSLB 与云控制面解耦或有手工通道　☐ 灾备端的配置/账号/证书定期同步时效性验证　☐ 声明 RTO 与演练实测 RTO 的差距有台账跟踪</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>RPO/RTO 是换算表不是口号</strong>：RPO 由复制模式决定（同步=0、异步=秒~分钟、备份=小时），RTO 由预案成熟度决定。业务先给数字，架构才有选型。</li>
+    <li><strong>想跨城不丢数据，必须让多数派跨城</strong>：OceanBase 三地五中心官方口径（地域级 RPO=0、RTO&lt;30s）的代价是每笔写跨城同步——这是多数公司止步同城双活的根本原因，不是技术不会，是账不划算。</li>
+    <li><strong>半同步的最大风险是静默退化</strong>：默认 10 秒超时后悄悄变异步，RPO=0 名存实亡，且专挑链路抖动时发生。改 3 秒 + 对降级状态做高级别告警，是双活数据层的生死线。</li>
+    <li><strong>每种数据资产按可重建性选容灾姿势</strong>：数据库半同步、Redis 机房独立可重建、消息跨机房多副本、对象存储双站点——别一把梭"全都双活"。</li>
+    <li><strong>控制面是 2023 年后必须盘点的故障域</strong>：机房双活防不住云控制面故障。切流入口解耦、手工作业预案、数据面自治三层对策，把"改变系统的能力"也纳入容灾范围。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目一：你们的核心交易系统部署在单一云厂商的单地域（两个可用区），MySQL 主从 + 应用双 AZ。业务方给出新要求："机房级故障 RTO ≤ 15 分钟、RPO = 0"，但预算明确不支持异地多活。①给出你的目标架构；②列出三个最容易翻车的点及对策；③解释为什么在这个预算下 RPO=0 与异地容灾不可兼得。<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 目标架构：同城双活（不是"双 AZ 高可用"）</h4>
+      <p>业务要求的是<strong>机房级</strong>故障恢复，双 AZ 只防可用区级故障（同机房的电力/网络域），机房级事件（光纤挖断、机房级火灾、制冷失效——2022 年某云香港机房制冷故障宕机超 10 小时就是前车之鉴）会把两个 AZ 一起带走。目标形态：同城两机房对等部署（GSLB 分流）、MySQL 半同步（AFTER_SYNC）跨机房、Redis 机房独立、消息副本跨机房、单机房容量可扛 100% 峰值。异地只做<strong>备份级容灾</strong>（异步复制 + 每日备份异地存放），明确声明异地 RPO&gt;0——这是预算约束下的诚实设计，比"伪多活"安全得多。</p>
+      <h4>✅ 三个最容易翻车的点</h4>
+      <ul>
+        <li><strong>半同步静默退化：</strong>默认 10s 超时降级异步，故障切换那一刻才发现 RPO 早就不是 0。对策：timeout 收紧到 3s、降级状态高级别告警、每日巡检 no_tx 计数归零；</li>
+        <li><strong>切流决策的自动化程度：</strong>RTO 15 分钟容不下"打电话找领导拍板"。但全自动切换有误切风险（机房间歇抖动时来回切比故障本身更伤）。对策：<strong>分级的自动化</strong>——数据层故障切换（主库心跳超时+从库数据完整校验）自动化，机房级整体切流保留"一键人工触发"（预案脚本化到只剩一个按钮），决策 2 分钟内可执行；</li>
+        <li><strong>备端时效性漂移：</strong>B 机房的配置、账号、证书、DNS 记录长期不用会悄悄腐化，真切换时连不上库、证书过期、配置不一致。对策：把 B 机房常态承载 50% 流量（真双活），让时效性由日常使用天然保鲜；演练剧本每季度真跑。</li>
+      </ul>
+      <h4>⚖️ 为什么 RPO=0 与异地不可兼得</h4>
+      <p>RPO=0 要求事务提交前数据已到达异地——即同步或多数派跨城。跨城 RTT 通常 30ms 起，每笔写至少翻倍延迟，交易 TPS 与用户体验的直接代价之外，还要多城多机房 ×2~3 的资源成本。OceanBase 三地五中心做到地域级 RPO=0，靠的是"每笔事务至少同步到两个城市"的多数派设计，这是金融级预算和写延迟容忍度换来的。预算不支持时的正确姿势：<strong>同城保 RPO=0，异地保"活着"（分钟~小时级 RPO 的灾备 + 对账补偿能力）</strong>，并把两地三中心写进演进路线图，业务量级和预算到位后再升级。</p>
+    </div>
+  </details>
+
+  <details class="q-card">
+    <summary>题目二：复盘阿里云 2023-11-12 场景：你的双活系统部署在该云单地域的两个机房，数据面一切正常，但云控制台与管控 API 异常持续 3.5 小时。①为什么你的自动切流方案可能完全失效？②这 3.5 小时里，哪些操作做不了、哪些仍然可用？③给出三层对策，并说明为什么"多活架构"本身解决不了这个问题。<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 ① 切流失效的机理</h4>
+      <p>切流链条上每一环都可能是云控制面的下游：GSLB 若用云厂商的智能解析产品，摘机房动作要走它的 API；应用扩容要走 K8s 托管集群的 API Server（控制面）；改配置中心参数可能依赖云上的中间件管控台；甚至监控大盘本身是云产品，你连"确认哪边出问题"的观测都失去了。故障期间还有客户连 DNS 解析都异常——"想跑都跑不了"。你的双活架构假设"出事时我有能力改变流量走向"，而控制面故障摧毁的正是这个假设本身。</p>
+      <h4>✅ ② 失效面盘点</h4>
+      <ul>
+        <li><strong>做不了：</strong>扩容/缩容（集群 API 不可用）、切流（GSLB 控制不可用）、新建资源（ECS/RDS 管控不可用）、改云上安全组/白名单、查看云监控定位问题；</li>
+        <li><strong>仍然可用：</strong>在跑的虚机/容器/数据库（数据面正常）、应用自身的无状态多副本与本地健康检查自愈、注册中心客户端快照与本地配置兜底（0002 期机制）、自建监控（若部署在他处）、Pulsar/Kafka 等自建中间件的数据面读写。</li>
+      </ul>
+      <h4>🛡 ③ 三层对策</h4>
+      <ul>
+        <li><strong>入口解耦层：</strong>GSLB/权威 DNS 选用与业务云不同厂商（或自建 + 商用双通道），保住"至少一条不依赖云控制面的切流路径"；关键证书、SDK、脚本本地留存；</li>
+        <li><strong>手工预案层：</strong>机房型/区域型/厂商级三档故障的电话树与决策链（谁有权拍板降级只读）、本地台账（资产清单、账号、拓扑图离线可查）、降级预案（非核心功能熔断清单，把容量压力主动降下来而不是硬扛）；</li>
+        <li><strong>数据面自治层：</strong>应用依赖的注册/配置快照本地化、中间件集群多机房 placement、数据备份至少一份在云外（对象存储异构或离线）。这三层共同保证：控制面死了，系统"还能被操作"。</li>
+      </ul>
+      <h4>⚡ 为什么多活解决不了</h4>
+      <p>多活（无论同城还是异地）解决的是<strong>数据面容量与故障接管</strong>：某个站点的计算/存储/网络坏了，流量去别的站点。而控制面故障里数据面本来就没坏——坏的是"改变数据面配置的能力"。这是两个正交的故障域：前者靠架构冗余，后者靠<strong>操作路径的冗余</strong>（多厂商入口、手工通道、离线台账）。2023 年那场故障的真正教训是：容灾方案的评审清单里，除了"机房没了怎么办"，必须加一行"我想切的时候切不动怎么办"。终极答案是多云/跨厂商部署，但代价极高；对多数公司，解耦切流入口 + 三层对策已是性价比正确的位置。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>OceanBase 官方文档 · 容灾部署方案（从同机房三副本到三地五中心的完整对照表，RPO/RTO 官方口径）：<br>
+    <a href="https://www.oceanbase.com/docs/community-observer-cn-0000000000161668" target="_blank" rel="noopener">oceanbase.com/docs/community-observer-cn-0000000000161668</a>（配套阅读：MySQL 8.4 官方文档 Semi-Synchronous Replication 章节——半同步参数与 AFTER_SYNC 语义；Google Cloud 2016-04-11 事故报告 status.cloud.google.com——18 分钟故障的完整复盘范例）</p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>高可用总纲与四层冗余模型：<a href="0017-arch-ha-overview.html">0017 高可用架构设计</a>（本期的下层地基）。切换工程：<a href="0033-mysql-ha-failover.html">0033 MySQL 高可用与故障切换</a>（数据面自动化切换的深讲位）。韧性参数：<a href="0049-distributed-design-patterns.html">0049 分布式设计模式</a>（重试预算/熔断，切流后的流量冲击治理）、<a href="0001-sentinel-circuit-breaking.html">0001 Sentinel</a>。客户端容灾：<a href="0002-nacos-registry-config.html">0002 Nacos 注册与配置中心</a>（本地快照兜底机制）。消息与对象存储跨机房姿势：<a href="0021-pulsar-message-reliability.html">0021 Pulsar 消息可靠性</a>、<a href="0023-minio-erasure-coding.html">0023 MinIO 纠删码</a>。下一期开启云原生前沿线——Service Mesh（Istio ambient 无 sidecar 模式）。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0049-distributed-design-patterns.html">← 上一期：分布式设计模式</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 50 期 · 架构与中间件运维系列 · 下一期预告：云原生前沿 —— Service Mesh（Istio ambient）</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
