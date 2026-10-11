@@ -94,8 +94,11 @@
 <li><strong>guide + 附件 = 服务端强制降级 queue</strong>（reasonCode 类 <code>guide.attachmentsUnsupported</code>）——
 插队通道不支持图片，UI 要提前拦截或提示。</li>
 </ul>
-<p>队列管理配套两个命令：<code>deleteQueueItem</code>（撤回排队消息，队列 id = <code>"queue_" + commandId</code>，前端可预置）；
-队列排空（当前回合结束把队首发出去）是<strong>客户端职责</strong>，服务端不会自动替你 flush。</p>
+<p>队列的两种实现路线要知道：<strong>服务端原生队列</strong>——sendText 的 <code>queue</code> 投递配套一族命令
+（<code>sendQueuedNow</code> 立即放行 / <code>editQueueItem</code> / <code>reorderQueueItem</code> / <code>deleteQueueItem</code> 撤回 /
+<code>setAutoDrain</code> 自动排空开关）；<strong>宿主自研队列</strong>——ZC-GUI 实际走这条（前端本地排队，对排序/编辑/秒改主意的
+UI 掌控更强），撤回 guide 插队的消息时才调 <code>deleteQueueItem</code>——它也走 CAS（带 baseRevision，
+stale 时会<b>假成功</b>，须重读 revision 重试，见第 7 课三步舞）。</p>
 
 <h2>四、停止回合：legacy stop 已死，v4 stop 当立</h2>
 <pre><code>// 已实证失效：官方客户端从不调它，新版 CLI 上发了个寂寞

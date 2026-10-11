@@ -31,6 +31,8 @@
 <tr><td><code>workspace/generateText</code></td><td>一次性生成（标题、润色）不带会话</td><td>否</td></tr>
 <tr><td><code>workspace/upsertModelProvider</code></td><td>注册自定义渠道（v2 已删）</td><td>否</td></tr>
 <tr><td><code>workspace/updateProviderRegistry</code></td><td>推渠道注册表（运行时态）</td><td>否</td></tr>
+<tr><td><code>provider/updateAccountConfig</code></td><td>推送账号渠道规则（overlay 叠加激活订阅渠道；注意 received 回执≠生效）</td><td>否</td></tr>
+<tr><td><code>provider/testModelConnectivity</code></td><td>渠道连通性测试（设置页「测试连接」）</td><td>否</td></tr>
 </tbody>
 </table>
 
@@ -87,12 +89,13 @@ CLI 的模型管理接口有 TTL，回执迟到时宿主重发会撞出"幽灵�
 // v1 形状：selection 换成 modelRef，去掉 maxOutputTokens；messages:[{role,content}] 形态也支持</code></pre>
 <p>注意：generateText 的模型选取规则与会话模型<strong>可能分叉</strong>（各自有默认值链），
 自定义渠道下它可能 -32603 渠道错位——兜底方案是退回 CLI 一次性子进程（<code>zcode -p</code>）跑同任务。
-另外它默认走注册表找渠道，<strong>新注册的渠道要在调用前注册好</strong>（upsertModelProvider 或写配置文件），未注册会报 -32603，此时可先 upsert 自愈再重发。</p>
+另外它默认走注册表找渠道，<strong>新注册的渠道要在调用前注册好</strong>——v1 用 upsertModelProvider 或写配置文件，
+v2 upsert 已删只能写 provider_config.json（热加载后重发即自愈），未注册会报 -32603。</p>
 
 <h2>五、渠道持久化：RPC 写的都是运行时态</h2>
 <div class="warn"><span class="h">跨重启必丢</span>
 <code>upsertModelProvider / updateProviderRegistry</code>（v1）写的是<strong>进程内注册表，不落盘</strong>。
-自定义渠道要持久，唯一途径是写配置文件：v1 写 <code>~/.zcode/cli/config.json</code> 的 provider 注册表，
+自定义渠道要持久，唯一途径是写配置文件：v1 写 <code>~/.zcode/v2/config.json</code> 的 provider 节点，
 v2 写 <code>~/.zcode/v2/provider_config.json</code>（服务端 watch 热加载，约 2 秒内生效）。
 两套命名还不一样（文件端 <code>name/options.apiKey/limit.context</code> vs RPC 端 <code>label/apiKey/contextWindow</code>），别照抄字段名。</div>
 <p>内置渠道列表怎么拿？插件实际用的是<strong>读文件 + 读会话设置双源合并</strong>，而不是某个 RPC——

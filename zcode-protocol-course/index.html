@@ -29,9 +29,9 @@
   <div class="card">
     <h4>📡 通信形态</h4>
     <ul>
-      <li>宿主 → CLI：约 30 个请求方法</li>
-      <li>CLI → 宿主：事件通知流 + 7 类反向请求</li>
-      <li>v4 面：订阅、行模型、写命令（CAS 并发）</li>
+      <li>宿主 → CLI：30 余个请求方法</li>
+      <li>CLI → 宿主：事件通知流 + 8 类反向请求</li>
+      <li>v4 面：订阅、行模型、wire 分片、写命令（CAS 并发）</li>
     </ul>
   </div>
 </div>
@@ -44,7 +44,7 @@
 <tbody>
 <tr><td>0001</td><td>整体架构与进程启动</td><td>四层架构图 · spawn 三件套 env · 帧格式 · stderr 排空 · 判代</td><td><a href="lessons/0001-architecture-and-startup.html">进入 →</a></td></tr>
 <tr><td>0002</td><td>会话生命周期</td><td>list / create / resume / close / read / setMode · -32004 两种成因</td><td><a href="lessons/0002-session-lifecycle.html">进入 →</a></td></tr>
-<tr><td>0003</td><td>订阅与事件流</td><td>session/subscribe · 事件族全家福 · v4 订阅与行模型 · 白名单时序</td><td><a href="lessons/0003-subscription-and-events.html">进入 →</a></td></tr>
+<tr><td>0003</td><td>订阅与事件流</td><td>session/subscribe · 事件族全家福 · v4 订阅与行模型 · wire 分片重组 · 白名单时序</td><td><a href="lessons/0003-subscription-and-events.html">进入 →</a></td></tr>
 <tr><td>0004</td><td>发消息与流式交互</td><td>send 与附件 · 三态路由（立即/排队/插队）· v4 stop · 队列管理</td><td><a href="lessons/0004-send-and-stream.html">进入 →</a></td></tr>
 <tr><td>0005</td><td>模型与配置</td><td>setModel 双代对照 · strict 降级 · 思考级别 · generateText · 渠道持久化</td><td><a href="lessons/0005-model-and-config.html">进入 →</a></td></tr>
 <tr><td>0006</td><td>反向请求</td><td>审批 / AskUserQuestion / 浏览器宿主 / 定时任务 · 应答纪律</td><td><a href="lessons/0006-server-to-client-requests.html">进入 →</a></td></tr>

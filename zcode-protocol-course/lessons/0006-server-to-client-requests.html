@@ -37,7 +37,8 @@ reader 一堵，所有请求全部超时；</li>
 <tr><td><code>session/requestRuntimePreferences</code></td><td>create/resume 会话后立刻</td><td><code>{"nativeSearchEnhancementsEnabled": bool, "memoryEnabled": bool, "askUserQuestionAutoResolutionEnabled": bool}</code> <b>三个键都必须给</b></td></tr>
 <tr><td><code>interaction/requestPermission</code></td><td>工具要执行敏感操作</td><td><code>{"decision": "allow"|"deny"|"escalate"|"modify", "reason"?, "modifiedInput"?, "permissionUpdates"?}</code></td></tr>
 <tr><td><code>interaction/requestUserInput</code></td><td>AI 调 AskUserQuestion 工具</td><td><code>{"action": "answer", "content": {"answer": "..."}}</code> 或 decline</td></tr>
-<tr><td><code>interaction/requestProviderRuntimeHeaders</code></td><td>套餐网关风控验证</td><td><code>{"headersApplied": bool, "errorMessage"?}</code></td></tr>
+<tr><td><code>interaction/requestProviderRuntimeHeaders</code></td><td>套餐网关风控验证</td><td><code>{"headersApplied": bool, "errorMessage"?}</code>（ZC-GUI 实现了从凭证文件供给 apiKey；不处理回 headersApplied:false 亦可）</td></tr>
+<tr><td><code>interaction/requestOfficialMcpAuthHeaders</code></td><td>官方 Marketplace MCP 鉴权头刷新</td><td>无官方鉴权能力时回结构化拒绝 <code>{"ok": false, "reason": "official_auth_unavailable"}</code></td></tr>
 <tr><td><code>interaction/browserList</code></td><td>AI 要用浏览器</td><td><code>{"browsers": [...]}</code>（能力清单，只列已实现的命令）</td></tr>
 <tr><td><code>interaction/browserExecute</code></td><td>执行浏览器命令</td><td>命令执行结果（约 40 个命令的 discriminatedUnion）</td></tr>
 <tr><td><code>automation/create|update|delete|list|checkTaskBinding</code></td><td>AI 调 Cron 系定时工具</td><td>宿主调度器的执行结果</td></tr>

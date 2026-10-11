@@ -31,8 +31,8 @@
 
 <div class="note"><span class="h">-32004 的两种成因，处理方式完全不同</span>
 ① <strong>冷会话</strong>：历史会话还没激活——<code>session/resume</code> 一次即愈，这是绝大多数情况；
-② <strong>真槽位满</strong>：运行时槽位约 16 个（LRU），此时 resume 最旧的腾位置。
-先试 resume，无效才考虑挤槽。</div>
+② <strong>真槽位满</strong>：运行时槽位约 16 个，且<strong>进程生命周期内不回收</strong>（没有 LRU 自动腾挪，
+唯一释放途径是重启 app-server）——宿主要靠"按需订阅 + 复用激活"控制占槽数量，而不是指望挤槽。</div>
 
 <h2>二、session/list：列出 + 两个 Windows 特有坑</h2>
 <pre><code>{"id": 2, "method": "session/list",
@@ -54,6 +54,8 @@
             "mode": "build"}}
 // → {"id": 3, "result": {"session": {"sessionId": "sess_abc", "protocol": {"name": "...", "version": 1}}}}</code></pre>
 <p><code>mode</code> 取 <code>build / edit / plan / yolo</code>（yolo = 全自动不放权限审批）。
+请求顶层还可以带 <code>mcpServers</code> 数组，把<strong>宿主侧 MCP server</strong>（比如 IDE 插件的浏览器、电脑控制工具面）
+按会话注入给 AI——不走 argv、不走磁盘配置；恢复会话时记得在 <code>session/resume</code> 里回灌同一份清单。
 创建成功后服务端会立刻反向发来 <code>session/requestRuntimePreferences</code>（第 6 课）——
 <strong>不答它会一直等</strong>，所以读循环要先于 create 启动。</p>
 

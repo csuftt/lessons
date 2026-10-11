@@ -74,7 +74,9 @@ ANTHROPIC_API_KEY=xxxxxxxx     # API Key
 # 可选但推荐：让 CLI 的请求头带上宿主身份
 ZCODE_APP_VERSION=0.16.5       # 拼进 user-agent / x-title
 # 可选：代理
-ZCODE_HTTP_PROXY=http://127.0.0.1:7890</code></pre>
+ZCODE_HTTP_PROXY=http://127.0.0.1:7890
+# NEW 代可选：显式指定渠道配置文件（默认会按内置路径找，多套环境共存时用它钉死）
+ZCODE_PERSONAL_PROVIDER_CONFIG_FILE=/path/to/provider_config.json</code></pre>
 
 <p>20 行 Python 跑通的最小宿主（scripts/diag-stream.py 的骨架，本课程大量复用）：</p>
 
@@ -143,13 +145,18 @@ stderr 不读的话，管道缓冲区（Windows 上约 4KB）写满后 CLI 会<s
 <thead><tr><th></th><th>OLD（v1 代）</th><th>NEW（v2 代）</th></tr></thead>
 <tbody>
 <tr><td>判别标记</td><td>不含 <code>ZCODE_PERSONAL_PROVIDER_CONFIG_FILE</code></td><td>文件含该标记串（兜底：看配置文件键形态）</td></tr>
-<tr><td>渠道配置</td><td><code>~/.zcode/cli/config.json</code></td><td><code>~/.zcode/v2/provider_config.json</code>（watch 热加载）</td></tr>
+<tr><td>渠道配置</td><td><code>~/.zcode/v2/config.json</code> 的 provider 节点</td><td><code>~/.zcode/v2/provider_config.json</code>（watch 热加载）</td></tr>
 <tr><td>参数风格</td><td>宽松，带 <code>runtimeModel</code> 大对象</td><td><strong>strict schema</strong>：多余字段直接 <code>-32602 Unrecognized key</code></td></tr>
 <tr><td>模型参数</td><td><code>runtimeModel</code> / <code>modelRef</code></td><td><code>modelSelection</code> / <code>selection</code> + <code>options.reasoningLevel</code></td></tr>
 </tbody>
 </table>
 <p>插件启动时判一次代，之后<strong>所有模型相关调用按代分支</strong>。strict 校验是新版最大行为差异，
 详细对照与自适应降级策略见第 5 课、第 8 课。</p>
+
+<div class="note"><span class="h">别把两棵配置树搞混</span>
+<code>~/.zcode/cli/config.json</code> 是 CLI 标准配置树（MCP servers 的 <code>mcp.servers</code>、技能启停的
+<code>skill</code> 节点），<strong>跟渠道注册表无关</strong>；provider 注册表在 <code>~/.zcode/v2/</code> 下
+（v1 代 config.json / v2 代 provider_config.json）。按错误路径找渠道定义会一无所获。</div>
 
 <div class="note"><span class="h">重试纪律</span>
 只有<strong>幂等读</strong>（session/list、session/read 等）允许超时重试；<code>session/create</code>、<code>session/send</code>

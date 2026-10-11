@@ -38,7 +38,7 @@
 <div class="arch">
   <div class="arch-row">
     <div class="arch-box"><b>session/subscribe</b><small>主会话事件主通道（legacy 面）</small></div>
-    <div class="arch-box"><b>v4/conversation/subscribe</b><small>子会话 / v4 帧通道</small></div>
+    <div class="arch-box"><b>v4/conversation/subscribe</b><small>子会话实时流 / 标题·索引·配置 topic</small></div>
   </div>
   <div class="arch-arrow">↓↓ 通知帧持续下发（无 id）</div>
   <div class="arch-row">
@@ -107,16 +107,46 @@
 <tbody>
 <tr><td><code>row.appended / row.upserted</code></td><td>追加/更新一行：{rowId, turnId, kind, text, output, status, actions:{canFork, canEdit}}；kind ∈ turnHeader / assistantText / reasoning / toolCall / userInput / timelineMarker</td></tr>
 <tr><td><code>row.delta</code></td><td>{rowId, path:"text", append}——流式增量往某行追加</td></tr>
-<tr><td><code>state.updated / row.removed</code></td><td>状态与删行（多数宿主可忽略）</td></tr>
+<tr><td><code>row.removed</code></td><td>删行</td></tr>
+<tr><td><code>state.updated</code></td><td>会话级状态 patch：<code>meta.title</code>（标题广播）、<code>backgroundWorks</code>（后台工作投影，全量替换）、<code>model.available</code>（模型能力位）——值得在行映射之外单独消费，别当噪声丢</td></tr>
 </tbody>
 </table>
 <p>宿主拿到帧后自己映射成 legacy 事件（turn.started / model.streaming / tool.updated…），
 这样上层 UI 只面对一种事件模型。要点：<strong>v4 订阅会话要先进本地白名单再发请求</strong>，
 且临时订阅（比如只为取 logEpoch）不要进白名单，否则快照回放会误推给 UI。</p>
+<p>topic 不止会话一种，ZC-GUI 实际常驻三类 v4 订阅：</p>
+<ul>
+<li><code>conversation/&lt;sessionId&gt;</code>：子会话完整订阅（行数据全映射），主会话也可以挂一条
+<strong>「标题轻订阅」</strong>——同 topic 但只抽 state.updated 的 meta.title 用、行数据丢弃，避免与 legacy 订阅双写。
+v2 代标题只在 v4 帧广播，这就是标题实时更新的最小代价方案；</li>
+<li><code>sessions-index/&lt;workspacePath&gt;</code>：快照 <code>snapshot.sessions</code> 全量 +
+<code>session.upserted / session.removed</code> 增量——会话列表的实时数据源，不用轮询 session/list；</li>
+<li><code>workspace-config/&lt;workspacePath&gt;</code>：snapshot.config + config.updated 增量。</li>
+</ul>
 
-<h2>五、v4/telemetry/event：v2 代的回合终态</h2>
+<h2>五、wire 分片：大帧会拆开送，宿主必须重组</h2>
+<p>wireVersion 3 起（新版换代 CLI），超过阈值的逻辑帧不再单帧送达，而是拆成一组<strong>分片信封</strong>推送：</p>
+<pre><code>{"method": "v4/conversation/frame",
+ "params": {"wireVersion": 3, "kind": "fragment",
+            "topic": "conversation/sess_abc", "subscriptionId": "sub_9",
+            "logicalFrameId": "lf_7c1", "logicalFrameOrdinal": 42,
+            "fragmentIndex": 0, "fragmentCount": 3,     // 第 0/3 片
+            "logicalBytes": 842113,                     // 逻辑帧总字节数
+            "checksum": {"algorithm": "crc32", "value": "a1b2c3d4"},
+            "dataBase64": "..."}}                       // 本片载荷</code></pre>
+<p>重组四步：<strong>按 logicalFrameId 分组</strong>收片 → 收齐 fragmentCount 片后按 fragmentIndex 排序 →
+逐片 base64 解码、拼接总长必须等于 logicalBytes → CRC32 对上 checksum.value 再解析 JSON。
+任一校验不过就丢弃整组（靠 resync 补），别拿半截数据硬解析。</p>
+
+<div class="warn"><span class="h">这个坑的死法很特别：时好时坏</span>
+小会话快照不分片、大会话快照（实测 827KB）才拆、实时增量帧小也不拆——缺重组器的宿主表现为
+<strong>小会话一切正常、大会话快照丢失、实时增量正常</strong>。宿主日志里「帧没到」和「帧被丢弃」长得一模一样，
+排查必须直连 dump 原始帧。这是真实插件项目里排查最久的缺陷之一；参照实现 V4WireAssembler
+（收片上限 64、pending 组 TTL 60s 防半组泄漏）。</div>
+
+<h2>六、v4/telemetry/event：v2 代的回合终态</h2>
 <p>v2 代 CLI 有个行为变化：<strong>模型校验后置</strong>——send 回执正常，但模型创建失败时 legacy 流上
-<strong>没有 turn.failed</strong>，终态只走 <code>v4/telemetry/event</code> 通知（type=turn.terminal）：</p>
+<strong>没有 turn.failed</strong>，终态只走 <code>v4/telemetry/event</code> 通知（kind=turn.terminal）：</p>
 <pre><code>{"method": "v4/telemetry/event",
  "params": {"kind": "turn.terminal", "status": "failed", "sessionId": "sess_abc",
             "turnId": "turn_1", "errorCode": "...", "errorMessage": "..."}}</code></pre>
@@ -124,7 +154,7 @@
 <code>success</code> → <strong>跳过</strong>（legacy 流已有真实完成帧，重复合成会出现两个结束气泡）。
 终态来源必须收敛到单一出口。</p>
 
-<h2>六、检索练习</h2>
+<h2>七、检索练习</h2>
 <div class="quiz" data-title="第 3 课练习">
   <div class="quiz-q" data-answer="2">
     <p class="q-text">1. 订阅了子代理会话的 legacy session/subscribe，能收到什么？</p>
@@ -156,6 +186,14 @@
     <button class="quiz-opt">合成 turn.completed</button>
     <button class="quiz-opt">重置订阅</button>
     <button class="quiz-opt">跳过，legacy 流已有真实完成帧</button>
+    <p class="quiz-feedback"></p>
+  </div>
+  <div class="quiz-q" data-answer="2">
+    <p class="q-text">5. 小会话正常、大会话快照收不到、实时增量也正常，最可能？</p>
+    <button class="quiz-opt">订阅白名单漏登记</button>
+    <button class="quiz-opt">服务端不推大会话快照</button>
+    <button class="quiz-opt">wireVersion 3 大帧分片未重组，分片被当无效帧丢弃</button>
+    <button class="quiz-opt">afterSeq 设错了</button>
     <p class="quiz-feedback"></p>
   </div>
 </div>
