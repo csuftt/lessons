@@ -101,7 +101,7 @@
     <rect x="204" y="170" width="140" height="34" rx="7" fill="var(--code-bg)" stroke="var(--accent-3)" stroke-width="1.5"/>
     <text x="274" y="191" text-anchor="middle" fill="var(--ink)" font-size="10.5">MySQL 主库（半同步）</text>
     <rect x="204" y="212" width="140" height="34" rx="7" fill="var(--code-bg)" stroke="var(--line)"/>
-    <text x="274" y="233" text-anchor="middle" fill="var(--ink)" font-size="10.5">Pulsar Broker（双机房混布）</text>
+    <text x="274" y="233" text-anchor="middle" fill="var(--ink)" font-size="10.5">消息队列 Broker（双机房混布）</text>
     <rect x="204" y="254" width="140" height="34" rx="7" fill="var(--code-bg)" stroke="var(--line)"/>
     <text x="274" y="275" text-anchor="middle" fill="var(--ink)" font-size="10.5">MinIO 站点 A（纠删码双站点）</text>
 
@@ -117,7 +117,7 @@
     <rect x="574" y="170" width="140" height="34" rx="7" fill="var(--code-bg)" stroke="var(--accent-3)" stroke-width="1.5"/>
     <text x="644" y="191" text-anchor="middle" fill="var(--ink)" font-size="10.5">MySQL 半同步从库</text>
     <rect x="574" y="212" width="140" height="34" rx="7" fill="var(--code-bg)" stroke="var(--line)"/>
-    <text x="644" y="233" text-anchor="middle" fill="var(--ink)" font-size="10.5">Pulsar Bookie（跨机架感知）</text>
+    <text x="644" y="233" text-anchor="middle" fill="var(--ink)" font-size="10.5">消息队列存储（跨机架感知）</text>
     <rect x="574" y="254" width="140" height="34" rx="7" fill="var(--code-bg)" stroke="var(--line)"/>
     <text x="644" y="275" text-anchor="middle" fill="var(--ink)" font-size="10.5">MinIO 站点 B（纠删码双站点）</text>
 
@@ -136,7 +136,7 @@
   <p>同城双活数据层的标配是 MySQL 半同步复制。它的手册语义很美好：主库提交时等待至少一个从库确认收到 binlog 才返回客户端。但有个参数的默认值决定了现实：<code>rpl_semi_sync_source_timeout</code>（MySQL 8.4 命名，8.0.26 前叫 <code>rpl_semi_sync_master_timeout</code>）<strong>默认 10000 毫秒</strong>——从库 10 秒内没应答，主库不会报错，而是<strong>悄悄降级回异步复制继续提交</strong>。这意味着你的 RPO 从 0 变成了"取决于复制延迟"，而且<strong>降级恰好发生在从库不健康或机房链路抖动的时候</strong>——正是你最需要它的时刻。生产纪律：超时改 2000~3000ms（快速感知+留抖动余量），并且<strong>对降级本身做高级别告警</strong>（监控 <code>Rpl_semi_sync_source_status</code> 从 ON 变 OFF、<code>Rpl_semi_sync_source_no_tx</code> 计数增长），把"半同步实际在不在岗"变成一块每天有人看的仪表盘，而不是配置文件里的一行自我安慰。</p>
 
   <h3>坑二：缓存和消息不能照抄数据库的双活姿势</h3>
-  <p>Redis <strong>不要做跨机房主从</strong>——复制延迟叠加脑裂风险，切流时两边各说各话；正确姿势是两机房各自独立集群，以"缓存可重建"为原则，切流后接受短暂穿透回源（0017 思考题已推演过这条结论）。Pulsar 则相反，天然适合跨机房：BookKeeper 多副本加机架感知 placement，让写集合覆盖两机房，消息层无需任何双写。对象存储（MinIO）用<strong>双站点纠删码</strong>异步复制。<strong>每种数据资产的容灾姿势由它的可重建性决定</strong>，这是比"全都双活"省钱也稳得多的思路。</p>
+  <p>Redis <strong>不要做跨机房主从</strong>——复制延迟叠加脑裂风险，切流时两边各说各话；正确姿势是两机房各自独立集群，以"缓存可重建"为原则，切流后接受短暂穿透回源（0017 思考题已推演过这条结论）。消息队列则相反，天然适合跨机房：以 Pulsar 的 BookKeeper 为例，多副本加机架感知 placement，让写集合覆盖两机房，消息层无需任何双写（Kafka 的机架感知副本分配同理）。对象存储（MinIO）用<strong>双站点纠删码</strong>异步复制。<strong>每种数据资产的容灾姿势由它的可重建性决定</strong>，这是比"全都双活"省钱也稳得多的思路。</p>
 
   <h3>坑三：控制面单点——2023 年那场故障的核心教训</h3>
   <p>盘点你的全局共享服务：注册/配置中心、网关管控面、K8s API Server、监控告警、堡垒机、以及<strong>云厂商的控制面本身</strong>。这些组件挂掉时数据面也许还在跑，但你<strong>失去的是"改变系统的能力"</strong>——扩不了容、切不了流、改不了配置，甚至看不了监控。对策三层：① 切流入口与云控制面解耦（GSLB/DNS 服务别和业务同厂商同账号体系，至少留一条手工切换通道）；② 手工作业预案（机房型故障时的电话树、本地留存的账号与配置台账、不依赖云 API 的操作路径）；③ 数据面尽量自治（应用本地兜底的注册快照、配置快照——0002 期讲过的客户端容灾机制在这里第二次救你）。</p>
@@ -176,7 +176,7 @@ SET GLOBAL rpl_semi_sync_replica_enabled = 1;
     <tr><td>注册/配置中心</td><td>跨机房集群 + 客户端本地快照兜底</td><td>断网启动测试（0002 期方法）</td></tr>
     <tr><td>MySQL（交易库）</td><td>同城半同步，主从可切换</td><td>杀主库演练，核对 RPO/RTO 实测值</td></tr>
     <tr><td>Redis</td><td>机房独立集群，可重建，不跨机房主从</td><td>单机房缓存全清的回源压测</td></tr>
-    <tr><td>Pulsar</td><td>Bookie 副本跨机房 placement</td><td>下线单机房 Bookie 验证读写不中断</td></tr>
+    <tr><td>消息队列</td><td>存储副本跨机房 placement（BookKeeper/机架感知）</td><td>下线单机房存储节点验证读写不中断</td></tr>
     <tr><td>对象存储/文件</td><td>双站点复制或跨可用区纠删码</td><td>抽样比对两站点对象一致性</td></tr>
     <tr><td>GSLB/DNS</td><td>与业务云厂商解耦 + 手工切换通道</td><td>演练一次"云控制面不可用"场景</td></tr>
     <tr><td>监控/告警/堡垒机</td><td>独立账号体系与最低限度本地部署</td><td>主监控不可用时的备用观测路径检查</td></tr>
@@ -221,26 +221,6 @@ SET GLOBAL rpl_semi_sync_replica_enabled = 1;
     </div>
   </details>
 
-  <details class="q-card">
-    <summary>题目二：复盘阿里云 2023-11-12 场景：你的双活系统部署在该云单地域的两个机房，数据面一切正常，但云控制台与管控 API 异常持续 3.5 小时。①为什么你的自动切流方案可能完全失效？②这 3.5 小时里，哪些操作做不了、哪些仍然可用？③给出三层对策，并说明为什么"多活架构"本身解决不了这个问题。<span class="chev">▶ 点击展开解析</span></summary>
-    <div class="details-body">
-      <h4>🔍 ① 切流失效的机理</h4>
-      <p>切流链条上每一环都可能是云控制面的下游：GSLB 若用云厂商的智能解析产品，摘机房动作要走它的 API；应用扩容要走 K8s 托管集群的 API Server（控制面）；改配置中心参数可能依赖云上的中间件管控台；甚至监控大盘本身是云产品，你连"确认哪边出问题"的观测都失去了。故障期间还有客户连 DNS 解析都异常——"想跑都跑不了"。你的双活架构假设"出事时我有能力改变流量走向"，而控制面故障摧毁的正是这个假设本身。</p>
-      <h4>✅ ② 失效面盘点</h4>
-      <ul>
-        <li><strong>做不了：</strong>扩容/缩容（集群 API 不可用）、切流（GSLB 控制不可用）、新建资源（ECS/RDS 管控不可用）、改云上安全组/白名单、查看云监控定位问题；</li>
-        <li><strong>仍然可用：</strong>在跑的虚机/容器/数据库（数据面正常）、应用自身的无状态多副本与本地健康检查自愈、注册中心客户端快照与本地配置兜底（0002 期机制）、自建监控（若部署在他处）、Pulsar/Kafka 等自建中间件的数据面读写。</li>
-      </ul>
-      <h4>🛡 ③ 三层对策</h4>
-      <ul>
-        <li><strong>入口解耦层：</strong>GSLB/权威 DNS 选用与业务云不同厂商（或自建 + 商用双通道），保住"至少一条不依赖云控制面的切流路径"；关键证书、SDK、脚本本地留存；</li>
-        <li><strong>手工预案层：</strong>机房型/区域型/厂商级三档故障的电话树与决策链（谁有权拍板降级只读）、本地台账（资产清单、账号、拓扑图离线可查）、降级预案（非核心功能熔断清单，把容量压力主动降下来而不是硬扛）；</li>
-        <li><strong>数据面自治层：</strong>应用依赖的注册/配置快照本地化、中间件集群多机房 placement、数据备份至少一份在云外（对象存储异构或离线）。这三层共同保证：控制面死了，系统"还能被操作"。</li>
-      </ul>
-      <h4>⚡ 为什么多活解决不了</h4>
-      <p>多活（无论同城还是异地）解决的是<strong>数据面容量与故障接管</strong>：某个站点的计算/存储/网络坏了，流量去别的站点。而控制面故障里数据面本来就没坏——坏的是"改变数据面配置的能力"。这是两个正交的故障域：前者靠架构冗余，后者靠<strong>操作路径的冗余</strong>（多厂商入口、手工通道、离线台账）。2023 年那场故障的真正教训是：容灾方案的评审清单里，除了"机房没了怎么办"，必须加一行"我想切的时候切不动怎么办"。终极答案是多云/跨厂商部署，但代价极高；对多数公司，解耦切流入口 + 三层对策已是性价比正确的位置。</p>
-    </div>
-  </details>
 </section>
 
 <!-- ================= 参考 & 导航 ================= -->
@@ -253,7 +233,7 @@ SET GLOBAL rpl_semi_sync_replica_enabled = 1;
   </div>
   <div class="card">
     <h4>📚 系列关联阅读</h4>
-    <p>高可用总纲与四层冗余模型：<a href="0017-arch-ha-overview.html">0017 高可用架构设计</a>（本期的下层地基）。切换工程：<a href="0033-mysql-ha-failover.html">0033 MySQL 高可用与故障切换</a>（数据面自动化切换的深讲位）。韧性参数：<a href="0049-distributed-design-patterns.html">0049 分布式设计模式</a>（重试预算/熔断，切流后的流量冲击治理）、<a href="0001-sentinel-circuit-breaking.html">0001 Sentinel</a>。客户端容灾：<a href="0002-nacos-registry-config.html">0002 Nacos 注册与配置中心</a>（本地快照兜底机制）。消息与对象存储跨机房姿势：<a href="0021-pulsar-message-reliability.html">0021 Pulsar 消息可靠性</a>、<a href="0023-minio-erasure-coding.html">0023 MinIO 纠删码</a>。下一期开启云原生前沿线——Service Mesh（Istio ambient 无 sidecar 模式）。</p>
+    <p>高可用总纲与四层冗余模型：<a href="0017-arch-ha-overview.html">0017 高可用架构设计</a>（本期的下层地基）。切换工程：<a href="0033-mysql-ha-failover.html">0033 MySQL 高可用与故障切换</a>（数据面自动化切换的深讲位）。韧性参数：<a href="0049-distributed-design-patterns.html">0049 分布式设计模式</a>（重试预算/熔断，切流后的流量冲击治理）、<a href="0001-sentinel-circuit-breaking.html">0001 Sentinel</a>。客户端容灾：<a href="0002-nacos-registry-config.html">0002 Nacos 注册与配置中心</a>（本地快照兜底机制）。消息与对象存储跨机房姿势：<a href="0021-pulsar-message-reliability.html">0021 Pulsar 消息可靠性</a>（消息队列深讲位）、<a href="0023-minio-erasure-coding.html">0023 MinIO 纠删码</a>。下一期开启云原生前沿线——Service Mesh（Istio ambient 无 sidecar 模式）。</p>
   </div>
 </section>
 
