@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · Service Mesh 重构进行时：Istio ambient 如何拆掉边车 | 2026-10-13</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0051</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0050-disaster-recovery-multi-active.html">上一期：容灾架构与多活</a> · <a href="https://www.bilibili.com/video/BV1ENpf6WEC8" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">云原生前沿 · 云原生前沿系列第 1 讲（服务网格篇）</p>
+  <h1>Service Mesh 重构进行时：Istio ambient 如何拆掉边车</h1>
+  <p class="subtitle">上一讲聊完容灾与多活，架构运维线告一段落，今天开启<strong>云原生前沿线</strong>。这条线从服务网格讲起：sidecar 模式十年后的第三次数据面重构——Istio ambient 用<strong>节点级 ztunnel + 按需 waypoint</strong> 把"每 Pod 一个代理"拆成"每节点一个"，省内存只是表象，真正的收益是<strong>网格对业务 Pod 的生命周期彻底隐身</strong>。两场 sidecar 时代的事故开局，讲透四层数据面演进、ztunnel/waypoint 分层、HBONE 隧道与四本治理账，最后给一套可直接落地的灰度迁移剧本。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">☁️ 云原生前沿</span>
+    <span class="tag-date">📅 2026-10-13 · 第 51 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>两起事故：sidecar 的账，最后都记在业务头上</h2>
+
+  <h3>事故一：凌晨的"内存税"审计——600 个 Pod 交了 90GB</h3>
+  <p>某平台团队年终成本审计时算了笔账：平台 60 个节点、约 600 个业务 Pod，每个 Pod 注入的 Envoy sidecar 实际消耗内存 <strong>80~150MiB</strong>（空载约 50MiB，带 L7 路由策略后普遍 100MiB 以上，600 个 Pod 的 sidecar 内存合计 <strong>约 90GB——相当于 3 个节点纯做代理</strong>。这不是异常，是 sidecar 模式的<strong>设计内成本</strong>：网格成本随 <strong>Pod 数</strong>线性增长，而不是随流量增长——200 个 QPS 的小服务和 20000 QPS 的核心服务交一样的"税"。预算会上 CFO 那句"这些代理在干什么"没人答得上来。</p>
+
+  <h3>事故二：升级一次网格，重启全公司</h3>
+  <p>另一起更疼：安全团队要求两周内完成 Envoy CVE 修复，网格团队看着工单发呆——sidecar 注入在业务 Pod 里，<strong>升级代理 = 滚动重启所有业务 Pod</strong>。600 个 Pod 分批重启，需要每个业务团队配合改发布窗口；有个 Job 类负载因为 sidecar 常驻容器不退出，卡在 NotReady 状态三小时；还有团队反馈"我们下个月有封网，重启不了"。一个基础设施组件的升级，变成了<strong>全公司 40+ 团队的协调项目</strong>。更糟的是升级当晚：两个 Pod 出现 sidecar 起了但应用没就绪的竞态（流入请求 502），排查发现是 <code>holdApplicationUntilProxyStarts</code> 注解没全局统一——边车模型最大的税，从来不在资源账单上，在<strong>两个容器的生命周期耦合</strong>里。</p>
+
+  <div class="callout">
+    <span class="callout-title">这两起事故的共同点</span>
+    <p>代理是基础设施，却住在业务的房子里。资源按 Pod 收税、升级要业务配合、OOM 限额共享、启动顺序竞态——<strong>sidecar 的每一笔账，最后都记在业务团队头上</strong>。2022 年 Istio 社区给出答案：把代理从 Pod 里搬出去。这就是 ambient 模式的起点。</p>
+  </div>
+</section>
+
+<!-- ================= 02 演进 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：数据面四层演进与 ambient 的"一拆为二"</h2>
+
+  <h3>四代数据面：代理一步步从业务进程里搬出来</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>代际</th><th>代理位置</th><th>代表</th><th>解决的问题 / 遗留的问题</th></tr>
+    <tr><td>第一代：SDK</td><td>业务进程内（代码库）</td><td>Spring Cloud / Dubbo 治理套件</td><td>语言绑定、升级推动业务改代码发版——治理逻辑污染业务仓库</td></tr>
+    <tr><td>第二代：sidecar</td><td>业务 Pod 内（独立容器）</td><td>经典 Istio / Linkerd</td><td>语言无关了，但资源按 Pod 线性收税、生命周期与业务耦合（本节事故）</td></tr>
+    <tr><td>第三代：sidecar-less</td><td>内核（eBPF）</td><td>Cilium Service Mesh</td><td>零用户态代理，L4 可下内核；L7 仍需 Envoy，可观测性弱于 sidecar</td></tr>
+    <tr><td><strong>第三代：ambient</strong></td><td><strong>节点级共享（DaemonSet）</strong></td><td><strong>Istio ambient（本期）</strong></td><td>代理按节点摊薄、对 Pod 完全透明；L7 按需下沉 waypoint——Istio 的主流路线</td></tr>
+  </table>
+  </div>
+  <p>这张表的关键认知：<strong>ambient 不是"新一代 Istio"，而是数据面部署形态的重构</strong>——控制面 istiod 没变、CRD 没变、VirtualService/AuthorizationPolicy 这些 API 没变，变的是"代理放在哪"。也因此，从 sidecar 到 ambient 的迁移不需要重写任何流量治理配置。</p>
+
+  <h3>一拆为二：ztunnel 管 L4，waypoint 管 L7</h3>
+  <p>sidecar 是"全能代理"：每个 Pod 里都有一个完整 Envoy，管 mTLS、也管 HTTP 路由。ambient 的核心思路是<strong>把这两件事拆开，按需付费</strong>：</p>
+  <ul>
+    <li><strong>ztunnel（L4，永远在线）：</strong>每个节点一个的 Rust DaemonSet，为节点上所有 Pod 提供 mTLS 加密、基于身份（SPIFFE）的 L4 授权、连接级遥测。它是"网格安全基座"，全量覆盖、不可选——零信任是默认而不是选项。ztunnel 很轻：官方口径约 <strong>30~50MB 内存、0.06 vCPU</strong> 量级，因为只做 L4 转发，不做 HTTP 解析；</li>
+    <li><strong>waypoint（L7，按需部署）：</strong>一个独立的 Envoy Deployment（不是 DaemonSet），按 namespace 或 serviceAccount 划界。只有需要 HTTP 路由、重试、熔断、按 header 鉴权这些 L7 能力的流量才经过它——不需要 L7 的服务，流量根本不碰 Envoy，<strong>L7 的成本从"全局默认"变成"局部显式"</strong>。</li>
+  </ul>
+  <p>一句话对比成本模型：sidecar 是 600 个 Pod = 600 个 Envoy；ambient 是 60 个节点 = 60 个 ztunnel（小钱）+ 按需几个 waypoint（L7 税只交给真正用 L7 的服务）。官方与社区实测口径：代理内存降幅<strong>七成上下</strong>（场景而异，纯 L4 场景降幅最大）。</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 430" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar51" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <text x="380" y="24" text-anchor="middle" fill="var(--muted)" font-size="13">ambient 数据面：节点共享 ztunnel（L4）+ 按需 waypoint（L7）</text>
+
+    <!-- Node 1 -->
+    <rect x="30" y="42" width="345" height="185" rx="12" fill="var(--card)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="202" y="64" text-anchor="middle" fill="var(--accent)" font-size="13" font-weight="700">节点 1</text>
+    <rect x="52" y="76" width="130" height="32" rx="7" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="117" y="96" text-anchor="middle" fill="var(--ink)" font-size="10.5">业务 Pod A（无代理）</text>
+    <rect x="200" y="76" width="130" height="32" rx="7" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="265" y="96" text-anchor="middle" fill="var(--ink)" font-size="10.5">业务 Pod B（无代理）</text>
+    <rect x="52" y="118" width="278" height="34" rx="7" fill="var(--code-bg)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="191" y="139" text-anchor="middle" fill="var(--accent)" font-size="11" font-weight="700">ztunnel（DaemonSet·Rust·L4 mTLS）</text>
+    <rect x="52" y="162" width="278" height="30" rx="7" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="191" y="181" text-anchor="middle" fill="var(--muted)" font-size="10">istio-cni：节点级流量重定向（iptables 规则）</text>
+
+    <!-- Node 2 -->
+    <rect x="385" y="42" width="345" height="185" rx="12" fill="var(--card)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="557" y="64" text-anchor="middle" fill="var(--accent)" font-size="13" font-weight="700">节点 2</text>
+    <rect x="407" y="76" width="130" height="32" rx="7" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="472" y="96" text-anchor="middle" fill="var(--ink)" font-size="10.5">业务 Pod C（无代理）</text>
+    <rect x="555" y="76" width="130" height="32" rx="7" fill="var(--code-bg)" stroke="var(--accent-3)" stroke-width="1.5"/>
+    <text x="620" y="90" text-anchor="middle" fill="var(--accent-3)" font-size="10.5" font-weight="700">waypoint（Envoy）</text>
+    <text x="620" y="103" text-anchor="middle" fill="var(--muted)" font-size="9">L7 路由/重试/鉴权</text>
+    <rect x="407" y="118" width="278" height="34" rx="7" fill="var(--code-bg)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="546" y="139" text-anchor="middle" fill="var(--accent)" font-size="11" font-weight="700">ztunnel（DaemonSet·Rust·L4 mTLS）</text>
+    <rect x="407" y="162" width="278" height="30" rx="7" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="546" y="181" text-anchor="middle" fill="var(--muted)" font-size="10">istio-cni：节点级流量重定向（iptables 规则）</text>
+
+    <!-- HBONE tunnel -->
+    <line x1="330" y1="135" x2="407" y2="135" stroke="var(--accent-3)" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#ar51)"/>
+    <text x="368" y="126" text-anchor="middle" fill="var(--accent-3)" font-size="10">HBONE</text>
+    <text x="368" y="158" text-anchor="middle" fill="var(--muted)" font-size="9">HTTP/2 CONNECT + mTLS</text>
+
+    <!-- traffic path notes -->
+    <rect x="30" y="248" width="345" height="48" rx="10" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="202" y="267" text-anchor="middle" fill="var(--muted)" font-size="10.5">纯 L4 流量：Pod A → 本节点 ztunnel 加密</text>
+    <text x="202" y="285" text-anchor="middle" fill="var(--muted)" font-size="10.5">→ 对端 ztunnel 解密 → Pod C（不碰任何 Envoy）</text>
+    <rect x="385" y="248" width="345" height="48" rx="10" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="557" y="267" text-anchor="middle" fill="var(--muted)" font-size="10.5">L7 流量：Pod B → ztunnel 发现已配置 waypoint</text>
+    <text x="557" y="285" text-anchor="middle" fill="var(--muted)" font-size="10.5">→ 经 HBONE 隧道送到 waypoint 做 L7 处理 → 目标</text>
+
+    <!-- capacity comparison -->
+    <rect x="30" y="318" width="700" height="92" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="380" y="341" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">同一集群 600 Pod / 60 节点：代理进程数对比</text>
+    <text x="380" y="363" text-anchor="middle" fill="var(--muted)" font-size="11">sidecar：600 个 Envoy（每 Pod 一个，内存随 Pod 数线性涨）</text>
+    <text x="380" y="385" text-anchor="middle" fill="var(--muted)" font-size="11">ambient：60 个 ztunnel（节点摊薄）+ 按需 2~3 个 waypoint（L7 税局部化）</text>
+  </svg>
+  </div>
+
+  <h3>HBONE 隧道：跨节点传输层的统一封装</h3>
+  <p>ztunnel 之间的流量走 <strong>HBONE（HTTP-Based Overlay Network Environment）</strong>——基于 HTTP/2 CONNECT 建隧道、mTLS 加密，端口 <strong>15008</strong>。源 IP 全程保留，NetworkPolicy 语义不被破坏。三个工程含义：① 跨节点流量在 ztunnel 之间端到端加密，应用容器里看到的一直是明文 HTTP；② NetworkPolicy 必须放行节点间 15008 端口，否则加入 ambient 的 Pod 互相访问会被静默丢弃——这是迁移期最常见的"无声故障"；③ 1.29 起 DNS 捕获默认开启（只对新 Pod 生效），DNS 劫持到 ztunnel 本地代理后,外部解析也走网格观测。</p>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：四本治理账与选型边界</h2>
+
+  <h3>容量账：先算清再上会</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>项</th><th>sidecar 模式</th><th>ambient 模式</th><th>架构含义</th></tr>
+    <tr><td>代理内存</td><td>每 Pod 50~150MiB，随 Pod 数线性</td><td>每节点 1 个 ztunnel（30~50MB 级）+ 按需 waypoint</td><td>600 Pod 集群代理内存约降 70%+；Pod 密度高的平台型集群收益最大</td></tr>
+    <tr><td>代理延迟</td><td>两跳本地 loopback（app↔sidecar 进程间）</td><td>跨节点多一跳 ztunnel（同节点直连场景除外）</td><td>P99 延迟两种模式同量级（ms 级）；极致低延迟交易链路单独压测再上</td></tr>
+    <tr><td>网格升级</td><td>滚动重启全部业务 Pod</td><td>ztunnel DaemonSet 独立滚动，业务零感知</td><td>基础设施升级与业务发布解耦——治理团队拿回升级主动权</td></tr>
+    <tr><td>加入网格</td><td>重启 Pod 注入 sidecar</td><td><strong>namespace 打标签即加入，Pod 不重启</strong></td><td>存量集群灰度接入的摩擦降一个量级</td></tr>
+  </table>
+  </div>
+
+  <h3>能力边界账：ambient 不是 sidecar 的完全替代</h3>
+  <p>选型前必须知道哪些能力<strong>还依赖 sidecar</strong>：① <strong>EnvoyFilter / WASM 扩展</strong>（waypoint 上不可用，深度定制 Envoy 的团队暂缓）；② <strong>VM/非 K8s 负载</strong>仍需 sidecar 接入；③ 部分长连接 L7 场景与多集群能力在 1.24~1.28 期间成熟中（多网络多集群 ambient 到 <strong>1.29 才 Beta</strong>）。好消息是<strong>两种模式可以共存</strong>：ambient namespace 与 sidecar namespace 混布，同一 istiod 管理——这就是灰度迁移的基础。</p>
+
+  <h3>版本坐标（2026-10）</h3>
+  <p>当前支持线 <strong>1.31</strong>（2026-08-31 发布，K8s 1.32~1.36）、1.30（2026-05-14）；<strong>1.29 已于 2026-10-12（昨天）EOL</strong>——还在 1.29 线的集群该把升级排进本月了。里程碑：ambient 于 <strong>1.24（2024-11-07）GA</strong>；1.29 DNS 捕获与 iptables 协调默认开启；1.30 提供 sidecar→ambient 官方迁移指南与 TrafficExtension API；1.31 引入 agentgateway waypoint（AI 流量，MCP 协议支持）与加权 waypoint 金丝雀。另外注意 1.31 起<strong>发布产物迁出 GCP 托管</strong>（镜像转 Docker Hub、Helm 转新地址），旧 gcr.io 仓库 12 月退役——CI 里的镜像地址该改了。</p>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：三条命令接入 + waypoint + 灰度迁移剧本</h2>
+
+  <h3>实战一：ambient 安装与 namespace 接入（零重启）</h3>
+  <pre><code><span class="c-com"># 1. 安装（ambient profile = istiod + istio-cni + ztunnel）</span>
+istioctl install --set profile=ambient -y
+kubectl get daemonset ztunnel -n istio-system   <span class="c-com"># 确认每个节点就位</span>
+
+<span class="c-com"># 2. namespace 打标签接入——存量 Pod 不重启，立即获得 mTLS</span>
+kubectl label namespace prod-app istio.io/dataplane-mode=ambient
+
+<span class="c-com"># 3. 验证：身份与 mTLS 已生效（istioctl 内置检查）</span>
+istioctl proxy-status
+istioctl x ztunnel-config workload -n prod-app   <span class="c-com"># 查看注册到网格的负载</span></code></pre>
+  <p>接入的第一分钟就要防两个坑：<strong>ztunnel 没覆盖的节点上的 Pod 会静默绕过 mTLS</strong>（DaemonSet 调度缺口 = 安全假象，用 <code>kubectl get pods -n istio-system -o wide | grep ztunnel</code> 核对每节点一个）；NetworkPolicy 未放行 <strong>15008</strong> 端口时跨节点流量被静默丢弃（先在预发环境全链路冒烟）。</p>
+
+  <h3>实战二：给核心服务配 L7——waypoint 三条命令</h3>
+  <pre><code><span class="c-com"># 1. 部署 namespace 级 waypoint 并自动附着（enroll）</span>
+istioctl waypoint apply -n prod-app --enroll-namespace
+
+<span class="c-com"># 2. 验证 waypoint 就绪（它就是个普通 Deployment，可 HPA）</span>
+kubectl get deployment -n prod-app -l istio.io/gateway-name=prod-app-waypoint
+
+<span class="c-com"># 3. 原有的 VirtualService / AuthorizationPolicy 原样生效——</span>
+<span class="c-com">#    istiod 自动把 L7 策略下发到 waypoint，无需改任何 YAML</span>
+kubectl apply -f virtualservice-canary.yaml   <span class="c-com"># 老配置直接用</span></code></pre>
+  <p>waypoint 是 <strong>Deployment</strong> 不是 DaemonSet——它吃的是自己 namespace 的 L7 流量，容量按该 namespace 的 RPS 规划（可 HPA 水平扩）。这也意味着它是新增组件：<strong>waypoint 挂了，该 namespace 的 L7 流量中断</strong>（L4 mTLS 不受影响）——给它配 PDB 与多副本，纳入核心链路监控。</p>
+
+  <h3>实战三：sidecar → ambient 灰度迁移剧本（存量集群）</h3>
+  <div class="steps">
+    <div class="step"><span class="step-n">1</span><p><strong>预检：</strong>盘点 EnvoyFilter/WASM 使用清单（waypoint 不支持则该 namespace 留 sidecar）；确认 Istio ≥1.30 与 K8s 版本矩阵；NetworkPolicy 15008 端口预放行。</p></div>
+    <div class="step"><span class="step-n">2</span><p><strong>试点 namespace（无 L7 优先）：</strong>摘 <code>istio-injection=enabled</code> → 打 <code>istio.io/dataplane-mode=ambient</code> → 滚动一次让 Pod 去掉 sidecar → mTLS/遥测/延迟全链路验证——每个 namespace 独立成灰度单元，回退=换回标签再滚动。</p></div>
+    <div class="step"><span class="step-n">3</span><p><strong>L7 namespace：</strong>按实战二补 waypoint；VirtualService 语义验证（金丝雀/重试/熔断各跑一轮预发用例）；waypoint 容量压测（该 namespace 峰值 RPS）。</p></div>
+    <div class="step"><span class="step-n">4</span><p><strong>收尾与复盘：</strong>分批迁移至存量 sidecar namespace 归零；对账代理内存降幅（预期 70% 量级）；ztunnel/waypoint 纳入升级 SOP（此后网格升级不再依赖业务配合）。</p></div>
+  </div>
+
+  <div class="card card-tip">
+    <h4>✅ Service Mesh 体检清单（拿去对表）</h4>
+    <p>☐ 代理内存占比已核算（每 Pod sidecar 实耗 vs ambient ztunnel 摊薄）　☐ 网格升级是否还需业务团队配合重启　☐ ztunnel DaemonSet 每节点就位有告警　☐ NetworkPolicy 已放行 HBONE 15008　☐ waypoint 有多副本+PDB 并纳入监控　☐ EnvoyFilter/WASM 清单已盘点（不支持项有留守方案）　☐ istiod 版本在支持线内（1.31/1.30）　☐ CI 镜像源已迁移至新仓库（1.31 起 GCP 托管退役）</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>sidecar 的税在生命周期耦合，不在内存：</strong>资源按 Pod 线性收、升级要全量重启业务、启动竞态 502——代理住在业务房子里，账都记在业务头上。</li>
+    <li><strong>ambient = 数据面一拆为二：</strong>ztunnel（节点级 Rust DaemonSet，L4 mTLS 基座，永远在线）+ waypoint（按需 Envoy，L7 局部显式付费）；控制面与 API 不变，是部署形态重构不是新产品。</li>
+    <li><strong>成本模型从"每 Pod"变"每节点"：</strong>600 Pod/60 节点集群从 600 个 Envoy 变 60 个 ztunnel+少量 waypoint，代理内存降约七成；加入网格从"重启注入"变"打标签即时生效"。</li>
+    <li><strong>能力边界要盘账：</strong>EnvoyFilter/WASM、VM 负载仍靠 sidecar；多网络多集群 ambient 1.29 才 Beta——但双模式可共存，灰度迁移就是在这个边界上做减法。</li>
+    <li><strong>新集群默认 ambient、存量渐进迁移是 2026 年社区共识</strong>；waypoint 是新增关键组件，多副本+PDB+监控三件套不能省。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目一：你们平台团队管理一个 60 节点、600 Pod 的共享 K8s 集群，40 个业务 namespace 全量 sidecar（Istio 1.28）。领导要求"三个月内把代理内存降七成、网格升级不再求业务团队"。你设计迁移方案：① 整体分几步，每步的验收标准是什么？② 迁移中某天值班收到"namespace orders 的服务间调用大面积超时"，给出你的定位路径（至少三个假设）；③ 有两个 namespace 重度使用 EnvoyFilter 做自定义协议解析，怎么处理？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 三问拆解</h4>
+      <p><strong>① 分步与验收：</strong>四步走（对应正文实战三）——<strong>第一步升级网格到 1.30+</strong>（验收：canary revision 并存、sidecar 流量无回归；1.28 已 EOL，先升版本再迁模式，变量解耦）；<strong>第二步无 L7 的 namespace 批量迁 ambient</strong>（验收：mTLS 全连通、L4 遥测完整、代理内存降幅对账）；<strong>第三步 L7 namespace 逐个配 waypoint</strong>（验收：金丝雀/重试/鉴权语义用例全绿、waypoint 压测过峰值）；<strong>第四步收尾</strong>（验收：sidecar 注解清零、升级演练一次 ztunnel 滚动重启全程业务无感——这条直接回应领导的第二条要求）。里程碑节奏建议：月一升级+试点、月二批量、月三 L7 与收尾。</p>
+      <p><strong>② 超时定位三假设：</strong>迁移期超时，先怀疑"这次变更动了什么"而非业务代码——<strong>假设一：NetworkPolicy 未放行 15008</strong>（orders 刚迁 ambient，跨节点 HBONE 流量被丢，特征=同节点通、跨节点挂，<code>ztunnel</code> 日志 connection established 但无响应）；<strong>假设二：waypoint 容量不足或 PDB 缺失</strong>（L7 流量集中过 waypoint，单副本过载排队，特征=延迟均匀放大而非超时尖刺，看 waypoint 的 downstream_rq_pending 指标）；<strong>假设三：混合模式互访语义</strong>（orders 已迁 ambient，依赖的库存 namespace 还是 sidecar，双方对 mTLS/路由的假设不一致，特征=特定依赖方向失败，<code>istioctl proxy-status</code> 与 AuthorizationPolicy shadow（dry-run）核对）。定位次序：先看变更窗口与 namespace 迁移清单的交集，再按假设一→二→三收窄。</p>
+      <p><strong>③ EnvoyFilter 重度 namespace：</strong>不迁、留守 sidecar——EnvoyFilter 在 waypoint 上不可用，强迁等于砍功能。但可以<strong>拆分 namespace 内部</strong>：把不需要 EnvoyFilter 的服务拆出去，重度的留在原 namespace 保持 sidecar 模式（双模式共存就是为这种不均衡设计的）。同时把这两个 namespace 的自定义协议解析需求登记为长期改造项——评估迁移到 TrafficExtension API（1.30+ Alpha）或等 waypoint 扩展能力补齐，让"留守"有时间边界而不是永久债。</p>
+    </div>
+  </details>
+
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>Istio 官方文档 · Ambient Mesh（安装、架构、waypoint 与迁移指南的权威出处）：<br>
+    <a href="https://istio.io/latest/docs/ambient/" target="_blank" rel="noopener">istio.io/latest/docs/ambient</a>（配套阅读：Istio 官方博客《Istio Ambient Mesh GA》公告——GA 判定标准与性能口径；CNCF 博客 ambient 生命周期与 Job 负载案例；istio.io 支持版本页——版本 EOL 时间表）</p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>集群侧基础：<a href="0043-k8s-pod-deployment-service.html">0043 三件套控制循环</a>（Pod 生命周期与 sidecar 竞态的底层机制）、<a href="0044-k8s-configmap-secret.html">0044 配置管理</a>、<a href="0024-k8s-ingress-service-traffic.html">0024 流量入口三道门</a>（南北向流量与东西向网格的边界）。治理同构：<a href="0032-spring-cloud-gateway.html">0032 网关入口防线</a>（waypoint 与网关的重试/熔断语义同源）、<a href="0049-distributed-design-patterns.html">0049 分布式设计模式</a>（重试预算——网格层治理的参数视角）、<a href="0028-prometheus-grafana.html">0028 监控体系</a>（ztunnel/waypoint 指标接入）。下一期继续云原生前沿线——eBPF 与 Cilium 网络。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0050-disaster-recovery-multi-active.html">← 上一期：容灾架构与多活</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 51 期 · 云原生前沿系列 · 下一期预告：eBPF 与 Cilium 网络</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
