@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>技术概念手记 · HTTPS 建连：从 TCP 通道到 TLS 加密</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">TECH CONCEPT NOTES · 0002</span>
+  <span><a href="../index.html">栏目目录</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">网络基础 · HTTPS</p>
+  <h1>HTTPS 建连：从 TCP 通道到 TLS 加密</h1>
+  <p class="subtitle">敲下回车到页面出现，前面一小半时间不在"下载"，而在"对话"——先和服务器对齐 TCP 序号，再完成 TLS 建连、密钥交换、加解密。这篇把全过程拆到每一步：<strong>为什么是三次、密钥为什么不走网络、加密到底加在哪一层</strong>，以及怎么用命令亲眼看见它们。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🌐 网络基础</span>
+    <span class="tag-date">📅 2026-10-13 · 第 2 期</span>
+    <span class="tag time">⏱ 预计阅读 9 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>场景：同一个"连不上"，卡在不同层</h2>
+  <p>打开 DevTools 的 Timing 面板看一次页面加载：DNS 解析完之后，先有一段 <code>Initial connection</code>，再来一段 <code>SSL</code>，然后才轮到 <code>Request sent</code> 和下载。<strong>这两段就是 HTTPS 建连的上下两半</strong>——TCP 握手建立"可靠通道"，TLS 在这条通道里建立"信任"。通道没建好，一个字节都发不出去；信任没建好，发出去的也是明文。</p>
+  <p>日常工作里撞上它们，往往是两条完全不同的报错：<code>Connection timed out</code>——TCP 三次握手没完成，查网络通不通、防火墙放没放行；<code>SSL certificate problem</code>——TCP 早就握上了，卡在 TLS 的证书验证，查证书过期、域名不匹配、信任链缺根。<strong>同一个"连不上"，卡在哪一层，修法完全不同</strong>。分不清这两层，排查就只能靠猜。</p>
+  <p>这一期就把从敲下回车到发出第一个 HTTP 请求之间的全过程讲透：TCP 握手对齐什么、为什么必须是三次、连接怎么体面地收尾；TLS 建连四步怎么走、会话密钥为什么两边各算一把、握手之后的每条数据是怎么被加密的——以及，怎么亲眼看一次。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：先对齐序号，再对齐信任</h2>
+
+  <h3>TCP 握手：三次，把序号对齐</h3>
+  <p>TCP 是<strong>按字节编号</strong>的协议：每个字节都有序号，接收方靠序号去重、排序、确认。"哪边发到哪了"必须两边一致，所以连接建立的第一件事是<strong>交换各自的初始序列号（ISN）</strong>，顺便确认"你发的我能收、我发的你能收"。这就是三次握手：</p>
+  <div class="diagram">
+  <svg viewBox="0 0 760 320" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="ar3" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+    <text x="380" y="18" text-anchor="middle" fill="var(--muted)" font-size="13">三次握手：交换初始序列号，确认双向畅通</text>
+
+    <!-- 两端 -->
+    <rect x="90" y="34" width="160" height="30" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="170" y="54" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">客户端</text>
+    <rect x="510" y="34" width="160" height="30" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="590" y="54" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">服务端（LISTEN）</text>
+    <line x1="170" y1="64" x2="170" y2="268" stroke="var(--line)" stroke-dasharray="4 4"/>
+    <line x1="590" y1="64" x2="590" y2="268" stroke="var(--line)" stroke-dasharray="4 4"/>
+
+    <!-- ① SYN -->
+    <line x1="172" y1="100" x2="586" y2="100" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#ar2)"/>
+    <text x="380" y="90" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">① SYN　seq = x</text>
+    <text x="380" y="116" text-anchor="middle" fill="var(--muted)" font-size="10">"我的初始序号是 x"（SYN 自己占一个序号）</text>
+
+    <!-- ② SYN+ACK -->
+    <line x1="588" y1="152" x2="174" y2="152" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#ar2)"/>
+    <text x="380" y="142" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">② SYN + ACK　seq = y, ack = x+1</text>
+    <text x="380" y="168" text-anchor="middle" fill="var(--muted)" font-size="10">"收到你的 x，我的初始序号是 y"</text>
+
+    <!-- ③ ACK -->
+    <line x1="172" y1="204" x2="586" y2="204" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#ar3)"/>
+    <text x="380" y="194" text-anchor="middle" fill="var(--accent)" font-size="11.5" font-weight="700">③ ACK　ack = y+1</text>
+    <text x="380" y="220" text-anchor="middle" fill="var(--muted)" font-size="10">"收到你的 y"（纯 ACK 不占序号）</text>
+
+    <rect x="150" y="240" width="460" height="30" rx="8" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.2"/>
+    <text x="380" y="260" text-anchor="middle" fill="var(--ink)" font-size="10.5">通道就绪，全双工 —— 整个过程一个来回（1 个 RTT）</text>
+    <text x="380" y="296" text-anchor="middle" fill="var(--muted)" font-size="9.5">为什么 ack 是 x+1？因为 SYN 占一个序号。FIN 同理；纯 ACK 不占——RFC 9293：否则就要"确认对确认"，没完没了</text>
+  </svg>
+  </div>
+  <p><strong>为什么必须是三次，两次不行？</strong>RFC 9293（2022 年 8 月发布的现行 TCP 规范，取代 43 岁的 RFC 793）在 §3.5 给了标准答案，原话是："三次握手的主要目的，是防止<strong>历史上重复的连接请求</strong>造成混乱。"场景是这样：一个在网络里迷路很久的旧 SYN 迟迟才到，服务端收到 SYN 时<strong>无法分辨它是新请求还是旧包裹</strong>——如果收 SYN 就直接建连，这个对方早已放弃的旧包会开出一条"客户端毫不知情"的僵尸连接，占着端口和内存。三次握手的第三次 ACK 正是留给服务端的核对机会：旧 SYN 进来后服务端回 SYN+ACK，真客户端一看 ack 对不上自己发出的序号，回一个 RST 把连接拆掉，服务端安全回到监听。两次握手没有这个环节。</p>
+  <p>还有一条容易被忽略的规则：<strong>初始序列号不是从零开始的，而是随机的</strong>。RFC 9293 要求用"单调递增时钟 + 外部无法推算的伪随机函数"生成——一方面让旧连接的迟到报文落在新连接的序号窗口之外，另一方面防攻击者猜测序号伪造报文注入。</p>
+
+  <h3>收尾：四次挥手与 TIME_WAIT</h3>
+  <p>有建立就有关闭，而且关闭比建立多一次——因为 TCP 是全双工，<strong>两个方向要各自关一次</strong>：</p>
+  <div class="flow-strip">
+    <div class="flow-step"><span class="no">1</span>
+      <p class="what">主动方发 FIN</p>
+      <p class="how">"我这边发完了"</p>
+      <p class="why">FIN 占一个序号</p></div>
+    <div class="flow-step"><span class="no">2</span>
+      <p class="what">对端回 ACK</p>
+      <p class="how">"知道你发完了"</p>
+      <p class="why">它自己还能继续发（半关闭）</p></div>
+    <div class="flow-step"><span class="no">3</span>
+      <p class="what">对端发 FIN</p>
+      <p class="how">"我也发完了"</p>
+      <p class="why">数据发完才发，所以晚一步</p></div>
+    <div class="flow-step"><span class="no">4</span>
+      <p class="what">主动方回 ACK</p>
+      <p class="how">进入 TIME_WAIT</p>
+      <p class="why">等 2×MSL 再销毁</p></div>
+  </div>
+  <div class="rule"><span class="mark">⚠</span><div class="txt">
+    <strong>TIME_WAIT 是主动关闭一方的正常状态，不是故障</strong>
+    <p class="why">RFC 9293 要求等待 2×MSL（报文最大生存时间，规范建议值 2 分钟）：一是兜底重传最终 ACK（它丢了对方会重发 FIN），二是让本连接迷路的旧报文自然消亡，免得污染四元组相同的新连接。Linux 内核把这段时间实现为固定 60 秒（<code>TCP_TIMEWAIT_LEN</code>）</p>
+  </div></div>
+
+  <h3>TLS 建连：一个往返，四步走完</h3>
+  <p>TCP 只保证"送到、按序、不丢"，<strong>不保证保密，也不验证身份</strong>——链路上任何一环都能窃听、篡改、冒充。HTTPS 里的 S 就靠 TLS（传输层安全，当前主流版本 TLS 1.3，RFC 8446，2018 年 8 月发布）在 TCP 之上补三件事：协商加密算法、商定会话密钥、验证服务器身份。TLS 1.3 建连只要<strong>一个往返</strong>，四步走完：</p>
+  <div class="diagram">
+  <svg viewBox="0 0 760 350" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar4" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <text x="380" y="18" text-anchor="middle" fill="var(--muted)" font-size="13">TLS 1.3 建连：一个往返，ServerHello 之后全程加密</text>
+
+    <rect x="90" y="32" width="160" height="28" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="170" y="51" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">客户端</text>
+    <rect x="510" y="32" width="160" height="28" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="590" y="51" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">服务端</text>
+    <line x1="170" y1="60" x2="170" y2="298" stroke="var(--line)" stroke-dasharray="4 4"/>
+    <line x1="590" y1="60" x2="590" y2="298" stroke="var(--line)" stroke-dasharray="4 4"/>
+
+    <!-- ClientHello -->
+    <line x1="172" y1="94" x2="586" y2="94" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#ar4)"/>
+    <text x="380" y="84" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">① ClientHello（明文）</text>
+    <text x="380" y="110" text-anchor="middle" fill="var(--muted)" font-size="10">支持的版本与密码套件 + key_share：直接带上自己的 DH 公钥</text>
+
+    <!-- ServerHello -->
+    <line x1="588" y1="140" x2="174" y2="140" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#ar4)"/>
+    <text x="380" y="130" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">② ServerHello（明文的最后一条）</text>
+    <text x="380" y="156" text-anchor="middle" fill="var(--muted)" font-size="10">选定参数 + 服务端 key_share —— 两边各自算出同一把会话密钥</text>
+
+    <!-- 加密区 -->
+    <rect x="100" y="172" width="560" height="96" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.2"/>
+    <text x="380" y="190" text-anchor="middle" fill="var(--accent)" font-size="9.5" font-weight="700">—— 从这里开始全部加密 ——</text>
+    <line x1="588" y1="212" x2="174" y2="212" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#ar4)"/>
+    <text x="380" y="204" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">③ {证书链 · CertificateVerify · Finished}</text>
+    <text x="380" y="228" text-anchor="middle" fill="var(--muted)" font-size="10">CertificateVerify：用证书私钥对"整段握手"签名，证明私钥持有人即服务器本人</text>
+    <line x1="172" y1="258" x2="586" y2="258" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#ar4)"/>
+    <text x="380" y="250" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">④ {Finished}</text>
+    <text x="380" y="274" text-anchor="middle" fill="var(--muted)" font-size="10">客户端对整段握手的校验码——密钥与完整性一次确认</text>
+
+    <rect x="150" y="282" width="460" height="26" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="380" y="300" text-anchor="middle" fill="var(--ink)" font-size="10.5">连接与信任同时就绪 —— 当场就能发加密的 HTTP 请求（1 个 RTT）</text>
+    <text x="380" y="336" text-anchor="middle" fill="var(--muted)" font-size="9.5">身份：证书链追溯到系统信任的根 CA；密钥：临时 DH，用完即弃 → 前向保密</text>
+  </svg>
+  </div>
+  <p>逐步看四个动作各自在干什么：<strong>① ClientHello</strong> 是客户端的"能力清单"——我支持这些版本、这些密码套件、这条椭圆曲线，并且<strong>直接附带自己这次连接的密钥交换公钥</strong>（key_share 扩展），这是 1.3 省 RTT 的关键：不等协商完再要公钥，第一次就把材料备齐。<strong>② ServerHello</strong> 是服务端的"拍板"——选定版本、套件、曲线，附上自己的 key_share。至此<strong>密钥交换所需的全部材料已经到位</strong>，两边各自算出同一把会话密钥（下一段细讲），从下一条消息起全部加密。<strong>③ 服务端密文三连</strong>：证书链（我是谁，由谁担保）、CertificateVerify（用证书私钥对整段握手签名，证明"我"就是证书的主人，且握手中途没被篡改）、Finished（对整段握手的校验码）。<strong>④ 客户端回自己的 Finished</strong>——验完证书、验完签名，再用校验码确认双方密钥一致，建连收口，第一条 HTTP 请求当场就能塞进这条加密通道。</p>
+
+  <h3>密钥交换：密钥不走网络，两边各算一把</h3>
+  <p>最反直觉也最核心的一步：<strong>会话密钥从头到尾没有在网络上传输过</strong>。TLS 1.3 强制使用 ECDHE（椭圆曲线临时 Diffie-Hellman）：</p>
+  <div class="diagram">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar5" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <text x="380" y="18" text-anchor="middle" fill="var(--muted)" font-size="13">ECDHE：私钥不出本机，网络上只飞公钥</text>
+
+    <rect x="60" y="38" width="230" height="104" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="175" y="60" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">客户端</text>
+    <text x="175" y="82" text-anchor="middle" fill="var(--muted)" font-size="10.5">随机私钥 x（绝不外发）</text>
+    <text x="175" y="102" text-anchor="middle" fill="var(--muted)" font-size="10.5">公钥 xG（随 ClientHello 发出）</text>
+    <text x="175" y="126" text-anchor="middle" fill="var(--accent)" font-size="10">计算：x × (yG)</text>
+
+    <rect x="470" y="38" width="230" height="104" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="585" y="60" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">服务端</text>
+    <text x="585" y="82" text-anchor="middle" fill="var(--muted)" font-size="10.5">随机私钥 y（绝不外发）</text>
+    <text x="585" y="102" text-anchor="middle" fill="var(--muted)" font-size="10.5">公钥 yG（随 ServerHello 发出）</text>
+    <text x="585" y="126" text-anchor="middle" fill="var(--accent)" font-size="10">计算：y × (xG)</text>
+
+    <line x1="292" y1="76" x2="468" y2="76" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#ar5)"/>
+    <text x="380" y="68" text-anchor="middle" fill="var(--muted)" font-size="10">xG</text>
+    <line x1="468" y1="96" x2="292" y2="96" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#ar5)"/>
+    <text x="380" y="88" text-anchor="middle" fill="var(--muted)" font-size="10">yG</text>
+
+    <rect x="180" y="166" width="400" height="66" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.3"/>
+    <text x="380" y="190" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">x × (yG) = y × (xG) = xyG —— 同一个共享秘密</text>
+    <text x="380" y="214" text-anchor="middle" fill="var(--muted)" font-size="10.5">G 是双方协商好的曲线基点；乘法可交换，所以两边各自算、结果必相同</text>
+
+    <text x="380" y="258" text-anchor="middle" fill="var(--muted)" font-size="10">窃听者抓到 xG、yG 也算不出 xyG —— 椭圆曲线离散对数是"单向门"，进去容易出来难</text>
+    <text x="380" y="280" text-anchor="middle" fill="var(--muted)" font-size="10">共享秘密再经 HKDF 派生：握手期收发两把 + 应用期收发两把，各司其职</text>
+  </svg>
+  </div>
+  <p>四步：双方<strong>各自随机生成一次性私钥</strong>（x、y），私钥从不出本机；只交换各自派生的公钥（xG、yG，G 是协商好的曲线基点）；客户端计算 x·(yG)，服务端计算 y·(xG)，乘法可交换，<strong>两边算出同一个共享秘密 xyG</strong>；最后用 HKDF 密钥派生函数把它扩成一串密钥材料——握手期收发各一把、应用期收发各一把，互不混用。窃听者拿到了 xG 和 yG 也无济于事：从 xG 反推 x 是椭圆曲线离散对数问题，算力上不可行，这就是"单向门"。</p>
+  <div class="rule"><span class="mark">⚠</span><div class="txt">
+    <strong>临时密钥用完即弃，就是前向保密</strong>
+    <p class="why">x、y 只活在这一次连接里。哪怕服务器的证书私钥日后泄露，攻击者翻出今天录下的全部密文，也没有 xyG 可用——历史流量依然解不开。TLS 1.3 把它做成强制，并砍掉了 TLS 1.2 的静态 RSA 密钥交换（那种模式密钥材料要用服务器公钥加密传输，私钥一泄历史全泄）</p>
+  </div></div>
+
+  <h3>加密解密：会话密钥怎么用在每条数据上</h3>
+  <p>握手结束后，两边手里有同一组对称密钥，之后<strong>所有数据走记录层（record），逐条加密</strong>。这是混合加密的设计：非对称密码（慢）只在建连时用，传输全程用对称密码（快）。三个要点把"怎么加解密"讲完整：</p>
+  <ul>
+    <li><strong>AEAD：加密和防篡改一次完成</strong>。TLS 1.3 只保留 AEAD 类算法（AES-GCM、ChaCha20-Poly1305）：同一次运算既把明文加密，又生成认证标签——密文动一个比特、顺序换一条记录，标签就验不过。不需要先加密再另算一次 HMAC。</li>
+    <li><strong>一条一密：每条记录独立 nonce</strong>。记录层维护一个从 0 递增的序号，nonce = 固定 IV 异或当前序号——同一把钥匙下每条记录的 nonce 都不同。重放旧记录、打乱顺序、掐掉尾巴，全部过不了 AEAD 验证，这就把"防重放、防重排"焊进了加密本身。</li>
+    <li><strong>Finished 是第一件作品</strong>。双方各发的 Finished，就是对"整段握手抄本"用刚算出的密钥算的校验码：密钥错一位、握手中任何一条消息被改过一个字节，两边就给不出同一个值——密钥确认与防篡改一次收口。</li>
+  </ul>
+  <div class="qa">
+    <span class="q">抓包能看到 ClientHello、ServerHello，为什么后面的数据全是密文、解不开？</span>
+    <div class="a"><p>因为解密需要的 xyG 从未在网络上出现过。网上飞的只有双方公钥，而公钥反推私钥是算力不可行的单向门；真正的密钥材料是两边<strong>本地计算</strong>出来的。中间人手里没有 x 也没有 y，凑不出 xyG，也就派生不出任何一把会话密钥。</p></div>
+  </div>
+  <details class="q-card">
+    <summary>深挖：HKDF 派生链长什么样？TLS 1.2 的老流程又差在哪？<span class="chev">▶ 点击展开</span></summary>
+    <div class="details-body">
+      <p><strong>派生链</strong>：共享秘密不是直接拿来加密的。它先与 0-RTT 的早期秘密汇合，逐级 HKDF-Extract：早期秘密 → 握手秘密 → 主秘密，每一级再 HKDF-Expand 出收发两个方向各自的流量密钥（握手期两把、应用期两把，0-RTT 再加一把）。分级的好处：握手期的密钥在建连完成后即可丢弃，应用数据的密钥不受握手消息影响，0-RTT 的弱密钥也污染不到正式数据。</p>
+      <p><strong>TLS 1.2 的差距</strong>：完整握手要 <strong>2 个 RTT</strong>——ClientHello → ServerHello + Certificate + ServerHelloDone → ClientKeyExchange + ChangeCipherSpec + Finished → ChangeCipherSpec + Finished，客户端发完第二趟才能发业务数据。RSA 密钥交换是把预主密钥用服务器公钥加密<strong>传过去</strong>，没有前向保密；握手主体明文，证书裸奔在链路上（中间设备能看到 SNI 和证书信息正是这个原因）。1.3 砍掉 RSA 交换、强制临时 DH、ServerHello 后全加密、往返砍半——安全性和速度一起赚。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 03 实战 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>实战：亲眼看见 HTTPS 建连</h2>
+
+  <h3>curl 计时：把 TCP 和 TLS 的开销拆开</h3>
+  <div class="codeblock term">
+    <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>分段计时</span><button class="copy">复制命令</button></div>
+    <pre><code><span class="t-cmt"># curl 缺省不输出任何计时，-w 要显式给格式</span>
+<span class="t-cmd">curl -so /dev/null -w 'TCP %{time_connect}s | TLS %{time_appconnect}s | 首字节 %{time_starttransfer}s\n' https://example.com</span>
+<span class="t-out">TCP 0.031s | TLS 0.092s | 首字节 0.147s</span></code></pre>
+  </div>
+  <p>三个时刻就是三个里程碑：<code>time_connect</code> 是<strong>TCP 三次握手完成</strong>，<code>time_appconnect</code> 是 <strong>TLS 建连也完成</strong>，两者之差就是 TLS 建连净耗时（TLS 1.3 下约等于一个 RTT 加证书验证与密钥计算）；<code>time_starttransfer</code> 是首字节到达。TLS 那 60 毫秒不是"网络慢"，是<strong>建连各付了一个往返</strong>——这也解释了为什么全站都在推连接复用和长连接：HTTP/1.1 起连接缺省就是持久连接（keep-alive），复用一条连接，握手只付一次。</p>
+
+  <h3>openssl s_client：看协商结果，但要知道它缺省偷懒</h3>
+  <div class="codeblock term">
+    <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>握手摘要</span><button class="copy">复制命令</button></div>
+    <pre><code><span class="t-cmd">openssl s_client -brief -connect example.com:443</span>
+<span class="t-out">CONNECTION ESTABLISHED</span>
+<span class="t-out">Protocol version: TLSv1.3</span>
+<span class="t-out">Ciphersuite: TLS_AES_256_GCM_SHA384</span>
+<span class="t-out">Verification: OK</span></code></pre>
+  </div>
+  <div class="rule warn"><span class="mark">⛔</span><div class="txt">
+    <strong>s_client 的缺省是"把连接建起来给你看"：不校验证书里的主机名，验证失败也照常继续</strong>
+    <p class="why">要完整校验得加 <code>-verify_hostname 域名</code> 和 <code>-verify_return_error</code>。做连通性诊断没问题，把"Verification: OK"当成"证书没问题"就会翻车</p>
+  </div></div>
+
+  <h3>ss 与 tcpdump：看状态，看报文</h3>
+  <div class="codeblock term">
+    <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>观察连接状态与握手报文</span><button class="copy">复制命令</button></div>
+    <pre><code><span class="t-cmt"># ss 缺省只列已连接（ESTAB）；看 TIME_WAIT 要显式指定状态</span>
+<span class="t-cmd">ss -tan state time-wait | wc -l</span>
+<span class="t-out">128</span>
+<span class="t-cmt"># 只抓带 SYN/ACK 标志位的包：-i any 看所有网卡，-nn 禁止翻译地址和端口名</span>
+<span class="t-cmd">tcpdump -nn -i any 'tcp[tcpflags] &amp; (tcp-syn|tcp-ack) != 0 and port 443'</span>
+<span class="t-out">12:01:33.101 IP 10.0.0.8.41822 &gt; 93.184.216.34.443: Flags [S],  seq 2837465021</span>
+<span class="t-out">12:01:33.219 IP 93.184.216.34.443 &gt; 10.0.0.8.41822: Flags [S.], seq 195630932, ack 2837465022</span>
+<span class="t-out">12:01:33.219 IP 10.0.0.8.41822 &gt; 93.184.216.34.443: Flags [.],  ack 1</span></code></pre>
+  </div>
+  <p>抓包输出就是教科书落地：<code>S</code> 是 SYN，<code>S.</code> 是 SYN+ACK，<code>.</code> 是纯 ACK；注意第二行 <code>ack 2837465022 = 对方 seq + 1</code>——<strong>SYN 占一个序号</strong>在这里看得见摸得着。此外 tcpdump 不写 <code>-i</code> 时缺省抓"编号最小的非回环网卡"，多网卡机器上"抓不到包"十有八九是抓错了网卡，先 <code>-i any</code>。TLS 那半在 tcpdump 里只会看到一片密文——现在你知道为什么了：密钥从未走过网络。</p>
+
+  <h3>你问我答</h3>
+  <div class="qa">
+    <span class="q">time_appconnect 减 time_connect，量的是什么？</span>
+    <div class="a"><p>纯 TLS 建连耗时：一个往返的传输，加证书链验证与 ECDHE 密钥计算。TLS 1.3 一个往返，TLS 1.2 要两个——所以老配置的站点这一段明显更长。</p></div>
+  </div>
+  <div class="qa">
+    <span class="q">服务器上几千个 TIME_WAIT，要调内核参数吗？</span>
+    <div class="a"><p>先回答"谁在频繁建连"：通常是你的程序在高频短连接里当主动关闭方。每个 TIME_WAIT 一分钟自愈，数量本身无害；根治靠连接池和长连接让握手少付，而不是改内核。非要动参数也先看清缺省值——<code>tcp_tw_reuse</code> 缺省 2，只允许回环地址复用，内核文档原话警告：非专家别改。</p></div>
+  </div>
+  <div class="qa">
+    <span class="q">既然密钥不走网络，为什么调试时能看到 HTTPS 明文？</span>
+    <div class="a"><p>那是在<strong>端点本地</strong>看的：浏览器开发者工具、服务端日志，或者把 keylog 文件（SSLKEYLOGFILE）喂给 Wireshark——记录的是本机自己派生出的密钥，不是从网络上截获的。这也反过来印证：没有端点配合，中间人拿不到明文。</p></div>
+  </div>
+</section>
+
+<!-- ================= 04 规则与坑 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>规则与坑：边界与报错对照</h2>
+  <p>证书相关报错先分三类，各有各的修法：</p>
+  <ul>
+    <li><strong><code>certificate has expired</code></strong>——证书过期。服务器该续期了；但客户端<strong>系统时间错乱</strong>也会报这个，先看本机时间。</li>
+    <li><strong><code>hostname mismatch</code></strong>——访问的域名不在证书的 SAN 列表里。比如拿 IP 直连一个只签了域名的证书。</li>
+    <li><strong><code>unable to get local issuer certificate</code></strong>——信任链缺根，典型于自签或企业内网 CA。修法是把根证书装进系统信任库，<strong>不是</strong> <code>-k</code> 一关了之。</li>
+  </ul>
+  <div class="rule warn"><span class="mark">⛔</span><div class="txt">
+    <strong>curl 的 <code>-k</code>（--insecure）关掉的是全部 TLS 保证</strong>
+    <p class="why">加密照跑，但对面是谁、报文有没有被篡改，一概不知。只留给一次性调试，别写进脚本和代码</p>
+  </div></div>
+  <p>再两条协议层面的：</p>
+  <ul>
+    <li><strong>SYN 洪泛与 syncookies</strong>：攻击者狂发 SYN 却不应答，半连接队列被打满。Linux 的 <code>tcp_syncookies</code> 缺省 1——<strong>backlog 溢出时</strong>才启用无状态握手（把状态编码进序号回给客户端，真客户端 ACK 回来再重建连接）。内核文档自己强调它是"严重违反 TCP 协议"的兜底手段，不能当常规扩容用。</li>
+    <li><strong>TLS 1.3 的 0-RTT 不是免费的午餐</strong>：复用会话时客户端可以带着加密数据直接发第一个 ClientHello，省一个往返。但 RFC 8446 写明 early data <strong>不具备前向保密、也没有跨连接的防重放保证</strong>——同样的数据可能被中间人原样重发。所以只放幂等请求（如 GET），写操作老老实实走完整建连。</li>
+  </ul>
+  <details class="q-card">
+    <summary>深挖：TIME_WAIT 暴涨时 dmesg 里的那句警告是什么？<span class="chev">▶ 点击展开</span></summary>
+    <div class="details-body">
+      <p><code>TCP: time wait bucket table overflow</code>——TIME_WAIT 数量顶到 <code>tcp_max_tw_buckets</code> 上限时，内核直接销毁最老的并打印这句。它只防简单 DoS，文档明确警告"不要人为调低这个上限"，遇到它该加不是该减；但更该问的还是那句话：谁在大量建短连接？</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 05 边界/对照 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>演进对照：1.2 → 1.3 → QUIC</h2>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th></th><th>TLS 1.2（2008）</th><th>TLS 1.3（2018）</th><th>QUIC（2021）</th></tr>
+    <tr><td><strong>建连往返</strong></td><td>完整握手 2 个 RTT</td><td>1 个 RTT（复用可 0-RTT）</td><td>TCP+TLS 合成 1 个 RTT（复用 0-RTT）</td></tr>
+    <tr><td><strong>密钥交换</strong></td><td>RSA/静态 DH 仍可选，无前向保密</td><td>强制 ECDHE，全前向保密</td><td>内嵌 TLS 1.3，同左</td></tr>
+    <tr><td><strong>握手明文暴露</strong></td><td>证书可见</td><td>ServerHello 之后全加密</td><td>几乎全程加密（仅固定包头明文）</td></tr>
+    <tr><td><strong>现状</strong></td><td>主流浏览器 2020 年起弃用</td><td>当前主流（RFC 8446）</td><td>HTTP/3 的底座（RFC 9000）</td></tr>
+  </table>
+  </div>
+  <p>方向很清楚：<strong>更少往返、强制前向保密、更少明文</strong>。QUIC 更进一步——把"通道"和"信任"两次对话合成一次，用户态实现、基于 UDP，连线建立带上了传输层没有的灵活性。理解了 TCP 与 TLS 的建连全过程，QUIC 不过是把同一套事（对齐状态 + 商定密钥 + 验证身份）更紧凑地重做了一遍。</p>
+</section>
+
+<!-- ================= 06 今日带走 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>今日带走</h2>
+  <ul class="key-points">
+    <li><strong>TCP 握手对齐的是序号</strong>：两边交换随机初始序号、确认双向畅通，一个字节都还没发；SYN 和 FIN 各占一个序号，纯 ACK 不占。</li>
+    <li><strong>第三次 ACK 防的是旧包</strong>：服务端分辨不出迟到的旧 SYN，三次握手给它核对的机会——对方不认账就 RST，开不出僵尸连接（RFC 9293 §3.5）。</li>
+    <li><strong>关闭比建立多一次，且主动关闭方要等</strong>：全双工两个方向各关一次；TIME_WAIT 等 2×MSL（Linux 实现 60 秒）让旧报文消亡，是正常状态不是故障。</li>
+    <li><strong>TLS 1.3 建连四步一个往返</strong>：ClientHello 带 key_share → ServerHello 拍板 → 服务端密文三连（证书+签名+校验码）→ 客户端 Finished 收口；ServerHello 之后全程加密。</li>
+    <li><strong>密钥不走网络，两边各算</strong>：私钥不出本机，网上只飞公钥，两边各自算出同一共享秘密再 HKDF 派生；临时密钥用完即弃 = 前向保密。</li>
+    <li><strong>传输靠对称 AEAD 一条一密</strong>：AES-GCM 加密防篡改一体，每条记录独立 nonce，重放重排全拦；非对称只管建连，对称管传输。</li>
+  </ul>
+</section>
+
+<!-- ================= 07 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>随堂小测</h2>
+  <div class="quiz" data-title="HTTPS 建连">
+    <span class="quiz-score"></span>
+    <div class="quiz-q" data-answer="2">
+      <p class="q-text">1. RFC 9293 说三次握手"必须三次"的主要理由是什么？</p>
+      <button class="quiz-opt">两次握手无法协商出加密密钥</button>
+      <button class="quiz-opt">三次比两次多一次确认，速度更稳定</button>
+      <button class="quiz-opt">防止历史上重复的连接请求开出对方毫不知情的僵尸连接</button>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q" data-answer="1">
+      <p class="q-text">2. TLS 1.3 里，会话密钥是怎么到双方手上的？</p>
+      <button class="quiz-opt">客户端生成后，用服务器证书公钥加密传给服务器</button>
+      <button class="quiz-opt">两边各算：只交换 DH 公钥，各自用对方公钥乘自己私钥，得到同一个共享秘密再派生</button>
+      <button class="quiz-opt">服务器生成后，随证书一起下发给客户端</button>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q" data-answer="0">
+      <p class="q-text">3. 主动关闭连接的一方，最后停在什么状态、等多久？</p>
+      <button class="quiz-opt">TIME_WAIT，等 2×MSL——Linux 实现为 60 秒</button>
+      <button class="quiz-opt">CLOSED，立即释放端口</button>
+      <button class="quiz-opt">FIN_WAIT，等对端超时后自动消失</button>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q" data-answer="2">
+      <p class="q-text">4. openssl s_client 建连后显示 Verification: OK，能说明什么？</p>
+      <button class="quiz-opt">证书链和主机名都校验通过，可以放心</button>
+      <button class="quiz-opt">只校验了主机名，证书链没查</button>
+      <button class="quiz-opt">只说明证书链对上了信任库——主机名缺省根本不查</button>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 08 延伸阅读 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>TCP 连接建立与终止的现行规范——三次握手、序号规则、TIME_WAIT 与 MSL 都在 §3.4–3.6：<br>
+    <a href="https://www.rfc-editor.org/rfc/rfc9293.html" target="_blank" rel="noopener">RFC 9293: Transmission Control Protocol (2022，取代 RFC 793)</a></p>
+    <p>TLS 1.3 建连全流程、密钥派生、0-RTT 与安全性质（§2 及附录 E）：<br>
+    <a href="https://www.rfc-editor.org/rfc/rfc8446.html" target="_blank" rel="noopener">RFC 8446: The Transport Layer Security (TLS) Protocol Version 1.3</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 相关阅读</h4>
+    <p>TLS 1.2 的四趟报文流程与 ChangeCipherSpec（§7.3）：<a href="https://www.rfc-editor.org/rfc/rfc5246" target="_blank" rel="noopener">RFC 5246</a>；Linux TCP 内核参数（syncookies、tw_buckets 等缺省值与官方警告）：<a href="https://docs.kernel.org/networking/ip-sysctl.html" target="_blank" rel="noopener">kernel.org: ip-sysctl</a>。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="../index.html">栏目目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>技术概念手记 · 第 2 期 · 不定期更新：工作中遇到难懂的概念，就回来吃透它</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/content.js"></script>
+</body>
+</html>
