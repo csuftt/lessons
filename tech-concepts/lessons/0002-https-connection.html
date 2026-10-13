@@ -219,6 +219,11 @@
   </svg>
   </div>
   <p>四步：双方<strong>各自随机生成一次性私钥</strong>（x、y），私钥从不出本机；只交换各自派生的公钥（xG、yG，G 是协商好的曲线基点）；客户端计算 x·(yG)，服务端计算 y·(xG)，乘法可交换，<strong>两边算出同一个共享秘密 xyG</strong>；最后用 HKDF 密钥派生函数把它扩成一串密钥材料——握手期收发各一把、应用期收发各一把，互不混用。窃听者拿到了 xG 和 yG 也无济于事：从 xG 反推 x 是椭圆曲线离散对数问题，算力上不可行，这就是"单向门"。</p>
+  <p>"乘法"到底在乘什么？看一张真实的几何原理图（维基百科经典三格图）：<strong>两点相加，是连线与曲线的第三个交点沿 x 轴反射；一个点自己加自己，连线换成切线</strong>。所谓乘 n，就是从基点出发做 n 次这样的加法、一路"走"到落点——<strong>公钥是落点位置，私钥是走了多少步</strong>。客户端在服务端的落点上再走 x 步，服务端在客户端的落点上再走 y 步，先走谁的步都一样，终点必是同一个点：这就是"两边各算"能殊途同归的几何根据，也是外人拿到落点却算不出步数的单向门。</p>
+  <div class="diagram">
+  <img src="../assets/ecc-lines.svg" alt="椭圆曲线点运算三格图：加法（连线与第三交点反射）、取负（x 轴镜像）、倍点（切线构造）" style="width:100%;background:#FFFFFF;border:2px solid var(--card-border);border-radius:10px;padding:14px">
+  </div>
+  <p style="text-align:center;font-size:.82rem;color:var(--muted);">图源：<a href="https://en.wikipedia.org/wiki/Elliptic_curve_point_multiplication" target="_blank" rel="noopener">Wikipedia · Elliptic curve point multiplication</a>（ECClines.svg，CC BY-SA 授权）</p>
   <div class="rule"><span class="mark">⚠</span><div class="txt">
     <strong>临时密钥用完即弃，就是前向保密</strong>
     <p class="why">x、y 只活在这一次连接里。哪怕服务器的证书私钥日后泄露，攻击者翻出今天录下的全部密文，也没有 xyG 可用——历史流量依然解不开。TLS 1.3 把它做成强制，并砍掉了 TLS 1.2 的静态 RSA 密钥交换（那种模式密钥材料要用服务器公钥加密传输，私钥一泄历史全泄）</p>
