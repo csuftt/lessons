@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · eBPF 与 Cilium 网络：把数据面装进内核 | 2026-10-14</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0052</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0051-service-mesh-istio-ambient.html">上一期：Istio ambient</a> · <a href="https://www.bilibili.com/video/BV1fopk6CEA1" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">云原生前沿 · 云原生前沿系列第 2 讲（eBPF 网络篇）</p>
+  <h1>eBPF 与 Cilium 网络：把数据面装进内核</h1>
+  <p class="subtitle">上一讲聊完 Istio ambient 的"节点共享"路线，这一期继续云原生前沿线，进入它的对门——<strong>内核路线</strong>。eBPF 让数据面逻辑不经用户态代理、直接在 Linux 内核里跑：策略执行、负载均衡、加密、可观测性一次到位。从一次 iptables 规则风暴引发的全厂 API 超时事故讲起，拆开 eBPF 的安全模型（验证器 + JIT）、内核版本硬账，再落到 Cilium 的架构、kube-proxy 替换、基于身份的网络策略与灰度上生产剧本。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">☁️ 云原生前沿</span>
+    <span class="tag-date">📅 2026-10-14 · 第 52 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>一起"规则风暴"事故：iptables 的税，藏在规模里</h2>
+
+  <h3>事故复盘：5000 个 Service 拖垮的不只是网络</h3>
+  <p>某电商团队的大促压测夜，凌晨 1 点起全站 RPC 调用超时告警爆发。排查方向从应用、注册中心一路拐到网络，最后在节点上 <code>top</code> 看到 <strong>CPU sys 占比飙到 35%+</strong>，火焰图里全是 iptables 规则匹配的内核函数。账目是这样的：</p>
+  <ul>
+    <li>集群已长到 <strong>约 5000 个 Service、3 万个 Pod</strong>，kube-proxy 的 iptables 规则链随 Service×Endpoint 数量近似线性膨胀——社区通行的估算是 <strong>每条 Service 规则链约占 2KB 内存、Service 数过千后新建连接延迟开始肉眼可见</strong>（0024 期讲过它的 O(n) 线性匹配机制，本期不重讲）；</li>
+    <li>压测中大促预发的几百个新 Service 集中下发，kube-proxy 全量刷新规则（iptables 无增量 API），<strong>iptables-restore 单次卡秒级</strong>——期间新建连接排队，上游超时重试叠加（0049 讲过的重试放大），延迟雪崩成形；</li>
+    <li>最疼的是恢复动作：切 IPVS 模式要滚动重启全部节点的 kube-proxy，而值班同学当时根本不敢在生产夜里动它——<strong>排障知识缺位让故障时长从 20 分钟拖到 2 小时</strong>。</li>
+  </ul>
+
+  <div class="callout">
+    <span class="callout-title">复盘的真正结论</span>
+    <p>iptables 不是"错"了——它设计给主机防火墙，没人打算让它扛每秒百万次的服务发现转发。错的是<strong>把 O(n) 的用户态规则引擎放在了 O(1) 问题的数据路径上</strong>。这一年多数团队的动作是：新集群直接上 eBPF 数据面（Cilium），老集群把"iptables 模式退化"纳入监控。Cilium 官方自己也曾披露：大规模 Service 场景下 iptables 模式的 CPU 与延迟曲线崩溃式上扬，正是 eBPF 替换项目的最初动机。</p>
+  </div>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：eBPF 的安全模型与内核版本账</h2>
+
+  <h3>先回答"凭什么敢把代码塞进内核"</h3>
+  <p>eBPF（extended Berkeley Packet Filter）的本质：<strong>把一小段经过安全验证的字节码动态加载进运行中的 Linux 内核，挂在事件钩子上执行</strong>——网卡收包、系统调用、Socket 操作都可以是钩子。它敢这么干而不崩内核，靠的是加载前的三道关：</p>
+  <ol>
+    <li><strong>验证器（Verifier）</strong>：加载时静态分析所有执行路径——证明程序<strong>必然终止</strong>（内核 5.3 起才允许可证明边界的循环，之前一律禁循环）、所有内存访问在界内、指令数不超限（内核 5.2 起上限 100 万条验证指令）。证明不了安全的程序直接拒绝加载——这是"内核不崩"的数学保证；</li>
+    <li><strong>JIT 编译</strong>：通过验证的字节码编译成本机指令执行，<strong>接近原生速度</strong>——这是"快"的来源，不是靠解释执行硬扛；</li>
+    <li><strong>能力管控</strong>：加载 eBPF 程序需要特权（5.8 起拆出独立的 CAP_BPF 能力位），普通容器进程塞不进去。</li>
+  </ol>
+  <p>内核与用户态之间用 <strong>maps（键值表）</strong>交换数据：策略表、连接表、统计计数都住在 maps 里，用户态控制面写表、内核态程序查表执行——<strong>控制逻辑与数据逻辑分离</strong>，这正是 Cilium 架构的底座。</p>
+
+  <h3>版本账：4.x 到 6.x，一张决定生产形态的表</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>内核版本</th><th>关键能力</th><th>对生产的意义</th></tr>
+    <tr><td>4.x（≤4.19）</td><td>基础 XDP/tc 钩子、无有界循环、验证器较弱</td><td>CentOS 7 时代内核——能跑但处于 eBPF"西部时代"，多程序共存隔离差，生产慎用</td></tr>
+    <tr><td>5.3</td><td>验证器允许有界循环</td><td>复杂协议解析程序成为可能</td></tr>
+    <tr><td>5.8</td><td>CAP_BPF 能力位拆分、ring buffer map</td><td>事件上送的现代通道；社区常引用的"最低可用线"</td></tr>
+    <tr><td>5.10 / 5.15</td><td>BTF 调试信息普及（主流发行版默认带）、LSM 钩子成熟</td><td><strong>当前生产基线</strong>：Cilium 官方要求 4.9.17 起步，但大量能力（socket 层负载均衡、Bandwidth Manager）要 5.x 才完整</td></tr>
+    <tr><td>6.8+（netkit）</td><td>netkit 高性能 Pod 网络设备</td><td>Cilium 1.20 起支持 <code>datapathMode: auto</code> 自动探测，回退 veth；Meta/字节大规模实测收益约 10% 量级</td></tr>
+  </table>
+  </div>
+  <div class="warn">
+    <p><strong>版本过关 ≠ 跑得稳。</strong>某 4200 节点环境的公开复盘：同一版本 Tetragon（eBPF 安全探针），5.15 内核 CPU 占用 3%，6.1 内核跳到 12%——bpf_link API 生命周期变化导致钩子调度行为不同。混内核集群里，<strong>每个内核小版本都要有兼容性测试与 P99 延迟基线</strong>，这是 eBPF 路线区别于用户态代理的独特运维成本。</p>
+  </div>
+</section>
+
+<!-- ================= 03 架构 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构：Cilium 数据面与三本账</h2>
+
+  <h3>Cilium 是什么：eBPF 之上的网络、安全、可观测三合一</h3>
+  <p>Cilium 是 CNCF 毕业项目（2023 年 10 月，<strong>首个以 eBPF 为核心毕业的项目</strong>），在 Kubernetes 里同时扮演三个角色：CNI 网络 插件、网络策略引擎、可观测性平台（Hubble）。它的核心抽象只有一个：<strong>基于身份的安全模型</strong>——每个 Pod/节点获得集群级身份（安全标识），策略与加密绑定身份而非 IP 地址，Pod 重建 IP 变了身份不变，策略不用跟着改。</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 470" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar52" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <text x="380" y="24" text-anchor="middle" fill="var(--muted)" font-size="13">Cilium 数据面：包从网卡到 Socket，全程内核态</text>
+
+    <!-- Node A -->
+    <rect x="30" y="42" width="340" height="240" rx="12" fill="var(--card)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="200" y="66" text-anchor="middle" fill="var(--accent)" font-size="13" font-weight="700">节点 A</text>
+    <rect x="52" y="80" width="140" height="34" rx="7" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="122" y="101" text-anchor="middle" fill="var(--ink)" font-size="10.5">Pod x（身份 1024）</text>
+    <rect x="52" y="126" width="140" height="34" rx="7" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="122" y="147" text-anchor="middle" fill="var(--ink)" font-size="10.5">Pod y（身份 2048）</text>
+    <rect x="212" y="80" width="140" height="60" rx="7" fill="var(--code-bg)" stroke="var(--accent-3)" stroke-width="1.5"/>
+    <text x="282" y="103" text-anchor="middle" fill="var(--accent-3)" font-size="10.5" font-weight="700">cilium-agent</text>
+    <text x="282" y="121" text-anchor="middle" fill="var(--muted)" font-size="9">DaemonSet·用户态控制面</text>
+    <rect x="52" y="178" width="300" height="36" rx="7" fill="var(--code-bg)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="202" y="200" text-anchor="middle" fill="var(--accent)" font-size="11" font-weight="700">Socket 层 eBPF：connect() 时直接改写目标（东西向）</text>
+    <rect x="52" y="226" width="300" height="36" rx="7" fill="var(--code-bg)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="202" y="248" text-anchor="middle" fill="var(--accent)" font-size="11" font-weight="700">tc / veth eBPF：策略执行 + 转发（网络栈）</text>
+
+    <!-- Node B -->
+    <rect x="390" y="42" width="340" height="240" rx="12" fill="var(--card)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="560" y="66" text-anchor="middle" fill="var(--accent)" font-size="13" font-weight="700">节点 B</text>
+    <rect x="412" y="80" width="140" height="34" rx="7" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="482" y="101" text-anchor="middle" fill="var(--ink)" font-size="10.5">Pod z（身份 3072）</text>
+    <rect x="412" y="126" width="140" height="34" rx="7" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="482" y="147" text-anchor="middle" fill="var(--ink)" font-size="10.5">Pod w（无策略标签）</text>
+    <rect x="572" y="80" width="140" height="60" rx="7" fill="var(--code-bg)" stroke="var(--accent-3)" stroke-width="1.5"/>
+    <text x="642" y="103" text-anchor="middle" fill="var(--accent-3)" font-size="10.5" font-weight="700">cilium-agent</text>
+    <text x="642" y="121" text-anchor="middle" fill="var(--muted)" font-size="9">身份→策略→eBPF maps</text>
+    <rect x="412" y="178" width="300" height="36" rx="7" fill="var(--code-bg)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="562" y="200" text-anchor="middle" fill="var(--accent)" font-size="11" font-weight="700">XDP eBPF：网卡驱动层南北向负载均衡（LB 场景）</text>
+    <rect x="412" y="226" width="300" height="36" rx="7" fill="var(--code-bg)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="562" y="248" text-anchor="middle" fill="var(--accent)" font-size="11" font-weight="700">tc / veth eBPF：策略执行 + 转发（网络栈）</text>
+
+    <!-- encrypted overlay -->
+    <line x1="370" y1="244" x2="390" y2="244" stroke="var(--accent-3)" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#ar52)"/>
+    <text x="380" y="232" text-anchor="middle" fill="var(--accent-3)" font-size="9.5">跨节点</text>
+
+    <!-- control plane -->
+    <rect x="30" y="304" width="700" height="64" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="380" y="328" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">控制面（用户态）：cilium-operator + Kubernetes API</text>
+    <text x="380" y="350" text-anchor="middle" fill="var(--muted)" font-size="10.5">监听 Pod/Service/Endpoint 变化 → 计算身份与策略 → 写入各节点 eBPF maps（全程不碰数据包）</text>
+    <line x1="282" y1="140" x2="282" y2="304" stroke="var(--muted)" stroke-width="1.2" stroke-dasharray="4 4" marker-end="url(#ar52)"/>
+    <line x1="642" y1="140" x2="642" y2="304" stroke="var(--muted)" stroke-width="1.2" stroke-dasharray="4 4" marker-end="url(#ar52)"/>
+
+    <!-- bottom notes -->
+    <rect x="30" y="388" width="340" height="64" rx="10" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="200" y="410" text-anchor="middle" fill="var(--muted)" font-size="10.5">同节点 Pod 互访：Socket 层直接转发</text>
+    <text x="200" y="430" text-anchor="middle" fill="var(--muted)" font-size="10.5">不经网络设备，时延砍半（对应用透明）</text>
+    <rect x="390" y="388" width="340" height="64" rx="10" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="560" y="410" text-anchor="middle" fill="var(--muted)" font-size="10.5">L7 需要（HTTP 路由等）：按节点一个 Envoy 处理</text>
+    <text x="560" y="430" text-anchor="middle" fill="var(--muted)" font-size="10.5">L3/L4 策略与加密全部留在内核 eBPF</text>
+  </svg>
+  </div>
+
+  <h3>账一：kube-proxy 替换——O(n) 到 O(1) 的量级变化</h3>
+  <p>Cilium 可以<strong>整体替换 kube-proxy</strong>（kubeProxyReplacement 模式）：Service 转发从"iptables 规则链线性匹配"变成"eBPF 哈希表查找"，复杂度从 O(n) 降为 O(1)。<strong>东西向</strong>流量在 Socket 层（connect() 系统调用时）直接改写目标后端，不经 NAT、不建 conntrack，每包开销大幅下降；<strong>南北向</strong>在 XDP 层做负载均衡——Cilium 1.8 时代的经典实测：单节点外部压测同一 Service，kube-proxy 每秒约转发 210 万请求即开始丢包，XDP 加速后<strong>打满数据源每秒 1000 万请求</strong>。社区复现的建连延迟对比：Service 数从 1000 涨到 5 万，eBPF 路线 P99 从 0.38ms 到 0.48ms 几乎平的；iptables 模式从 1.8ms 恶化到 <strong>85ms</strong>（IPVS 居中，1.2ms）。</p>
+
+  <h3>账二：基于身份的网络策略——IP 治理换身份治理</h3>
+  <p>传统 NetworkPolicy 依赖 IP（Pod 重建即失效，先要 IP 归属推断）。Cilium 给每个工作负载分配<strong>集群身份</strong>，策略写"允许 frontend 标签的身份访问 backend 的 8080 端口"，身份随 Pod 调度实时生效，且能覆盖<strong>东西向 + 南北向 + FQDN（域名级出站控制）+ L7 HTTP/Kafka 规则</strong>。对安全团队的意义：出站不再只能按 IP 段粗粒度封禁——"允许访问 api.weixin.qq.com、拒绝其他外网"这类策略第一次成为一等公民。</p>
+
+  <h3>账三：Hubble 可观测性——免费的全链路流日志</h3>
+  <p>Hubble 复用 eBPF 数据面天然看到的全部流量，输出服务依赖图、流日志（谁在何时被谁因哪条策略拒绝）、黄金指标——<strong>零应用侵入、零 sidecar</strong>。"被 NetworkPolicy 拒绝的连接到底是谁"这个排障高频问题，Hubble 一条命令出答案。0046 期讲的长连接网关排障里，"这连接到底建立没有"的确认成本，在 Hubble 集群近乎为零。</p>
+
+  <h3>账外账：透明加密与边界</h3>
+  <p>节点间流量可开 <strong>WireGuard/IPsec 透明加密</strong>（1.20 起同节点 Pod 间流量也纳入加密，补齐多租户同宿主机窥探缺口）。而 eBPF 路线的边界也要写清楚：① <strong>L7 深度流量治理仍需 Envoy</strong>（每节点一个，不是每 Pod），复杂金丝雀/镜像等能力成熟度不如 Istio 体系——0051 讲过的分界在这里兑现：L4 进内核、L7 按节点；② 内核版本是硬依赖（见 02 节）；③ eBPF 程序排障要求内核技能，火焰图/验证器日志不是普通运维的日常工具。<strong>Cilium（内核路线）与 Istio ambient（节点共享路线）并非互斥——大量团队用 Cilium 做 CNI 承载 Istio 网格</strong>，两层各干各的活。</p>
+
+  <h3>版本坐标（2026-10）</h3>
+  <p>当前维护线 <strong>1.20.2 / 1.19.8 / 1.18.14</strong>（2026-09-15 同批补丁；1.20 于 2026-09-14 发布）。1.20 要点：CNI 二进制从 76MB 瘦到 16MB（500 节点集群 CNI 存储从约 38GB 降到 8GB，节点启动更快）；同节点 Pod WireGuard 加密；Kubernetes ClusterNetworkPolicy（Admin/Baseline 分层，平台团队终于有了集群级策略权威）；netkit <code>datapathMode: auto</code> 自动探测内核（6.8+ 用 netkit、否则回退 veth）；数据面插件机制 beta（Google 主导，第三方 eBPF 程序不再需要 fork Cilium）。1.19 的 Multi-Pool IPAM 转稳定。生产采用面：Trip.com "五年生产零重大数据面事故"、DigitalOcean、Form3（跨数据中心切换）、Adobe、Bell Canada 等；GKE/Datadog 深度参与上游。</p>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：内核预检、kube-proxy 替换与灰度上生产</h2>
+
+  <h3>实战一：内核与前置条件预检（决定性的一步）</h3>
+  <pre><code><span class="c-com"># 1. 内核版本与 BTF（CO-RE 依赖 /sys/kernel/btf/vmlinux）</span>
+uname -r                              <span class="c-com"># 期望 ≥ 5.10（生产基线）</span>
+ls /sys/kernel/btf/vmlinux            <span class="c-com"># 无此文件的节点，eBPF 程序加载即失败</span>
+
+<span class="c-com"># 2. cilium-cli 预检：内核能力逐项核对（每类集群都要跑）</span>
+cilium sysdump --output-filename pre-check   <span class="c-com"># 采集现场</span>
+kubectl -n kube-system logs ds/cilium | grep -i "require\|probe"
+<span class="c-com"># 常见红灯：KernelVersion 低 / BPF Map 大小受限 / 缺 BTF</span>
+
+<span class="c-com"># 3. eBPF 程序共存盘点——多工具冲突的第一道防线</span>
+bpftool prog show | wc -l             <span class="c-com"># 已加载的 eBPF 程序数</span>
+bpftool map show | head -5            <span class="c-com"># maps 占用（探针类工具常驻大表）</span></code></pre>
+  <p>预检的三个红灯各有含义：内核过低——能力缺失或行为退化，先升内核再说；缺 BTF——换带 <code>CONFIG_DEBUG_INFO_BTF=y</code> 的节点镜像；已有大量 eBPF 程序——<strong>排障"看不见的共存者"（安全探针/观测探针由不同团队部署）</strong>，混部前先对齐归属与资源占用，老内核上多程序共存隔离性差是真实事故来源（某 4.18 内核环境两个探针共存直接 kernel panic 连环重启 24 台）。</p>
+
+  <h3>实战二：kube-proxy-free 集群（新集群推荐姿势）</h3>
+  <pre><code><span class="c-com"># Helm 安装：eBPF 直接接管 Service 转发（不再部署 kube-proxy）</span>
+helm install cilium cilium/cilium -n kube-system \
+  --set kubeProxyReplacement=true \
+  --set k8sServiceHost=API_SERVER_IP --set k8sServicePort=6443 \
+  --set bandwidthManager.enabled=true \    <span class="c-com"># 需内核 ≥5.10（替代 iptables 限速）</span>
+  --set hubble.enabled=true --set hubble.relay.enabled=true
+
+<span class="c-com"># 验证三件套</span>
+cilium status --wait                     <span class="c-com"># agent/operator 全 Ready</span>
+cilium connectivity test                 <span class="c-com"># 内置连通性套件（含策略用例）</span>
+kubectl get ds -n kube-system            <span class="c-com"># 确认 kube-proxy 已不在列表</span></code></pre>
+  <p>两个注意点：① kubeProxyReplacement 要求把 API Server 地址显式传给 Cilium（原来这个活是 kube-proxy 干的）；② 从 1.14 起 replacement 默认就是"能开尽开"的探测逻辑，但<strong>混合云/特殊 CNI 环境（如自带路由的 Terway）要单独核对探测报告</strong>，不要默认全绿。另外本页验证三件套里 <code>cilium connectivity test</code> 会真实发起跨节点/跨策略用例，压测窗口别跑，选业务低峰执行。</p>
+
+  <h3>实战三：存量集群灰度迁移剧本（iptables → Cilium）</h3>
+  <div class="steps">
+    <div class="step"><span class="step-n">1</span><p><strong>预检与容量：</strong>按实战一跑全套预检；盘点现有 NetworkPolicy 语义（iptables 系策略迁移到身份策略要重写语义，不是翻译 YAML）；选定首灰度节点池（无状态业务 + 可随时摘除）。</p></div>
+    <div class="step"><span class="step-n">2</span><p><strong>双 CNI 并存期（如环境不支持原地换）：</strong>新节点池跑 Cilium、旧节点池维持原状，跨池流量走标准 Pod 网络；此阶段验证的东西向连通性、DNS、出站策略三件套，每项都要有用例。</p></div>
+    <div class="step"><span class="step-n">3</span><p><strong>节点池轮换：</strong>业务逐池迁移（Pod 漂移即完成数据面切换——eBPF 的优势：换的是节点不是应用）；每池迁移后跑 <code>cilium connectivity test</code> + 业务冒烟，P99 延迟基线对比（预期不变或略降）。</p></div>
+    <div class="step"><span class="step-n">4</span><p><strong>收尾：</strong>全网切换后退役旧 CNI 与 kube-proxy；把"内核版本纳入节点池镜像管理 + eBPF 程序清单纳入变更管理"写进平台规范（内核小版本升级 = eBPF 兼容性回归测试，这是长期纪律）。</p></div>
+  </div>
+
+  <div class="card card-tip">
+    <h4>✅ eBPF / Cilium 上生产体检清单（10 条）</h4>
+    <p>☐ 内核版本统一在 5.10+（最好 5.15+），节点池镜像带 BTF　☐ 每类节点镜像在 CI 里跑 eBPF 兼容性测试　☐ eBPF 程序清单有台账（bpftool 定期导出，探针类工具部署走变更流程）　☐ cilium-agent 的 CPU/内存有独立容量规划（它不等于数据面开销，别混着看）　☐ kubeProxyReplacement 探测报告全绿或有明确豁免记录　☐ NetworkPolicy 已从 IP 语义迁移到身份语义并经安全评审　☐ Hubble Relay/UI 已部署、流日志接了告警（策略拒绝突增要有声音）　☐ 跨节点加密（WireGuard/IPsec）按合规要求评估开启　☐ 内核小版本升级 SOP 包含 P99 延迟回归基线　☐ 有"摘除 Cilium 节点池回退旧数据面"的演练记录</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>eBPF 的安全模型三件套：</strong>验证器（加载时证明安全，内核不崩的数学保证）+ JIT（近原生速度）+ 特权管控（CAP_BPF）——"敢把代码装进内核"的完整答案，maps 是内核态与用户态的分界线。</li>
+    <li><strong>内核版本是硬账不是软建议：</strong>5.3 有界循环、5.8 能力位拆分、5.10/5.15 生产基线、6.8 netkit；版本过关 ≠ 跑得稳——每个内核小版本都要有兼容性与延迟回归。</li>
+    <li><strong>Cilium 三本账：</strong>kube-proxy 替换（O(n)→O(1)，Service 5 万时 P99 0.48ms vs iptables 85ms）；身份网络策略（IP 治理换身份治理，FQDN 出站控制）；Hubble 可观测（零侵入全链路流日志）。</li>
+    <li><strong>L4 进内核、L7 按节点：</strong>eBPF 路线不是万能替代——深度 L7 治理仍需 Envoy（每节点一个）；与 Istio ambient 是两条互补路线，Cilium CNI + Istio 网格的组合大量存在。</li>
+    <li><strong>上生产的顺序是预检先于一切：</strong>内核/BTF/eBPF 共存盘点三红灯一个都不能漏；eBPF 程序"对用户态完全透明"，没有台账就等于没有排障入口。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目：你们有一个 800 节点、1.2 万 Pod 的存量集群（内核 5.4 混 5.10，iptables 模式，Service 约 6000 个），频繁出现"滚动发布窗口 API 建连超时"，已确认与 iptables-restore 全量刷新相关。领导拍板"半年内迁移到 eBPF 数据面"。① 给出你的迁移方案骨架与阶段验收标准；② 迁移中某夜值班收到"Cilium 节点池上跨节点 Pod 互访批量失败、同节点正常"，网络抓包显示包到了目标节点但没人处理——给出至少三个假设与定位路径；③ 两个月后安全团队要求在全部节点部署基于 eBPF 的运行时安全探针，你如何评估与落地？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 三问拆解</h4>
+      <p><strong>① 方案骨架与验收：</strong>第一阶段<strong>内核统一到 5.10+（或 5.15+）</strong>——800 节点按节点池滚动重刷镜像，验收=全节点 <code>ls /sys/kernel/btf/vmlinux</code> 存在 + CI 里 eBPF 兼容性测试通过（5.4 内核是硬短板：无有界循环等能力不说，大量 Cilium 特性降级运行，先升内核再迁数据面，变量解耦）；第二阶段<strong>试点节点池</strong>——无状态业务池先迁（双 CNI 并存或节点池轮换），验收=<code>cilium connectivity test</code> 全绿 + 建连延迟基线对比（重点盯"发布窗口建连超时"指标是否消失——这是本次迁移的业务级 OKR）+ Service 转发路径核验（<code>bpftool prog show</code> 有 lb 程序、iptables 里 Service 链不再增长）；第三阶段<strong>全网轮换 + kube-proxy 退役</strong>，验收=iptables 规则总量归零、发布窗口指标连续两周无尖刺。节奏建议：月一~二内核、月三试点、月四~五逐池、月六收尾。</p>
+      <p><strong>② 跨节点失败、同节点正常的定位：</strong>三个假设按概率排序——<li><strong>假设一：MTU/封装不匹配</strong>（跨节点流量走 VXLAN/Geneve 封装加头，若底层网络 MTU 未预留或应用发了大包，表现为"包到了目标节点但 veth 丢弃"，<code>kubectl logs ds/cilium</code> 查 drop 原因字段、cilium metrics 里 <code>cilium_drop_count_total</code> 按 reason 分桶——这是 Cilium 排障第一入口）；</li><strong>假设二：身份策略误伤</strong>（迁移期新身份未同步或策略语义从 IP 改写为身份后，跨节点对端身份解析失败导致默认拒绝——同节点走 Socket 层快路径可能不触发同一条策略路径，特征=Hubble 流日志里 FORGotten/Policy Verdict DENY，<code>hubble observe --verdict DROPPED</code> 一查便知）；<strong>假设三：eBPF 程序加载不完整</strong>（目标节点 agent 异常或内核差异导致 tc 程序没挂上，"包到了没人处理"的字面原因——<code>bpftool prog show</code> 对比正常/异常节点的程序清单、cilium-agent 日志 grep attach 失败）。定位次序：先 cilium metrics drop reason（量级最大方向）→ Hubble DENY 流（策略方向）→ 节点程序清单对比（加载方向）。</p>
+      <p><strong>③ eBPF 安全探针评估落地：</strong>先算三笔账——<strong>共存账</strong>（bpftool 盘点现有程序与 maps 占用，Cilium 与探针的钩子/资源冲突在老内核上是真实事故源，本集群已统一 5.10+ 风险可控但要留资源余量）；<strong>性能账</strong>（探针类工具在高频系统调用路径上的 CPU 开销按节点压测，按公开复盘口径预留 5~10% 内核态余量，灰度节点池先跑两周看 P99）；<strong>治理账</strong>（探针的 TracingPolicy 策略变更走与网络策略同级的评审流程——eBPF 探针能 kill 进程，策略写错的爆炸半径不亚于网络策略）。落地姿势：独立 DaemonSet 分批灰度（不与 Cilium 升级同窗口）、事件出口接独立管道（安全事件与网络流日志分流，防互相打饱和）、并约定"探针类工具部署必须登记台账"的平台规范——把这次评估沉淀成 eBPF 治理制度，而不只是又一次安装。</p>
+    </div>
+  </details>
+
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>Cilium 官方文档 · 架构与 eBPF 数据面（kube-proxy 替换、身份安全模型、Hubble 的权威出处）：<br>
+    <a href="https://docs.cilium.io/en/latest/network/ebpf/intro/" target="_blank" rel="noopener">docs.cilium.io — eBPF Introductory &amp; Architecture</a>（配套阅读：ebpf.io 官方站《What is eBPF》——验证器/JIT/钩子模型的社区权威入门；Cilium GitHub README 的 Stable Releases 与 USERS.md——版本坐标与生产案例）</p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>集群侧基础：<a href="0024-k8s-ingress-service-traffic.html">0024 流量入口三道门</a>（kube-proxy iptables/IPVS 机制与 502 窗口的详细拆解，本期 O(n) 痛点的用户态视角）、<a href="0043-k8s-pod-deployment-service.html">0043 三件套控制循环</a>（Endpoint 名单传播）。网格与内核路线：<a href="0051-service-mesh-istio-ambient.html">0051 Istio ambient</a>（节点共享路线 vs 本期内核路线，L4/L7 分界的另一边）、<a href="0049-distributed-design-patterns.html">0049 分布式设计模式</a>（本节事故里的重试放大与韧性纪律）。排障同构：<a href="0046-iot-long-connection-gateway.html">0046 长连接网关</a>（conntrack/内核参数的接入层视角）。云原生前沿线下一讲：OpenTelemetry 可观测性标准化。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0051-service-mesh-istio-ambient.html">← 上一期：Istio ambient</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 52 期 · 云原生前沿系列 · 下一期预告：OpenTelemetry 可观测性标准化</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
