@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · Flink 流批一体：一套代码，两种时间观 | 2026-10-15</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0053</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0052-ebpf-cilium-network.html">上一期：eBPF 与 Cilium</a> · <a href="https://www.bilibili.com/video/BV1ieJr6fEtm" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">数据架构与实时计算 · 数据架构系列第 1 讲（流批一体篇）</p>
+  <h1>Flink 流批一体：一套代码，两种时间观</h1>
+  <p class="subtitle">上一讲聊完 eBPF 与 Cilium，云原生前沿线告一段落，今天开启数据架构与实时计算线。同一个"当日 GMV"指标，凌晨批任务算出 2.31 亿，实时大屏跑出 2.28 亿——<strong>差的那 300 万不是误差，是两套代码、两套时间观、两套故障域各自为政的必然产物</strong>。这一期从"指标对不上"这类每天都在发生的数仓事故切入，拆开 Flink 流批一体的三层含义（同引擎执行流与批、事件时间统一口径、物化表声明式交付），落到 exactly-once 的真实边界与 1.x 升 2.x 的迁移账本。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">📊 数据架构与实时计算</span>
+    <span class="tag-date">📅 2026-10-15 · 第 53 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>场景：每天凌晨都在发生的"指标对不上"</h2>
+
+  <h3>事故复盘：大促复盘会上的 300 万差额</h3>
+  <p>某电商团队大促次日开复盘会，实时大屏显示当日 GMV <strong>2.28 亿</strong>，财务口径的离线报表是 <strong>2.31 亿</strong>，差 300 万。实时团队和离线团队各带各的账本来对质，逐层核对后挖出三笔"制度性差额"：</p>
+  <ul>
+    <li><strong>口径分裂：</strong>实时链路按<strong>事件时间</strong>（订单创建时刻）归属到分钟，批链路按 <code>dt</code> 分区字段（通常是数据落到 Hive/湖表的时刻）归属到天。23:59:59 创建、00:00:03 落表的订单，实时算在"昨天"，离线算在"今天"——<strong>这笔差额永远存在，且天天都在</strong>；</li>
+    <li><strong>补不回来的迟到数据：</strong>实时链路的窗口关了就是关了（watermark 越过窗口末端即触发计算），凌晨补采的昨日退款单、跨系统延迟同步的物流状态，实时侧只能进侧输出流单独处理；批任务凌晨重跑全量，天然全收。<strong>两条链路对"迟到"的态度是两套哲学</strong>；</li>
+    <li><strong>修 bug 只修一边：</strong>口径定义改了（比如"支付成功"从支付回调改为订单状态机终态），实时 SQL 改了上线，离线任务下个调度周期才生效，中间两个版本各自产数。<strong>同一个业务逻辑活在两份代码里，就是两个故障域</strong>。</li>
+  </ul>
+
+  <div class="callout">
+    <span class="callout-title">复盘的真正结论</span>
+    <p>300 万差额里，真正的"错账"只有修 bug 时差造成的那部分；口径分裂与迟到数据是<strong>两套架构的制度性产物</strong>。光靠"加强数据治理"开会对口径没用——只要流和批是两套代码、两套时间语义、两套调度，差额就只能被解释、不能被消灭。流批一体要解决的就是这个：<strong>让同一份业务逻辑只有一份实现，流和批只是同一引擎在两种数据形态上的两种执行方式</strong>。</p>
+  </div>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：流批一体的三层含义</h2>
+
+  <h3>第一层：同一个引擎跑流和跑批</h3>
+  <p>Flink 的批执行不是另一个系统，是<strong>同一套算子图在"有界输入"下的特例</strong>：批作业的输入有已知边界，调度器可以按依赖关系分阶段调度（Stage 一批算完再跑下一批，中间结果落盘、失败只重跑失败 Stage）；流作业输入无界，全图常驻、逐条处理。同一个 <code>GROUP BY</code> 聚合算子，流模式下产出的是<strong>变更流（changelog）</strong>——每来一条更新一次累计值并向下发射 +I/-U/+U/-D 变更记录；批模式下直接产出最终结果集。2025 年 3 月 Flink 2.0 发布时，陪伴社区近十年的 <strong>DataSet API（老批 API）被整体移除</strong>——批处理全面收敛到 DataStream 与 Table API/SQL 一套栈上，"两套 API 假装的流批一体"正式退场。</p>
+
+  <h3>第二层：事件时间统一口径</h3>
+  <p>流批对账的根基是<strong>同一个时间语义</strong>。Flink 以<strong>事件时间</strong>（Event Time，业务事实发生的时刻）为一等公民：窗口按事件时间切，流和批对同一段事件时间区间的计算结果天然可比。<strong>Watermark</strong>（水位线，"事件时间已推进到 T，不再期待比 T 更早的数据"的声明）是流模式处理乱序的机制——它越过窗口末端时触发计算；批模式输入有界、天然全量有序，无需 watermark。此外 Flink 把源表抽象为<strong>动态表</strong>：流是表的变更日志，表是流的物化结果，同一条 SQL 查询既可解释为"对流持续求值"也可解释为"对表批量求值"——<strong>这就是"一套代码"的形式化基础</strong>。</p>
+
+  <h3>第三层：物化表——从"启动作业"到"维护一张表"</h3>
+  <p>2.0 落地的 <strong>Materialized Table（物化表）</strong>把流批一体推进到声明式交付：你只声明<strong>要什么数据、要多新</strong>（<code>FRESHNESS</code> 子句），引擎自动决定用流作业持续刷新、批作业周期全量刷新还是增量刷新——大促期间要秒级新鲜度就持续流刷，大促结束一键把新鲜度调成天级，<strong>常驻流作业退化为每日批任务，资源成本直接砍掉</strong>。三种刷新模式的成本模型（官方口径）：流式持续刷新提供秒级新鲜度但<strong>成本不随新鲜度要求放宽而下降</strong>（流作业要常驻算力）；全量批刷新在小新鲜度区间成本剧增（每次全量重算）；增量刷新在分钟到小时级区间按增量计算，成本最优。目前物化表以 <strong>Paimon 作为首个支持的 Catalog</strong>——湖存储选型会被这条链路牵动（0037 期讲过对象存储冷热分层的另一面）。</p>
+</section>
+
+<!-- ================= 03 架构 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构：实时链路的标准形状与四笔账</h2>
+
+  <h3>流批一体实时数仓参考架构</h3>
+  <div class="diagram">
+  <svg viewBox="0 0 760 430" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar53" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <text x="380" y="24" text-anchor="middle" fill="var(--muted)" font-size="13">流批一体实时数仓：一套 SQL，一条链路，两种执行</text>
+
+    <rect x="30" y="44" width="150" height="76" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="105" y="74" text-anchor="middle" fill="var(--accent)" font-size="12" font-weight="700">业务库 binlog</text>
+    <text x="105" y="94" text-anchor="middle" fill="var(--muted)" font-size="9.5">CDC 接入（Debezium 类）</text>
+
+    <rect x="30" y="150" width="150" height="60" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="105" y="176" text-anchor="middle" fill="var(--accent)" font-size="12" font-weight="700">消息队列</text>
+    <text x="105" y="196" text-anchor="middle" fill="var(--muted)" font-size="9.5">ODS 贴源层（可回放）</text>
+
+    <rect x="220" y="44" width="170" height="166" rx="12" fill="var(--card)" stroke="var(--accent-2)" stroke-width="1.8"/>
+    <text x="305" y="70" text-anchor="middle" fill="var(--accent-2)" font-size="12.5" font-weight="700">Flink SQL 作业</text>
+    <text x="305" y="94" text-anchor="middle" fill="var(--ink)" font-size="10">同一份业务逻辑</text>
+    <text x="305" y="112" text-anchor="middle" fill="var(--ink)" font-size="10">事件时间窗口 + watermark</text>
+    <text x="305" y="130" text-anchor="middle" fill="var(--ink)" font-size="10">状态后端 RocksDB / ForSt</text>
+    <text x="305" y="148" text-anchor="middle" fill="var(--ink)" font-size="10">checkpoint 周期快照</text>
+    <text x="305" y="166" text-anchor="middle" fill="var(--muted)" font-size="9.5">流模式：常驻逐条 · 批模式：分阶段调度</text>
+    <text x="305" y="184" text-anchor="middle" fill="var(--muted)" font-size="9.5">失败恢复：流回放重算 · 批重跑失败 Stage</text>
+
+    <rect x="430" y="44" width="140" height="76" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="500" y="74" text-anchor="middle" fill="var(--accent)" font-size="12" font-weight="700">湖仓 Paimon</text>
+    <text x="500" y="94" text-anchor="middle" fill="var(--muted)" font-size="9.5">物化表 DWD/DWS 沉淀</text>
+
+    <rect x="430" y="150" width="140" height="60" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="500" y="176" text-anchor="middle" fill="var(--accent)" font-size="12" font-weight="700">OLAP 引擎</text>
+    <text x="500" y="196" text-anchor="middle" fill="var(--muted)" font-size="9.5">大屏 / 报表 / Ad-hoc</text>
+
+    <rect x="610" y="108" width="120" height="100" rx="10" fill="var(--card)" stroke="var(--accent-3)" stroke-width="1.5"/>
+    <text x="670" y="136" text-anchor="middle" fill="var(--accent-3)" font-size="11.5" font-weight="700">对账与回刷</text>
+    <text x="670" y="158" text-anchor="middle" fill="var(--muted)" font-size="9.5">同一 SQL 批模式</text>
+    <text x="670" y="176" text-anchor="middle" fill="var(--muted)" font-size="9.5">重算历史区间</text>
+    <text x="670" y="194" text-anchor="middle" fill="var(--muted)" font-size="9.5">回写同一张湖表</text>
+
+    <line x1="105" y1="120" x2="105" y2="150" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar53)"/>
+    <line x1="180" y1="105" x2="220" y2="105" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar53)"/>
+    <line x1="180" y1="180" x2="220" y2="180" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar53)"/>
+    <line x1="390" y1="82" x2="430" y2="82" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar53)"/>
+    <line x1="390" y1="172" x2="430" y2="172" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar53)"/>
+    <line x1="570" y1="180" x2="610" y2="160" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar53)"/>
+    <line x1="670" y1="208" x2="670" y2="230" stroke="var(--muted)" stroke-width="1.2" stroke-dasharray="4 4"/>
+    <line x1="670" y1="230" x2="500" y2="230" stroke="var(--muted)" stroke-width="1.2" stroke-dasharray="4 4" marker-end="url(#ar53)"/>
+    <line x1="500" y1="230" x2="500" y2="210" stroke="var(--muted)" stroke-width="1.2" stroke-dasharray="4 4" marker-end="url(#ar53)"/>
+
+    <rect x="30" y="260" width="700" height="150" rx="10" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="380" y="288" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">关键设计约束（流批共享，逐条对账）</text>
+    <text x="60" y="316" fill="var(--muted)" font-size="10.5">① 分区字段 = 事件时间派生列（非落表时刻），流批同源同口径</text>
+    <text x="60" y="340" fill="var(--muted)" font-size="10.5">② ODS 保留在可回放的消息队列 / 湖表——批重算的输入永远是原始事实，不是中间结果</text>
+    <text x="60" y="364" fill="var(--muted)" font-size="10.5">③ 迟到数据策略显式化：allowedLateness 内更新窗口 / 超限进侧输出流，两侧共用一条规则</text>
+    <text x="60" y="388" fill="var(--muted)" font-size="10.5">④ Exactly-once 只在 checkpoint 边界内成立——Sink 必须支持事务或幂等（见 04 节）</text>
+  </svg>
+  </div>
+
+  <h3>账一：exactly-once 的真实边界——"生效一次"不是"送达一次"</h3>
+  <p>Flink 的 exactly-once 是<strong>状态生效一次</strong>：checkpoint（基于 Chandy-Lamport 分布式快照算法，barrier 随数据流动、算子对齐后异步快照到远端存储）保证故障恢复后<strong>每条记录对内部状态的影响等价于只发生一次</strong>——重放照样发生，但状态不重不漏。要把这个保证延伸到输出端（端到端 exactly-once），Sink 必须配合<strong>两阶段提交</strong>：checkpoint 开始即预提交事务，全局 checkpoint 成功后才真正提交。代价是<strong>可见性延迟</strong>——下游要等下一个 checkpoint 提交后才能消费到数据，30 秒 checkpoint 间隔意味着最长约 30 秒输出延迟。工程上的常用替代：<strong>at-least-once + 幂等写</strong>（按主键 upsert），延迟更低、语义在实践中同样正确——按业务能否容忍重复与能否幂等来选，不要条件反射地上两阶段提交。</p>
+
+  <h3>账二：checkpoint 是心跳，也是税</h3>
+  <p>一个真实生产案例（电商实时大盘，双 11 大促）：平时 checkpoint 30 秒完成，<strong>大促流量涨 10 倍后 checkpoint 持续 8~10 分钟、每 5 分钟超时一次</strong>，作业反复重启、大盘数据断断续续。排查路径：Checkpoint History 看到持续时间暴涨 → 失败详情里<strong>对齐时间占 80%</strong> → 反压指标显示下游聚合算子 HIGH、Source 端 OK → 聚合算子 CPU 95%、并行度 200 打满。根因链：<strong>下游处理不过来 → 反压 → barrier 在网络队列里排队 → 对齐超时 → checkpoint 失败 → 作业重启 → 重启后继续反压</strong>，死循环。止血开关是 <strong>Unaligned Checkpoint（非对齐 checkpoint，反压时不等 barrier 对齐、连在途数据一起快照）</strong>，checkpoint 时间从 10 分钟回落到 30 秒量级；根治靠扩并行度与算子优化。这条链路要记住的判断题：<strong>checkpoint 超时绝大多数时候不是 checkpoint 的病，是反压的病</strong>——先治反压（下游扩容/倾斜治理/慢算子优化），再谈 checkpoint 参数。</p>
+
+  <h3>账三：状态是资产，也是负债</h3>
+  <p>流作业的状态（窗口累计、维度缓存、去重集合）住在状态后端里，随 checkpoint 周期性快照。它同时是两样东西：<strong>资产</strong>——故障恢复不用重放全量、增量 checkpoint 让大状态（TB 级）可承受；<strong>负债</strong>——没配 TTL 的去重集合、没设清理的维表缓存会无限膨胀，最终 OOM 或把 checkpoint 拖死。Flink 2.0 引入 <strong>ForStDB（存算分离状态后端）</strong>：远端存储为主存储、本地盘做缓存，直指云原生容器环境"本地盘易逝、compaction 资源毛刺、大状态扩缩容慢"三个痛点。纪律只有一条：<strong>每个 keyed 状态都要能回答"它什么时候过期"</strong>——答不上来的状态就是未来的事故。</p>
+
+  <h3>账四：1.x → 2.x 迁移是重构，不是升级</h3>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>变更项</th><th>1.x（现状）</th><th>2.x（2025-03 起）</th><th>迁移含义</th></tr>
+    <tr><td>DataSet API</td><td>老批处理 API</td><td><strong>整体移除</strong></td><td>批作业迁 DataStream / Table API·SQL，官方有迁移指南</td></tr>
+    <tr><td>Source/Sink API</td><td>SourceFunction/SinkFunction</td><td>移除，统一 Source/Sink V2</td><td>自研连接器必须重写；官方连接器 2.0 后陆续适配</td></tr>
+    <tr><td>状态兼容</td><td>—</td><td><strong>1.x 与 2.x 不保证兼容</strong></td><td>升级 = 从 savepoint 无状态重建或全量重算，要排停机/双跑窗口</td></tr>
+    <tr><td>Java 版本</td><td>Java 8 可用</td><td>最低 Java 11（新部署实践 Java 17）</td><td>运行时先升，作业代码连带 JDK 依赖核对</td></tr>
+    <tr><td>配置文件</td><td>flink-conf.yaml</td><td>config.yaml（标准 YAML）</td><td>官方提供转换工具；per-job 模式同批移除，改 Application 模式</td></tr>
+  </table>
+  </div>
+  <p>版本坐标（2026-10）：当前稳定线 <strong>2.3.0</strong>（2026-06-25），维护线 2.3/2.2/2.1 与 <strong>1.20 LTS</strong>（1.20.5）并存——1.20 是存量迁移的官方基线。2.3 要点：SQL 层 FROM_CHANGELOG/TO_CHANGELOG 算子（CDC 变更流与动态表在纯 SQL 内互转，不再退回 DataStream 手写）、物化表 DDL 对齐普通表（ALTER 支持列增删改 + START_MODE 控制回刷起点，改查询不再默认全量重算）、原生 S3 文件系统（去 Hadoop 依赖）。<strong>升级顺序建议：先在 1.20 上把作业迁到新 Source/Sink、清掉 DataSet，再切 2.x 运行时</strong>——把一次大爆炸拆成两次可控变更。</p>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：三条能直接落地的配置</h2>
+
+  <h3>实战一：流批一体的当日 GMV（同一条 SQL 的两种跑法）</h3>
+  <pre><code><span class="c-com">-- 1. 源表：Kafka 订单流，事件时间取 order_time，watermark 容忍 5 秒乱序</span>
+CREATE TABLE ods_order (
+  order_id   BIGINT,
+  amount     DECIMAL(16,2),
+  order_time TIMESTAMP(3),
+  dt AS DATE_FORMAT(order_time, 'yyyy-MM-dd'),   <span class="c-com">-- 分区=事件时间派生列</span>
+  WATERMARK FOR order_time AS order_time - INTERVAL '5' SECOND
+) WITH ('connector'='kafka', 'topic'='ods_order', <span class="c-com">/* ... */</span>);
+
+<span class="c-com">-- 2. 同一份业务逻辑：按事件时间天窗口聚合</span>
+CREATE VIEW v_gmv AS
+SELECT dt, SUM(amount) AS gmv
+FROM ods_order GROUP BY dt;
+
+<span class="c-com">-- 3a. 流模式：写入 Paimon 结果表（changelog 持续更新，秒级新鲜度）</span>
+INSERT INTO paimon_gmv SELECT * FROM v_gmv;
+
+<span class="c-com">-- 3b. 批模式：同一 SQL 回刷历史区间（bounded input，分阶段执行）</span>
+SET 'execution.runtime-mode' = 'batch';
+INSERT INTO paimon_gmv /*+ OPTIONS('partition'='2026-10-14') */
+SELECT * FROM v_gmv WHERE dt = DATE '2026-10-14';</code></pre>
+  <p>要点就一个：<strong>分区字段由事件时间派生</strong>（而非消息到达时刻），流批两条执行路径对同一天的计算口径完全一致——01 节事故里的"制度性差额"在源头被消灭。回刷时批模式读的是可回放的 ODS（消息队列按 retention 保留、或湖表的历史分区），重算永远从原始事实出发。</p>
+
+  <h3>实战二：checkpoint 与反压的生产参数（含止血开关）</h3>
+  <pre><code><span class="c-com">// 有状态流作业的 checkpoint 骨架（DataStream API）</span>
+env.enableCheckpointing(Duration.ofSeconds(60));          <span class="c-com">// 间隔=输出可见延迟上界</span>
+chkConfig.setCheckpointingMode(CheckpointingMode.EXACTLY_ONCE);
+chkConfig.setCheckpointTimeout(Duration.ofMinutes(10));
+chkConfig.setMinPauseBetweenCheckpoints(Duration.ofSeconds(30)); <span class="c-com">// 防快照风暴</span>
+chkConfig.enableUnalignedCheckpoints(true);               <span class="c-com">// 反压对齐超时的止血开关</span>
+chkConfig.setExternalizedCheckpointCleanup(RETAIN_ON_CANCELLATION);
+<span class="c-com">// 每个 TM 状态超过 GB 级再考虑 RocksDB + 增量 checkpoint</span></code></pre>
+  <p>三条纪律：<strong>① checkpoint 间隔就是端到端输出延迟的量级</strong>——要秒级新鲜度就得接受分钟级 checkpoint 频率的算力税；<strong>② Unaligned Checkpoint 治的是"对齐超时"这个症状</strong>，反压根因（并行度不足/数据倾斜/慢 Sink）还要单独治，别把止血药当饭吃；<strong>③ 监控三件套</strong>——checkpoint 持续时间与成功率、反压状态（Web UI 算子颜色：黑=BACKPRESSURED）、状态大小增长率，三者联动看（03 节账二的事故链就是三件套串起来的）。</p>
+
+  <h3>实战三：端到端 exactly-once 的 Kafka Sink（两阶段提交）</h3>
+  <pre><code>KafkaSink&lt;String&gt; sink = KafkaSink.&lt;String&gt;builder()
+    .setBootstrapServers("kafka:9092")
+    .setRecordSerializer(KafkaRecordSerializationSchema.builder()
+        .setTopic("dws_gmv_changelog")
+        .setValueSerializationSchema(new SimpleStringSchema()).build())
+    .setDeliveryGuarantee(DeliveryGuarantee.EXACTLY_ONCE)  <span class="c-com">// 2PC 模式</span>
+    .setTransactionalIdPrefix("flink-gmv-")                 <span class="c-com">// 唯一前缀防跨作业串事务</span>
+    .setProperty("transaction.timeout.ms", "900000")        <span class="c-com">// &gt; checkpoint 间隔+恢复时长</span>
+    .build();</code></pre>
+  <p>三个坑提前说：① <strong>消费端要设 <code>isolation.level=read_committed</code></strong>，否则预提交事务里的数据照样被读到，exactly-once 形同虚设；② <strong>transaction.timeout.ms 必须大于 checkpoint 间隔加最长恢复时间</strong>，且小于 Kafka broker 的 <code>transaction.max.timeout.ms</code>（默认 15 分钟）——被 broker 先超时回滚的事务会让作业陷入提交失败循环；③ 下游如果是 MySQL/ClickHouse 这类不支持 Kafka 语义的系统，改用<strong>幂等 upsert</strong>（主键去重），别硬套两阶段提交。</p>
+
+  <div class="card card-tip">
+    <h4>✅ 流批一体落地体检清单（10 条）</h4>
+    <p>☐ 所有分区/口径字段由事件时间派生，流批同源　☐ ODS 可回放（队列 retention 或湖表历史分区覆盖回刷窗口）　☐ 迟到数据策略显式化（allowedLateness + 侧输出，两侧共用）　☐ 每个有状态算子都有 uid（savepoint 兼容的前提）　☐ 每个 keyed 状态都能回答 TTL/清理时机　☐ checkpoint 三件套（时长/成功率/状态大小）有告警　☐ Sink 语义显式选择：2PC 或幂等，写进作业文档　☐ 2PC Sink 的 transaction.timeout 与 checkpoint 间隔对过账　☐ 批回刷 SOP 演练过（不是"应该可以"）　☐ 升级 2.x 前存量作业盘点：DataSet/旧 Source Sink/Java 版本三张清单</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>流批一体解决的是制度性差额：</strong>实时与离线对不上，多数不是算错，是两套代码、两套时间观、两套故障域的必然产物——一套 SQL + 事件时间统一口径，差额在源头消灭。</li>
+    <li><strong>三层含义递进：</strong>同引擎跑流与批（批是有界输入的特例，DataSet API 已在 2.0 移除）→ 事件时间 + watermark 统一口径 → 物化表声明式交付（FRESHNESS 换档，大促秒级、平日批刷新省成本）。</li>
+    <li><strong>exactly-once 的真实边界：</strong>checkpoint 保证的是"状态生效一次"；端到端要 Sink 两阶段提交配合，代价是输出可见延迟；at-least-once + 幂等 upsert 常常是更工程的选择。</li>
+    <li><strong>checkpoint 超时九成是反压的病：</strong>大促 10 倍流量下对齐时间占 80%、CP 从 30 秒涨到 10 分钟的真实案例——止血用 Unaligned Checkpoint，根治治下游（扩容/倾斜/慢算子）。</li>
+    <li><strong>1.x → 2.x 是重构不是升级：</strong>状态不兼容、DataSet/旧 API 移除、Java 11+——先在 1.20 基线上完成 API 迁移，再切运行时；当前稳定线 2.3.0，1.20 是 LTS 迁移基线。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目：你们的风控实时特征作业（Flink 1.17，RocksDB 状态约 800GB，Kafka Source + MySQL 维表 + Kafka Sink 幂等写）大促期间连续出现 checkpoint 超时（间隔 2 分钟、超时阈值 10 分钟，实际对齐 8 分钟+），作业每小时重启 1~2 次，特征产出延迟从秒级恶化到分钟级，下游风控决策接口超时率抬升。团队有人提议"把 checkpoint 间隔从 2 分钟调大到 10 分钟，超时阈值调到 30 分钟"，有人提议"直接翻倍扩并行度"。① 分析两个提议各自的问题；② 给出你的处置分层（当夜止血 / 大促后根治）；③ 公司同时决定半年内升级 Flink 2.x——基于该作业现状给出迁移评估要点与顺序。<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 三问拆解</h4>
+      <p><strong>① 两个提议的问题：</strong>提议一（间隔 2→10 分钟、阈值 10→30 分钟）治标掩病——对齐时间 8 分钟的根因是反压（下游算子处理不过来，barrier 排队），调大间隔只是降低"单位时间超时次数"，让作业看起来稳定；但代价是<strong>故障恢复基点后移</strong>（回放窗口最长 10 分钟，Kafka 重放流量放大）、<strong>幂等写下游的重复窗口拉长</strong>（at-least-once 重放段变长），且对齐 8 分钟的病根还在，30 分钟阈值只是把死线推迟。提议二（直接翻倍并行度）方向对但姿势错——反压定位要先用 Web UI 找到<strong>第一个 BUSY 且下游 BACKPRESSURED 的算子</strong>（瓶颈口诀），无差别翻倍是把算力撒在没有瓶颈的算子上；且并行度翻倍 = key group 重分布 + 状态重新分配，<strong>大促期间做全局 rescale 是二次事故</strong>（恢复时间本身可能超过故障窗口）。正确姿势是只扩瓶颈算子（Flink 支持算子级并行度），或先做倾斜治理。</p>
+      <p><strong>② 处置分层：</strong>当夜止血三步——<strong>开 Unaligned Checkpoint</strong>（不等 barrier 对齐、连在途数据一起快照，对齐 8 分钟的问题直接绕过，这是双 11 真实案例验证过的开关，CP 时间回落到 30 秒量级）；<strong>定位反压算子</strong>（Checkpoint 详情确认对齐占比 → Backpressure Tab 找瓶颈算子 → SubTask 数据量看是否倾斜：某 SubTask 记录数超其他 5 倍即热点 key，两阶段聚合打散）；<strong>临时限速保决策链路</strong>（Source 端消费限速，宁可特征延迟抬升、保住作业不重启——作业活着才有秒级，作业重启一切归零）。大促后根治四件——瓶颈算子并行度按容量账（峰值 QPS×P99 处理时长）重算并固定；维表查询改 Async I/O + 缓存（同步查 MySQL 是流作业最常见隐形瓶颈）；状态盘点（800GB 里多少是没有 TTL 的历史累积，清一轮可能瘦身一半）；checkpoint 存储与网络带宽核对（800GB 状态的全量快照本身可能就是带宽瓶颈，上 RocksDB 增量 checkpoint）。</p>
+      <p><strong>③ 迁移 Flink 2.x 评估要点与顺序：</strong>先盘三张清单——<strong>API 清单</strong>（该作业 1.17：Source 用的 KafkaSource 已是新 Source API 则存量兼容，MySQL 维表若用老 connector 需查 2.x 适配版本；无 DataSet 则批侧无包袱）、<strong>状态清单</strong>（800GB RocksDB 状态<strong>跨大版本不保证兼容</strong>——升级 = 从 savepoint 重建或全量重算：这个作业状态可由 Kafka 回放重建（ODS retention 覆盖窗口要算清：800GB 状态对应多长的重放），规划一个双跑窗口而非硬切）、<strong>运行时清单</strong>（Java 版本 ≥11/实践 17、flink-conf.yaml→config.yaml、部署模式 Application/K8s Operator）。顺序建议：第一步在 1.20 LTS 上把作业升到迁移基线（验证新 API 全兼容）；第二步搭 2.x 双跑环境，同源 Kafka 消费组不同 groupId 双消费，输出对账（特征值按 key 逐窗口 diff）；第三步切流（新作业接管生产消费组，老作业降级热备）；第四步复盘清理（老集群退役、状态重建期间的业务校准记录归档）。半年窗口的建议节奏：前两个月清单与双跑环境、中间两个月对账、第五个月切流、第六个月收尾——<strong>留一个月给"对账发现口径分裂"这种必然会发生的意外</strong>。</p>
+    </div>
+  </details>
+
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>Apache Flink 官方文档 · 物化表与流批统一（FRESHNESS 刷新模式、成本模型的权威出处）：<br>
+    <a href="https://nightlies.apache.org/flink/flink-docs-master/docs/dev/table/materialized-table/overview/" target="_blank" rel="noopener">nightlies.apache.org — Materialized Table Overview</a>（配套阅读：Flink 2.0.0 与 2.3.0 官方 Release Announcement——破坏性变更清单与物化表演进的一手口径；《End-to-End Exactly-Once Processing in Apache Flink》官方博客——两阶段提交机制的经典详解）</p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>数据链路上下游：<a href="0039-tdengine-data-subscription.html">0039 TDengine 数据订阅</a>（下游按需拉增量的另一种姿势）、<a href="0037-pulsar-tiered-storage.html">0037 Pulsar 分层存储</a>（ODS 可回放的存储账）、<a href="0041-shardingsphere-sharding.html">0041 ShardingSphere 分库分表</a>（业务库侧的容量边界）。分布式语义同构：<a href="0021-pulsar-message-reliability.html">0021 Pulsar 消息可靠性</a>（at-least-once 与幂等是同源命题——0012 期 Kafka/Pulsar 对比亦互链）、<a href="0049-distributed-design-patterns.html">0049 分布式设计模式</a>（重试、幂等键与状态治理的参数视角）。可观测与排障：<a href="0028-prometheus-grafana.html">0028 Prometheus 监控体系</a>（checkpoint 三件套告警的落点）。数据架构与实时计算线首期到此，下一期继续本线连 2 期：湖仓一体（Iceberg/Paimon/Fluss）。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0052-ebpf-cilium-network.html">← 上一期：eBPF 与 Cilium</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 53 期 · 数据架构与实时计算系列 · 下一期预告：湖仓一体（Iceberg / Paimon / Fluss）</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
