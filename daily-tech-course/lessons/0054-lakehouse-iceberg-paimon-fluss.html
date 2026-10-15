@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · 湖仓一体：Iceberg、Paimon 与 Fluss 的分层和解 | 2026-10-16</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0054</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0053-flink-stream-batch-unified.html">上一期：Flink 流批一体</a> · <a href="https://www.bilibili.com/video/BV1RgJS67Em9" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">数据架构与实时计算 · 数据架构系列第 2 讲（湖仓一体篇）</p>
+  <h1>湖仓一体：Iceberg、Paimon 与 Fluss 的分层和解</h1>
+  <p class="subtitle">上一讲聊完 Flink 流批一体，这期继续数据架构线。凌晨两点，DWD 层一张核心表被误清空，新来的分析师用旧 SQL 全表重跑覆盖了分区，恢复靠 DBA 从昨天的全量备份里人肉捞——<strong>"湖上建仓"两年了，为什么数据安全感还不如当年那个 Hive 集群</strong>？这一讲拆开湖仓一体的三层结构：开放表格式（Iceberg/Paimon）解决"湖上的表怎么像表"，流式存储（Fluss）解决"湖怎么变得实时"，再把"三个开源项目怎么选、怎么组合"落成一张决策表。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">📊 数据架构与实时计算</span>
+    <span class="tag-date">📅 2026-10-16 · 第 54 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>场景：凌晨两点的"表没了"事故</h2>
+
+  <h3>事故复盘：一次 INSERT OVERWRITE 引发的三个系统都要修</h3>
+  <p>某电商团队的湖仓建在对象存储上，凌晨两点值班群炸了：DWD 层订单明细表（T+1 分区、下游 40+ 张 ADS 表、3 条报表链路）查询全挂。时间线还原：</p>
+  <ul>
+    <li><strong>02:03</strong> 新入职分析师跑历史回补，脚本里 <code>INSERT OVERWRITE</code> 的分区条件少写一个月份过滤——<strong>全表被当成了一个分区覆盖</strong>。Hive 时代这种事故靠"误删分区还能从回收站捞目录"，但对象存储没有回收站，目录被覆盖就是物理覆盖；</li>
+    <li><strong>02:03</strong> 注意时间戳——覆盖动作<strong>秒级完成</strong>，没有任何提交冲突、没有任何告警。对象存储的 PUT 是原子的，但"覆盖两千个文件"这个业务语义没有任何校验；</li>
+    <li><strong>02:15</strong> 团队想回滚，发现这套链路是"Flink 直接写 Parquet 文件到对象存储"的裸奔方案：<strong>没有快照、没有版本、没有时间旅行</strong>。最终恢复 = 从前一天的全量备份 + 当天 Kafka 重放（ODS 队列 retention 只剩 3 天，险象环生），恢复耗时 6 小时，错过早间报表。</li>
+  </ul>
+
+  <div class="callout">
+    <span class="callout-title">复盘的真正结论</span>
+    <p>直接写文件到对象存储，用的是<strong>存储的语义</strong>（PUT 成功 = 写成功），丢的是<strong>表的语义</strong>（原子提交、版本、回滚、schema 演进）。湖仓一体的核心命题不是"把数据搬到对象存储上省存储费"，而是<strong>在廉价存储之上重建一张"像数据库的表"该有的一切事务语义</strong>——这正是开放表格式（Iceberg/Paimon）存在的意义。而这个事故里的"从 Kafka 重放恢复"，则引出本期第二个主角：如果 Kafka retention 不止 3 天、如果队列和湖是同一份数据的不同温度层——恢复根本不用 6 小时。</p>
+  </div>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：一张湖表的"表语义"从哪来</h2>
+
+  <h3>开放表格式：把"表"做成一组元数据文件</h3>
+  <p>Iceberg 的回答是把表状态做成<strong>元数据树</strong>：数据文件（Parquet/ORC）不可变，其上是<strong>清单文件 manifest</strong>（每个清单记录一批数据文件的路径、分区统计、列级 min/max），最顶上是<strong>快照 snapshot</strong>（指向一组清单，代表表的某个一致版本）。每次写入 = 新数据文件 + 新清单 + 新快照，通过 Catalog 的<strong>原子指针切换</strong>提交（旧快照不动，新快照生效）。这套结构一次性带来：ACID（提交原子、读快照隔离）、<strong>时间旅行</strong>（旧快照还在，<code>SELECT ... AS OF</code> 直接查历史版本）、schema 演进（加列不重写文件）、分区演进（改分区策略不动存量数据）。凌晨事故里那类"误覆盖"，在 Iceberg 表上是<strong>一次新快照</strong>——回滚 = 把指针切回上一个快照，秒级完成。</p>
+  <p>Paimon 的出发点不同：它要在湖上接住<strong>流式更新</strong>。主键表底层是 <strong>LSM-Tree</strong>（与 HBase/RocksDB 同族的结构）：写入先落小文件（L0），后台 compaction 逐层合并去重，读取时多路归并按主键取最新值。这个结构让 Paimon 能以<strong>分钟级延迟</strong>接住 CDC 流的持续 upsert，还带出了三个流式特性：<strong>merge engine</strong>（去重/部分更新/预聚合/首行，按业务语义选）、<strong>changelog-producer</strong>（产出完整正确的变更流，下游流算子不用另做去重）、CDC 整库同步。代价是 LSM 永动：<strong>compaction 是常态运行成本</strong>，小文件与读放大是它一生的敌人。</p>
+
+  <h3>一张图看懂分层：格式层与热层各管什么</h3>
+  <div class="diagram">
+  <svg viewBox="0 0 760 470" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar54" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <text x="380" y="24" text-anchor="middle" fill="var(--muted)" font-size="13">湖仓一体分层：流式热层 + 开放表格式 + 对象存储</text>
+
+    <!-- 计算层 -->
+    <rect x="30" y="42" width="700" height="64" rx="10" fill="var(--card)" stroke="var(--line)" stroke-width="1.2"/>
+    <text x="380" y="68" text-anchor="middle" fill="var(--accent)" font-size="13" font-weight="700">计算引擎层（谁都能来读）</text>
+    <text x="380" y="90" text-anchor="middle" fill="var(--muted)" font-size="10.5">Flink（流） · Spark（批） · Trino / StarRocks（OLAP 查询） · DuckDB（本地分析）</text>
+
+    <!-- 热层 Fluss -->
+    <rect x="30" y="130" width="330" height="120" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="1.6"/>
+    <text x="195" y="156" text-anchor="middle" fill="var(--accent)" font-size="12.5" font-weight="700">流式热层：Fluss</text>
+    <text x="195" y="176" text-anchor="middle" fill="var(--ink)" font-size="10.5">日志表：秒级流读，替代 Kafka 热数据段</text>
+    <text x="195" y="194" text-anchor="middle" fill="var(--ink)" font-size="10.5">主键表：KV 点查 / 流式 upsert（LSM）</text>
+    <text x="195" y="214" text-anchor="middle" fill="var(--muted)" font-size="9.5">Arrow 列式流 · 服务端谓词下推 · 副本可恢复</text>
+    <text x="195" y="232" text-anchor="middle" fill="var(--muted)" font-size="9.5">数据只在热层待“几天”</text>
+
+    <!-- 格式层 -->
+    <rect x="400" y="130" width="330" height="120" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="1.6"/>
+    <text x="565" y="156" text-anchor="middle" fill="var(--accent)" font-size="12.5" font-weight="700">开放表格式层（湖表语义）</text>
+    <text x="565" y="176" text-anchor="middle" fill="var(--ink)" font-size="10.5">Iceberg：快照 + 清单元数据树，批分析旗舰</text>
+    <text x="565" y="194" text-anchor="middle" fill="var(--ink)" font-size="10.5">Paimon：主键表 LSM，流式更新入湖</text>
+    <text x="565" y="214" text-anchor="middle" fill="var(--muted)" font-size="9.5">ACID · 时间旅行 · schema/分区演进 · 多引擎读</text>
+    <text x="565" y="232" text-anchor="middle" fill="var(--muted)" font-size="9.5">Parquet 不可变文件 + 元数据指针原子切换</text>
+
+    <!-- 对象存储 -->
+    <rect x="30" y="278" width="700" height="52" rx="10" fill="var(--card)" stroke="var(--line)" stroke-width="1.2"/>
+    <text x="380" y="300" text-anchor="middle" fill="var(--accent)" font-size="12.5" font-weight="700">对象存储层（S3 / OSS / MinIO）</text>
+    <text x="380" y="318" text-anchor="middle" fill="var(--muted)" font-size="10.5">11 个 9 的持久性 · 无回收站 · 秒级原子 PUT 但无事务 —— 一切廉价的底座</text>
+
+    <!-- 仲裁箭头 -->
+    <path d="M195,250 L195,272" stroke="var(--muted)" stroke-width="1.4" marker-end="url(#ar54)" fill="none"/>
+    <path d="M565,250 L565,272" stroke="var(--muted)" stroke-width="1.4" marker-end="url(#ar54)" fill="none"/>
+    <text x="152" y="268" fill="var(--muted)" font-size="9">远端副本</text>
+    <text x="585" y="268" fill="var(--muted)" font-size="9">数据文件</text>
+
+    <!-- Fluss -> 格式层 沉降箭头 -->
+    <path d="M360,178 L400,178" stroke="var(--accent)" stroke-width="2" marker-end="url(#ar54)" fill="none"/>
+    <text x="380" y="170" text-anchor="middle" fill="var(--accent)" font-size="9.5" font-weight="700">沉降</text>
+    <text x="380" y="196" text-anchor="middle" fill="var(--muted)" font-size="8.5">自动转 Parquet</text>
+
+    <!-- 查询穿透：引擎直读湖 -->
+    <path d="M640,106 L640,128" stroke="var(--muted)" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ar54)" fill="none"/>
+    <text x="700" y="122" fill="var(--muted)" font-size="9">全量历史</text>
+
+    <!-- 底部一句话 -->
+    <rect x="30" y="356" width="700" height="46" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="1.2" stroke-dasharray="6 3"/>
+    <text x="380" y="376" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">流批一体的“存储版”：Fluss 管秒级新鲜，格式层管全量真相，边界 = 数据温度</text>
+    <text x="380" y="393" text-anchor="middle" fill="var(--muted)" font-size="10">同一份数据，热段在 Fluss 可流读可点查，冷段在湖可快照可回滚——不再是两套系统两份数据</text>
+  </svg>
+  </div>
+
+  <p>分层的要害在<strong>边界</strong>：Fluss 是<strong>流式存储</strong>（一个独立的集群系统，不是文件格式），它管"数据最热的那几天"，Arrow 列式流 + 服务端下推让流读也省带宽；Iceberg/Paimon 是<strong>文件格式 + 元数据约定</strong>（不是集群，没有常驻进程），管"全量历史与事务语义"。Fluss 1.0 起支持<strong>湖一体</strong>：日志表数据自动沉降为湖上的 Parquet（当前对接 Paimon/Iceberg），主键表可通过 <strong>Union Read</strong> 把 Fluss 热段与湖上冷段合并成一个视图。换句话说：<strong>Fluss 不与湖竞争，它是湖的"实时前置层"</strong>。</p>
+</section>
+
+<!-- ================= 03 架构 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构：选型决策表与组合参考架构</h2>
+
+  <h3>Iceberg vs Paimon：不是二选一，是分工</h3>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>维度</th><th>Iceberg</th><th>Paimon</th><th>Fluss</th></tr></thead>
+    <tbody>
+      <tr><td><strong>本质</strong></td><td>开放表格式（元数据树）</td><td>湖格式（主键表 LSM）</td><td>流式存储系统（集群）</td></tr>
+      <tr><td><strong>强项</strong></td><td>大规模批分析、多引擎生态最广、快照回滚</td><td>流式 upsert 分钟级入湖、CDC 整库同步、changelog</td><td>秒级流读、KV 点查、与湖自动冷热分层</td></tr>
+      <tr><td><strong>更新姿势</strong></td><td>MERGE INTO（COW/MOR，v3 引入删除向量 DV）</td><td>主键表原生 upsert + merge engine</td><td>主键表实时 upsert + Delta Join</td></tr>
+      <tr><td><strong>运维形态</strong></td><td>无常驻进程（表维护作业按需跑）</td><td>compaction 常态化（写入侧或独立作业）</td><td>独立集群（TabletServer + 协调器）</td></tr>
+      <tr><td><strong>典型角色</strong></td><td>DWD/DWS 批层、ADS 湖上集市</td><td>DWD 实时层、CDC 入湖落地表</td><td>Kafka 替代/共存 + 实时点查层</td></tr>
+      <tr><td><strong>版本坐标（2026-10）</strong></td><td>1.12.0（2026-09-30）</td><td>2.0.0（2026-08-07）</td><td>1.0（2026-09-21）·8 月毕业 TLP</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="note">
+  <p><strong>决策口径：</strong>纯批分析为主、生态广度优先 → Iceberg；Flink 实时数仓主力、CDC 持续 upsert → Paimon；秒级流读 + 点查 + 想把 Kafka 热数据也纳入统一元数据 → Fluss（可替代或共存于 Kafka）。三者不互斥：<strong>常见的生产组合是 Fluss（热）+ Paimon（实时湖层）+ Iceberg（批层/集市层）</strong>，靠 Catalog 语义打通。另注意 Paimon 1.2+ 提供"Iceberg 兼容元数据"（Paimon 表可同时暴露为 Iceberg 表供 Trino/StarRocks 读）——两个格式间的墙正在被拆掉。</p>
+  </div>
+
+  <h3>组合参考架构：三条入湖链路</h3>
+  <p>以典型电商实时数仓为例（承接 0053 的分层话语）：</p>
+  <ul>
+    <li><strong>实时链路（秒~分钟）：</strong>业务库 binlog → Flink CDC → <strong>Fluss 日志表</strong>（ODS 实时层，替代 Kafka，队列即表）→ Flink 流作业聚合 → <strong>Paimon 主键表</strong>（DWD/DWS 实时层，upsert 持续更新）→ StarRocks/Trino 直读供报表与 OLAP；</li>
+    <li><strong>沉降链路（自动）：</strong>Fluss 日志表按 TTL 沉降为 Paimon/Iceberg 分区（湖上 ODS 全量历史），热段过期即只剩湖——<strong>同一份数据不需要在队列和湖各存一份</strong>；</li>
+    <li><strong>批链路（小时~天）：</strong>湖上 ODS → Spark/Flink 批模式 → <strong>Iceberg DWD/DWS/ADS</strong>（大表批加工、快照对账、报表集市）→ 各引擎按 Catalog 直读。</li>
+  </ul>
+  <p><strong>容量三笔账：</strong>①存储账——对象存储单价约为自建 HDFS 三分之一以下，但<strong>小文件是头号成本刺客</strong>：每 GB 对象存储每日上千次 LIST/GET 请求费可能反超存储费本身，Iceberg 的 manifest 合并、Paimon 的 compaction、Fluss 的沉降都直接压请求费；②新鲜度账——Fluss 热段秒级、Paimon 分钟级、Iceberg 批小时级，<strong>链路每降一层温度，延迟和成本各降一档</strong>，按业务 SLA 分层放置而不是全量追求秒级；③恢复账——有了快照与可回放 ODS，"凌晨事故"类恢复从 6 小时人肉恢复降为<strong>分钟级快照回滚 + Fluss/Kafka 重放</strong>——湖仓的事务语义本质上是买了一份"数据可恢复性"保险。</p>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：三段最小可用配置</h2>
+
+  <h3>① Flink SQL 一条链路写 Paimon 主键表（CDC 入湖）</h3>
+  <div class="codeblock">
+  <pre><code>-- Flink SQL：MySQL binlog 整库入 Paimon 主键表
+CREATE CATALOG paimon WITH (
+  'type'='paimon',
+  'warehouse'='s3://lake/warehouse'              -- 对象存储路径
+);
+CREATE TABLE dwd_orders (
+  order_id BIGINT,
+  user_id BIGINT,
+  status STRING,
+  op_time TIMESTAMP(3),
+  dt AS DATE_FORMAT(op_time, 'yyyy-MM-dd'),      -- 0053 讲过：事件时间派生分区
+  PRIMARY KEY (order_id) NOT ENFORCED
+) PARTITIONED BY (dt) WITH (
+  'changelog-producer'='input',                  -- 源是 CDC 流，变更语义完整
+  'bucket'='4',                                  -- 分桶数=写入并行度上限
+  'snapshot.time-retained'='2 h'                 -- 快照保留窗口
+);
+-- 同步作业：Source 为 CDC 连接器，upsert 持续合入
+INSERT INTO dwd_orders SELECT ... FROM orders_cdc;</code></pre>
+  </div>
+
+  <h3>② Iceberg：快照回滚与表维护（凌晨事故的解药）</h3>
+  <div class="codeblock">
+  <pre><code>-- Spark SQL：误覆盖后秒级回滚
+SELECT * FROM dws_gmv /* OPTIONS('snapshot-id'='4113') */;  -- 先查旧快照确认
+CALL iceberg.system.rollback_to_snapshot(
+  table =&gt; 'lake.dws_gmv',
+  snapshot_id =&gt; 4113                            -- 指针切回，旧数据文件从未被删
+);
+-- 表维护：过期快照清理 + 小文件合并（控对象存储请求费）
+CALL iceberg.system.expire_snapshots('lake.dws_gmv',
+  'older_than'=&gt;'2026-10-01 00:00:00');
+CALL iceberg.system.rewrite_data_files(
+  table =&gt; 'lake.dws_gmv',
+  strategy =&gt; 'sort', sort_order =&gt; 'dt DESC'   -- 顺便做聚类，查询裁剪受益
+);</code></pre>
+  </div>
+
+  <h3>③ Fluss：建一张自动沉降的日志表</h3>
+  <div class="codeblock">
+  <pre><code>-- Flink SQL（Fluss Catalog）：日志表 + 湖一体沉降
+CREATE TABLE ods_events (
+  event_id STRING,
+  payload STRING,
+  event_time TIMESTAMP(3)
+) WITH (
+  'table.type'='log',                            -- 日志表（流读语义）
+  'bucket'='8',
+  'log.ttl'='3 d',                               -- 热层只留 3 天
+  'table.lake-enable'='true',                    -- 开启湖一体
+  'table.lake-format'='paimon',                  -- 沉降为 Paimon 分区
+  'datalake.ttl'='365 d'                         -- 湖上留一年
+);
+-- 消费端视角：FlussConnector 自动做 union read，
+-- 3 天内走 Fluss 热段，更早的走湖上 Parquet，一条 SQL 两种温度。</code></pre>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>湖仓一体 ≠ 数据上对象存储：</strong>对象存储只给"廉价 + 持久"，表语义（ACID、快照、回滚、演进）由开放表格式的元数据层重建——凌晨误覆盖事故的根因是用存储语义冒充了表语义。</li>
+    <li><strong>Iceberg 与 Paimon 是两种出身：</strong>Iceberg 是元数据树，为大规模批分析而生、生态最广；Paimon 是湖上 LSM，为流式 upsert 而生、分钟级 CDC 入湖——不是竞品二选一，是"批层与实时层"的分工。</li>
+    <li><strong>Fluss 补上"实时湖"缺口：</strong>流式存储集群，日志表秒级流读可替代 Kafka 热段，主键表支持点查；数据按温度自动沉降入湖（Paimon/Iceberg），队列与湖从"两份数据两套系统"变为"一份数据两个温度"。</li>
+    <li><strong>小文件是湖仓头号成本刺客：</strong>对象存储的请求费可能反超存储费——compaction/manifest 合并/沉降策略不是性能优化，是成本工程。</li>
+    <li><strong>快照 + 可回放 ODS = 数据可恢复性保险：</strong>误覆盖恢复从 6 小时人肉捞备份降为秒级快照回滚；ODS 队列/湖表保留窗口要按"最坏重放需求"倒推。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目：你们公司实时数仓现状：Kafka（ODS 队列，retention 3 天）+ Flink 流作业 + StarRocks 供数；离线数仓：Hive on HDFS（T+1 调度）。老板要求"一年内湖仓一体"，并明确三个目标：① 实时与离线的 ODS 不再各存一份（存储费砍半）；② 核心链路具备"误操作可分钟级恢复"能力；③ 大促期间实时报表能扛住（当前 StarRocks 在大促时因高频 upsert 出现查询抖动）。给出你的目标架构（画分层、选组件、定边界），并回答：④ Kafka 是否退役、Fluss 是否引入的决策依据；⑤ 迁移的分阶段路线（不允许全量重写、业务无感）。<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 五问拆解</h4>
+      <p><strong>①②③ 目标架构：</strong>分层画法——<strong>ODS 层</strong>：binlog → Flink CDC → <strong>Fluss 日志表</strong>（table.lake-enable=true，沉降 Paimon 分区；Kafka 不再承担全量 ODS，仅保留跨团队外部订阅场景或直接退役）。热段 3 天覆盖 StarRocks 拉取窗口与重放需求。<strong>DWD/DWS 层</strong>：Flink 流作业读 Fluss → 写 <strong>Paimon 主键表</strong>（分钟级 upsert）；同一份数据由 compaction 作业维护。<strong>批层/ADS</strong>：Spark/Flink 批模式读 Paimon ODS → 写 <strong>Iceberg DWD/ADS</strong>（大表批加工、集市）；StarRocks/Trino 通过 Catalog 直读湖。这样：ODS 一份数据两个温度（存储费目标①达成）；全链路快照化（目标②：误覆盖 = 快照回滚，Paimon snapshot + Iceberg rollback 都是秒级指针操作）；大促查询抖动（目标③）的根因是"高频 upsert 直打 OLAP 引擎"，解法是 OLAP 引擎改为读湖上批层（读多写少的 ADS），实时侧仅小表直读——<strong>读写分离到温度层</strong>，而不是给 StarRocks 加机器。</p>
+      <p><strong>④ Kafka 退役与 Fluss 引入的决策依据：</strong>退役的收益 = ODS 双份存储消除 + 队列/湖两套元数据合一；不退役的理由 = Kafka 生态成熟度（connector、运维团队技能、跨语言客户端）与 Fluss 1.0 的生产验证周期。决策判据三条：<strong>一看消费模式</strong>——消费方是否需要"秒级流读 + 点查 + 湖上全量"三合一？只有流读 → Kafka 够；要三合一 → Fluss。<strong>二看组织能力</strong>——Fluss 是新集群系统，要评估运维画像（类似 Kafka 但有 TabletServer/协调器，大促容量规划另一套）；<strong>三看迁移窗口</strong>——外部订阅方多（数据团队之外的消费者）时 Kafka 退役牵连面大，可先"Fluss 承接 Flink 内部链路、Kafka 保留对外分发"的双轨，后续再收敛。技术上还要核对 Fluss 1.0 的能力边界（如消费组管理、Kafka 协议兼容在 1.1 roadmap）——<strong>别让目标架构跑在 roadmap 前面</strong>。</p>
+      <p><strong>⑤ 分阶段路线（业务无感）：</strong><strong>第一阶段（1~2 月）打底</strong>：建 Catalog 与对象存储规范（路径/权限/生命周期）、Iceberg ADS 层先行（纯增量，不动存量 Hive——新报表走湖，老的按周迁移）；<strong>第二阶段（2~3 月）双轨实时层</strong>：Fluss 集群灰度上线，一条新业务链路 CDC → Fluss → Paimon 全链试点，与 Kafka 链路双跑对账（口径、延迟、成本三张表）；<strong>第三阶段（2~3 月）ODS 收敛</strong>：存量 Kafka ODS 逐 topic 迁 Fluss（消费组批量切，保留回切预案），Paimon 沉降分区替代离线 Hive ODS 的每日同步任务，Hive T+1 任务改为读湖（Spark 直读 Paimon/Iceberg，SQL 兼容层验证）；<strong>第四阶段（收尾）Hive 退役评估</strong>：存量 HDFS 数据迁移（Iceberg migrate 或保留只读）、Hive 集群下线成本复盘。全程两条纪律：每个阶段有"可停点"（双轨任一侧能独立承担全量业务）；对账先行——<strong>口径对上了再切流量，0053 讲的三笔制度性差额教训在湖仓迁移里同样成立</strong>。</p>
+    </div>
+  </details>
+
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>Apache Paimon 官方文档 · 湖仓一体与主键表机制（快照、LSM、merge engine、changelog-producer 的权威出处）：<br>
+    <a href="https://paimon.apache.org/docs/master/" target="_blank" rel="noopener">paimon.apache.org — Apache Paimon Documentation</a>（配套阅读：Apache Iceberg 官方 Table Spec 与 <a href="https://iceberg.apache.org/docs/latest/" target="_blank" rel="noopener">iceberg.apache.org 文档</a>；Apache Fluss 官方博客 <a href="https://fluss.apache.org/blog/" target="_blank" rel="noopener">1.0 发布公告与 Lakehouse Architecture</a>——三者交叉阅读，分层视角自然浮现）</p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>本线上下文：<a href="0053-flink-stream-batch-unified.html">0053 Flink 流批一体</a>（物化表 FRESHNESS 以 Paimon 为首个 Catalog、事件时间派生分区——本期直接承接）、<a href="0037-pulsar-tiered-storage.html">0037 Pulsar 分层存储</a>（冷热分层的另一条技术路线：消息队列侧）、<a href="0039-tdengine-data-subscription.html">0039 TDengine 数据订阅</a>（下游按需拉增量）。存储底座：<a href="0023-minio-erasure-coding.html">0023 MinIO 纠删码</a>（对象存储可靠性的底层账）。业务库侧：<a href="0041-shardingsphere-sharding.html">0041 ShardingSphere</a>（源库的容量边界）。数据架构线连 2 期，下一期回十类循环轮换——进入架构方法论与工程效能线：DDD 战略设计。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0053-flink-stream-batch-unified.html">← 上一期：Flink 流批一体</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 54 期 · 数据架构与实时计算系列 · 下一期预告：DDD 战略设计（架构方法论线）</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
