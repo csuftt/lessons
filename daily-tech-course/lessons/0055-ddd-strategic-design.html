@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · DDD 战略设计：康威定律、限界上下文与团队拓扑 | 2026-10-19</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0055</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0054-lakehouse-iceberg-paimon-fluss.html">上一期：湖仓一体</a> · <a href="https://www.bilibili.com/video/BV1XAn76dEh4" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">架构方法论与工程效能 · 架构方法论系列第 1 讲（DDD 战略设计篇）</p>
+  <h1>DDD 战略设计：康威定律、限界上下文与团队拓扑</h1>
+  <p class="subtitle">新的技术栈轮换线开启：上一讲聊完湖仓一体，数据架构线告一段落，今天开启架构方法论与工程效能线。公司按渠道拆了七个订单团队，一年后订单服务长出了七套"几乎一样"的接口；十几个团队共用一张 200 万行的订单大表，加个字段要发十几封邮件——<strong>这两类"接口爆炸"和"共享数据库"的病，代码评审拦不住，因为病根不在代码里，在边界里</strong>。DDD 战略设计不讲类图，讲的是系统怎么切、边界谁守、模型放哪。这一讲用一条被忽视的实证铁律（组织结构决定架构）做骨架，把限界上下文、子域划分、上下文映射和团队拓扑串成一套可落地的切系统方法。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧭 架构方法论与工程效能</span>
+    <span class="tag-date">📅 2026-10-19 · 第 55 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>场景：接口爆炸与共享大表，两种"边界病"</h2>
+
+  <h3>事故复盘：一个订单域的两种畸形生长</h3>
+  <p>某电商公司订单域的真实演化史（合并自多家公司的公共剧本）：</p>
+  <ul>
+    <li><strong>病一：接口爆炸。</strong>公司按渠道设了七个订单团队（App、小程序、主站、开放平台、线下门店、直播、海外），每个团队都在订单服务里有"自己人"：加个字段要拉七个群对齐，发版要排七条流水线的空档；七年下来订单服务对外暴露了 <strong>200+ 个接口</strong>，其中 30% 是"同一业务语义的七个变体"——按团队复制，不按业务抽象。新人入职三周不敢碰。</li>
+    <li><strong>病二：共享大表。</strong>十几个团队共用一张 <strong>200 万行的订单主表（100+ 字段）</strong>：加字段要通知所有下游评估影响，一次变更窗口排两周；不同渠道团队给同一列写不同语义的值（status 字段六套枚举），"订单"这个词在每次需求评审会上都要重新吵一遍定义。DBA 夜里被叫醒的原因，一半是某个团队一条慢查询拖垮了所有人。</li>
+    <li><strong>两次失败的治理：</strong>第一次按"渠道垂直拆微服务"——七套订单服务各自演化，三个月后公共逻辑抄了七份，改一个促销规则要发七次版；第二次把公共逻辑抽成"订单中心统一服务"——所有团队排队改一个服务，发布排队比原来更长。<strong>垂直抄一遍、水平抄一遍，怎么切都切不对。</strong></li>
+  </ul>
+
+  <div class="callout">
+    <span class="callout-title">复盘的真正结论</span>
+    <p>两次治理都在"怎么切代码"上打转，没人问过"业务边界本来在哪、组织边界把它拧成了什么样"。七个团队对应七个接口变体——这不是巧合，这是<strong>康威定律在收组织结构欠下的税</strong>；一张共享大表——这是<strong>缺少限界上下文边界</strong>，让所有人在同一个模型上互相踩脚。DDD 战略设计提供的正是这套"先找业务边界、再用边界改组织、最后才动代码"的操作顺序。</p>
+  </div>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：组织结构决定架构——一条被忽视的实证铁律</h2>
+
+  <h3>康威定律不是段子，是被量化验证过的工程事实</h3>
+  <p>1968 年 Melvin Conway 在《How Do Committees Invent?》里写下："任何设计系统的组织，都将产生一种设计与该组织内沟通结构同构的设计。"这句话长期被当作"管理学段子"，直到 2008 年被微软研究院和马里兰大学<strong>量化验证</strong>：Nagappan、Murphy、Basili 对 <strong>Windows Vista 的全部二进制组件</strong>建模——不看一行代码，只用八个"组织指标"（改过该组件的工程师数量、已离职工程师数量、组织架构中参与编辑的层级深度、参与编辑的组织占比、跨组织交叉因子等），去预测哪些组件<strong>上线后会出故障</strong>。</p>
+  <p>结果：组织结构模型预测精度 <strong>86.2%、召回率 84.0%</strong>，<strong>优于全部五组代码级指标</strong>（代码变动 78.6%/79.9%、复杂度 79.3%/66.0%、依赖 74.4%/69.9%、覆盖率 83.8%/54.4%、历史缺陷 73.8%/62.9%）。结论只有一句话：<strong>"谁写的、几个人写的、跨了几个部门"，比"代码写得多复杂"更能预测哪里会坏。</strong>对架构师的直接含义：组织架构图是工程输入，不是软性话题——想改缺陷分布，最强杠杆是改组织，而不是改代码规范。</p>
+
+  <h3>DDD 战略设计的三层武器：子域 → 限界上下文 → 上下文映射</h3>
+  <p><strong>子域划分</strong>（按业务价值）：支撑域、通用域、核心域。<strong>核心域</strong>是公司赚钱的差异竞争力——投放系统之于广告平台、履约调度之于即时零售，值得最好的人和自主的模型；<strong>支撑域</strong>是必需但不产生差异化价值的（如商家管理后台）；<strong>通用域</strong>是行业里大家都一样、直接买或用开源的（认证、消息、支付网关对接）。投入策略的核心纪律：<strong>好的架构师把兵力花在核心域，通用域的正义是"别自研"。</strong></p>
+  <p><strong>限界上下文</strong>（模型生效的显式边界）：同一个"订单"，交易上下文里关心价格与履约状态，物流上下文里关心包裹与运单，结算上下文里关心金额与账期——<strong>它们不该是同一个类，甚至不该是同一张表</strong>。限界上下文的判别式不是"名词有几个"，而是"<strong>同一名词的模型在何处不再一致</strong>"：当两个团队对'订单已取消'的定义打架时，边界就在打架的地方。一个限界上下文 = 一个自治的模型 + 一份它独占的数据 = 一支能端到端负责它的团队。</p>
+  <p><strong>上下文映射</strong>（边界之间的集成关系）：识别出"下游团队"与"上游团队"的九种关系模式中，工程上最常落地的三种：<strong>防腐层</strong>（下游在自己的边界内翻译上游模型，上游烂不至于传染——<a href="0040-dubbo-rpc-governance.html">0040 期</a>在 RPC 治理里用过同一思想）、<strong>开放主机服务</strong>（上游发布标准协议，如消息事件契约——与 <a href="0038-pulsar-schema-registry.html">0038 期 Schema Registry</a> 同构）、<strong>共享内核</strong>（两上下文共享一小块模型——最危险的选项，共享面积就是耦合面积）。</p>
+
+  <h3>团队拓扑：给每个上下文配一支"认知负载合身"的团队</h3>
+  <p>Skelton 与 Paise 的《Team Topologies》给康威定律装上了操作系统，四种团队类型 + 三种交互模式：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>团队类型</th><th>职责</th><th>订单域例子</th></tr></thead>
+    <tbody>
+      <tr><td><strong>流团队 stream-aligned</strong></td><td>端到端拥有一个限界上下文，面向业务流交付</td><td>交易团队拥有"交易上下文"（模型+库+服务+值班）</td></tr>
+      <tr><td><strong>平台团队 platform</strong></td><td>提供自助式内部平台，降低流团队认知负载</td><td>订单中台暴露自助 API，不帮业务写代码</td></tr>
+      <tr><td><strong>赋能团队 enabling</strong></td><td>临时辅导流团队掌握新能力，教完就走</td><td>DDD 教练团带三个团队画上下文图后撤离</td></tr>
+      <tr><td><strong>复杂子系统团队</strong></td><td>独占高复杂度子系统，对内屏蔽复杂</td><td>运费引擎/风控规则引擎团队</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>三种交互模式：<strong>X-as-a-Service</strong>（平台把能力做成自助服务，交互最轻）、<strong>协作 collaboration</strong>（两团队共创，交互最重，要限时）、<strong>促进 facilitating</strong>（赋能团队辅导流团队）。团队拓扑的落地要诀：<strong>先让组织结构对齐期望的架构（逆康威机动），再动代码</strong>——顺序反了，组织引力会把架构拉回原形。</p>
+</section>
+
+<!-- ================= 03 架构设计思路 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：先把模型钉在图上，再切组织与代码</h2>
+
+  <h3>事件风暴：两个下午挖出真实边界</h3>
+  <p><strong>事件风暴</strong>（Event Storming）是战略设计阶段性价比最高的工作坊：业务与工程同室，按"领域事件 → 命令 → 聚合 → 限界上下文"的顺序贴墙。<strong>时间线</strong>阶段贴领域事件（订单已创建/已支付/已取消…），<strong>热点</strong>阶段贴业务痛点（橙色便签），<strong>热点聚类处就是上下文候选边界</strong>——吵架吵得最凶的地方，就是模型不一致的地方，就是边界该划的地方。两个下午、一面墙、比三个月的文档评审挖出的边界更真。七渠道订单的案例里，事件风暴会很快暴露：七个渠道团队贴出的"订单已取消"事件定义有四种（用户取消/超时取消/风控取消/客服仲裁取消）——这四个语义本来就属于不同的限界上下文。</p>
+
+  <h3>目标架构：一张上下文映射图</h3>
+  <div class="diagram">
+  <svg viewBox="0 0 760 500" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar55" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <text x="380" y="24" text-anchor="middle" fill="var(--muted)" font-size="13">订单域目标架构：限界上下文 × 团队拓扑 × 集成关系</text>
+
+    <!-- 交易上下文 -->
+    <rect x="30" y="48" width="340" height="128" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="1.8"/>
+    <text x="200" y="74" text-anchor="middle" fill="var(--accent)" font-size="13.5" font-weight="700">交易上下文【核心域】· 流团队</text>
+    <text x="200" y="96" text-anchor="middle" fill="var(--ink)" font-size="10.5">模型：Order（价格/履约状态/取消语义）</text>
+    <text x="200" y="114" text-anchor="middle" fill="var(--ink)" font-size="10.5">独占数据：交易库 order_tx（无外部直连）</text>
+    <text x="200" y="132" text-anchor="middle" fill="var(--muted)" font-size="9.5">发布事件：OrderPlaced / OrderCancelled(四类取消显式建模)</text>
+    <text x="200" y="150" text-anchor="middle" fill="var(--muted)" font-size="9.5">7 渠道 = 7 个适配器，不再是 7 套接口</text>
+
+    <!-- 履约上下文 -->
+    <rect x="400" y="48" width="330" height="128" rx="10" fill="var(--card)" stroke="var(--line)" stroke-width="1.2"/>
+    <text x="565" y="74" text-anchor="middle" fill="var(--accent)" font-size="13.5" font-weight="700">履约上下文【核心域】· 流团队</text>
+    <text x="565" y="96" text-anchor="middle" fill="var(--ink)" font-size="10.5">模型：FulfillmentOrder（包裹/仓/运单）</text>
+    <text x="565" y="114" text-anchor="middle" fill="var(--ink)" font-size="10.5">只订阅事件，不读交易库</text>
+    <text x="565" y="132" text-anchor="middle" fill="var(--muted)" font-size="9.5">拥有自己的"订单"投影表（按需字段）</text>
+    <text x="565" y="150" text-anchor="middle" fill="var(--muted)" font-size="9.5">取消语义翻译：四类取消 → 两种履约动作</text>
+
+    <!-- 事件总线 -->
+    <rect x="30" y="212" width="700" height="52" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-dasharray="5,4"/>
+    <text x="380" y="234" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">开放主机服务：领域事件契约（消息队列 · Schema 治理）</text>
+    <text x="380" y="252" text-anchor="middle" fill="var(--muted)" font-size="9.5">事件 schema 有版本与兼容策略（承接 0038 期契约治理）· 消费端自治</text>
+
+    <!-- 下游三个上下文 -->
+    <rect x="30" y="300" width="220" height="96" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="140" y="326" text-anchor="middle" fill="var(--accent)" font-size="12" font-weight="700">结算上下文</text>
+    <text x="140" y="346" text-anchor="middle" fill="var(--ink)" font-size="10">模型：Bill（金额/账期）</text>
+    <text x="140" y="364" text-anchor="middle" fill="var(--muted)" font-size="9.5">订阅事件 → 防腐层翻译</text>
+    <text x="140" y="380" text-anchor="middle" fill="var(--muted)" font-size="9.5">交易模型变更不传染</text>
+
+    <rect x="270" y="300" width="220" height="96" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="380" y="326" text-anchor="middle" fill="var(--accent)" font-size="12" font-weight="700">渠道适配层【支撑域】</text>
+    <text x="380" y="346" text-anchor="middle" fill="var(--ink)" font-size="10">7 个渠道 = 7 支小团队</text>
+    <text x="380" y="364" text-anchor="middle" fill="var(--muted)" font-size="9.5">各自防腐层：渠道模型→交易模型</text>
+    <text x="380" y="380" text-anchor="middle" fill="var(--muted)" font-size="9.5">互不影响，独立发布</text>
+
+    <rect x="510" y="300" width="220" height="96" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="620" y="326" text-anchor="middle" fill="var(--accent)" font-size="12" font-weight="700">认证/消息【通用域】</text>
+    <text x="620" y="346" text-anchor="middle" fill="var(--ink)" font-size="10">买或用开源，不自研</text>
+    <text x="620" y="364" text-anchor="middle" fill="var(--muted)" font-size="9.5">X-as-a-Service 交互</text>
+    <text x="620" y="380" text-anchor="middle" fill="var(--muted)" font-size="9.5">按 SLA 消费</text>
+
+    <!-- 箭头 -->
+    <line x1="200" y1="176" x2="250" y2="212" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#ar55)"/>
+    <line x1="565" y1="176" x2="510" y2="212" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#ar55)"/>
+    <line x1="140" y1="212" x2="140" y2="300" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#ar55)"/>
+    <line x1="380" y1="212" x2="380" y2="300" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#ar55)"/>
+    <line x1="620" y1="212" x2="620" y2="300" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#ar55)"/>
+
+    <text x="380" y="428" text-anchor="middle" fill="var(--muted)" font-size="10.5">纪律：上下文间只走事件或防腐层调用，禁止跨库 JOIN、禁止共享表</text>
+    <text x="380" y="446" text-anchor="middle" fill="var(--muted)" font-size="10.5">团队边界 = 上下文边界（逆康威机动：先改组织，再迁代码）</text>
+  </svg>
+  </div>
+
+  <h3>容量与选型的三笔账</h3>
+  <ul>
+    <li><strong>人力账：</strong>限界上下文的数量级 = 能端到端负责的团队数量级。7 渠道 × 全功能 = 7 支昂贵团队重复造轮子；按上下文切 = 交易/履约/结算各 1 支流团队 + 7 支轻渠道适配团队，<strong>适配团队 2~3 人即可</strong>（模型翻译是薄层），总人力显著低于 7 支全功能团队。</li>
+    <li><strong>发布账：</strong>边界即发布单元。事件契约下的消费端自治让"加字段"从"十几封邮件 + 两周变更窗口"降为"上游发事件新版本、下游按需订阅"——<strong>协调成本从组织流程转嫁为契约版本管理</strong>（这正是 0038 期 Schema Registry 治理的用武之地）。</li>
+    <li><strong>演化账：</strong>Amazon Prime Video 监控工具从 Step Functions + Lambda 回流单体进程省 90% 成本、Segment 从 140+ 微服务合并回 3 个服务——边界不是越细越好，<strong>没有独立伸缩/独立团队/合规隔离诉求的"细"，是给自己发分布式税</strong>。先模块化、有真实信号再拆分。</li>
+  </ul>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：用 Spring Modulith 把边界钉进 CI</h2>
+  <p>战略设计的落地痛点是"图上画的边界，代码里慢慢糊掉"。Spring Modulith（当前 2.0.x，配 Spring Boot 4；Boot 3 用 1.x 线）把限界上下文映射为<strong>包级模块</strong>，边界验证进 CI，糊掉就挂构建：</p>
+
+  <h3>第一段：包结构即边界</h3>
+  <div class="codeblock">
+  <pre><code>com.example.shop
+├─ Application.java
+├─ order/                        // 模块根 = 公开 API
+│  ├─ OrderService.java          //   对外只能用这些
+│  ├─ OrderCompleted.java        //   公开领域事件
+│  ├─ package-info.java          //   声明允许的依赖
+│  └─ internal/                  // 内部实现 = 对外不可见
+│     ├─ OrderRepository.java
+│     └─ OrderEntity.java
+└─ inventory/
+   ├─ InventoryService.java
+   └─ internal/</code></pre>
+  </div>
+
+  <h3>第二段：模块依赖白名单 + 边界验证测试</h3>
+  <div class="codeblock">
+  <pre><code>// order/package-info.java —— 依赖白名单，越界即构建失败
+@ApplicationModule(allowedDependencies = { "inventory" })
+package com.example.shop.order;
+
+// 验证测试 —— 一行挂进 CI
+class ModularityTests {
+  ApplicationModules modules =
+      ApplicationModules.of(Application.class);
+
+  @Test void verifiesModularStructure() {
+    modules.verify();  // 越界访问 internal → 精确报出文件与行号
+  }
+}</code></pre>
+  </div>
+
+  <h3>第三段：模块间用事件解耦（注册表保证可靠投递）</h3>
+  <div class="codeblock">
+  <pre><code>// order 模块：事务内发事件
+@Transactional
+public void complete(Order order) {
+  repository.save(order.complete());
+  events.publishEvent(
+      new OrderCompleted(order.getId()));
+}
+
+// inventory 模块：独立事务异步消费
+@ApplicationModuleListener
+void on(OrderCompleted event) {
+  // 独立事务 + 主事务提交后才执行
+  stock.decrement(event.orderId());
+}
+// Event Publication Registry 把事件落库，
+// 崩溃重启后重发 —— 应用内 Outbox，无需外挂消息中间件</code></pre>
+  </div>
+
+  <div class="note">这是<strong>模块化单体</strong>的姿势：一个进程内先把边界立起来（验证、事件、按模块出文档），哪天某个上下文需要独立伸缩或独立团队，<strong>沿事件缝拆出去就是微服务</strong>——Fowler 的判断至今成立："几乎所有成功的微服务故事，都从拆掉一个太大的单体开始；几乎全部从零直接上微服务的系统，最后都陷入严重麻烦。"先立边界、后拆进程，顺序别反。</div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>组织结构是工程输入，不是软性话题：</strong>Vista 实证——组织指标预测缺陷（精度 86.2%/召回 84.0%）优于全部代码指标；接口爆炸与共享大表的病根都在边界，不在代码。</li>
+    <li><strong>限界上下文的判别式是"模型何处不再一致"：</strong>两个团队对"订单已取消"定义打架的地方就是边界；同一名词在不同上下文就该有不同模型、不同表。</li>
+    <li><strong>投入跟着子域走：</strong>核心域配最好的团队与自主模型，通用域的正义是"别自研"，支撑域够用就好——兵力错配是最大的架构浪费。</li>
+    <li><strong>先改组织再迁代码（逆康威机动）：</strong>团队拓扑四类型三交互给边界配团队；顺序反了，组织引力会把架构拉回原形。</li>
+    <li><strong>边界要进 CI 才不会糊：</strong>Spring Modulith 把限界上下文变成包级模块 + 构建期验证 + 事件解耦；模块化单体是微服务的前置形态，不是妥协。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目：某公司 800 人技术部门，订单域：30 人共用一个订单服务与一张共享订单大表，发布需全员协调；业务侧有 5 个渠道团队排队提需求，每次跨团队变更要"提单 → 排期 → 会审"三步，平均等待两周。公司决定"全面微服务化"，拟将订单服务按渠道拆成 5 个微服务、每个渠道团队一个。作为架构师：① 用 DDD 战略设计给出你的边界方案（子域/限界上下文/团队拓扑），并说明为什么"按渠道拆 5 个"大概率重蹈覆辙；② 给出 12 个月分阶段迁移路线（团队与代码如何动、存量共享大表如何拆、怎么验证每阶段边界没糊）；③ 若迁移进行到一半，两个渠道团队被合并成一个事业部，你的架构会遭遇什么反噬，怎么应对？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 三问拆解</h4>
+      <p><strong>① 边界方案：</strong>"按渠道拆 5 个微服务"重复了场景篇病一的错误——渠道是<strong>组织的销售触点</strong>，不是业务的模型差异；按渠道切，公共交易逻辑会抄五份（或者抽一个"公共订单中心"让五队排队，回到第二次失败治理）。正确切法：先用事件风暴挖模型差异——交易（价格/取消语义）、履约（包裹/运单）、结算（金额/账期）是三个真上下文，渠道只是交易上下文的<strong>适配器</strong>。目标：交易/履约/结算各 1 支流团队（核心域，配最强的人），5 渠道各留 2~3 人的薄适配层（支撑域），认证消息等用现成组件（通用域）。这样服务数是 3+薄层，不是 5 个全功能副本；渠道间的"复用"由事件与契约承担，不再由代码拷贝承担。团队拓扑上再配一个平台团队把"事件契约、CI 边界验证、云底座"做成 X-as-a-Service，流团队自助消费。</p>
+      <p><strong>② 12 个月路线：</strong><strong>第一阶段（1~2 月）冻结+画像：</strong>新需求一律按目标上下文实现（哪怕暂住旧库），存量冻结不再加深耦合；用 Modulith 对现有代码做"实际依赖画像"（ArchUnit/Modulith 文档器出图），让"边界糊成什么样"第一次可见。<strong>第二阶段（3~5 月）先组织后代码：</strong>按目标边界重组团队（逆康威机动）——交易/履约/结算三支流团队到位、渠道并入适配层；代码上先把单体内部按 Modulith 模块立边界、verify() 进 CI。<strong>第三阶段（6~9 月）数据搬家：</strong>共享大表按上下文拆——先"读分离"（各上下文建自己的投影表，从事件流回填），再"写收口"（写入路径逐上下文切换，双写对账），最后下线共享表；事件契约上 Schema Registry 管版本兼容（0038 期纪律直接复用）。<strong>第四阶段（10~12 月）进程拆分按需执行：</strong>只有出现"独立伸缩/独立发布节奏/合规隔离"真实信号才把模块拆成独立服务，否则保持模块化单体——Prime Video/Segment 的回流案例是清醒剂。每阶段验证：verify() 零违例 + 事件契约兼容检查 + 跨团队变更等待时长（应从两周降到天级）三个指标入月度架构评审。</p>
+      <p><strong>③ 组织合并的反噬：</strong>两渠道团队并成一个事业部 = <strong>康威定律反向发力</strong>：他们的两个适配层会自然"融合"——共用代码、共用排期、最后互相 import 内部包，若这个事业部再被赋予交易域的诉求，边界会被重新拉歪。应对三招：<strong>边界自适应机制</strong>——限界上下文图不是一次性交付物，架构评审每季度对照组织变化重画一次（团队拓扑本身就要求"组织动、拓扑动"）；<strong>技术边界顶住组织引力</strong>——CI 里的 verify() 与事件契约让"融合"有摩擦成本，糊边界会挂构建，给管理者一个"要不要改边界"的显式决策点而不是无声漂移；<strong>顺势收编</strong>——若合并是长期事实，承认它是信号：把两渠道适配层合并为一个多渠道适配上下文（减少一支团队），但交易上下文的独立性不让步——渠道怎么合并是支撑域的事，核心域边界不动。康威定律不可违抗，但可以被管理：你要做的不是阻止组织变化，而是让每次变化都显式地过一遍边界重审。</p>
+    </div>
+  </details>
+
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>Vaughn Vernon《Implementing Domain-Driven Design》与 Eric Evans《Domain-Driven Design》中战略设计部分的在线体系化导读，社区公认的官方路线图（子域/限界上下文/上下文映射的权威出处）：<br>
+    <a href="https://www.domainlanguage.com/ddd/" target="_blank" rel="noopener">domainlanguage.com — Eric Evans 的 DDD 官方站</a>（配套阅读：<a href="https://martinfowler.com/bliki/BoundedContext.html" target="_blank" rel="noopener">Martin Fowler《BoundedContext》</a> 与 <a href="https://martinfowler.com/bliki/MonolithFirst.html" target="_blank" rel="noopener">《MonolithFirst》</a>、<a href="https://spring.io/projects/spring-modulith" target="_blank" rel="noopener">Spring Modulith 官方文档</a>、微软研究院论文 <a href="https://dl.acm.org/doi/10.1145/1368088.1368124" target="_blank" rel="noopener">《The Influence of Organizational Structure on Software Quality》ICSE 2008</a>——四路交叉阅读，战略设计到落地闭环）</p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>方法论互链：<a href="0049-distributed-design-patterns.html">0049 分布式设计模式</a>（边界内的一致性与韧性参数治理）、<a href="0018-seata-distributed-tx.html">0018 Seata 分布式事务</a>（跨上下文一致性的另一条技术路线）、<a href="0021-pulsar-delivery-reliability.html">0021 Pulsar 消息可靠性</a>与 <a href="0038-pulsar-schema-registry.html">0038 Schema Registry</a>（上下文间事件契约的投递与版本治理）、<a href="0040-dubbo-rpc-governance.html">0040 Dubbo RPC 治理</a>（防腐层思想在 RPC 侧的同构应用）、<a href="0042-innodb-crash-recovery.html">0042 InnoDB 崩溃恢复</a>（上下文内数据可靠性的底层账）、<a href="0047-langgraph-agent-orchestration.html">0047 Agent 编排</a>（AI 线上的"边界与检查点"同构命题）。架构方法论与工程效能线首期，下一期预告：事件驱动架构 EDA。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0054-lakehouse-iceberg-paimon-fluss.html">← 上一期：湖仓一体</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 55 期 · 架构方法论与工程效能系列 · 下一期预告：事件驱动架构 EDA（架构方法论线）</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
