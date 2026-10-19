@@ -27,7 +27,7 @@
 <!-- ================= 01 场景 ================= -->
 <section>
   <h2><span class="sec-num">01</span>场景：改了域名配置，为什么半天不生效</h2>
-  <p>发布现场几乎都遇到过这一幕：迁移机房要切流量，改完解析记录，自己本机 <code>dig</code> 一下已经是新 IP，可同事那边还连着旧机器；再等等，有人好了、有人没好。<strong>“部分生效”是域名变更的常态</strong>，不是谁的机器坏了。另一种更吓人的场景：新域名明明配好了，本地怎么查都是 <code>NXDOMAIN</code>，感觉配置根本没上去。</p>
+  <p>发布现场几乎都遇到过这一幕：迁移机房要切流量，改完解析记录，自己本机 <code>dig</code> 一下已经是新 IP，可同事那边还连着旧机器；再等等，有人好了、有人没好。<strong>“部分生效”是域名变更的常态</strong>，不是谁的机器坏了。另一种更吓人的场景：新域名明明配好了，本地怎么查都是 <code>NXDOMAIN</code>（域名不存在），感觉配置根本没上去。</p>
   <p>这两个现象都不是故障，而是 DNS 的“设计行为”：解析结果不会只存在你改的那台权威服务器上——它会沿途被<strong>一层层缓存</strong>；而替用户去问解析的那个角色，也未必站在用户旁边。所以“改域名”实质上是改一个被多处复制的分布式状态，生效天然是渐进的。你没等它，它就不是“没生效”，是<strong>还在生效的路上</strong>。</p>
   <p>还有一类高频怪象来自移动世界：同一个 App，换个网络解析到的机房就变了，开始跨网、变慢；在个别网络里，域名甚至会被解析到一个陌生的 IP。这也不怪 App——问题出在“<strong>替它问路的那个人</strong>”身上。这一期先走完整条链路（02 原理），再亲手验证（03 实战），最后一节看今天“查域名”的两种新姿势：加密的 DoH 和应用层的 HTTPDNS。</p>
 </section>
@@ -106,7 +106,7 @@
     <text x="410" y="362" text-anchor="middle" fill="var(--muted)" font-size="9.5">根 / 顶级域 / 权威 —— 一层层向下授权，只有权威才真正「知道答案」</text>
   </svg>
   </div>
-  <p>把图读一遍：客户端发查询时把 <strong>RD（Recursion Desired，期望递归）</strong>位置 1，意思是“替我查完”；递归服务器愿意干这活，就在回复里把 <strong>RA（Recursion Available，可提供递归）</strong>置 1——RFC 1034 §4.3.1 说，客户端靠“<strong>回复里 RD 和 RA 都置位</strong>”来确认递归真的发生了。递归器先翻自己缓存，没中就拿着问题从根开始：根说“.com 归谁管”，.com 说“example.com 归谁管”，example.com 的权威才给出真正的 A 记录和 TTL；递归器把答案按 TTL 缓存一份，原路返回。</p>
+  <p>把图读一遍：客户端发查询时把 <strong>RD（Recursion Desired，期望递归）</strong>位置 1，意思是“替我查完”；递归服务器愿意干这活，就在回复里把 <strong>RA（Recursion Available，可提供递归）</strong>置 1——RFC 1034 §4.3.1 说，客户端靠“<strong>回复里 RD 和 RA 都置位</strong>”来确认递归真的发生了。递归器先翻自己缓存，没中就拿着问题从根开始：根说“.com 归谁管”，.com 说“example.com 归谁管”，example.com 的权威才给出真正的 A 记录（域名对应的 IP 地址）和 TTL；递归器把答案按 TTL 缓存一份，原路返回。</p>
   <p>图里「本地缓存先过一遍」这半句值得展开——<strong>缓存不在存根本身上</strong>（它只问不存，TTL 计时、负缓存都是递归器那侧的活），而在它上下好几层，各管各的：<strong>浏览器自己一份</strong>（Chrome 在 <code>chrome://net-internals/#dns</code> 里能看、能清）；<strong>操作系统一份</strong>——Windows 的 DNS 客户端服务会缓存最近拿到的应答，官方文档说它“在查询配置的 DNS 服务器之前”先用这些记录（<code>ipconfig /displaydns</code> 能列出来、<code>/flushdns</code> 能清，负结果也在其中）；Linux 要看发行版有没有装 systemd-resolved 这类本机解析器，裸的 glibc 默认不缓存；<strong>应用运行时还各有一份</strong>，比如 JVM 的 InetAddress 对成功解析缓存一段实现相关的时长（HotSpot 默认 30 秒）、失败的默认 10 秒——“发版后还连旧 IP”常撞在这。<strong>最特殊的是 hosts 文件：它不是缓存，是本地强制复写</strong>——命中的域名根本不会发出 DNS 查询，也永远不受 TTL 管辖；只有你一台机器解析异常、别人都正常时，先看它。</p>
   <p>为什么要这么绕？因为要<strong>去中心化</strong>：没有一台服务器知道全世界的域名，每一层只对下一层授权、只答自己那一段。扩容和治理由此变成分治问题；代价是查询要多走几跳——不过有缓存兜着，绝大多数查询在第一站（递归器）就结束了。</p>
 
@@ -118,13 +118,13 @@
   <p>TTL 是每条 DNS 记录随身带的一个数字。RFC 1034 §3.6.1 定义为“<strong>32 位整数、单位秒</strong>”，“描述一条记录在被丢弃之前可以被缓存多久”；由每个区的管理员自己设，短 TTL 减少缓存，TTL 设为 0 表示禁止缓存。</p>
   <p>谁在按这个数字倒计时？浏览器、操作系统、递归器（缓存量最大的一层）、公司出口……每一层都按自己看到的 TTL 各自计时。于是“生效时间线”是这样的：你在权威上改掉记录，<strong>不等于</strong>大家立刻看到——要等所有缓存里的旧记录各自过期。这也是“有人好了有人没好”的原因：不同递归器缓存旧答案的时刻不同，到期时间就不同。</p>
   <p>于是教科书做法是一个<strong>变更窗口</strong>：要改的记录先把 TTL 调小（比如提前一天调到 60 秒），静置一个“旧 TTL”周期等旧缓存自然过期，再动手改，确认全网生效，最后把 TTL 调回来。改完十分钟就指望全网生效的，说明改之前缓存里那条记录的寿命本来就标得很长。</p>
-  <p>还有一条更隐蔽的期限：<strong>负缓存</strong>。查一个不存在的域名会得到 NXDOMAIN，而“不存在”这个结论本身也会被缓存。RFC 2308 规定负缓存时长取“<strong>SOA 的 MINIMUM 字段与 SOA 自身 TTL 中的较小者</strong>”，并提示 1 到 3 小时的实践效果较好、超过一天“会有问题”。所以“域名明明配好了，为什么还报 NXDOMAIN”——多半是某个递归器在几小时前就把“不存在”存下来了。</p>
+  <p>还有一条更隐蔽的期限：<strong>负缓存</strong>。查一个不存在的域名会得到 NXDOMAIN，而“不存在”这个结论本身也会被缓存。RFC 2308 规定负缓存时长取“<strong>SOA——起始授权记录，每个区唯一一条——的 MINIMUM 字段与 SOA 自身 TTL 中的较小者</strong>”，并提示 1 到 3 小时的实践效果较好、超过一天“会有问题”。所以“域名明明配好了，为什么还报 NXDOMAIN”——多半是某个递归器在几小时前就把“不存在”存下来了。</p>
 </section>
 
 <!-- ================= 03 实战 ================= -->
 <section>
   <h2><span class="sec-num">03</span>实战：用 dig 把这趟旅程看穿</h2>
-  <p><code>dig</code> 是随 BIND 分发的标准查询工具，三招就能把上一节的图逐段验证。</p>
+  <p><code>dig</code> 是随 BIND（那套最经典的 DNS 服务器软件）分发的标准查询工具，三招就能把上一节的图逐段验证。</p>
 
   <h3>第一招：默认查询——看一次“递归问答”</h3>
   <div class="codeblock term">
@@ -169,7 +169,7 @@
 
   <h3>CNAME：别名不是转发，同一条名字上不许再挂别的</h3>
   <p>CNAME 的含义是“<strong>这条名字是另一个名字的别名</strong>”。RFC 1034 §3.6.2 的原文很硬：“<strong>如果某个节点上存在 CNAME 记录，就不应存在任何其它数据</strong>”——理由也写在同段：要让“别名与正名的数据不可能不一致”，这样一来，缓存里的 CNAME 可以被直接拿来把后续查询重定向到正名，不必再回头问权威。如果同一条名字上又 CNAME 又 A，它到底算谁？</p>
-  <p>RFC 2181 §10.1 把这条规则写成了更干净的“四选一”：任何一个名字，<strong>要么只有一条 CNAME（可带 DNSSEC 相关的 SIG、NXT、KEY），要么存在一组非 CNAME 记录，要么“存在但没有记录”，要么“不存在”</strong>——没有第五种状态。“根域名不能做 CNAME”也就顺理成章：根上必然有 NS、SOA，和共存禁令直接冲突，所以域名商干脆不让你设。</p>
+  <p>RFC 2181 §10.1 把这条规则写成了更干净的“四选一”：任何一个名字，<strong>要么只有一条 CNAME（可带 DNSSEC 相关的 SIG、NXT、KEY），要么存在一组非 CNAME 记录，要么“存在但没有记录”，要么“不存在”</strong>——没有第五种状态。“根域名不能做 CNAME”也就顺理成章：根上必然有 NS（负责应答的服务器记录）、SOA（区的起始授权记录），和共存禁令直接冲突，所以域名商干脆不让你设。</p>
   <p>还有个实操后果：解析器遇到 CNAME 会拿正名“重启”查询（RFC 1034 §4.3.2 的服务端算法就是这么写的）——<strong>CNAME 是改名，不是转发</strong>，链上每多一层 CNAME 就多一跳查询。能少则少，别拿它当“跳转”使。</p>
 
   <h3>LocalDNS 的三宗罪</h3>
@@ -204,7 +204,7 @@
 <!-- ================= 05 加密与旁路 ================= -->
 <section>
   <h2><span class="sec-num">05</span>把解析装进 HTTP：DoH 与 HTTPDNS</h2>
-  <p>把前面的问题归成一句话：传统 DNS 是<strong>明文的、依赖路程的、没有认证的</strong>。改良它的努力分成两条路线：<strong>把 DNS 加密</strong>（DoT、DoH、DoQ，IETF 标准），和<strong>绕开系统解析路径</strong>（HTTPDNS，应用层方案）。两条路线都用上了 HTTP/HTTPS。先看加密三兄弟的对照——注意：换的只是“传输方式”，DNS 报文的语义一律不变。</p>
+  <p>把前面的问题归成一句话：传统 DNS 是<strong>明文的、依赖路程的、没有认证的</strong>。改良它的努力分成两条路线：<strong>把 DNS 加密</strong>（DoT、DoH、DoQ——分别把 DNS 装进 TLS、HTTPS、QUIC 三种传输，IETF 标准），和<strong>绕开系统解析路径</strong>（HTTPDNS，应用层方案）。两条路线都用上了 HTTP/HTTPS。先看加密三兄弟的对照——注意：换的只是“传输方式”，DNS 报文的语义一律不变。</p>
   <div class="tbl-wrap">
   <table>
     <tr><th></th><th>传统 DNS</th><th>DoT</th><th>DoH</th><th>DoQ</th></tr>
@@ -236,7 +236,7 @@
       <p class="how">HTTP 新鲜期 ≤ 答案里最小 TTL</p>
       <p class="why">客户端还要扣掉 Age 头</p></div>
   </div>
-  <p>四步各有一段规范原文值得记住。<strong>第 2 步</strong>：GET 请求把报文做 <strong>base64url 编码放进 <code>?dns=</code> 参数，且“不得包含 padding”</strong>；POST 则把原始报文直接当 body（“<strong>不做编码</strong>”），媒体类型是 <code>application/dns-message</code>，报文上限 65535 字节。<strong>第 3 步最容易误解</strong>：RFC 8484 §4.2.1 规定，用“<strong>2xx 状态码表示任何合法的 DNS 响应，无论 DNS 响应码是什么</strong>”——也就是说 NXDOMAIN、SERVFAIL 都是 HTTP 层面的“成功”；反过来，401、415 这类 4xx/5xx 才代表 DoH 通道本身出了问题。<strong>第 4 步</strong>：服务器给响应的 HTTP 新鲜期“<strong>不得大于 Answer 段里最小的 TTL</strong>”（§5.1），客户端算 DNS TTL 时要把 <code>Age</code> 头扣掉——DNS 的 TTL 和 HTTP 的 Cache-Control 在这里就是同一笔账。</p>
+  <p>四步各有一段规范原文值得记住。<strong>第 2 步</strong>：GET 请求把报文做 <strong>base64url 编码放进 <code>?dns=</code> 参数，且“不得包含 padding”</strong>；POST 则把原始报文直接当 body（“<strong>不做编码</strong>”），媒体类型是 <code>application/dns-message</code>，报文上限 65535 字节。<strong>第 3 步最容易误解</strong>：RFC 8484 §4.2.1 规定，用“<strong>2xx 状态码表示任何合法的 DNS 响应，无论 DNS 响应码是什么</strong>”——也就是说 NXDOMAIN、SERVFAIL 都是 HTTP 层面的“成功”；反过来，401、415 这类 4xx/5xx 才代表 DoH 通道本身出了问题。<strong>第 4 步</strong>：服务器给响应的 HTTP 新鲜期“<strong>不得大于 Answer 段里最小的 TTL</strong>”（§5.1），客户端算 DNS TTL 时要把 <code>Age</code> 头（这条响应在缓存里已躺了多久）扣掉——DNS 的 TTL 和 HTTP 的 Cache-Control 在这里就是同一笔账。</p>
   <p>为什么这套有用：DoH 跑在 443 上、和浏览网页走一条加密管道——链路上能看到的只是“你在和一个 DoH 服务说话”，至于你查的是哪个域名，全在加密里。这也是它比 DoT（853 专用端口）更难被单独针对的原因。当然，隐私不是白给的：<strong>你的 DoH 服务商能看到你全部的查询</strong>——加密只是把“谁能看见”从本地网络换成了服务商，选服务商就是在选托付对象。</p>
   <p>注意 DoH 解决的是“<strong>可窥探、可篡改</strong>”，没解决“<strong>调度</strong>”——替你去问的依然是那台递归器，权威看到的还是它的位置。要连调度一起解决，就轮到移动端那条路线了。</p>
 
@@ -248,7 +248,7 @@
 <span class="t-out">{"host":"www.example.com","ips":["203.0.113.10"],"ttl":57,"origin_ttl":120}</span>
 <span class="t-cmt"># ips = 候选 IP 列表；ttl = 结果可缓存秒数；origin_ttl = 权威给出的原始 TTL</span></code></pre>
   </div>
-  <p>拿到 IP 之后，App 直接连 IP、不再让系统解析。但“直连 IP”必须自己补一整套身份动作——<strong>HTTP 要带上 <code>Host</code> 头，HTTPS 还要处理 SNI 与证书校验</strong>。阿里云官方文档的步骤：手动设置“<code>Host: 原始域名</code>”；把“<strong>原始域名写入 SNI 扩展</strong>”；证书校验时“<strong>在 TLS 校验阶段显式传入原始域名，确保 CN/SAN 比对正确</strong>”。否则 IP 连得上、证书却对不上域名（hostname mismatch），或者 SNI 填错被服务端拒绝。</p>
+  <p>拿到 IP 之后，App 直接连 IP、不再让系统解析。但“直连 IP”必须自己补一整套身份动作——<strong>HTTP 要带上 <code>Host</code> 头，HTTPS 还要处理 SNI 与证书校验</strong>。阿里云官方文档的步骤：手动设置“<code>Host: 原始域名</code>”；把“<strong>原始域名写入 SNI 扩展</strong>”（SNI：TLS 握手里声明“我要连谁”的字段）；证书校验时“<strong>在 TLS 校验阶段显式传入原始域名，确保 CN/SAN 比对正确</strong>”。否则 IP 连得上、证书却对不上域名（hostname mismatch），或者 SNI 填错被服务端拒绝。</p>
   <div class="flow-strip">
     <div class="flow-step"><span class="no">1</span>
       <p class="what">SDK 直连服务商</p>
