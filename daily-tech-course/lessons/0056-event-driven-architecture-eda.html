@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · 事件驱动架构 EDA：事件、命令与那条看不见的流程 | 2026-10-20</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0056</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0055-ddd-strategic-design.html">上一期：DDD 战略设计</a> · <a href="https://www.bilibili.com/video/BV1DvJZ6AEPS" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">架构方法论与工程效能 · 架构方法论系列第 2 讲（EDA 篇）</p>
+  <h1>事件驱动架构 EDA：事件、命令与那条看不见的流程</h1>
+  <p class="subtitle">上一讲用 DDD 划清了限界上下文，边界之间"只走事件或防腐层"——这一讲就把这句话展开：<strong>事件到底是什么、命令到底不是什么、边界之间的消息怎么发才不丢不重</strong>。两条真实剧本开局：积分因重试发了三倍、又因进程崩溃一条没发出去；一次大促 fanout 把下单链路拖垮。你会看到 Martin Fowler 说的那句警告的分量——事件驱动最大的风险不是性能，是<strong>那条没有任何程序文本记载的业务流程，从所有人的视野里消失了</strong>。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧭 架构方法论与工程效能</span>
+    <span class="tag-date">📅 2026-10-20 · 第 56 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>场景：一奖一罚，事件用错的两种代价</h2>
+
+  <h3>事故一：积分发了三倍，又一条没发出去</h3>
+  <p>某电商支付回调链路的两段真实演化（合并自多家公司公共剧本）：</p>
+  <ul>
+    <li><strong>第一版：同步 RPC + 重试。</strong>支付成功后，订单服务在本地事务提交后调用积分服务"加 1000 积分"。某天积分服务处理成功，但<strong>应答在网络层超时</strong>——订单服务的重试逻辑跑了两次，用户收到 3000 积分。客诉来了，财务要薅回去，比发放贵十倍。这不是"重试写错了"，是<strong>重试配在非幂等副作用上</strong>——<a href="0049-distributed-design-patterns.html">0049 期</a>讲过的老病，在事件场景里有专门解法。</li>
+    <li><strong>第二版：事务提交后发消息。</strong>团队改成"本地事务提交成功后，再发一条消息到消息队列"。看起来对了，直到一次发布：事务提交完、消息还没发出去，<strong>进程被杀</strong>。数据库里订单是"已支付"，积分系统永远不知道这件事——用户投诉"付了钱没积分"，排查两天，因为这条链路没有任何日志能证明"消息曾经尝试过"。</li>
+    <li><strong>两个反例合成一个结论：</strong>副作用跟着数据库事务走，就必须回答"事务成功、副作用失败怎么办"。答案不是更小心地写代码，而是把副作用从"事务的尾巴"变成"事务的账本"——Outbox 模式，原理段展开。</li>
+  </ul>
+
+  <h3>事故二：一次大促，fanout 把下单链路拖垮</h3>
+  <p>另一个更隐蔽的病。订单创建成功后要通知 5 个下游：推荐、搜索索引、风控、BI、缓存失效。实现是订单服务里串行 fanout 五个同步 RPC：</p>
+  <ul>
+    <li>大促 2 小时 100 万单，平均每单 5 次 fanout 调用 = <strong>500 万次同步 RPC</strong>；其中风控接口在高压下 P99 飙到 800ms，订单创建的 P99 从 120ms 被拖到 900ms——<strong>链路延迟 ≈ 最慢下游</strong>。</li>
+    <li>更糟的是可用性乘法：五条依赖各自 99% 可用，串行链路理论可用性 ≈ 0.99⁵ ≈ <strong>95%</strong>，一天故障 72 分钟。网关限流按"订单 QPS"配置，被风控拖慢后线程池打满，<strong>限流开始误杀正常下单</strong>——大促当晚下单成功率跌 4%，而故障源是八竿子打不着的风控 fanout。</li>
+  </ul>
+
+  <div class="callout">
+    <span class="callout-title">两起事故的公共病根</span>
+    <p>同步调用把"<strong>我的事务</strong>"和"<strong>别人的反应</strong>"焊死在一起：别人慢我慢、别人挂我挂、我的重试造成别人的重复。事件驱动的解法是加一个中间层——<strong>我提交事务并宣告"发生了什么"，谁关心、什么时候处理、处理几遍，是你的事</strong>。但这个解法自带新病：流程从代码里消失、消息可能丢可能重可能乱序。这一讲就把这两面一起讲透。</p>
+  </div>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：先分清四种"事件驱动"，再谈架构</h2>
+
+  <h3>Fowler 的拆解：一个词，四件事</h3>
+  <p>"事件驱动"是架构圈被用得最糊的词。Martin Fowler 在 2017 年《What do you mean by "Event-Driven"?》里把它拆成<strong>四个经常被混为一谈、实则互相独立</strong>的模式（ThoughtWorks 全球峰会多位资深架构师的共识总结）：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>模式</th><th>一句话本质</th><th>得到什么</th><th>付出什么</th></tr></thead>
+    <tbody>
+      <tr><td><strong>事件通知</strong><br>Event Notification</td><td>源系统宣告"我这边发生了变化"，不关心谁在听、也不期待回应</td><td>极低耦合，接入新消费者零改动上游</td><td>跨系统的业务流程<strong>不存在于任何程序文本里</strong>，只能靠监控活系统还原</td></tr>
+      <tr><td><strong>事件携带状态迁移</strong><br>Event-Carried State Transfer</td><td>事件带上完整变更数据，消费者维护自己的本地副本，不再回查源系统</td><td>消费者自治：源挂了照常工作、零回查延迟、源系统无查询负载</td><td>数据被搬运多份，<strong>副本一致性</strong>成了消费者自己的责任</td></tr>
+      <tr><td><strong>事件溯源</strong><br>Event Sourcing</td><td>状态变更记为不可变事件，当前状态 = 事件日志重放的派生物（git 就是典范）</td><td>完整审计轨迹、任意时点重建、可注入假设事件做推演</td><td>重放依赖外部系统时会卡住、事件 schema 演进是长期税</td></tr>
+      <tr><td><strong>CQRS</strong></td><td>读写用不同的数据结构（与事件无必然关系，只是常组合）</td><td>读写模型各自优化，复杂领域的读写负载解耦</td><td>两套模型 + 一致性窗口，简单系统上纯属自找</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Fowler 的警告很直接：麻烦通常<strong>不来自任何一个模式，而来自把四个模式混为一谈</strong>——他的轶事：项目出问题时项目经理怪"事件溯源"，技术负责人却认定真凶是"异步通信"，其实是两个独立决策被当成了一个。<strong>架构师的第一课是每次说"我们用事件"之前，先说清楚是四者中的哪一个、或者哪几个的组合。</strong></p>
+
+  <h3>事件 vs 命令：语义错了，模式白搭</h3>
+  <p>比选模式更早的坑是把<strong>命令（command）</strong>当事件发。Fowler 给它起了个刻薄的名字：<strong>"被动攻击型命令"（passive-aggressive command）</strong>——发送方明明<strong>期待接收方执行某个动作</strong>，却把消息包装成事件的样式。判别式一句话：</p>
+  <div class="note"><strong>事件是过去时，命令是祈使句。</strong>"订单已支付（OrderPaid）"是事实，谁都可以订阅，没人必须反应；"给用户发优惠券（IssueCoupon）"是指令，有明确的义务方，发出去就要管到底。把命令伪装成事件，得到的是假解耦：上游嘴上说"不关心"，业务上天天追问"处理了没"；下游挂了没人兜底，因为"事件"的设计里根本没有失败语义。</div>
+  <p>工程上的分界线：</p>
+  <ul>
+    <li><strong>事实事件</strong>：广播给未知数量的订阅者，用 Outbox 保证必达 + <a href="0038-pulsar-schema-registry.html">0038 期</a>的 schema 兼容治理契约；消费者自己保证幂等。</li>
+    <li><strong>命令</strong>：点对点发给已知的义务方，失败要重试、要超时、要上报——本质上和同步 RPC 一样是"调用"，只是搬运介质换成了消息队列。不要因为"用了消息队列"就以为获得了解耦。</li>
+  </ul>
+
+  <h3>Outbox：把副作用变成事务的一部分</h3>
+  <p>事故一的两种写法都错在副作用游离在事务边界之外。Outbox 模式的做法：<strong>业务表更新与"待发事件"写在同一个本地事务里</strong>——事件先落库（outbox 表），提交即事实；一个独立的投递器把 outbox 表里的记录发到消息队列，发成功标记已发，失败重试。于是：</p>
+  <ul>
+    <li><strong>事务提交 = 事件必然存在</strong>（进程崩溃也丢不了，记录在库里）；</li>
+    <li><strong>投递至少一次</strong>（投递器可能重发），消费端用幂等键（<code>event_id</code> 去重表）把"至少一次"收敛成"恰好一次的视觉效果"；</li>
+    <li>对照 <a href="0055-ddd-strategic-design.html">0055 期</a> Spring Modulith 的 Event Publication Registry——那就是应用内的 Outbox，跨进程版本只是把"落库的位置"从模块表换成共享消息队列。</li>
+  </ul>
+  <p>更彻底的变体是 <strong>CDC 直出</strong>：不做 outbox 表，直接用 Debezium（当前 3.7.0.Final，2026-09-29 发布；稳定线 3.6.3）订阅数据库的 binlog 变更流——binlog 本身就是"已经提交的事实"（参见 <a href="0042-innodb-crash-recovery.html">0042 期</a>），天然不丢。代价是消费者拿到的是<strong>行级变更</strong>而非领域语义，需要一层翻译。</p>
+
+  <h3>三笔固有账：重复、乱序、积压</h3>
+  <p>事件链路（at-least-once 投递）有三笔绕不开的账，架构期就要回答：</p>
+  <ul>
+    <li><strong>重复：</strong>投递器重试、消费组重平衡（rebalance）都会造成同一条事件被投递多次——幂等不是优化项，是消费端的准入门槛。</li>
+    <li><strong>乱序：</strong>同一订单的"已支付"可能晚于"已发货"到达（分区键不同、重试错位）。队列<strong>只保证分区内有序</strong>——分区键必须选业务实体键（如 order_id）；消费端对状态机类更新还要做版本号/时间戳裁决。</li>
+    <li><strong>积压：</strong>最终一致的"最终"有多久，取决于消费滞后（lag）。积压 = 下游看到的"过去"，<strong>lag 告警是事件系统的心电图</strong>——监控口径见 <a href="0028-prometheus-grafana.html">0028 期</a>，订阅端负载均衡可借 <a href="0045-mqtt-emqx-cluster.html">0045 期</a>共享订阅的思路。</li>
+  </ul>
+</section>
+
+<!-- ================= 03 架构设计思路 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：四层参考架构与三个决策</h2>
+
+  <h3>参考架构：从命令编排到事件协作</h3>
+  <div class="diagram">
+  <svg viewBox="0 0 760 470" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar56" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <text x="380" y="24" text-anchor="middle" fill="var(--muted)" font-size="13">事件驱动参考架构：事实广播 + 命令点对点 + 投影自治</text>
+
+    <!-- 上游上下文 -->
+    <rect x="30" y="48" width="330" height="118" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-width="1.8"/>
+    <text x="195" y="74" text-anchor="middle" fill="var(--accent)" font-size="13.5" font-weight="700">订单上下文（上游·事实发布方）</text>
+    <text x="195" y="97" text-anchor="middle" fill="var(--ink)" font-size="10.5">本地事务：order 表 + outbox 表 同库同事务</text>
+    <text x="195" y="115" text-anchor="middle" fill="var(--ink)" font-size="10.5">发布事实事件：OrderPlaced / OrderPaid / OrderShipped</text>
+    <text x="195" y="133" text-anchor="middle" fill="var(--muted)" font-size="9.5">分区键 = order_id（同单有序）· schema 走注册中心管兼容</text>
+    <text x="195" y="151" text-anchor="middle" fill="var(--muted)" font-size="9.5">投递器：轮询/CDC（Debezium 读 binlog）→ 队列</text>
+
+    <!-- 命令通道 -->
+    <rect x="400" y="48" width="330" height="118" rx="10" fill="var(--card)" stroke="var(--line)" stroke-width="1.2" stroke-dasharray="5,4"/>
+    <text x="565" y="74" text-anchor="middle" fill="var(--accent)" font-size="13.5" font-weight="700">命令通道（点对点·义务明确）</text>
+    <text x="565" y="97" text-anchor="middle" fill="var(--ink)" font-size="10.5">退款指令 Refund → 支付上下文（唯一接收方）</text>
+    <text x="565" y="115" text-anchor="middle" fill="var(--ink)" font-size="10.5">失败重试 + 超时升级 + 死信人工处理</text>
+    <text x="565" y="133" text-anchor="middle" fill="var(--muted)" font-size="9.5">本质仍是调用：不走 fanout、不允许多订阅</text>
+    <text x="565" y="151" text-anchor="middle" fill="var(--muted)" font-size="9.5">审慎使用：能用事实事件推导的别发命令</text>
+
+    <!-- 事件总线 -->
+    <rect x="30" y="204" width="700" height="52" rx="10" fill="var(--card)" stroke="var(--accent)" stroke-dasharray="5,4"/>
+    <text x="380" y="226" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">事件总线（消息队列 · 分区内有序 · at-least-once · lag 监控）</text>
+    <text x="380" y="244" text-anchor="middle" fill="var(--muted)" font-size="9.5">每消费组独立 offset（一份数据 N 份投递）· 重试策略与死信队列挂 topic 级</text>
+
+    <!-- 下游三个上下文 -->
+    <rect x="30" y="292" width="220" height="104" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="140" y="316" text-anchor="middle" fill="var(--accent)" font-size="12" font-weight="700">积分上下文（ECST）</text>
+    <text x="140" y="336" text-anchor="middle" fill="var(--ink)" font-size="10">本地副本：用户积分流水表</text>
+    <text x="140" y="354" text-anchor="middle" fill="var(--muted)" font-size="9.5">幂等：event_id 去重表</text>
+    <text x="140" y="370" text-anchor="middle" fill="var(--muted)" font-size="9.5">订单系统挂了照常可查可兑</text>
+
+    <rect x="270" y="292" width="220" height="104" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="380" y="316" text-anchor="middle" fill="var(--accent)" font-size="12" font-weight="700">推荐/搜索（投影）</text>
+    <text x="380" y="336" text-anchor="middle" fill="var(--ink)" font-size="10">事件 → 本地索引/缓存（CQRS 读模型）</text>
+    <text x="380" y="354" text-anchor="middle" fill="var(--muted)" font-size="9.5">重放可重建：投影天生可丢弃</text>
+    <text x="380" y="370" text-anchor="middle" fill="var(--muted)" font-size="9.5">消费并行度 = 分区数上限</text>
+
+    <rect x="510" y="292" width="220" height="104" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="620" y="316" text-anchor="middle" fill="var(--accent)" font-size="12" font-weight="700">BI / 审计（仅订阅）</text>
+    <text x="620" y="336" text-anchor="middle" fill="var(--ink)" font-size="10">只读事件流，永不回写</text>
+    <text x="620" y="354" text-anchor="middle" fill="var(--muted)" font-size="9.5">乱序容忍度高·批量拉取降成本</text>
+    <text x="620" y="370" text-anchor="middle" fill="var(--muted)" font-size="9.5">对接流计算承接 0053 期</text>
+
+    <line x1="195" y1="166" x2="230" y2="204" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#ar56)"/>
+    <line x1="565" y1="166" x2="530" y2="204" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#ar56)"/>
+    <line x1="140" y1="256" x2="140" y2="292" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#ar56)"/>
+    <line x1="380" y1="256" x2="380" y2="292" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#ar56)"/>
+    <line x1="620" y1="256" x2="620" y2="292" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#ar56)"/>
+
+    <text x="380" y="428" text-anchor="middle" fill="var(--muted)" font-size="10.5">纪律：事实事件只能广播过去时 · 命令必须点对点且带失败语义 · 消费者永不回查上游（ECST 兜底）</text>
+    <text x="380" y="446" text-anchor="middle" fill="var(--muted)" font-size="10.5">对账兜底：T+1 全量比对捕获"静默丢失"，与 0021 期投递语义互补</text>
+  </svg>
+  </div>
+
+  <h3>三个关键决策</h3>
+  <ul>
+    <li><strong>粒度决策：细事件，不胖事件。</strong>"OrderPaid"只表达支付完成这一件事；把金额、商品、用户画像全塞进去的"OrderChanged 胖事件"，每次上游加字段全体下游重新解析——<a href="0038-pulsar-schema-registry.html">0038 期</a>的契约兼容成本随字段数膨胀。细事件让每个消费者只订自己关心的，互不牵连。</li>
+    <li><strong>载荷决策：通知还是 ECST？</strong>默认<strong>消费者需要的数据直接放事件里</strong>（ECST 姿势），把"回查上游 API"留作例外——回查意味着上游可用性成为全系统的公共依赖，0055 期"消费端自治"的边界承诺就破了。例外是敏感数据（脱敏/合规）与超大载荷（对象存储放本体、事件放引用，即 Claim Check 模式，<a href="0049-distributed-design-patterns.html">0049 期</a>已展开）。</li>
+    <li><strong>顺序决策：分区键即一致性边界。</strong>队列不承诺全局有序，只承诺分区内有序——把 order_id 做分区键，同一订单的事件天然有序；跨订单的顺序本来就不该有业务依赖。消费端并行度受分区数约束，容量不够加分区，而不是加消费者。</li>
+  </ul>
+
+  <h3>容量与延迟的三笔账</h3>
+  <ul>
+    <li><strong>延迟账：</strong>事件链路端到端延迟 ≈ 入队 + 排队 + 消费调度 + 消费处理，典型几百毫秒。比同步 fanout 慢，但换来的是<strong>下单 P99 不再等于最慢下游的 P99</strong>——事故二里 900ms 的订单创建会回到 120ms 附近，风控延迟退化为风控自己的数据新鲜度问题。</li>
+    <li><strong>放大账：</strong>投递次数 = 事件量 × 消费组数。100 万单 × 每单 6 个事件 × 9 个消费组 = <strong>5400 万次投递</strong>——broker 分区数、消费组 rebalance 频率、带宽都要按这个数算，而不是按"订单 QPS"想当然。</li>
+    <li><strong>一致性账：</strong>最终一致的窗口 = 消费 lag 的时长。给业务一个可承诺的数字（如"积分 1 分钟内到账，99 分位 15 秒"），由 lag 告警 + T+1 对账双层保障；<strong>给不出数字的最终一致，等于没有 SLA 的异步</strong>。</li>
+  </ul>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：三段可落地的骨架</h2>
+
+  <h3>第一段：Outbox——同事务落账，异步投递</h3>
+  <div class="codeblock">
+  <pre><code>-- 与业务更新同一个本地事务
+BEGIN;
+UPDATE orders SET status = 'PAID' WHERE id = ?;
+INSERT INTO outbox(id, aggregate_id, event_type, payload, created_at)
+VALUES (uuid(), ?, 'OrderPaid', ?, NOW());
+COMMIT;
+-- 投递器（独立进程）: SELECT ... WHERE status='NEW'
+--   ORDER BY created_at LIMIT 100 FOR UPDATE SKIP LOCKED;
+--   发到队列成功 → UPDATE status='SENT'；失败 → 退避重试</code></pre>
+  </div>
+  <p class="code-note">`FOR UPDATE SKIP LOCKED` 让多个投递器实例互不阻塞地分页搬运；消费端以 outbox.id 作为幂等键（去重表唯一约束），把 at-least-once 收敛为业务上的恰好一次。投递器也可以换成 Debezium 直读 outbox 表或 binlog（官方 outbox event router），省掉轮询代码。</p>
+
+  <h3>第二段：Spring 侧监听——事务边界外触发</h3>
+  <div class="codeblock">
+  <pre><code>@Transactional
+public Order pay(Long orderId) {
+    Order order = repo.save(order.markPaid());
+    // 同事务发布（Modulith 同款，见 0055 期）
+    events.publishEvent(new OrderPaid(order.getId(),
+        order.getAmount(), order.getUserId()));  // ECST:载荷带全
+    return order;
+}
+
+// 只在事务成功提交后才投递/执行（默认不执行）
+@TransactionalEventListener(phase = AFTER_COMMIT)
+void on(OrderPaid event) {
+    producer.send(topic("order-events"),
+        new Key(event.orderId().toString()),  // 分区键=订单
+        envelope(event));
+}</code></pre>
+  </div>
+  <p class="code-note">注意 AFTER_COMMIT 仍有一个小窗口（提交后、发送前进程崩溃）——所以跨进程链路的<b>真相在 outbox 表</b>，监听器只是低延迟的"快路径"；投递器轮询是兜底的"慢路径"，两条路都走幂等。单机内的模块解耦，0055 期 Event Publication Registry 已经够用，不必上队列。</p>
+
+  <h3>第三段：消费端三件套——幂等、重试、死信</h3>
+  <div class="codeblock">
+  <pre><code>// 幂等：去重表唯一约束，重复事件静默跳过
+@Transactional
+public void handle(OrderPaid evt) {
+    if (dedup.exists(evt.eventId())) return;  // 幂等键
+    points.earn(evt.userId(), rule(evt.amount()));
+    dedup.insert(evt.eventId());
+}
+// 重试与死信：以 Pulsar 为例（topic 级策略）
+//   retry 队列：自动重投，指数退避 2s/8s/32s
+//   dead letter：3 次失败后进入，人工处置 + 告警
+//   negativeAckRedeliveryDelay 微调首投节奏</code></pre>
+  </div>
+  <p class="code-note">死信队列不是垃圾场：每条死信都要有处置 SOP（补数据后重放、修 bug 后重放、明确放弃并记账）。重试策略必须在 topic 级统一配置，不要散在每个消费者的注解里——散装重试是 0049 期"多层放大"事故的事件版。</p>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>先拆词再架构：</strong>"事件驱动"= 事件通知 / ECST / 事件溯源 / CQRS 四个正交模式的混称——说"我们用事件"之前，先说清用的是哪一个；Fowler 的警告：麻烦来自混淆，不来自任何单一模式。</li>
+    <li><strong>事件是过去时，命令是祈使句：</strong>期待对方做事就明着发命令（点对点 + 失败语义）；伪装成事件的"被动攻击型命令"得到的是假解耦、真失联。</li>
+    <li><strong>副作用必须进事务的账本：</strong>Outbox 把"待发事件"写进业务同事务，提交即事实、投递至少一次、消费端幂等收敛——比"提交后发消息"多一张表，少一类"付了钱没积分"。</li>
+    <li><strong>三笔固有账架构期就答：</strong>重复（幂等是准入门槛）、乱序（分区键 = 一致性边界）、积压（lag 是心电图，最终一致要给得出秒级数字）。</li>
+    <li><strong>解耦的代价是流程隐形：</strong>跨事件通知的业务流程不在任何程序文本里——用事件目录文档 + 链路追踪 + 消费关系盘点把它显式找回来，否则三年后系统没人看得懂。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目：某平台四个团队都靠订阅 OrderPaid（订单已支付）事实事件驱动各自逻辑：积分团队加积分、推荐团队更新用户画像、风控团队做异动检测并需要"确认本单已检查"的凭据、客服团队据此自动关单。运行一年后出现四个症状：① 积分偶尔多发（无规律可复现）；② 推荐画像滞后数小时且订单系统一抖动就不可用；③ 风控团队向上游提需求"把 OrderPaid 改成带 ack 回执的消息"；④ 客服团队消费失败时整条链路阻塞。作为架构师：① 分别诊断四个症状各踩了哪个模式的坑（缺什么机制）；② 给出目标方案：哪些该改成 ECST、哪些该拆细事件、哪些根本不该是事件；③ 风控的 ack 需求为什么是对事件语义的误解？正确的姿势是什么？<span class="chev">▶ 点击展开解析</span></summary>
+    <div class="details-body">
+      <h4>🔍 三问拆解</h4>
+      <p><strong>① 四个症状的病理：</strong>症状一是<strong>消费端幂等缺失</strong>——事件链路 at-least-once 是常态，消费组 rebalance 或重试都会重投，积分处理没有以 event_id 做去重（幂等是消费端准入门槛，不是优化项）；症状二是<strong>通知模式 + 回查依赖</strong>——推荐团队收到的是瘦事件（只有订单号），每次都要回查订单系统拿详情，上游一抖动画像就停摆，这正是 Fowler 说"事件通知"的陷阱：改成 ECST（事件携带画像所需字段、本地维护副本），推荐侧即可自治；症状三是<strong>命令被伪装成事件</strong>——"确认已检查"是风控对确定性交付的诉求，本质是命令语义（有义务方、要回执），但他想把这义务加到全体订阅者的广播通道上；症状四是<strong>消费失败策略缺失</strong>——没有配置独立重试队列与死信队列，一个毒消息（解析失败的坏数据）无限重投占住订阅位，把"广播"退化成了"串行阻塞"。</p>
+      <p><strong>② 目标方案：</strong>四件事分流——<strong>积分</strong>：保持订阅 OrderPaid，但消费端加 event_id 去重表（同事务写积分流水 + 去重记录），并把 OrderPaid 拆细为 OrderPaid（事实）而非 OrderChanged（胖事件），载荷带金额与规则版本；<strong>推荐</strong>：改 ECST——上游把画像需要的字段（用户、金额、类目、渠道）放进事件，推荐侧落本地画像库，从此上游挂了照常服务，新鲜度由 lag 告警承诺（如 99 分位 1 分钟）；<strong>风控</strong>：异动检测本身可以继续订阅事实事件（它是"反应"而非"义务"），但"已检查"凭据改为风控自己落库（检查记录表），凭据的真相在风控上下文内部，不靠上游回执——上游的事实事件已经就是"发生了"的凭据，风控的处理进度是风控自己的账；<strong>客服</strong>：自动关单如果"必须执行且失败要有人管"，那它就是命令——从事件总线广播里拿出来，改为点对点命令通道（或独立消费组 + 独立重试/死信策略），失败三次进死信、人工处置。一句话总纲：<strong>同一份数据变化可以同时产生事实事件（广播）与个别命令（点对点），别让一条通道承担两种语义。</strong></p>
+      <p><strong>③ ack 需求的误解与正解：</strong>风控要的"ack 回执"混淆了两层：消息队列的 ack 是<strong>传输层</strong>语义（"我收到了"，offset 提交），永远不该承载<strong>业务层</strong>语义（"我处理完了且结果正确"）。若按风控的提议改造：上游要为每个订阅者维护处理状态——广播通道退化成 N 份点对点责任，事件通知的低耦合优势清零，而且其他订阅者会被风控一家的慢消费拖累（可用性重新乘法）。正确姿势分三步：风控消费组独立（与积分、推荐互不干扰，队列天然支持）；处理进度由风控自己的状态表 + lag 指标暴露（"已处理到位"是可观测性，不是协议改造）；真需要强保证的子流程（如涉案订单必须拦截支付），那是同步调用或命令通道该干的事——在支付链路上同步问一次风控，而不是事后靠事件追认。<strong>事件回答"发生了什么"，命令回答"接下来必须做什么"，让 ack 的诉求回到它该在的那条通道上。</strong></p>
+    </div>
+  </details>
+
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>Martin Fowler《What do you mean by "Event-Driven"?》——事件通知 / ECST / 事件溯源 / CQRS 四模式拆解的原始出处，全文十分钟读完，值得每年重读一遍：<br>
+    <a href="https://martinfowler.com/articles/201701-event-driven.html" target="_blank" rel="noopener">martinfowler.com — What do you mean by "Event-Driven"?</a>（配套阅读：<a href="https://debezium.io/documentation/reference/latest/architecture.html" target="_blank" rel="noopener">Debezium 官方文档 · Outbox Event Router</a> 与 <a href="https://microservices.io/patterns/data/transactional-outbox.html" target="_blank" rel="noopener">microservices.io · Transactional Outbox</a>——模式的两条工程落地路线）</p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>方法论互链：<a href="0055-ddd-strategic-design.html">0055 DDD 战略设计</a>（上下文边界是事件架构的地基，本期兑现"边界之间只走事件"）、<a href="0049-distributed-design-patterns.html">0049 分布式设计模式</a>（Outbox/幂等键/Claim Check 的模式地图原籍）、<a href="0038-pulsar-schema-registry.html">0038 Schema Registry</a>（事件契约的版本治理）、<a href="0021-pulsar-delivery-reliability.html">0021 消息投递可靠性</a>（投递语义的参数级展开）、<a href="0053-flink-stream-batch-unified.html">0053 Flink 流批一体</a>（事件流的流计算消费）、<a href="0045-mqtt-emqx-cluster.html">0045 MQTT 共享订阅</a>（消费端负载均衡）、<a href="0047-langgraph-agent-orchestration.html">0047 Agent 编排</a>（检查点即事件溯源的 AI 线同构）。架构方法论与工程效能线第 2 讲（连 2 期已满回十类循环），下一期预告：Java 平台与运行时前沿——虚拟线程与结构化并发。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0055-ddd-strategic-design.html">← 上一期：DDD 战略设计</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 56 期 · 架构方法论与工程效能系列 · 下一期预告：虚拟线程与结构化并发（Java 平台与运行时前沿线）</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
