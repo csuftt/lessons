@@ -107,6 +107,7 @@
   </svg>
   </div>
   <p>把图读一遍：客户端发查询时把 <strong>RD（Recursion Desired，期望递归）</strong>位置 1，意思是“替我查完”；递归服务器愿意干这活，就在回复里把 <strong>RA（Recursion Available，可提供递归）</strong>置 1——RFC 1034 §4.3.1 说，客户端靠“<strong>回复里 RD 和 RA 都置位</strong>”来确认递归真的发生了。递归器先翻自己缓存，没中就拿着问题从根开始：根说“.com 归谁管”，.com 说“example.com 归谁管”，example.com 的权威才给出真正的 A 记录和 TTL；递归器把答案按 TTL 缓存一份，原路返回。</p>
+  <p>图里「本地缓存先过一遍」这半句值得展开——<strong>缓存不在存根本身上</strong>（它只问不存，TTL 计时、负缓存都是递归器那侧的活），而在它上下好几层，各管各的：<strong>浏览器自己一份</strong>（Chrome 在 <code>chrome://net-internals/#dns</code> 里能看、能清）；<strong>操作系统一份</strong>——Windows 的 DNS 客户端服务会缓存最近拿到的应答，官方文档说它“在查询配置的 DNS 服务器之前”先用这些记录（<code>ipconfig /displaydns</code> 能列出来、<code>/flushdns</code> 能清，负结果也在其中）；Linux 要看发行版有没有装 systemd-resolved 这类本机解析器，裸的 glibc 默认不缓存；<strong>应用运行时还各有一份</strong>，比如 JVM 的 InetAddress 对成功解析缓存一段实现相关的时长（HotSpot 默认 30 秒）、失败的默认 10 秒——“发版后还连旧 IP”常撞在这。<strong>最特殊的是 hosts 文件：它不是缓存，是本地强制复写</strong>——命中的域名根本不会发出 DNS 查询，也永远不受 TTL 管辖；只有你一台机器解析异常、别人都正常时，先看它。</p>
   <p>为什么要这么绕？因为要<strong>去中心化</strong>：没有一台服务器知道全世界的域名，每一层只对下一层授权、只答自己那一段。扩容和治理由此变成分治问题；代价是查询要多走几跳——不过有缓存兜着，绝大多数查询在第一站（递归器）就结束了。</p>
 
   <h3>递归与迭代：一个替你把全程跑完，一个只给你下一站</h3>
@@ -189,6 +190,10 @@
   <div class="qa">
     <span class="q">dig 出来 TTL 只剩 3 秒，是不是我配错了？</span>
     <div class="a"><p>不是。你看到的是缓存里的“剩余保质期”，正在倒计时；过几秒再查它会继续变小，刷新后又会回到接近原始值——说明链路是活的、缓存也在正常工作。想确认原始 TTL，去问权威本身（<code>dig @权威服务器</code>）。</p></div>
+  </div>
+  <div class="qa">
+    <span class="q">同事都好了，就我一个人还是旧解析，按什么顺序查？</span>
+    <div class="a"><p>由近到远四步。① 先看 hosts 有没有这条域名的强制复写（Linux、macOS 在 <code>/etc/hosts</code>，Windows 在系统盘 <code>drivers\etc\hosts</code>）——命中的话它根本不发查询。② 刷本机三层：浏览器 host cache（<code>chrome://net-internals/#dns</code> 清除）、系统解析器缓存（<code>ipconfig /flushdns</code>；Linux 用 <code>resolvectl flush-caches</code>）、JVM 的名字缓存（重启进程最省事）。③ 用 <code>dig @递归器地址</code> 直接问你们在用的那台递归器，看它缓存是不是还没过期。④ 以上都新，再回头怀疑权威配置。顺序别反——先怀疑远端最费时间。</p></div>
   </div>
   <div class="qa">
     <span class="q">公司内网、家里宽带、手机 4G 解析结果各不相同，以哪个为准？</span>
