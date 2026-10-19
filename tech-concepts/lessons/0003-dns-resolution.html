@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>技术概念手记 · DNS 解析：一次查询到底走了多少步</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">TECH CONCEPT NOTES · 0003</span>
+  <span><a href="../index.html">栏目目录</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">网络基础 · DNS</p>
+  <h1>DNS 解析：一次查询到底走了多少步</h1>
+  <p class="subtitle">“改了域名半天不生效”“有的用户好了有的没好”——这些日常怪象都藏在一句“域名变 IP”的背后。这篇把一次 DNS 查询从浏览器一路走到权威，看清递归与迭代是谁替谁跑腿、TTL 到底管着谁、CNAME 为什么有禁令；再把解析装进 HTTPS（DoH）和移动端的 HTTPDNS 讲透——<strong>“查域名”这件事本身，也值得加密</strong>。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🌐 网络基础</span>
+    <span class="tag-date">📅 2026-10-19 · 第 3 期</span>
+    <span class="tag time">⏱ 预计阅读 9 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>场景：改了域名配置，为什么半天不生效</h2>
+  <p>发布现场几乎都遇到过这一幕：迁移机房要切流量，改完解析记录，自己本机 <code>dig</code> 一下已经是新 IP，可同事那边还连着旧机器；再等等，有人好了、有人没好。<strong>“部分生效”是域名变更的常态</strong>，不是谁的机器坏了。另一种更吓人的场景：新域名明明配好了，本地怎么查都是 <code>NXDOMAIN</code>，感觉配置根本没上去。</p>
+  <p>这两个现象都不是故障，而是 DNS 的“设计行为”：解析结果不会只存在你改的那台权威服务器上——它会沿途被<strong>一层层缓存</strong>；而替用户去问解析的那个角色，也未必站在用户旁边。所以“改域名”实质上是改一个被多处复制的分布式状态，生效天然是渐进的。你没等它，它就不是“没生效”，是<strong>还在生效的路上</strong>。</p>
+  <p>还有一类高频怪象来自移动世界：同一个 App，换个网络解析到的机房就变了，开始跨网、变慢；在个别网络里，域名甚至会被解析到一个陌生的 IP。这也不怪 App——问题出在“<strong>替它问路的那个人</strong>”身上。这一期先走完整条链路（02 原理），再亲手验证（03 实战），最后一节看今天“查域名”的两种新姿势：加密的 DoH 和应用层的 HTTPDNS。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：一次查询的完整路径</h2>
+
+  <h3>三级接力：只会问的、替你跑的、只答自己那段的</h3>
+  <p>DNS 世界的角色分工从 RFC 1034 起就定得很清楚，一共三个：<strong>Stub Resolver（存根解析器）</strong>——浏览器和操作系统里的那个 DNS 客户端，<strong>只会“问”，不会“查”</strong>；<strong>递归服务器</strong>——运营商 LocalDNS、公司内网 DNS、8.8.8.8 与 223.5.5.5 这类公共 DNS，接受“帮我查完”的委托，负责跑完整趟；<strong>权威服务器</strong>——域名主人在自己的 DNS 服务商那里配置的那台，只回答自己管辖区内的数据。</p>
+  <div class="diagram">
+  <svg viewBox="0 0 820 380" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="arA" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+    <text x="410" y="18" text-anchor="middle" fill="var(--muted)" font-size="13">一次解析的完整链路：客户端只「递归」问一次，递归器替它「迭代」走完全程</text>
+
+    <!-- 顶部一行：客户端侧 -->
+    <rect x="30" y="36" width="140" height="50" rx="9" fill="var(--card)" stroke="var(--line)"/>
+    <text x="100" y="58" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">浏览器 / App</text>
+    <text x="100" y="74" text-anchor="middle" fill="var(--muted)" font-size="9.5">本地缓存先过一遍</text>
+
+    <rect x="206" y="36" width="160" height="50" rx="9" fill="var(--card)" stroke="var(--line)"/>
+    <text x="286" y="58" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">Stub Resolver</text>
+    <text x="286" y="74" text-anchor="middle" fill="var(--muted)" font-size="9.5">操作系统里的「只会问」</text>
+
+    <rect x="400" y="36" width="390" height="50" rx="9" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.2"/>
+    <text x="595" y="58" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">递归服务器（LocalDNS / 公共 DNS）</text>
+    <text x="595" y="74" text-anchor="middle" fill="var(--muted)" font-size="9.5">先翻自己的缓存；未命中就替你迭代全图，按 TTL 缓存答案</text>
+
+    <line x1="172" y1="61" x2="202" y2="61" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#ar)"/>
+    <line x1="368" y1="61" x2="396" y2="61" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#arA)"/>
+    <text x="382" y="53" text-anchor="middle" fill="var(--accent)" font-size="10" font-weight="700">①</text>
+
+    <!-- 从根开始：递归器 → 根 -->
+    <polyline points="595,86 595,110 675,110 675,127" fill="none" stroke="var(--accent)" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#arA)"/>
+    <text x="585" y="105" text-anchor="end" fill="var(--accent)" font-size="9.5" font-weight="700">② 从根开始</text>
+
+    <!-- 迭代竖链：根 → 顶级域 → 权威 -->
+    <rect x="560" y="130" width="230" height="52" rx="9" fill="var(--card)" stroke="var(--line)"/>
+    <text x="675" y="152" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">根服务器（.）</text>
+    <text x="675" y="168" text-anchor="middle" fill="var(--muted)" font-size="9">我只知道：各顶级域（如 .com）归谁管</text>
+
+    <line x1="675" y1="182" x2="675" y2="202" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#arA)"/>
+    <text x="684" y="197" text-anchor="start" fill="var(--muted)" font-size="9.5">③ 回：委派——去问 .com</text>
+
+    <rect x="560" y="206" width="230" height="52" rx="9" fill="var(--card)" stroke="var(--line)"/>
+    <text x="675" y="228" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">「.com」顶级域</text>
+    <text x="675" y="244" text-anchor="middle" fill="var(--muted)" font-size="9">我只知道：example.com 归谁管</text>
+
+    <line x1="675" y1="258" x2="675" y2="278" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#arA)"/>
+    <text x="684" y="273" text-anchor="start" fill="var(--muted)" font-size="9.5">④ 回：委派——去问它的权威</text>
+
+    <rect x="560" y="282" width="230" height="52" rx="9" fill="var(--card)" stroke="var(--line)"/>
+    <text x="675" y="304" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">example.com 权威</text>
+    <text x="675" y="320" text-anchor="middle" fill="var(--muted)" font-size="9">答案在这里：A 记录 + TTL</text>
+
+    <!-- ⑤ 答案原路返回 -->
+    <polyline points="558,308 505,308 505,94" fill="none" stroke="var(--accent)" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#arA)"/>
+    <text x="496" y="200" text-anchor="end" fill="var(--accent)" font-size="9.5" font-weight="700">⑤ 权威给出答案，递归器</text>
+    <text x="496" y="216" text-anchor="end" fill="var(--muted)" font-size="9">按 TTL 缓存一份，再原路返回</text>
+
+    <!-- 左下说明 -->
+    <text x="40" y="150" fill="var(--ink)" font-size="10.5">① 唯一一次「递归」：客户端问一次、等一个答案</text>
+    <text x="40" y="176" fill="var(--ink)" font-size="10.5">②③④ 是一层层「迭代」：每一站只答自己那一段，</text>
+    <text x="62" y="192" fill="var(--muted)" font-size="10">并回一句「去问下一层」——根甚至不知道</text>
+    <text x="62" y="208" fill="var(--muted)" font-size="10">www.example.com 的 IP，它只知道「.com 归谁管」</text>
+    <text x="40" y="236" fill="var(--ink)" font-size="10.5">客户端视角永远只有一次问答；中间这几跳，</text>
+    <text x="40" y="252" fill="var(--ink)" font-size="10.5">都发生在「递归器替它跑」的世界里</text>
+
+    <text x="410" y="362" text-anchor="middle" fill="var(--muted)" font-size="9.5">根 / 顶级域 / 权威 —— 一层层向下授权，只有权威才真正「知道答案」</text>
+  </svg>
+  </div>
+  <p>把图读一遍：客户端发查询时把 <strong>RD（Recursion Desired，期望递归）</strong>位置 1，意思是“替我查完”；递归服务器愿意干这活，就在回复里把 <strong>RA（Recursion Available，可提供递归）</strong>置 1——RFC 1034 §4.3.1 说，客户端靠“<strong>回复里 RD 和 RA 都置位</strong>”来确认递归真的发生了。递归器先翻自己缓存，没中就拿着问题从根开始：根说“.com 归谁管”，.com 说“example.com 归谁管”，example.com 的权威才给出真正的 A 记录和 TTL；递归器把答案按 TTL 缓存一份，原路返回。</p>
+  <p>为什么要这么绕？因为要<strong>去中心化</strong>：没有一台服务器知道全世界的域名，每一层只对下一层授权、只答自己那一段。扩容和治理由此变成分治问题；代价是查询要多走几跳——不过有缓存兜着，绝大多数查询在第一站（递归器）就结束了。</p>
+
+  <h3>递归与迭代：一个替你把全程跑完，一个只给你下一站</h3>
+  <p>这两个词在任何 DNS 材料里都会出现，一句话区分：<strong>递归是“你帮我查完”，迭代是“你去找它”</strong>。RFC 1034 §4.3.1 的定义非常干净：非递归（迭代）模式下，服务器返回“<strong>一个错误、一个答案，或者一个指向更接近答案的服务器的委派</strong>”；递归模式下，服务器“<strong>要么给错误，要么给答案，但绝不返回委派</strong>”。规范还给了一条分工：<strong>迭代是所有服务器都必须支持的，递归是可选的</strong>——所以现实里递归被集中放在“递归服务器”这一层，客户端只跟它打一次“递归”交道，后面的路全由它逐跳迭代走完。</p>
+  <p>记住这个分工，排障直觉就来了：客户端永远只看到“一次问答”。如果问答根本没发生（超时、SERVFAIL），问题在递归器这一跳或它的上游；如果问答发生了但答案是旧的，问题在缓存。</p>
+
+  <h3>TTL：缓存的契约，也是“生效慢”的根源</h3>
+  <p>TTL 是每条 DNS 记录随身带的一个数字。RFC 1034 §3.6.1 定义为“<strong>32 位整数、单位秒</strong>”，“描述一条记录在被丢弃之前可以被缓存多久”；由每个区的管理员自己设，短 TTL 减少缓存，TTL 设为 0 表示禁止缓存。</p>
+  <p>谁在按这个数字倒计时？浏览器、操作系统、递归器（缓存量最大的一层）、公司出口……每一层都按自己看到的 TTL 各自计时。于是“生效时间线”是这样的：你在权威上改掉记录，<strong>不等于</strong>大家立刻看到——要等所有缓存里的旧记录各自过期。这也是“有人好了有人没好”的原因：不同递归器缓存旧答案的时刻不同，到期时间就不同。</p>
+  <p>于是教科书做法是一个<strong>变更窗口</strong>：要改的记录先把 TTL 调小（比如提前一天调到 60 秒），静置一个“旧 TTL”周期等旧缓存自然过期，再动手改，确认全网生效，最后把 TTL 调回来。改完十分钟就指望全网生效的，说明改之前缓存里那条记录的寿命本来就标得很长。</p>
+  <p>还有一条更隐蔽的期限：<strong>负缓存</strong>。查一个不存在的域名会得到 NXDOMAIN，而“不存在”这个结论本身也会被缓存。RFC 2308 规定负缓存时长取“<strong>SOA 的 MINIMUM 字段与 SOA 自身 TTL 中的较小者</strong>”，并提示 1 到 3 小时的实践效果较好、超过一天“会有问题”。所以“域名明明配好了，为什么还报 NXDOMAIN”——多半是某个递归器在几小时前就把“不存在”存下来了。</p>
+</section>
+
+<!-- ================= 03 实战 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>实战：用 dig 把这趟旅程看穿</h2>
+  <p><code>dig</code> 是随 BIND 分发的标准查询工具，三招就能把上一节的图逐段验证。</p>
+
+  <h3>第一招：默认查询——看一次“递归问答”</h3>
+  <div class="codeblock term">
+    <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>递归查询（缺省行为）</span><button class="copy">复制命令</button></div>
+    <pre><code><span class="t-cmd">dig www.example.com</span>
+<span class="t-out">;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 46112</span>
+<span class="t-out">;; flags: qr rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 0</span>
+<span class="t-out">;; QUESTION SECTION:</span>
+<span class="t-out">;www.example.com.		IN	A</span>
+<span class="t-out">;; ANSWER SECTION:</span>
+<span class="t-out">www.example.com.	300	IN	A	93.184.216.34</span>
+<span class="t-out">;; SERVER: 192.168.1.1#53(192.168.1.1)</span></code></pre>
+  </div>
+  <p>三个关键点。<strong>flags 里 <code>rd</code> 是你请求了递归，<code>ra</code> 是对方说“我接受递归”</strong>——这两个字母就是上一节那张图的开关。dig 的缺省就是发递归查询（BIND 手册原话：RD 位“缺省置位”），不带任何参数时，它做的就是“客户端那一跳”的事。<strong>ANSWER 里的 300 是缓存剩余秒数</strong>，不是权威上配的原始值——再查一次它会继续变小。而 <code>SERVER</code> 行告诉你是谁在替你跑（Linux 上这个地址来自 /etc/resolv.conf，也就是系统配置的递归器）。</p>
+
+  <h3>第二招：+trace——把“迭代全程”自己走一遍</h3>
+  <div class="codeblock term">
+    <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>从根开始逐跳迭代</span><button class="copy">复制命令</button></div>
+    <pre><code><span class="t-cmd">dig +trace www.example.com</span>
+<span class="t-out">.			518400	IN	NS	a.root-servers.net.		← 根：. 的 NS 列表</span>
+<span class="t-out">com.			172800	IN	NS	a.gtld-servers.net.		← 委派：去问 .com</span>
+<span class="t-out">example.com.		172800	IN	NS	a.iana-servers.net.		← 委派：去问它的权威</span>
+<span class="t-out">www.example.com.	300	IN	A	93.184.216.34			← 权威给出的答案</span></code></pre>
+  </div>
+  <p><code>+trace</code> 会自动关掉递归（BIND 手册原话：“使用 +trace 时递归被自动禁用”），dig 从根服务器开始跟着委派一路往下走——上面四段输出，正是递归器替你跑的那条路。日常排障里它最大的价值是<strong>钉死断在哪一层</strong>：根、.com 段都出来了却没有权威答案，问题大概率在权威配置；第一段就断了，多半是本地网络或防火墙把 53 端口封了。</p>
+
+  <h3>第三招：@server 与 +norecurse——验证缓存与调度</h3>
+  <div class="codeblock term">
+    <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>指定递归器对比答案</span><button class="copy">复制命令</button></div>
+    <pre><code><span class="t-cmt"># @server 越过系统配置，直接指定递归器</span>
+<span class="t-cmd">dig @223.5.5.5 www.example.com +short</span>
+<span class="t-out">93.184.216.34</span>
+<span class="t-cmt"># +norecurse：关掉「帮我查完」，只翻对方缓存</span>
+<span class="t-cmd">dig +norecurse @223.5.5.5 www.example.com</span></code></pre>
+  </div>
+  <p><code>@server</code> 让不同公共 DNS 的答案排排站：结果不同不是谁“错了”，而是两个递归器位置不同，权威给出的是各自的“就近答案”（下一节细说这背后的机制）。<code>+norecurse</code> 则关掉“帮我查完”、只翻对方缓存——它是回答“<strong>是缓存问题还是解析问题</strong>”的利器：norecurse 也秒回，说明答案一直躺在缓存里；报错或退回委派，说明这台递归器缓存里没有、得靠正常查询现查。</p>
+</section>
+
+<!-- ================= 04 规则与坑 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>规则与坑：CNAME 的禁令，与 LocalDNS 的三宗罪</h2>
+
+  <h3>CNAME：别名不是转发，同一条名字上不许再挂别的</h3>
+  <p>CNAME 的含义是“<strong>这条名字是另一个名字的别名</strong>”。RFC 1034 §3.6.2 的原文很硬：“<strong>如果某个节点上存在 CNAME 记录，就不应存在任何其它数据</strong>”——理由也写在同段：要让“别名与正名的数据不可能不一致”，这样一来，缓存里的 CNAME 可以被直接拿来把后续查询重定向到正名，不必再回头问权威。如果同一条名字上又 CNAME 又 A，它到底算谁？</p>
+  <p>RFC 2181 §10.1 把这条规则写成了更干净的“四选一”：任何一个名字，<strong>要么只有一条 CNAME（可带 DNSSEC 相关的 SIG、NXT、KEY），要么存在一组非 CNAME 记录，要么“存在但没有记录”，要么“不存在”</strong>——没有第五种状态。“根域名不能做 CNAME”也就顺理成章：根上必然有 NS、SOA，和共存禁令直接冲突，所以域名商干脆不让你设。</p>
+  <p>还有个实操后果：解析器遇到 CNAME 会拿正名“重启”查询（RFC 1034 §4.3.2 的服务端算法就是这么写的）——<strong>CNAME 是改名，不是转发</strong>，链上每多一层 CNAME 就多一跳查询。能少则少，别拿它当“跳转”使。</p>
+
+  <h3>LocalDNS 的三宗罪</h3>
+  <p>运营商或公司给你配的那台递归器（俗称 LocalDNS）是绝大多数查询的终点站，但它有三类典型问题，正是另一半“解析怪象”的来源：</p>
+  <ul>
+    <li><strong>劫持</strong>：传统 DNS 跑在明文的 UDP 上、没有认证——链路中间任何一环都能把答案改掉。被塞广告页、被解析到钓鱼 IP，都从这里来。</li>
+    <li><strong>调度不准</strong>：权威是按“提问者的位置”给就近答案的，可提问的是递归器，不是用户——它的出口 IP 可能代表几十公里外一个县城的机房。腾讯云官方文档的原话说得直白：LocalDNS 会“按权威 DNS 目标 IP 做 NAT 或转发请求，权威 DNS 无法识别其 IP”，结果是“域名解析错误、流量跨网”。小运营商出口少、位置偏，跨网慢就是这么来的。</li>
+    <li><strong>缓存不守约</strong>：TTL 是给缓存的建议，个别递归器会超期缓存；缓存量最大的一层不守时，全网生效就被它拖长。</li>
+  </ul>
+  <div class="rule"><span class="mark">⚠</span><div class="txt">
+    <strong>变更纪律：动解析之前，先把 TTL 降到 60 秒并静置一个旧周期</strong>
+    <p class="why">切机房、切 CDN、改负载均衡都同理——让“路上”的旧记录先自然死光，再动源头。这条纪律比任何工具都有效</p>
+  </div></div>
+  <div class="rule warn"><span class="mark">⛔</span><div class="txt">
+    <strong>CNAME 与其它记录同挂、或给根域名加 CNAME，会让解析半瘫</strong>
+    <p class="why">部分查询类型可达、部分直接报错，排查起来极费时。先把别名和正名的记录配清楚，再谈上线</p>
+  </div></div>
+  <div class="qa">
+    <span class="q">dig 出来 TTL 只剩 3 秒，是不是我配错了？</span>
+    <div class="a"><p>不是。你看到的是缓存里的“剩余保质期”，正在倒计时；过几秒再查它会继续变小，刷新后又会回到接近原始值——说明链路是活的、缓存也在正常工作。想确认原始 TTL，去问权威本身（<code>dig @权威服务器</code>）。</p></div>
+  </div>
+  <div class="qa">
+    <span class="q">公司内网、家里宽带、手机 4G 解析结果各不相同，以哪个为准？</span>
+    <div class="a"><p>以“出问题的那台客户端实际使用的递归器”为准。排障要在故障现场查：在公司机器上 dig，别拿你手机的结果去解释公司内网的故障——两边的递归器、缓存、甚至出口路径都不是同一条。<code>dig +norecurse</code> 可以逐个确认每个递归器缓存里到底存着什么。</p></div>
+  </div>
+</section>
+
+<!-- ================= 05 加密与旁路 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>把解析装进 HTTP：DoH 与 HTTPDNS</h2>
+  <p>把前面的问题归成一句话：传统 DNS 是<strong>明文的、依赖路程的、没有认证的</strong>。改良它的努力分成两条路线：<strong>把 DNS 加密</strong>（DoT、DoH、DoQ，IETF 标准），和<strong>绕开系统解析路径</strong>（HTTPDNS，应用层方案）。两条路线都用上了 HTTP/HTTPS。先看加密三兄弟的对照——注意：换的只是“传输方式”，DNS 报文的语义一律不变。</p>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th></th><th>传统 DNS</th><th>DoT</th><th>DoH</th><th>DoQ</th></tr>
+    <tr><td><strong>传输</strong></td><td>UDP 53（明文）</td><td>TCP 853 + TLS（RFC 7858）</td><td>HTTPS 443（RFC 8484）</td><td>QUIC / UDP 853（RFC 9250）</td></tr>
+    <tr><td><strong>加密</strong></td><td>无，链路可窥探可篡改</td><td>有（专用通道）</td><td>有（与网页流量同管道）</td><td>有（每条查询一个流）</td></tr>
+    <tr><td><strong>形态</strong></td><td>一问一答的裸报文</td><td>加密长连接，适合复用</td><td>看不出是 DNS，难被单独针对</td><td>独立流 + 0-RTT，最激进</td></tr>
+    <tr><td><strong>谁在用</strong></td><td>全世界</td><td>系统级（Android“私密 DNS”）</td><td>浏览器级（Chrome“安全 DNS”）</td><td>较新，仍在铺开</td></tr>
+  </table>
+  </div>
+  <p>两个系统级的印证：“Android 私密 DNS”设置里一开，DNS 的问与答就走加密，官方说明很诚实——“<strong>私密 DNS 只保护 DNS 的问与答，保护不了其它流量</strong>”；Chrome 的安全 DNS 是同一思路，官方描述是“<strong>Chrome 会在解析过程中加密你的信息</strong>”，自动模式下缺省开启、失败还会回退到未加密模式。DoQ 则把整套搬到 QUIC 上：RFC 9250 规定 UDP 853 端口、<strong>每条查询一个独立双向流</strong>——所以 DoQ 里 DNS 报文的 ID 字段直接置 0，流的编号已经天然对齐了问答。</p>
+
+  <h3>DoH：一次“解析”是怎么装进 HTTP 的</h3>
+  <p>这是最值得慢下来看的拼接——DNS 和 HTTPS 到底怎么合到一起？四步：</p>
+  <div class="flow-strip">
+    <div class="flow-step"><span class="no">1</span>
+      <p class="what">组包</p>
+      <p class="how">照 RFC 1035 组装查询报文</p>
+      <p class="why">和发往 53 端口的那份一模一样</p></div>
+    <div class="flow-step"><span class="no">2</span>
+      <p class="what">装进 HTTP</p>
+      <p class="how">GET 「?dns=base64url」或 POST 原始报文</p>
+      <p class="why">Content-Type: application/dns-message</p></div>
+    <div class="flow-step"><span class="no">3</span>
+      <p class="what">响应</p>
+      <p class="how">HTTP 2xx = 一次合法的 DNS 响应</p>
+      <p class="why">NXDOMAIN 也装在 2xx 里</p></div>
+    <div class="flow-step"><span class="no">4</span>
+      <p class="what">缓存合账</p>
+      <p class="how">HTTP 新鲜期 ≤ 答案里最小 TTL</p>
+      <p class="why">客户端还要扣掉 Age 头</p></div>
+  </div>
+  <p>四步各有一段规范原文值得记住。<strong>第 2 步</strong>：GET 请求把报文做 <strong>base64url 编码放进 <code>?dns=</code> 参数，且“不得包含 padding”</strong>；POST 则把原始报文直接当 body（“<strong>不做编码</strong>”），媒体类型是 <code>application/dns-message</code>，报文上限 65535 字节。<strong>第 3 步最容易误解</strong>：RFC 8484 §4.2.1 规定，用“<strong>2xx 状态码表示任何合法的 DNS 响应，无论 DNS 响应码是什么</strong>”——也就是说 NXDOMAIN、SERVFAIL 都是 HTTP 层面的“成功”；反过来，401、415 这类 4xx/5xx 才代表 DoH 通道本身出了问题。<strong>第 4 步</strong>：服务器给响应的 HTTP 新鲜期“<strong>不得大于 Answer 段里最小的 TTL</strong>”（§5.1），客户端算 DNS TTL 时要把 <code>Age</code> 头扣掉——DNS 的 TTL 和 HTTP 的 Cache-Control 在这里就是同一笔账。</p>
+  <p>为什么这套有用：DoH 跑在 443 上、和浏览网页走一条加密管道——链路上能看到的只是“你在和一个 DoH 服务说话”，至于你查的是哪个域名，全在加密里。这也是它比 DoT（853 专用端口）更难被单独针对的原因。当然，隐私不是白给的：<strong>你的 DoH 服务商能看到你全部的查询</strong>——加密只是把“谁能看见”从本地网络换成了服务商，选服务商就是在选托付对象。</p>
+  <p>注意 DoH 解决的是“<strong>可窥探、可篡改</strong>”，没解决“<strong>调度</strong>”——替你去问的依然是那台递归器，权威看到的还是它的位置。要连调度一起解决，就轮到移动端那条路线了。</p>
+
+  <h3>HTTPDNS：绕开 LocalDNS 的应用层方案</h3>
+  <p>HTTPDNS 不是 IETF 标准，是商业 DNS 服务（阿里云、腾讯云都有）面向 App 的一种“解析直连”方案。它的原点正是上一节 LocalDNS 的第二宗罪。阿里云官方文档写得很直白：“<strong>通过集成 HTTPDNS 提供的客户端 SDK 或调用 HTTP API，您的应用可以绕过传统 Local DNS 服务器，直接通过 HTTP(S) 协议向 HTTPDNS 服务发送 DNS 查询请求</strong>”；服务端则“<strong>能够直接得到客户端的出口公网 IP，从而更准确地判断客户端地区和运营商，得到更精准的解析结果</strong>”。一句话：让它替 App 问——而且它能看到 App 的真身位置。</p>
+  <div class="codeblock term">
+    <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>App 内 SDK 发起的解析请求（阿里云 HTTPDNS 接口示意）</span><button class="copy">复制命令</button></div>
+    <pre><code><span class="t-cmd">GET http://203.107.1.1/100000/d?host=www.example.com</span>
+<span class="t-out">{"host":"www.example.com","ips":["203.0.113.10"],"ttl":57,"origin_ttl":120}</span>
+<span class="t-cmt"># ips = 候选 IP 列表；ttl = 结果可缓存秒数；origin_ttl = 权威给出的原始 TTL</span></code></pre>
+  </div>
+  <p>拿到 IP 之后，App 直接连 IP、不再让系统解析。但“直连 IP”必须自己补一整套身份动作——<strong>HTTP 要带上 <code>Host</code> 头，HTTPS 还要处理 SNI 与证书校验</strong>。阿里云官方文档的步骤：手动设置“<code>Host: 原始域名</code>”；把“<strong>原始域名写入 SNI 扩展</strong>”；证书校验时“<strong>在 TLS 校验阶段显式传入原始域名，确保 CN/SAN 比对正确</strong>”。否则 IP 连得上、证书却对不上域名（hostname mismatch），或者 SNI 填错被服务端拒绝。</p>
+  <div class="flow-strip">
+    <div class="flow-step"><span class="no">1</span>
+      <p class="what">SDK 直连服务商</p>
+      <p class="how">HTTP(S) 查询（带鉴权）</p>
+      <p class="why">绕过 LocalDNS，链路里没人能改答案</p></div>
+    <div class="flow-step"><span class="no">2</span>
+      <p class="what">按 TTL 缓存</p>
+      <p class="how">过期前异步刷新，失败降级 LocalDNS</p>
+      <p class="why">官方口径：“根据 TTL 进行生命周期管理”</p></div>
+    <div class="flow-step"><span class="no">3</span>
+      <p class="what">IP 直连</p>
+      <p class="how">HTTP 带 Host、HTTPS 带 SNI</p>
+      <p class="why">证书校验用回原始域名</p></div>
+  </div>
+  <p>和 DoH 的关系一句话：两条路线都“绕过系统解析路径、走 HTTP(S)”，区别在<strong>DoH 是标准协议</strong>（无鉴权、不支持业务参数），<strong>HTTPDNS 是带鉴权的私有协议</strong>（可自定义调度、可批量解析）。阿里云官方对比的原话：“<strong>两者都通过 HTTP/HTTPS 通道绕过操作系统 Local DNS 解析路径……HTTPDNS 除私有协议外也支持 DoH，但适用场景不同</strong>。”分工也就出来了：浏览器和操作系统层面用 DoH，App 要精细调度、可控选路、失败兜底就用 HTTPDNS——而且很多 App 是两者并存，先 HTTPDNS、兜底 DoH/LocalDNS。</p>
+  <div class="qa">
+    <span class="q">开了加密 DNS，域名就“劫持不了”了吗？</span>
+    <div class="a"><p>加密保护的是“你到递归器”这一段；递归器往上到权威那一小段是否加密，取决于递归器自己的配置。另外 DoH 自身也依赖“你连的 DoH 服务器地址”没被篡改。安全是链式的，加密 DNS 补上了过去最大的短板，但不是全部。</p></div>
+  </div>
+  <details class="q-card">
+    <summary>深挖：权威服务器到底怎么知道“你在哪儿”——以及 ECS 的隐私代价<span class="chev">▶ 点击展开</span></summary>
+    <div class="details-body">
+      <p><strong>ECS（EDNS Client Subnet）</strong>是标准侧的补丁：递归器可以把客户端 IP 截断后附在查询里（RFC 7871，EDNS0 选项代码 8），权威据此返回“就近答案”；规范建议截断到 IPv4 的 24 位、IPv6 的 56 位。但它是可选、可被忽略的，RFC 7871 的作者甚至建议“<strong>默认关闭、确有收益再开</strong>”——因为它会把缓存切碎（按网段缓存、命中率大降），还向权威暴露了客户端网段。</p>
+      <p>这正是 HTTPDNS 在移动端大行其道的另一个原因：它不用走 ECS 这套折中，<strong>服务端直接看到客户端出口 IP</strong>，“精准调度”是天然属性。加密与调度的账，在两条路线上是分开算的。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 06 今日带走 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>今日带走</h2>
+  <ul class="key-points">
+    <li><strong>一次解析是三级接力</strong>：stub 只会问、递归器替你跑、权威只答自己那一段；客户端视角永远只有“一次问答”。</li>
+    <li><strong>递归是“帮我查完”，迭代是“去问它”</strong>：唯一一次递归发生在客户端与递归器之间，往里全是一层层委派（RFC 1034 §4.3.1）。</li>
+    <li><strong>TTL 是缓存的契约</strong>：改解析 = 改一个多处复制的状态——先降 TTL 再改、等旧缓存过期；负缓存（NXDOMAIN）还有一个 SOA MINIMUM 定的期限（RFC 2308）。</li>
+    <li><strong>CNAME 是别名不是转发</strong>：同一条名字上不许再挂别的记录（RFC 2181 §10.1 的“四选一”），根域名因此天然不能设 CNAME。</li>
+    <li><strong>DoH = 把 DNS 报文装进 HTTPS</strong>：GET <code>?dns=base64url</code> 或 POST <code>application/dns-message</code>，NXDOMAIN 也装在 2xx 里；HTTP 缓存与 DNS TTL 在此合账。</li>
+    <li><strong>HTTPDNS 是应用层绕行</strong>：App 直接向服务商要 IP + TTL，再 IP 直连——Host、SNI、证书校验都得用回原始域名。</li>
+  </ul>
+</section>
+
+<!-- ================= 07 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>随堂小测</h2>
+  <div class="quiz" data-title="DNS 解析">
+    <span class="quiz-score"></span>
+    <div class="quiz-q" data-answer="1">
+      <p class="q-text">1. 改了 A 记录，自己本机已经是新 IP，同事一半人还是旧的，最可能的原因？</p>
+      <button class="quiz-opt">权威服务器没保存成功，一半查询会失败</button>
+      <button class="quiz-opt">各处缓存的旧记录还没到 TTL，生效是渐进的</button>
+      <button class="quiz-opt">递归服务器的 RA 位没有置位，查询被降级</button>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q" data-answer="0">
+      <p class="q-text">2. 新域名明明配好了，dig 却还报 NXDOMAIN，先怀疑什么？</p>
+      <button class="quiz-opt">负缓存——“不存在”这个结论也被缓存了，时长由 SOA 的 MINIMUM 决定</button>
+      <button class="quiz-opt">域名商忘记续费，域名已经被删除</button>
+      <button class="quiz-opt">权威服务器宕机，NXDOMAIN 是它返回的默认错误</button>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q" data-answer="1">
+      <p class="q-text">3. dig +trace 与不带参数的 dig，本质区别是？</p>
+      <button class="quiz-opt">+trace 只是把输出格式化成更易读的样子</button>
+      <button class="quiz-opt">+trace 关掉递归，自己从根开始逐跳迭代</button>
+      <button class="quiz-opt">+trace 强制查询走 TCP 并把结果加密</button>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q" data-answer="2">
+      <p class="q-text">4. 用 DoH 查询一个不存在的域名，HTTP 状态码是什么？</p>
+      <button class="quiz-opt">404——记录不存在，属于“未找到”</button>
+      <button class="quiz-opt">500——解析失败，属于服务器端错误</button>
+      <button class="quiz-opt">2xx——NXDOMAIN 是 DNS 层面的结论，装在成功响应里</button>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 08 延伸阅读 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>解析模型、递归/迭代、TTL 与 CNAME 规则的源头——DNS 的“概念与设施”篇（§3.6、§4.3、§5.3）：<br>
+    <a href="https://www.rfc-editor.org/rfc/rfc1034.html" target="_blank" rel="noopener">RFC 1034: Domain Names — Concepts and Facilities</a>；报文格式（wire format，§4.2.1）：<a href="https://www.rfc-editor.org/rfc/rfc1035.html" target="_blank" rel="noopener">RFC 1035</a></p>
+    <p>负缓存的规则（NXDOMAIN 到底能存多久）：<a href="https://www.rfc-editor.org/rfc/rfc2308.html" target="_blank" rel="noopener">RFC 2308: Negative Caching of DNS Queries</a></p>
+    <p>DoH 的完整规范（媒体类型、GET/POST、缓存语义）：<a href="https://www.rfc-editor.org/rfc/rfc8484.html" target="_blank" rel="noopener">RFC 8484: DNS Queries over HTTPS</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 相关阅读</h4>
+    <p>DoT（853 端口、两个认证档位）与 DoQ（QUIC、每条查询一个流）：<a href="https://www.rfc-editor.org/rfc/rfc7858.html" target="_blank" rel="noopener">RFC 7858</a> · <a href="https://www.rfc-editor.org/rfc/rfc9250.html" target="_blank" rel="noopener">RFC 9250</a>；ECS 的隐私权衡：<a href="https://www.rfc-editor.org/rfc/rfc7871.html" target="_blank" rel="noopener">RFC 7871</a>；dig 全部参数：<a href="https://bind9.readthedocs.io/en/latest/manpages.html" target="_blank" rel="noopener">BIND 9 dig 手册</a>。HTTPDNS 官方文档：<a href="https://help.aliyun.com/zh/document_detail/435220.html" target="_blank" rel="noopener">阿里云 HTTPDNS</a> · <a href="https://cloud.tencent.com/document/product/379/3519" target="_blank" rel="noopener">腾讯云移动解析</a>。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="../index.html">栏目目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>技术概念手记 · 第 3 期 · 不定期更新：工作中遇到难懂的概念，就回来吃透它</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/content.js"></script>
+</body>
+</html>
