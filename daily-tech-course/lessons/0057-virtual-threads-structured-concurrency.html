@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · 虚拟线程与结构化并发：一行配置后的架构账单 | 2026-10-21</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0057</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0056-event-driven-architecture-eda.html">上一期：事件驱动架构 EDA</a> · <a href="https://www.bilibili.com/video/BV1KJnK6jEj6" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">Java 平台与运行时前沿 · Java 平台系列第 1 讲（虚拟线程篇）</p>
+  <h1>虚拟线程与结构化并发：一行配置后的架构账单</h1>
+  <p class="subtitle">Spring Boot 3.2 起，<code>spring.threads.virtual.enabled=true</code> 一行就能把 Tomcat 换到虚拟线程上——但这一行删掉的不只是延迟，还有你<strong>用了十年的隐式限流器：线程池</strong>。这一讲从两起真实事故讲起：一起"JVM 活着但不服务"的静默假死，一起"开启后连接池被打爆"的瓶颈转移；再把虚拟线程的 mount/unmount 机制、pinning 的前后身世（JEP 491）、结构化并发七轮预览的演进账本一次讲透。你会看到：<strong>虚拟线程不是性能开关，是一次限流责任的转移</strong>。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">☕ Java 平台与运行时前沿</span>
+    <span class="tag-date">📅 2026-10-21 · 第 57 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>场景：一起静默假死，一起瓶颈转移</h2>
+
+  <h3>事故一：JVM 活着，但不再服务任何人</h3>
+  <p>Netflix JVM 团队公开过一类故障（多个 Spring Boot 3 服务、Java 21、内嵌 Tomcat 开启虚拟线程后集中出现），剧本高度一致：</p>
+  <ul>
+    <li>流量高峰后，实例<strong>停止响应业务请求</strong>，但健康检查还通、JVM 进程活着——监控上看就是"这台机器还在，但它不干活了"。</li>
+    <li>拉线程转储排查：<code>jstack</code> 输出一片"祥和"，<strong>没有死锁、没有等锁、没有线程池打满</strong>——因为 jstack 根本看不到虚拟线程。</li>
+    <li>用 <code>jcmd &lt;pid&gt; Thread.dump_to_file -format=json</code> 才看清真相：<strong>数千个虚拟线程已创建却无法被调度，全部载体线程钉死（pinning）在连接处理代码的 synchronized 块里</strong>；同时 sockets 大量堆在 CLOSE_WAIT 状态。</li>
+    <li>根因：JDK 21~23 里，虚拟线程进入 <code>synchronized</code> 块后若发生阻塞，<strong>无法从载体线程卸载</strong>——载体被占着干等，调度器手里的"CPU 门票"发完了，后面的虚拟线程全部排队。这不是错误，是机制；日志里一个异常都不会有。</li>
+  </ul>
+
+  <h3>事故二：一行配置开启，数据库连接池当场打爆</h3>
+  <p>另一类更常见。某服务 Spring Boot 3.2 升 JDK 21 后，加了一行 <code>spring.threads.virtual.enabled=true</code> 就上线。当晚一个批处理接口触发 200 个 <code>@Async</code> 任务并发执行，每个任务要查数据库：</p>
+  <ul>
+    <li>HikariCP 连接池 <code>maximumPoolSize=100</code>，被 200 个并发任务瞬间占满，剩余任务 <strong>30 秒拿不到连接</strong>，<code>PoolExhaustedException</code> 刷屏；接口整体超时，比没开虚拟线程时死得更快。</li>
+    <li>以前为什么"没事"？因为 <code>@Async</code> 默认线程池就 8 个线程——<strong>线程池在替你挡子弹</strong>。虚拟线程把并发上限从 8 变成"几乎无限"，下游真实容量第一次被裸露在流量面前。</li>
+  </ul>
+
+  <div class="callout">
+    <span class="callout-title">两起事故的公共病根</span>
+    <p>线程池从来有<strong>两重身份：执行器 + 限流器</strong>。虚拟线程只保留了第一个身份（而且执行得很好），悄悄没收了第二个。所以"开启虚拟线程"真正的架构动作不是改配置，是<strong>回答"谁来接替线程池当限流器"</strong>——这一讲的全部内容，就是这张账单的明细。</p>
+  </div>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：mount/unmount，以及 pinning 的前世今生</h2>
+
+  <h3>虚拟线程是什么：栈在堆上的轻量线程</h3>
+  <p>平台线程与操作系统内核线程一一对应：默认约 1MB 栈、创建销毁走内核、切换要上下文切换——所以只能"池化复用"，并发度被池大小锁死。虚拟线程（JDK 21 转正，Project Loom）是 <strong>JVM 自己调度的线程</strong>：</p>
+  <ul>
+    <li><strong>栈在堆上</strong>，初始几百字节、按需增长——1GB 内存可挂数万乃至百万级虚拟线程（对比：200 个平台线程就吃掉约 200MB 栈）；</li>
+    <li><strong>挂载（mount）到载体线程上执行</strong>：载体是默认数量 = CPU 核数的 ForkJoinPool（参数 <code>jdk.virtualThreadScheduler.parallelism</code>）；</li>
+    <li>遇到阻塞点（网络 I/O、<code>sleep</code>、<code>j.u.c</code> 的锁与队列）自动<strong>卸载（unmount）</strong>，载体立刻去跑别的虚拟线程，I/O 完成后再挂回来——<strong>写同步代码，拿异步吞吐</strong>，调用栈、断点、异常栈全部保持人类可读，这是它相对响应式编程的根本优势。</li>
+  </ul>
+
+  <h3>pinning：JDK 21 的暗坑与 JEP 491 的了断</h3>
+  <p>事故一的元凶 pinning（钉住），规则其实很短：JDK 21~23 里只有两类东西会把虚拟线程钉在载体上——<code>synchronized</code> 块内的阻塞、以及 native/VM 栈帧。前者的量级感受一下（JDK 21、载体并行度 4 的阻塞压测）：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>写法</th><th>耗时</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>synchronized</code> 内阻塞</td><td><strong>5023 ms</strong></td><td>四个载体全被钉住，排队等车</td></tr>
+      <tr><td><code>ReentrantLock</code> 内阻塞</td><td><strong>214 ms</strong></td><td>j.u.c 的锁走 park，可正常卸载</td></tr>
+      <tr><td>synchronized + 载体扩到 100</td><td>257 ms</td><td>能跑，但等于重建线程池还多付一层调度</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p><strong>JEP 491（JDK 24）彻底了断了 synchronized 这一支</strong>：monitor 所有权重写为按虚拟线程自身身份记录，虚拟线程在 synchronized 块内照样卸载、可进 <code>Object.wait()</code>、醒来重新拿锁——你代码和三方库里成千上万个存量 synchronized <strong>一次性全部无害化</strong>。JDK 25 是第一个包含它的 LTS。<strong>仍会 pin 的残余</strong>：JNI/FFM native 帧、类初始化、Linux 本地文件 I/O（内核没有可用的异步通道）——用 JFR 事件 <code>jdk.VirtualThreadPinned</code>（JDK 25 默认 20ms 阈值）监控，native 密集路径隔离到平台线程池执行。</p>
+
+  <h3>三个"不"：虚拟线程不做什么</h3>
+  <ul>
+    <li><strong>不是更快。</strong>单请求延迟一点没变——它提升的是吞吐（同机器容纳更多"正在等待"的请求）。纯 CPU 密集任务（编解码、加解密、规则计算）没有阻塞点可卸载，白付调度开销，老老实实用有界平台线程池。</li>
+    <li><strong>不要池化。</strong>虚拟线程廉价、用完即弃，"虚拟线程池"是类别错误；需要限流时限的是<strong>资源</strong>（连接数、并发数），不是线程数。</li>
+    <li><strong>不自带背压。</strong>虚拟线程不排队、不施压、不减速——排队必须发生在资源前的闸门（连接池上限、信号量、并发上限），这些闸门现在全归你管。</li>
+  </ul>
+
+  <h3>ThreadLocal 账：百万线程时代的上下文</h3>
+  <p>平台线程时代，<code>ThreadLocal</code> 里放缓存（格式化器、缓冲区）是常见优化；虚拟线程时代它变成<strong>堆炸弹</strong>：一百万个虚拟线程各调一次 <code>initialValue()</code>，就是一百万份对象。InfoQ 的 JDK 21 对比实测还给了个反直觉数据：虚拟线程模式<strong>分配速率更高、GC 反而更频繁，但单次停顿仍在 5ms 内</strong>——真正会炸的不是 GC，是 ThreadLocal 缓存的重复构建与池化失效。上下文传递（traceId、租户）请迁移 <strong>ScopedValue（JDK 25 定稿）</strong>：不可变、作用域绑定、<code>run()</code> 返回即解绑，且结构化并发 fork 的子任务<strong>自动继承绑定</strong>，不用手工搬运。</p>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：结构化并发与迁移决策</h2>
+
+  <h3>ExecutorService 的四个泄漏口</h3>
+  <p>"一个请求并行扇出三个下游"是虚拟线程最典型的用法，但用 <code>ExecutorService + Future</code> 写，JEP 505 原文列出了四个经典泄漏口：</p>
+  <ul>
+    <li>子任务 A 失败抛异常，<strong>兄弟任务 B 继续跑</strong>（线程泄漏，最坏还会干扰其他请求）；</li>
+    <li>父线程被中断，<strong>中断不会传播</strong>给子任务——两个子任务全漏；</li>
+    <li>A 已经失败，父线程还阻塞在 <code>future.get()</code> 上<strong>等最慢的 B 跑完</strong>才见到异常；</li>
+    <li><code>CompletableFuture.cancel(true)</code> 大多是"记账式取消"——把 Future 标记为取消，<strong>不保证真正中断执行线程</strong>。</li>
+  </ul>
+  <p>病根：任务生命周期与提交它的代码块<strong>没有任何结构上的绑定</strong>。<strong>结构化并发</strong>（Structured Concurrency）把并发任务组绑进一个作用域：离开作用域时，所有子任务要么完成、要么被取消——泄漏不是被纪律消灭的，是<strong>无处可表达</strong>。</p>
+
+  <h3>版本坐标：一条仍在收敛的 API</h3>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>JDK</th><th>里程碑</th><th>工程含义</th></tr></thead>
+    <tbody>
+      <tr><td>21（LTS）</td><td>虚拟线程转正（JEP 444）；结构化并发首次预览（453）</td><td>可用，但 synchronized pinning 是真实生产风险</td></tr>
+      <tr><td>24</td><td>JEP 491：synchronized 不再 pin</td><td>存量代码与三方库一次性无害化</td></tr>
+      <tr><td>25（LTS）</td><td>ScopedValue 定稿（JEP 506）；结构化并发第五预览（505：open() 工厂 + Joiner）</td><td>2026 年生产落地的自然目标</td></tr>
+      <tr><td>27（2026-09）</td><td>第七预览（JEP 533：awaitAll() 移除、失败抛 ExecutionException）</td><td>API 仍在变，<strong>别信"27 已定稿"的自媒体稿</strong>；JEP 543 提议 28 定稿</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>预览期 API 上不上生产？给一个务实口径：<strong>思想现在就用</strong>（任务成树、统一取消、失败短路），<strong>API 等定稿再进关键路径</strong>；中间态可以把 StructuredTaskScope 包一层薄封装隔离变动。上下文传递不受此限——ScopedValue 已定稿，可直接上。</p>
+
+  <h3>容量与护栏的三笔账</h3>
+  <ul>
+    <li><strong>载体账：</strong>载体默认 = <code>availableProcessors()</code>。在 K8s 里配了 CPU limit=2 的 Pod，载体就只有 2 个——pinning 残余（native、文件 I/O）在这类配置下会被放大，必要时显式设 <code>jdk.virtualThreadScheduler.parallelism</code>，别被动继承。</li>
+    <li><strong>连接账：</strong>数据库连接池 20 还是 20，变的是"同时到达抢连接的请求数"从几百涨到几万。<strong>池大小按下游真实容量定，绝不随线程数调大</strong>；池前排信号量，把"等连接"变成显式排队而非雪崩。</li>
+    <li><strong>上下文账：</strong>MDC/ThreadLocal 的链路上下文在虚拟线程间不自动流动（<code>@Async</code>、结构化并发 fork 都是新线程）——要么任务提交时显式快照复制，要么迁 ScopedValue。日志断 traceId 不是小事故，是可观测性塌方（0030 期日志体系的地基）。</li>
+  </ul>
+
+  <h3>迁移决策：什么服务值得开</h3>
+  <ul>
+    <li><strong>值得：</strong>I/O 密集且线程池常年吃紧——网关、BFF 聚合、消息消费、批量 RPC 扇出。典型收益形态：同硬件吞吐翻数倍、内存反降（线程栈省的比 ThreadLocal 多花的大）。</li>
+    <li><strong>不值得：</strong>CPU 密集（无阻塞可卸载）、强依赖背压语义的流式链路（虚拟线程不提供背压，该用响应式还是响应式）。</li>
+    <li><strong>灰度路径：</strong>先在独立接口用手写 <code>Executors.newVirtualThreadPerTaskExecutor()</code> 包住（范围可控、回滚一行），观察 JFR pinning 事件与下游水位；稳定后再开全局开关。全局开关的实际语义要清楚：Tomcat 请求线程、<code>@Async</code> 执行器、任务调度器<strong>全部</strong>换到虚拟线程，没有只换一半的说法。</li>
+  </ul>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：三段可落地的骨架</h2>
+
+  <h3>第一段：开启、验证、给 @Async 上闸</h3>
+  <div class="codeblock">
+  <pre><code># application.yml —— Spring Boot 3.2+ / JDK 21+
+spring:
+  threads:
+    virtual:
+      enabled: true        # Tomcat 请求线程/@Async/调度器全换虚拟线程
+  task:
+    execution:
+      simple:
+        concurrency-limit: 16   # @Async 并发闸(信号量),没有它并发≈无限
+
+# 验证:请求线程真的是虚拟线程?
+@GetMapping("/thread-check")
+public Map&lt;String, Object&gt; threadCheck() {
+    return Map.of("virtual", Thread.currentThread().isVirtual(),
+                  "name", Thread.currentThread().toString());
+}</code></pre>
+  </div>
+  <p class="code-note">上线前压测建议带上 <code>-XX:StartFlightRecording</code>，看 <code>jdk.VirtualThreadPinned</code> 事件（JDK 25 默认 20ms 阈值）；JDK 21~23 排查期可临时用 <code>-Djdk.tracePinnedThreads=full</code>，但注意该参数在 JDK 24+ 已移除——打印为空不代表没事，可能只是参数不存在了。</p>
+
+  <h3>第二段：有限资源前的信号量闸门</h3>
+  <div class="codeblock">
+  <pre><code>// 数据库前的并发闸:池多大,闸就多大 —— 别让"等连接"变成雪崩
+private final Semaphore dbPermits = new Semaphore(20);  // = HikariCP 池大小
+
+public Order loadOrder(Long id) throws InterruptedException {
+    if (!dbPermits.tryAcquire(2, TimeUnit.SECONDS)) {   // 限时等待,可降级
+        return orderCache.get(id);                      // 降级路径:缓存/默认值
+    }
+    try (var ex = Executors.newVirtualThreadPerTaskExecutor()) {
+        return ex.submit(() -> repo.findWithItems(id)).get();
+    } finally {
+        dbPermits.release();
+    }
+}</code></pre>
+  </div>
+  <p class="code-note">原则一句话：<strong>限资源，不限线程</strong>。每个有限资源（DB 连接、下游 RPC 配额、文件句柄）配一个显式闸门，闸门大小对齐资源容量；<code>tryAcquire</code> 带超时给降级留口子，比无限等待更像生产代码。</p>
+
+  <h3>第三段：结构化并发聚合三个下游</h3>
+  <div class="codeblock">
+  <pre><code>// JDK 25 预览 API(--enable-preview):一个失败/超时,整组取消
+Response aggregate(Long userId) throws Exception {
+    try (var scope = StructuredTaskScope.open(
+            Joiner.allSuccessfulOrThrow(),
+            cf -> cf.withTimeout(Duration.ofSeconds(2)))) {  // 整组超时
+        var user   = scope.fork(() -> userClient.get(userId));
+        var orders = scope.fork(() -> orderClient.list(userId));
+        var points = scope.fork(() -> pointClient.sum(userId));
+        scope.join();                    // 失败在这里立刻抛出
+        return new Response(user.get(), orders.get(), points.get());
+    }   // 离开作用域=子任务全部结束,无泄漏可表达
+}</code></pre>
+  </div>
+  <p class="code-note">对照 ExecutorService 版本要手写的样板：兄弟任务的 cancel、整组超时的编排、异常的短路——在这里都是作用域的属性。<code>Joiner.allSuccessfulOrThrow()</code> 是"全成功才要"；竞速场景（多副本取最快）用 <code>Joiner.anySuccessfulResultOrThrow()</code>。ScopedValue 绑定会被 fork 的子任务自动继承，traceId 不用手工搬运。</p>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>虚拟线程删掉的是隐式限流器：</strong>线程池"执行器+限流器"的双重身份只剩前者——开启它等于接下全部限流责任：连接池、信号量、并发上限，一个都不能少。</li>
+    <li><strong>pinning 已有定论：</strong>JDK 21~23 的 synchronized 钉住是真实生产风险（载体耗尽=静默假死）；JEP 491（JDK 24/25 LTS）一次性无害化全部存量；残余钉住（JNI、文件 I/O）用 JFR <code>jdk.VirtualThreadPinned</code> 盯。</li>
+    <li><strong>三个"不"：</strong>不是更快（吞吐≠单请求延迟）、不要池化（一任务一线程）、不自带背压（闸门自己建）；CPU 密集任务别迁。</li>
+    <li><strong>上下文用 ScopedValue：</strong>JDK 25 已定稿——不可变、作用域绑定、结构化并发自动继承；ThreadLocal 缓存是百万线程时代的堆炸弹。</li>
+    <li><strong>结构化并发思想先行、API 后上：</strong>任务成树、失败短路、离开作用域即收敛；JDK 27 仍是第七预览（JEP 533），定稿前别进关键路径，中间用薄封装隔离变动。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目：订单聚合服务，8C16G、JDK 17、Tomcat 200 线程打满，团队决定升 JDK 25 并全局开启虚拟线程——这个迁移方案该怎么审？</summary>
+    <div class="details-body">
+      <p>背景：单接口聚合 3 个下游 RPC（各约 50ms）+ 2 次 MySQL 查询；大促压测 500 并发线程池即打满超时；日志链路依赖 MDC 里的 traceId；代码里有十余处 synchronized（含一个三方 JSON 序列化库）。团队方案是"升 JDK 25 + <code>spring.threads.virtual.enabled=true</code> 一步到位全局开启"。请回答：</p>
+      <p><strong>① 全局开启前，哪三件审计必须做完？</strong><br>
+      <strong>② 开启后压测：MySQL 连接池（20）排队严重、下游 RPC 超时率上升——瓶颈去了哪？护栏怎么加？</strong><br>
+      <strong>③ 灰度期间发现部分日志丢了 traceId，根因是什么、怎么修？</strong><br>
+      <strong>④ 同事提议"顺便把 JSON 序列化也丢进虚拟线程并行跑"——这个提议对吗？</strong></p>
+      <h4>🔍 深度解析</h4>
+      <p><strong>① 三件审计：</strong>（a）<strong>pinning 审计</strong>——JDK 25 已无 synchronized 钉住，但三方 JSON 库若走 JNI native 帧仍会钉住载体（CPU limit=8 的 Pod 只有 8 个载体，钉住两个就少 25% 运力）；用 JFR <code>jdk.VirtualThreadPinned</code> 压测采样确认。（b）<strong>ThreadLocal/MDC 审计</strong>——所有 <code>ThreadLocal.withInitial</code> 缓存（百万线程 × initialValue = 堆炸弹）与 MDC 上下文传递路径（<code>@Async</code>/自定义线程池处需要显式快照）逐个登记。（c）<strong>下游容量盘点</strong>——开启后并发度从 200 变成几乎无限：MySQL 连接池 20、下游 RPC 各自的配额、文件句柄，每个有限资源都要有显式闸门和降级路径。这一步没做完就开全局开关，等于拆掉刹车再踩油门。</p>
+      <p><strong>② 瓶颈转移：</strong>线程池不再是限流器，压力原样传导到两个新瓶颈——连接池前的排队（20 个连接服务几百并发请求，等待时间线性恶化）与下游 RPC（以前 200 线程天然限制了对外并发，现在下游第一次见到真实全量流量）。护栏分两层：连接池大小<strong>不调大</strong>（按 MySQL 真实容量定，盲目调大只是把排队搬进数据库）；池前加信号量（=池大小）+ <code>tryAcquire</code> 限时降级；每个下游 RPC 设独立并发上限（对齐其配额）。验收口径：等连接的请求在闸门处显式排队并可降级，而不是雪崩式超时。</p>
+      <p><strong>③ traceId 丢失：</strong>MDC 底层是 ThreadLocal——虚拟线程一任务一线程、不复用，<code>@Async</code> 与线程池边界处上下文不会自动流动；平台线程时代靠"线程复用碰巧带上"的隐性传递全部失效。修法两级：短期在任务提交处显式快照复制（装饰 Runnable：提交前取 MDC map，执行时 <code>MDC.setContextMap</code>，finally 清理）；中期迁 ScopedValue（JDK 25 定稿，<code>where().run()</code> 作用域绑定，结构化并发 fork 自动继承）。另注意日志框架版本要跟上虚拟线程适配。</p>
+      <p><strong>④ JSON 序列化并行提议——不对。</strong>序列化是 CPU 密集操作，没有阻塞点可卸载，丢进虚拟线程只是让任务占着载体空转，还把"一个对象连续序列化"的局部性拆碎了；正确姿势是给 CPU 密集工作一个<strong>有界平台线程池</strong>（或并行流），与 I/O 密集的虚拟线程分道。这个提议把"虚拟线程=更快"的误解暴露无遗：它提升的是等待型并发，不是计算吞吐。</p>
+    </div>
+  </details>
+
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>Oracle 官方《Virtual Threads》指南——"永不池化、用信号量限流、synchronized 与 pinning"的一手出处，十分钟读完：<br>
+    <a href="https://docs.oracle.com/en/java/javase/21/core/virtual-threads.html" target="_blank" rel="noopener">docs.oracle.com — Virtual Threads (Java 21)</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>跨栈互链：<a href="0031-openfeign-service-call-governance.html">0031 OpenFeign 调用治理</a>与<a href="0040-dubbo-rpc-governance.html">0040 Dubbo 线程池防线</a>（线程池当限流器的老世界观，本期是它的迭代）、<a href="0030-elk-loki-logging.html">0030 日志体系</a>（MDC/traceId 的地基）、<a href="0049-distributed-design-patterns.html">0049 分布式设计模式</a>（超时/舱壁/重试预算——虚拟线程时代的闸门设计同源）、<a href="0053-flink-stream-batch-unified.html">0053 Flink 流批一体</a>（背压语义的正例：响应式/流计算才管背压）。延伸：JEP 491 / 505 / 533 与 InfoQ《Virtual Threads after JDK 24》（Netflix 复盘一手梳理）。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0056-event-driven-architecture-eda.html">← 上一期：事件驱动架构 EDA</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 57 期 · Java 平台与运行时前沿系列 · 下一期预告：GraalVM Native Image 与 AOT（Java 平台与运行时前沿线）</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
