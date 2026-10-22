@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>技术概念手记 · 大模型 API 格式：为什么全世界都在兼容 OpenAI</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">TECH CONCEPT NOTES · 0004</span>
+  <span><a href="../index.html">栏目目录</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">AI 工程 · LLM API</p>
+  <h1>大模型 API 格式：为什么全世界都在兼容 OpenAI</h1>
+  <p class="subtitle">打开 DeepSeek、vLLM、Ollama 的文档，第一句几乎都是“兼容 OpenAI”——<code>base_url</code> 一改就能跑。可 OpenAI 自己又冒出个 Responses API，Anthropic 坚持另一套 Messages 格式，Gemini 还有自己的方言。这篇把“调大模型的那个 HTTP 请求”解剖开：<strong>事实标准是怎么长出来的、三家格式差在哪、换供应商时哪里最容易翻车</strong>——顺带澄清一个高频口误：OpenAI 和 OpenAPI，完全是两回事。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🤖 AI 工程</span>
+    <span class="tag-date">📅 2026-10-23 · 第 4 期</span>
+    <span class="tag time">⏱ 预计阅读 9 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>场景：换一家模型，为什么代码几乎不用改</h2>
+  <p>几乎每个自己接过模型的开发者都见过这句话：文档首页写着“<strong>OpenAI 兼容（OpenAI-compatible）</strong>”。DeepSeek（深度求索的国产模型）写、vLLM 和 Ollama（两个最主流的开源推理引擎）写、通义千问也写。实际体验也确实神奇：用 OpenAI 官方 SDK，把 <code>base_url</code> 从 <code>api.openai.com</code> 换成 <code>api.deepseek.com</code>，同一行 <code>client.chat.completions.create(...)</code> 立刻调通了另一家的模型。<strong>“兼容 OpenAI”兼容的到底是什么？</strong>是端点路径、请求体结构、响应结构、流式事件这一整套约定——业内叫<strong>事实标准（de facto standard）</strong>：没有委员会投票，用的人多了，它就是标准。</p>
+  <p>但往下学很快会撞上三层困惑。第一层：<strong>OpenAI 自己又出了个 Responses API</strong>，官方说新项目推荐用它——那我刚学会的 Chat Completions 过时了吗？第二层：<strong>Anthropic 明明有自己的 Messages API</strong>，格式和 OpenAI 不一样（system 放哪、必填参数、工具调用写法都不同），可为什么全世界的兼容层都围着 OpenAI 转？第三层是个高频口误：<strong>OpenAI ≠ OpenAPI</strong>——OpenAPI 是 Swagger 那套描述 REST 接口的规范（一个 YAML/JSON 文件描述你的接口给机器看），和大模型没有半点关系；OpenAI 是公司名。名字只差一个字母，完全是两个世界的东西。</p>
+  <p>这篇按四步走：先看事实标准是怎么长出来的（02 原理），再把三家最小请求并排写一遍、缺省行为逐个说破（03 实战），然后趟一趟换供应商时最容易翻车的水区——工具调用（04 规则与坑），最后一张大表收走所有差异，附怎么选（05 对照）。</p>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：事实标准是怎么长出来的</h2>
+
+  <h3>三年时间线：一个引爆，两个应答</h3>
+  <div class="flow-strip">
+    <div class="flow-step"><span class="no">1</span>
+      <p class="what">2023-03-01</p>
+      <p class="how">ChatGPT API（gpt-3.5-turbo）发布</p>
+      <p class="why">每千 token 两美分，比 text-davinci-003 便宜 90%，开发者蜂拥而入</p></div>
+    <div class="flow-step"><span class="no">2</span>
+      <p class="what">2024-03-04</p>
+      <p class="how">Claude 3 家族 + Messages API</p>
+      <p class="why">Anthropic 换掉旧的补全接口，Claude 3 只走 Messages——另一家门派成型</p></div>
+    <div class="flow-step"><span class="no">3</span>
+      <p class="what">2025-03-11</p>
+      <p class="how">OpenAI 发布 Responses API</p>
+      <p class="why">内置工具、服务端状态，定位是 Chat Completions 的演进</p></div>
+    <div class="flow-step"><span class="no">4</span>
+      <p class="what">2026-01</p>
+      <p class="how">Open Responses 开放规范</p>
+      <p class="why">OpenAI 把 Responses 格式开源成多供应商互操作规范——格式之争进入下一局</p></div>
+  </div>
+  <p>“兼容 OpenAI”为什么成了默认？看第一步的连锁反应：2023 年 3 月 ChatGPT API 发布，价格一步降到原来的十分之一，一年之内教程、LangChain、客户端 SDK、开源项目全围着 <code>/v1/chat/completions</code> 这一个端点建。后来者想让这批开发者零成本切换，最省事的选择不是发明新格式，而是<strong>让自己的接口“说同一种方言”</strong>——端点路径一样、请求体一样、响应结构一样、流式事件一样，OpenAI SDK 换个 <code>base_url</code> 直接用。DeepSeek 官方文档的原话是：“<strong>The DeepSeek API uses an API format compatible with OpenAI/Anthropic</strong>”，而且它真的同时开了两个口子：<code>api.deepseek.com</code>（OpenAI 格式）和 <code>api.deepseek.com/anthropic</code>（Anthropic 格式）——连 Anthropic 格式也成了被兼容对象，只是体量远小于 OpenAI 这门“通用语”。</p>
+
+  <h3>剥开方言：同一副骨架</h3>
+  <p>三家格式看着互不相同，剥开看是同一件事：<strong>无状态的 HTTP POST + 角色消息列表 + 采样参数</strong>。“无状态”是理解一切的关键——服务端不记得你上一轮说了什么，<strong>每一轮请求都要把完整对话历史重发一遍</strong>。模型没有记忆，所谓“上下文”，是你每轮亲手拼好发过去的。那个消息列表（messages / input / contents），本质就是逐轮对话的完整重放。</p>
+  <div class="diagram">
+  <svg viewBox="0 0 820 400" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+      <marker id="arA" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+    <text x="410" y="18" text-anchor="middle" fill="var(--muted)" font-size="13">调大模型的一个 HTTP POST，剥开都是同一副骨架</text>
+
+    <!-- 左：端点与鉴权 -->
+    <rect x="26" y="40" width="200" height="150" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="126" y="64" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">① 端点 + 鉴权头</text>
+    <text x="40" y="90" fill="var(--muted)" font-size="10">POST /v1/chat/completions</text>
+    <text x="40" y="108" fill="var(--muted)" font-size="10">Authorization: Bearer sk-...</text>
+    <text x="40" y="126" fill="var(--muted)" font-size="10">（Anthropic：x-api-key +</text>
+    <text x="40" y="144" fill="var(--muted)" font-size="10">anthropic-version 版本头）</text>
+    <text x="40" y="170" fill="var(--ink)" font-size="10">每家自己的域名和鉴权方式</text>
+
+    <!-- 中：消息列表（主体） -->
+    <rect x="258" y="40" width="300" height="150" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.2"/>
+    <text x="408" y="64" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">② 消息列表 = 完整历史重放</text>
+    <rect x="278" y="76" width="120" height="20" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="338" y="90" text-anchor="middle" fill="var(--muted)" font-size="9.5">system / developer</text>
+    <rect x="418" y="76" width="120" height="20" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="478" y="90" text-anchor="middle" fill="var(--muted)" font-size="9.5">user（用户）</text>
+    <rect x="278" y="104" width="120" height="20" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="338" y="118" text-anchor="middle" fill="var(--muted)" font-size="9.5">assistant（模型）</text>
+    <rect x="418" y="104" width="120" height="20" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="478" y="118" text-anchor="middle" fill="var(--muted)" font-size="9.5">user（新问题）</text>
+    <text x="408" y="152" text-anchor="middle" fill="var(--ink)" font-size="10">服务端不记对话——每轮全量重发</text>
+    <text x="408" y="172" text-anchor="middle" fill="var(--muted)" font-size="9.5">「多轮对话」是你拼出来的，不是它记下来的</text>
+
+    <!-- 右：采样参数 -->
+    <rect x="590" y="40" width="204" height="150" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="692" y="64" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">③ 采样参数</text>
+    <text x="604" y="90" fill="var(--muted)" font-size="10">model：用哪个模型</text>
+    <text x="604" y="108" fill="var(--muted)" font-size="10">temperature：随机度</text>
+    <text x="604" y="126" fill="var(--muted)" font-size="10">max_tokens：输出上限</text>
+    <text x="604" y="144" fill="var(--muted)" font-size="10">tools：可用的工具清单</text>
+    <text x="604" y="170" fill="var(--ink)" font-size="10">Gemini 全收进 generationConfig</text>
+
+    <line x1="228" y1="115" x2="254" y2="115" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#ar)"/>
+    <line x1="560" y1="115" x2="586" y2="115" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#ar)"/>
+
+    <!-- 底部：三种方言 -->
+    <rect x="26" y="220" width="768" height="160" rx="10" fill="var(--card)" stroke="var(--line)"/>
+    <text x="410" y="246" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">同一副骨架，三种方言</text>
+    <text x="46" y="276" fill="var(--accent)" font-size="10.5" font-weight="700">OpenAI（Chat Completions）</text>
+    <text x="46" y="294" fill="var(--muted)" font-size="10">system 是消息列表的一员；新模型改叫 developer</text>
+    <text x="46" y="312" fill="var(--muted)" font-size="10">max_tokens 可选（已改名 max_completion_tokens）</text>
+    <text x="46" y="330" fill="var(--muted)" font-size="10">返回 choices[0].message.content</text>
+    <text x="296" y="276" fill="var(--accent)" font-size="10.5" font-weight="700">Anthropic（Messages）</text>
+    <text x="296" y="294" fill="var(--muted)" font-size="10">system 独立放在顶层参数，不进消息列表</text>
+    <text x="296" y="312" fill="var(--muted)" font-size="10">max_tokens 必填，不写直接报错</text>
+    <text x="296" y="330" fill="var(--muted)" font-size="10">content 是块数组：text / tool_use / thinking…</text>
+    <text x="546" y="276" fill="var(--accent)" font-size="10.5" font-weight="700">Gemini（generateContent）</text>
+    <text x="546" y="294" fill="var(--muted)" font-size="10">角色叫 user / model，不叫 assistant</text>
+    <text x="546" y="312" fill="var(--muted)" font-size="10">systemInstruction 顶层；内容切成 parts 数组</text>
+    <text x="546" y="330" fill="var(--muted)" font-size="10">模型名放 URL 路径：models/{model}:generateContent</text>
+    <text x="410" y="364" text-anchor="middle" fill="var(--muted)" font-size="9.5">骨架相同——所以“兼容”只需要翻译外壳；方言不同——所以换供应商必须逐项对照</text>
+  </svg>
+  </div>
+
+  <h3>为什么没人统一成一个格式？</h3>
+  <p>因为格式不只是外壳，还是各家模型能力的表达方式。Anthropic 把 thinking（思考过程块）做成消息内容的一种类型，把缓存控制（<code>cache_control</code>，提示缓存的生效范围与时长）做成消息上的标记；OpenAI 的 Responses 把推理摘要、函数调用、内置工具的结果都做成类型化的输出项。这些设计跟着各自模型的特性走，谁也说服不了谁——于是标准化的努力走向了另一个方向：不是让三家改说一种话，而是<strong>让“翻译层”便宜</strong>。你会在 05 节看到这条路线的最新形态。</p>
+</section>
+
+<!-- ================= 03 实战 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>实战：同一句“你好”，发三家</h2>
+  <p>空谈结构不如真发一次。下面是三个最小可运行请求（curl 直发，不用 SDK），问的都是同一句话——注意三段代码里<strong>标粗意涵的四处不同</strong>：端点、system 的位置、max_tokens 的必填性、从响应里取答案的路径。</p>
+
+  <h3>第一家：Chat Completions（事实标准的本体）</h3>
+  <div class="codeblock term">
+    <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>OpenAI · POST /v1/chat/completions</span><button class="copy">复制命令</button></div>
+    <pre><code><span class="t-cmd">curl https://api.openai.com/v1/chat/completions -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{"model":"gpt-5.2","messages":[{"role":"user","content":"你好"}]}'</span>
+<span class="t-out">{"choices":[{"message":{"role":"assistant","content":"你好！有什么可以帮你？"}}],</span>
+<span class="t-out"> "usage":{"prompt_tokens":8,"completion_tokens":9}}</span>
+<span class="t-cmt"># messages 必填；没写 max_tokens = 不设上限，生成到自然停止</span>
+<span class="t-cmt"># 取答案：choices[0].message.content</span></code></pre>
+  </div>
+
+  <h3>第二家：Responses（OpenAI 的演进版）</h3>
+  <div class="codeblock term">
+    <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>OpenAI · POST /v1/responses</span><button class="copy">复制命令</button></div>
+    <pre><code><span class="t-cmd">curl https://api.openai.com/v1/responses -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{"model":"gpt-5.2","input":"你好"}'</span>
+<span class="t-out">{"output":[{"type":"message","content":[{"type":"output_text","text":"你好！"}]}],</span>
+<span class="t-out"> "usage":{"input_tokens":8,"output_tokens":9}}</span>
+<span class="t-cmt"># input 可直接给字符串；系统提示是顶层 instructions，不在消息里</span>
+<span class="t-cmt"># 取答案：output 数组里 type=message 的那一项（SDK 提供 output_text 捷径）</span></code></pre>
+  </div>
+
+  <h3>第三家：Messages（Anthropic 的门派）</h3>
+  <div class="codeblock term">
+    <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>Anthropic · POST /v1/messages</span><button class="copy">复制命令</button></div>
+    <pre><code><span class="t-cmd">curl https://api.anthropic.com/v1/messages -H "x-api-key: $KEY" -H "anthropic-version: 2023-06-01" -H "Content-Type: application/json" -d '{"model":"claude-sonnet-5-5","max_tokens":1024,"messages":[{"role":"user","content":"你好"}]}'</span>
+<span class="t-out">{"content":[{"type":"text","text":"你好！有什么可以帮你？"}],"stop_reason":"end_turn"}</span>
+<span class="t-cmt"># max_tokens 必填——漏了它，两家都不用比，这一步就直接 400 报错</span>
+<span class="t-cmt"># 鉴权是 x-api-key + anthropic-version 版本头，不是 Bearer</span>
+<span class="t-cmt"># 取答案：content 数组里 type=text 的那些块</span></code></pre>
+  </div>
+
+  <p>把缺省行为说破，这组对照才算讲完。<strong>max_tokens 不写会怎样？</strong>OpenAI 这边它是可选参数——不写就是参数层面不设上限，模型生成到自然停止（注意这个参数已改名 <code>max_completion_tokens</code>，而且推理模型的思考 token 也计入）；Anthropic 这边它<strong>必填</strong>，官方文档明说这是“生成停止前最大的 token 数”，不写直接被拒。<strong>系统提示放哪？</strong>Chat Completions 里它是消息列表的一条（新模型推荐用 <code>developer</code> 角色替代 <code>system</code>）；Responses 里是顶层 <code>instructions</code>；Anthropic 里是顶层 <code>system</code>，根本不进消息列表。<strong>角色必须严格交替吗？</strong>Anthropic 允许连续同角色的消息，服务端会自动合并；把最后一条写成 <code>assistant</code> 还能玩 prefill（让模型接着你的半句话说）——OpenAI 的消息列表没有这两个行为。</p>
+</section>
+
+<!-- ================= 04 规则与坑 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>规则与坑：工具调用，换供应商时最容易翻车的段</h2>
+  <p>“让模型调用你的函数”是现代 AI 应用的地基，也是三家用语分歧最大的地方。但先看清那个<strong>完全一致的闭环</strong>——四步：</p>
+  <div class="flow-strip">
+    <div class="flow-step"><span class="no">1</span>
+      <p class="what">声明工具</p>
+      <p class="how">tools 里给函数名 + 参数的 JSON Schema</p>
+      <p class="why">告诉模型“有哪些能力可以调”</p></div>
+    <div class="flow-step"><span class="no">2</span>
+      <p class="what">模型要调工具</p>
+      <p class="how">不直接回答，返回带 id 的调用请求</p>
+      <p class="why">参数由模型生成，含在返回里</p></div>
+    <div class="flow-step"><span class="no">3</span>
+      <p class="what">本地执行</p>
+      <p class="how">你自己跑这个函数——模型只出嘴不出手</p>
+      <p class="why">要不要执行、怎么执行，永远是你说了算</p></div>
+    <div class="flow-step"><span class="no">4</span>
+      <p class="what">结果回传</p>
+      <p class="how">把执行结果拼回消息列表，再发一次</p>
+      <p class="why">模型看到结果，才给出最终回答</p></div>
+  </div>
+  <p>分歧全在第 2 步的返回长相和第 4 步的回传写法上。<strong>OpenAI</strong>：模型的调用请求放在 assistant 消息的 <code>tool_calls</code> 数组里（id + 函数名 + arguments）；你回传时，用一条<strong>独立的 <code>role:"tool"</code> 消息</strong>装结果，靠 <code>tool_call_id</code> 对上号。<strong>Anthropic</strong>：模型的调用请求是 assistant 消息里的一个 <code>tool_use</code> 内容块（同样带 id）；你回传时，把 <code>tool_result</code> 块<strong>塞进下一条 user 消息的内容数组里</strong>——没有 tool 这个角色。同一次“问天气”，回传体一个长这样：</p>
+  <div class="codeblock term">
+    <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>工具结果回传：同一件事的两种方言</span></div>
+    <pre><code><span class="t-cmt"># OpenAI：独立 role:"tool" 消息，靠 tool_call_id 对号</span>
+<span class="t-out">{"role":"tool","tool_call_id":"call_abc123","content":"259.75 USD"}</span>
+<span class="t-cmt"># Anthropic：tool_result 块装进下一条 user 消息的 content 数组</span>
+<span class="t-out">{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01D7...","content":"259.75 USD"}]}</span></code></pre>
+  </div>
+  <div class="rule"><span class="mark">⚠</span><div class="txt">
+    <strong>OpenAI 的 arguments 是字符串化的 JSON，且官方警告“不总是合法 JSON”</strong>
+    <p class="why">拿到 tool_calls 先解析校验再执行——直接当对象用会撞运行时错误。另外模型只要了工具、没写正文时，content 可以是 null，别对它取长度</p>
+  </div></div>
+  <div class="rule warn"><span class="mark">⛔</span><div class="txt">
+    <strong>Anthropic 的 max_tokens 必填、system 不进消息列表——这两条是从 OpenAI 平移代码时最常见的报错来源</strong>
+    <p class="why">前者直接 400，后者不报错但系统提示悄悄失效，模型“人设全丢”</p>
+  </div></div>
+  <div class="qa">
+    <span class="q">流式输出三家都支持吗？写一个通用网关要处理几种？</span>
+    <div class="a"><p>都支持，而且都用 <strong>SSE（Server-Sent Events，服务器单向推流的 HTTP 长连接）</strong>——但事件结构是三种方言。Chat Completions 推 <code>chat.completion.chunk</code>，增量文本在 <code>delta</code> 里，结尾是 <code>data: [DONE]</code>；Responses 推<strong>类型化事件</strong>（<code>response.output_text.delta</code> 一类，事件名即语义）；Anthropic 推 <code>content_block_delta</code> 一类事件、按内容块分段。网关要各写一套解析器，这是“兼容层”真正的成本所在。</p></div>
+  </div>
+  <div class="qa">
+    <span class="q">多轮对话要自己存历史吗？Responses 的“状态管理”是什么？</span>
+    <div class="a"><p>Chat Completions 和 Messages 都是无状态的——历史由你自己存、自己拼、每轮全量重发。Responses 多给了一个选项：<code>store: true</code> 时服务端帮你存这轮的输入输出，下一轮只带 <code>previous_response_id</code> 就能接上，不必重发全史；对数据合规敏感（不许服务端留存）的场景，可以用加密的 reasoning 项走无状态模式。它甚至还提供了会话对象——但骨架没变：所谓会话，仍然是历史的一种托管方式。</p></div>
+  </div>
+</section>
+
+<!-- ================= 05 对照与生态 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>对照：一张表收走差异，生态往哪走</h2>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th></th><th>Chat Completions</th><th>Responses</th><th>Messages</th><th>Gemini</th></tr>
+    <tr><td><strong>端点</strong></td><td>POST /v1/chat/completions</td><td>POST /v1/responses</td><td>POST /v1/messages</td><td>models/{model}:generateContent</td></tr>
+    <tr><td><strong>发布</strong></td><td>2023-03</td><td>2025-03-11</td><td>2024-03-04</td><td>2023-12</td></tr>
+    <tr><td><strong>system 位置</strong></td><td>消息之一（developer）</td><td>顶层 instructions</td><td>顶层 system</td><td>顶层 systemInstruction</td></tr>
+    <tr><td><strong>角色名</strong></td><td>system/developer·user·assistant·tool</td><td>同左（input 项）</td><td>user·assistant</td><td>user·model</td></tr>
+    <tr><td><strong>max_tokens</strong></td><td>可选（改名 max_completion_tokens）</td><td>可选</td><td><strong>必填</strong></td><td>可选（generationConfig）</td></tr>
+    <tr><td><strong>工具调用</strong></td><td>tool_calls + role:"tool"</td><td>function_call 输出项 + call_id</td><td>tool_use 块 + tool_result 块</td><td>functionCall part + functionResponse</td></tr>
+    <tr><td><strong>状态</strong></td><td>无状态</td><td>store + previous_response_id</td><td>无状态</td><td>无状态（store 可选）</td></tr>
+    <tr><td><strong>生态</strong></td><td><strong>事实标准</strong>：DeepSeek/vLLM/Ollama/千问全兼容</td><td>新模型的能力主场</td><td>被 DeepSeek 等兼容</td><td>自成一体</td></tr>
+  </table>
+  </div>
+  <p>表的最右一列是这期的题眼：<strong>Chat Completions 是唯一被全行业当“通用语”来兼容的格式</strong>。而两个最新动向值得知道。其一，OpenAI 官方对 Chat Completions 的态度是“<strong>仍支持、未废弃，但新项目一律推荐 Responses</strong>”，而且最新模型（GPT-6 系列）的工具调用已经<strong>只认 Responses</strong>——上一代通用语的原产地，正在推下一代通用语；老的 Assistants API 已于 2026-08-26 正式下线，就是这个方向的注脚。其二，2026 年 1 月 OpenAI 把 Responses 格式开源成 <strong>Open Responses 规范</strong>，目标是一个规范接多家模型——标准化正在从“大家兼容某一家”走向“共享一个开放规范”。</p>
+  <div class="vs">
+    <div class="pick">
+      <h4>怎么选：三个场景三个答案</h4>
+      <p><strong>① 直连 OpenAI 的新项目</strong> → Responses。新能力都先落在这里（内置联网搜索、文件检索、远程 MCP 工具），reasoning 模型表现更好，服务端状态省掉自己拼历史的代码。</p>
+      <p><strong>② 要最大兼容面（开源模型、vLLM/Ollama 自建、随时换供应商）</strong> → 守 Chat Completions。全行业的兼容层都说这门方言，一行 base_url 换后端。</p>
+      <p><strong>③ 主力用 Claude</strong> → Messages + Anthropic 官方 SDK。顶层 system、必填 max_tokens、thinking 块这些设计要按它家的规矩来，SDK 已替你包好。</p>
+    </div>
+    <div>
+      <h4>一条不变的底线</h4>
+      <p>无论选哪门方言，底层骨架一样：无状态 POST、角色消息列表全量重发、采样参数。理解了骨架，任何新格式都只是“又一种方言”——看一遍端点和消息结构，就能上手。</p>
+      <p>真正需要盯紧的不是格式本身，而是<strong>它们背后的能力差异</strong>：谁的服务端状态、谁的思考块、谁的内置工具——格式是外壳，能力才是选型时真正的筹码。</p>
+    </div>
+  </div>
+  <details class="q-card">
+    <summary>深挖：Gemini 的 generateContent 长什么样——第四种方言速览<span class="chev">▶ 点击展开</span></summary>
+    <div class="details-body">
+      <p>Gemini 走的是 Google 自己的 REST 风格：模型名直接放 URL 路径（<code>POST .../v1beta/models/gemini-2.0-flash:generateContent</code>，流式把动词换成 <code>:streamGenerateContent</code>）。消息叫 <code>contents</code>，角色叫 <code>user</code> 和 <code>model</code>——没有 assistant 这个词；每条消息的内容切成 <code>parts</code> 数组，文本、图片（base64 内联或文件引用）、函数调用各是一种 part。系统提示是顶层 <code>systemInstruction</code>；采样参数（temperature、maxOutputTokens、stopSequences…）全部收进 <code>generationConfig</code> 一个对象，而不是像 OpenAI 那样平铺在请求体顶层。字段命名还混着驼峰（generationConfig）和下划线（system_instruction）两个习惯——读它的文档时多留个心眼。</p>
+      <p>对照前三家你会发现：换的只是词汇表，“无状态 + 角色消息 + 采样参数”的骨架纹丝不动。这也是为什么各家网关（LiteLLM、OpenRouter 这类）能做到一个入口翻译四方——骨架同源，翻译才便宜。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 06 今日带走 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>今日带走</h2>
+  <ul class="key-points">
+    <li><strong>“兼容 OpenAI” = 兼容 Chat Completions 那套端点+请求+响应+流式约定</strong>：它是无委员会的事实标准，DeepSeek、vLLM、Ollama、千问都说这门方言，base_url 一改就能换后端。</li>
+    <li><strong>所有大模型 API 共用一副骨架</strong>：无状态 HTTP POST + 角色消息列表 + 采样参数；每轮全量重发历史——模型的“记忆”是你每轮亲手拼出来的。</li>
+    <li><strong>max_tokens 一边可选一边必填</strong>：OpenAI 不写就是不设上限（参数已改名 max_completion_tokens）；Anthropic 不写直接 400 报错。</li>
+    <li><strong>system 三个位置</strong>：OpenAI 放消息里（新模型叫 developer）、Anthropic 放顶层 system、Gemini 放顶层 systemInstruction——平移代码时悄悄失效的就是它。</li>
+    <li><strong>工具调用闭环四步一致，方言在第 2、4 步</strong>：OpenAI 用 role:"tool" 消息回传，Anthropic 把 tool_result 块塞回 user 消息——换供应商最容易翻车的就是这段。</li>
+    <li><strong>选型三句</strong>：直连 OpenAI 新项目用 Responses；要兼容面守 Chat Completions；主力 Claude 用 Messages+官方 SDK。格式是外壳，服务端状态、思考块、内置工具这些能力才是筹码。</li>
+  </ul>
+</section>
+
+<!-- ================= 07 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>随堂小测</h2>
+  <div class="quiz" data-title="大模型 API 格式">
+    <span class="quiz-score"></span>
+    <div class="quiz-q" data-answer="2">
+      <p class="q-text">1. 把 OpenAI 的请求代码平移到 Anthropic，请求体照发不改，会发生什么？</p>
+      <button class="quiz-opt">正常工作——Anthropic 也兼容 OpenAI 格式，自动翻译</button>
+      <button class="quiz-opt">模型照常回答，但 token 计费翻倍</button>
+      <button class="quiz-opt">直接 400 报错——Anthropic 的 max_tokens 是必填参数</button>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q" data-answer="1">
+      <p class="q-text">2. 模型发起了工具调用、你本地执行完，结果怎么回传？</p>
+      <button class="quiz-opt">拼在下一轮 user 消息的文本里，所有家都一样</button>
+      <button class="quiz-opt">OpenAI 用独立 role:"tool" 消息，Anthropic 把 tool_result 块塞进 user 消息——两家写法不同</button>
+      <button class="quiz-opt">不需要回传，模型会主动来拉取执行结果</button>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q" data-answer="0">
+      <p class="q-text">3. “多轮对话”在 Chat Completions 和 Messages 里是怎么实现的？</p>
+      <button class="quiz-opt">服务端无状态，每轮把完整历史重发一遍</button>
+      <button class="quiz-opt">服务端记着会话，只发增量的新消息</button>
+      <button class="quiz-opt">靠 SSE 长连接维持会话不中断</button>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q" data-answer="2">
+      <p class="q-text">4. 为什么 DeepSeek、vLLM、Ollama 都选择“兼容 OpenAI”？</p>
+      <button class="quiz-opt">OpenAI 格式是 ISO 国际标准，必须遵守</button>
+      <button class="quiz-opt">OpenAI 的传输性能最好，兼容它能更快</button>
+      <button class="quiz-opt">生态效应：SDK 和教程都围着它建，说同一种方言让开发者零成本切换</button>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 08 延伸阅读 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>Chat Completions 的消息角色、tool_calls 与流式 chunk 结构（含 developer 角色、max_completion_tokens 改名）：<br>
+    <a href="https://developers.openai.com/api/docs/api-reference/chat/create" target="_blank" rel="noopener">OpenAI — Chat Completions API Reference</a></p>
+    <p>Responses 与 Chat Completions 的逐项差异、迁移指引（含 store / previous_response_id 状态管理）：<br>
+    <a href="https://developers.openai.com/api/docs/guides/migrate-to-responses" target="_blank" rel="noopener">OpenAI — Migrate to Responses</a></p>
+    <p>Messages API 的必填参数、内容块类型（tool_use / tool_result / thinking）、prefill 与缓存控制：<br>
+    <a href="https://platform.claude.com/docs/en/api/messages" target="_blank" rel="noopener">Anthropic — Messages API</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 相关阅读</h4>
+    <p>Gemini 的第四种方言（contents/parts、generationConfig）：<a href="https://ai.google.dev/api/generate-content" target="_blank" rel="noopener">Gemini API — generateContent</a>；“兼容 OpenAI/Anthropic”与双端点的原话：<a href="https://api-docs.deepseek.com/" target="_blank" rel="noopener">DeepSeek API Docs</a>；引爆事实标准的起点：<a href="https://openai.com/index/introducing-chatgpt-and-whisper-apis" target="_blank" rel="noopener">Introducing ChatGPT and Whisper APIs（2023-03-01）</a>；另一门派的开山：<a href="https://www.anthropic.com/news/claude-3-family" target="_blank" rel="noopener">Claude 3 Family（2024-03-04）</a>；Responses 的发布现场：<a href="https://community.openai.com/t/introducing-the-responses-api/1140929" target="_blank" rel="noopener">Introducing the Responses API（2025-03-11）</a>。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="../index.html">栏目目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>技术概念手记 · 第 4 期 · 不定期更新：工作中遇到难懂的概念，就回来吃透它</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/content.js"></script>
+</body>
+</html>

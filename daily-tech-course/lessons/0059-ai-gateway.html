@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · AI 网关：LLM 流量的入口、账房与保险丝 | 2026-10-23</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0059</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0058-graalvm-native-image-aot.html">上一期：GraalVM Native Image 与 AOT</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">AI 大模型应用 · AI 平台系列（网关篇）</p>
+  <h1>AI 网关：LLM 流量的入口、账房与保险丝</h1>
+  <p class="subtitle">公司三十个团队各自接模型 API，密钥散落代码仓库、账单月底才见真章、供应商一限流全站陪葬——这是多数公司 AI 落地的现状：Kong 平台口径的企业 AI 流量九个月涨了七倍，而其中<strong>只有不到 1% 的组织部署了任何 AI 专项治理</strong>。这一讲从 2026 年 3 月 24 日那次真实的 AI 网关供应链投毒事件讲起（40 分钟毒包窗口、官方镜像因锁版本幸免、披露 36 小时后 SQL 注入就被在野利用），把 AI 网关的三顶帽子讲透：<strong>入口</strong>（统一端点与协议适配）、<strong>账房</strong>（token 计费、预算与缓存）、<strong>保险丝</strong>（fallback、限流与内容治理）——以及它自己成为高价值靶子之后，你的部署姿势为什么决定你是幸存者还是受害者。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🤖 AI 大模型应用</span>
+    <span class="tag-date">📅 2026-10-23 · 第 59 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>场景：40 分钟毒包，36 小时打表</h2>
+
+  <h3>事故一：AI 网关被供应链投毒，谁中招了？</h3>
+  <p>2026 年 3 月 24 日 10:39（UTC），开源 AI 网关 LiteLLM 的 v1.82.7 被推上 PyPI，v1.82.8 随后跟上——这两个包不是官方发布流程的产物：攻击者污染了 CI 流水线里的安全扫描器依赖（Trivy），偷走静态存放的发布凭据，绕过官方 CI 直接向 PyPI 投毒。毒包里带了一个凭据窃取器：扫描环境变量、SSH 私钥、云厂商凭据、K8s ServiceAccount 令牌、数据库密码，加密后回传到一个仿冒域名。两个包在 PyPI 上<strong>存活了约 40 分钟</strong>后被隔离，当天 16:00 被彻底删除。</p>
+  <p>谁中了招？官方给出的判定清单像一份部署姿势考试：用 <code>pip install litellm</code> 不锁版本、恰好在那个窗口升级的——中招；让依赖把它<strong>间接拉进来的（AI 编排框架、MCP server 常这么干）</strong>——中招；而<strong>跑官方 Docker 镜像的团队全部幸免</strong>，因为镜像在 requirements.txt 里锁死了依赖版本，根本不碰 PyPI 上的毒包。三天后官方请来 Mandiant 与白帽团队做代码审计，砍掉约 6000 个开放分支、发布凭据全部改临时凭据、镜像全部 cosign 签名——这是这个项目一生中最贵的一次安全补课。</p>
+
+  <h3>事故二：披露 36 小时后，攻击者开始精确打表</h3>
+  <p>同年 4 月，同一产品的代理鉴权路径被报出 SQL 注入（CVE-2026-42208，CVSS 9.3）：未认证攻击者构造一个 Authorization 头，就能经由错误处理路径触达数据库查询。Sysdig 威胁研究团队观测到<strong>公告发布 36 小时 07 分钟后出现首次利用尝试</strong>——且不是无差别的扫描器 spraying，而是对生产库表的<strong>定向枚举，直奔三张高价值表：虚拟密钥表、供应商凭据表、环境变量配置表</strong>。为什么打得这么准？因为 AI 网关的数据库里躺着<strong>全公司所有模型供应商的真实密钥</strong>。</p>
+
+  <div class="callout">
+    <span class="callout-title">两起事故的公共结论</span>
+    <p>AI 网关把"每个团队各自保管一把模型密钥"收敛成"一个集中保管箱"——这正是它的价值，也精确地重铸了它的风险：<strong>网关一旦被攻破，全公司的模型账户、全部经过网关的 prompt（常含客户数据与内部代码）、全部调用配额一次性暴露</strong>。它的安全等级必须对标密钥管理系统，而不是"一个内部转发工具"。</p>
+  </div>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：LLM 流量不是普通 HTTP</h2>
+
+  <h3>五点不同，决定了 API 网关不能直接复用</h3>
+  <p>传统 API 网关的四层防线（路由、认证限流、熔断降级、观测——0026 期之前的 Spring Cloud Gateway 一讲已展开，此处不重讲）解决的是"请求进、响应出"的同步语义。LLM 流量在这个模型上有五处对不上：</p>
+  <ul>
+    <li><strong>响应是流：</strong>SSE 逐 token 吐出，一次回答几十秒、连接全程挂着——网关不能缓冲完整个响应再转发，超时、重试、日志的语义全部要按"流"重写；</li>
+    <li><strong>计费按 token：</strong>成本藏在响应体的 usage 字段里，同一个请求贵模型与便宜模型差一到两个数量级——"记条访问日志"升级成"逐请求计费记账"；</li>
+    <li><strong>路由键是模型名：</strong>同一个端点，<code>model</code> 字段决定去哪家供应商——路由决策从"路径"变成"模型目录 + 策略"；</li>
+    <li><strong>上游是外部依赖：</strong>模型供应商会宕机、会限流、会涨价、会下线旧版本——fallback 与多供应商冗余不是高可用选项，是日常操作；</li>
+    <li><strong>载荷是敏感数据：</strong>prompt 里混着客户信息、源码、内部工单——脱敏、审计留存、合规边界都长在载荷上。</li>
+  </ul>
+
+  <h3>由此收敛出 AI 网关的五件事</h3>
+  <p>把五点不同翻成能力清单：应用与 Agent 只对接一个<strong>统一端点</strong>（事实标准是 OpenAI 兼容协议），网关在中间做<strong>认证与虚拟密钥、模型路由与 fallback、token 计费与预算、语义缓存、内容治理（guardrails 与审计）</strong>，北向是各家公有模型与自建推理集群。落到组织里，它同时是三顶帽子：<strong>入口</strong>（协议适配与模型目录）、<strong>账房</strong>（每一分模型钱记到团队头上）、<strong>保险丝</strong>（上游出事时业务不断电）。</p>
+
+  <div class="diagram" style="margin:1.2rem 0;">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="AI 网关架构示意">
+    <defs>
+      <marker id="arr9" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#64748b"/></marker>
+    </defs>
+    <style>
+      .bx{fill:#f8fafc;stroke:#94a3b8;stroke-width:1.4;rx:10}
+      .gw{fill:#eef2ff;stroke:#6366f1;stroke-width:2}
+      .lb{font:600 14px sans-serif;fill:#1e293b;text-anchor:middle}
+      .ls{font:11px sans-serif;fill:#475569;text-anchor:middle}
+      .ln{stroke:#64748b;stroke-width:1.6;fill:none;marker-end:url(#arr9)}
+    </style>
+    <rect class="bx" x="20" y="30" width="150" height="58" rx="10"/>
+    <text class="lb" x="95" y="54">业务应用</text><text class="ls" x="95" y="72">OpenAI 兼容 SDK</text>
+    <rect class="bx" x="20" y="120" width="150" height="58" rx="10"/>
+    <text class="lb" x="95" y="144">Agent / IDE</text><text class="ls" x="95" y="162">编程助手 · 工单机器人</text>
+    <rect class="gw" x="260" y="30" width="230" height="220" rx="12"/>
+    <text class="lb" x="375" y="56" style="fill:#4338ca">AI 网关</text>
+    <text class="ls" x="375" y="86">虚拟密钥 · 预算限流</text>
+    <text class="ls" x="375" y="110">模型路由 · fallback</text>
+    <text class="ls" x="375" y="134">token 计费 · 审计</text>
+    <text class="ls" x="375" y="158">语义缓存</text>
+    <text class="ls" x="375" y="182">guardrails · 脱敏</text>
+    <text class="ls" x="375" y="214">统一协议（OpenAI 兼容）</text>
+    <rect class="bx" x="580" y="22" width="160" height="46" rx="10"/>
+    <text class="lb" x="660" y="42">模型供应商 A</text><text class="ls" x="660" y="60">主路由</text>
+    <rect class="bx" x="580" y="92" width="160" height="46" rx="10"/>
+    <text class="lb" x="660" y="112">模型供应商 B</text><text class="ls" x="660" y="130">fallback</text>
+    <rect class="bx" x="580" y="162" width="160" height="46" rx="10"/>
+    <text class="lb" x="660" y="182">自建推理集群</text><text class="ls" x="660" y="200">vLLM · 私有数据</text>
+    <line class="ln" x1="170" y1="59" x2="255" y2="100"/><line class="ln" x1="170" y1="149" x2="255" y2="170"/>
+    <line class="ln" x1="490" y1="70" x2="575" y2="45"/><line class="ln" x1="490" y1="130" x2="575" y2="115"/><line class="ln" x1="490" y1="190" x2="575" y2="185"/>
+    <text class="ls" x="375" y="280">密钥只在网关与上游之间流动，业务侧凭虚拟密钥进门</text>
+  </svg>
+  </div>
+  <p class="code-note">关键不变式：<strong>供应商真实密钥只在网关侧存在</strong>，业务与 Agent 拿到的是可撤销、带预算、带模型白名单的虚拟密钥——这是"入口"这顶帽子的安全内核，也是事故二里攻击者直奔密钥表的原因：那里是全公司的钥匙串。</p>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：选型、密钥与三笔账</h2>
+
+  <h3>形态选型：三条路线</h3>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>维度</th><th>独立 AI 网关（以 LiteLLM 为例）</th><th>API 网关 + AI 插件（以 Kong 为例）</th><th>云托管入口</th></tr></thead>
+    <tbody>
+      <tr><td>定位</td><td>LLM 优先：路由/预算/缓存开箱即用</td><td>API 体系优先：AI 是插件之一</td><td>跟云账号走，零运维</td></tr>
+      <tr><td>优势</td><td>模型目录更新快（新模型 day-one 支持）、虚拟密钥与预算体系完整</td><td>复用既有网关的认证限流观测体系；治理面统一</td><td>几分钟上线</td></tr>
+      <tr><td>代价</td><td>多养一个组件，安全责任自负（本期两起事故就是它）</td><td>AI 深能力（语义缓存、预算台账）弱于专业网关</td><td>锁定供应商；策略与审计受平台边界限制</td></tr>
+      <tr><td>适合</td><td>模型团队主导、多供应商混用</td><td>已有成熟 API 网关团队</td><td>验证期、单云架构</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="code-note">两条路线正在互相靠近：Kong 自 3.14 起补齐 A2A 流量治理与 token 交换，LiteLLM 也在加 MCP 网关能力——但选型的第一判据仍是<strong>你团队原本的治理资产在哪一侧</strong>，而不是功能清单谁长一行。</p>
+
+  <h3>密钥与预算：账房的核心账本</h3>
+  <p>虚拟密钥体系三件事：<strong>主密钥只做发钥匙一件事</strong>（不进应用、不进 CI、进密钥管理系统）；<strong>业务密钥=身份+预算+模型白名单</strong>（"客服团队、月预算 2 万、只许调中小档模型"是一条密钥的全部定义）；<strong>预算三级记账</strong>（key / team / 月度总额），超预算在网关侧熔断而不是等月底账单。配套纪律：供应商真实密钥季度轮换——它在网关侧集中存放，轮换成本是"一处换、全网关生效"，这是集中保管箱相对"密钥散落 11 个仓库"的唯一正收益，不用白不用。</p>
+
+  <h3>容量与高可用：保险丝的物理实现</h3>
+  <ul>
+    <li><strong>网关自身不能是新的单点：</strong>多副本 + 无状态化（配置与台账进数据库/Redis），前置负载均衡照旧——网关挂了等于全公司 AI 断电，它的可用性目标要高于任何一个单一业务。</li>
+    <li><strong>流式响应的重试是语义雷区：</strong>SSE 已经吐了一半的请求挂了，盲目重试等于把同一段生成再买一遍单（重复计费 + 用户看到重复内容）。正确姿势：重试只发生在<strong>首 token 之前</strong>；流中断的处理交给客户端续跑（Agent 编排层的检查点机制，0047 期已讲）。</li>
+    <li><strong>fallback 按模型对配置：</strong>主路由打满或供应商 5xx，降级链是"同档备用供应商 → 低一档模型 → 排队或拒绝"；降级触发的告警要单独分级——它意味着用户正在悄悄拿到质量更差的回答。</li>
+  </ul>
+
+  <h3>省钱三板斧：精确缓存、语义缓存、模型分层</h3>
+  <p><strong>精确缓存</strong>（请求逐字节相同直接返回）便宜但命中率低，作 L1。<strong>语义缓存</strong>作 L2：把请求向量化，相似度过阈值直接返回旧答案，整次模型调用被跳过——公开口径的收益区间为 <strong>40%~86%</strong>（AWS ElastiCache 评估：阈值 0.75 时命中率 90.3%、成本降 86%；GPT Semantic Cache 论文：命中率 61.6%~68.8%、正向命中准确率超 97%）。但"相似"不等于"相同"：有团队上线后用户问"北京明天天气"，命中了"北京今天晴"的缓存——<strong>时间敏感、个性化、带随机上下文的问题一律是语义缓存的禁区</strong>，阈值也要分查询类调（技术问答 0.92 起步，代码/法律/医疗 0.95 以上）。<strong>模型分层路由</strong>是第三板斧：难任务走贵模型、简单任务走便宜模型，路由策略下沉淀在网关，业务无感知。三者叠加，才配得上"账房"这个名字——只记账不省钱的账房只是日志系统。</p>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：三段可落地的骨架</h2>
+
+  <h3>第一段：网关配置——虚拟密钥、预算与 fallback</h3>
+  <div class="codeblock">
+  <pre><code># config.yaml(LiteLLM 骨架,策略同样适用于其他网关)
+model_list:
+  - model_name: chat-main            # 业务侧看到的模型名(路由键)
+    litellm_params:
+      model: openai/gpt-5.5-mini
+      api_key: os.environ/OPENAI_KEY # 真实密钥只从环境/密钥管理系统注入
+  - model_name: chat-main
+    litellm_params:
+      model: anthropic/claude-sonnet-5.5   # 同名双部署 => 天然 fallback
+      api_key: os.environ/ANTHROPIC_KEY
+
+router_settings:
+  num_retries: 2
+  allowed_fails: 3            # 连续失败后摘除该部署,冷却再回
+  fallbacks: [{"chat-main": ["chat-cheap"]}]
+
+general_settings:
+  master_key: os.environ/MASTER_KEY   # 主密钥只管发钥匙,不进任何应用</code></pre>
+  </div>
+  <p class="code-note">业务侧申请虚拟密钥：<code>/key/generate</code> 带 <code>max_budget</code>（月预算）、<code>models</code>（白名单）、<code>team_id</code>（记账归属）——一条密钥即一份权限与预算契约，撤销即失效，不用去供应商控制台删 key。</p>
+
+  <h3>第二段：语义缓存的启用边界（先圈禁区，再谈收益）</h3>
+  <div class="codeblock">
+  <pre><code>litellm_settings:
+  cache: true
+  cache_params:
+    type: redis                 # L1 精确缓存(Redis)
+    ttl: 86400
+# 语义缓存按命名空间启用,只给"意图聚类明显"的流量开:
+#   客服 FAQ / 文档问答        -> 开,历史口径命中率 60%+
+#   代码助手 / 长文摘要        -> 关,个性化上下文为主,误命中代价高
+# 禁区清单(写进评审 checklist):
+#   时间敏感(行情/天气) 个性化(用户上下文) 强随机性(创意生成)</code></pre>
+  </div>
+  <p class="code-note">上线顺序建议：先只开精确缓存观察一周（命中率数据决定语义层值不值得养），语义层再按命名空间灰度。每一路缓存都要能回答：<strong>误命中一次的业务代价，省下的 token 钱扛不扛得住</strong>——这是缓存策略里唯一的判断式。</p>
+
+  <h3>第三段：部署加固——让"下一个 3·24"发生在别人身上</h3>
+  <div class="codeblock">
+  <pre><code># 1. 锁版本 + 官方镜像基线(毒包事件的幸存者姿势)
+#    Dockerfile: FROM ghcr.io/berriai/litellm:v1.105.0   # 不用 latest
+# 2. 验签:官方镜像自 1.83 起全部 cosign 签名
+cosign verify --key &lt;官方仓库&gt;/cosign.pub ghcr.io/berriai/litellm:v1.105.0
+# 3. 出口白名单:容器只许访问配置过的模型供应商端点
+#    (窃取器的回传域名连不上,泄密链路从物理上断)
+# 4. 升级通道:安全公告进值班群,高危 CVE 48 小时内评估
+#    每月演练一次:拔掉一个供应商密钥,看 fallback 是否真的接得住</code></pre>
+  </div>
+  <p class="code-note">四条加固各自对应一个真实攻击面：锁版本防投毒、验签防调包、出口白名单防外传、升级通道防"披露 36 小时后"的那种精确打击。<strong>AI 网关的运维手册第一页应该写着：你是全公司模型资产的保管箱，攻击者的工时是按你的密钥价值定价的。</strong></p>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>AI 网关=入口+账房+保险丝：</strong>统一端点与协议适配、虚拟密钥与 token 计费预算、fallback 与内容治理——LLM 流量的五点特殊（流式、按 token 计费、模型名路由、外部上游、敏感载荷）决定了传统 API 网关不能直接复用。</li>
+    <li><strong>集中保管密钥是价值也是靶心：</strong>3·24 供应链事件里官方 Docker 镜像因锁依赖幸免、pip 不锁版本中招；SQL 注入披露 36 小时就被定向打表——部署姿势（锁版本/验签/出口白名单）决定你是幸存者还是受害者。</li>
+    <li><strong>账房要会省钱：</strong>精确缓存 L1 + 语义缓存 L2（公开收益 40%~86%，但时间敏感/个性化/强随机是禁区，阈值按查询类分层）+ 模型分层路由，三板斧叠加才是账房，只记账那是日志系统。</li>
+    <li><strong>流式重试是语义雷区：</strong>重试只许发生在首 token 之前；流中断的恢复交给 Agent 编排层的检查点，网关别越位替业务做"重新生成"的决定。</li>
+    <li><strong>选型看治理资产在哪侧：</strong>独立 AI 网关（模型团队主导）vs API 网关+AI 插件（已有网关团队）vs 云托管（验证期）——Kong 口径企业 AI 流量九个月涨七倍、不到 1% 组织有 AI 专项治理，先收口，再谈优化。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目：三十个团队、两百把散落密钥、三家供应商——你的 AI 网关收编方案怎么设计？</summary>
+    <div class="details-body">
+      <p>背景：公司三十个团队各自接了模型 API，安全扫描发现两百把真实密钥散落在代码仓库、配置中心和本地环境文件里；月底账单总额没人说得清归属；上周供应商 A 大范围限流，三个核心业务陪葬。你主导 AI 网关收编，请回答：</p>
+      <p><strong>① 两百把存量密钥的收编迁移怎么做？设计四步与每步的验收标准。</strong><br>
+      <strong>② 供应商 A 再限流的那天，网关该自动做什么、绝不做什么？</strong><br>
+      <strong>③ 复盘 3·24 式供应链事故：怎么保证毒包事件发生在你的网关身上时，你是幸存者？</strong></p>
+      <h4>🔍 深度解析</h4>
+      <p><strong>① 收编四步=盘点→镜像→切换→作废：</strong>（a）<strong>盘点</strong>——扫代码仓库与配置中心建立密钥清单（谁、哪个供应商、调哪些模型、大概什么量级），验收=清单覆盖度与扫描工具误报率；（b）<strong>镜像</strong>——在网关侧按清单建虚拟密钥（预算先设成该团队历史月均的 1.2 倍，模型白名单按实际调用记录生成，别拍脑袋），真实供应商密钥收进网关的密钥管理系统，验收=每把虚拟密钥都有 owner 与预算归属；（c）<strong>切换</strong>——按团队灰度切端点，双跑期旧密钥保留只读监控（对比网关侧计量与供应商账单的偏差），验收=计量偏差 &lt;5%、无业务报障；（d）<strong>作废</strong>——去供应商控制台吊销全部旧密钥，这一步不可逆所以放最后，验收=控制台零遗留密钥、仓库扫描器连续两周零告警。<strong>关键节奏：先易后难，从内部工具类团队切起，核心交易链路最后动。</strong></p>
+      <p><strong>② 自动做的三件事与绝不做的两件事：</strong>自动——按 fallback 链切到供应商 B 与自建推理集群（响应头里带降级标记，让业务可感知）；对供应商 A 的调用预算自动收紧（故障期重试风暴是账单杀手，allowed_fails 摘除部署）；把限流事件按 P2 告警出去（降级=用户正在拿到质量更差的回答，不能静默）。绝不——<strong>绝不在流式响应中途自动重试</strong>（首 token 后中断交给业务层检查点续跑，网关重试=重复计费+重复内容）；<strong>绝不静默把请求无限排队</strong>（排队的延迟会吃掉业务的超时预算，宁可快速失败带明确错误码，让业务的降级逻辑有机会接手——0049 期重试预算的纪律在这里同样适用）。</p>
+      <p><strong>③ 幸存者清单四条，每条对应一个攻击面：</strong>（a）<strong>锁版本+官方镜像</strong>——3·24 里幸存者的唯一共性是"部署路径不碰 PyPI 浮动版本"，私有镜像仓库同步固定 tag，验收=生产无 latest；（b）<strong>签名验证</strong>——cosign 验签进部署流水线，防"下一个仿冒域名"式的调包，验收=未验签镜像无法进集群（准入策略）；（c）<strong>出口白名单</strong>——网关容器只许访问配置过的供应商端点，凭据窃取器即使跑起来也传不出数据，验收=随机注入测试域名被拒；（d）<strong>升级演练</strong>——安全公告接值班流程，高危 CVE 48 小时内评估、每月一次"拔密钥看 fallback"演练，验收=演练记录与 fallback 实际生效时间。<strong>一句话总结：收编方案的安全下限不是网关产品的 CVE 记录，是你自己的部署姿势——集中保管箱的价值，一半在收口那天，另一半在每天的运维纪律里。</strong></p>
+    </div>
+  </details>
+
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>LiteLLM 官方文档（虚拟密钥、预算、路由与缓存的配置一手出处；3·24 供应链事件公告与安全加固博客亦出自官方）：<br>
+    <a href="https://docs.litellm.ai/docs/" target="_blank" rel="noopener">docs.litellm.ai — LiteLLM Documentation</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>跨栈互链：<a href="0032-spring-cloud-gateway.html">0032 Spring Cloud Gateway 流量入口治理</a>（传统网关四层防线与超时预算漏斗——本期的"通用底座"，AI 增量不重讲）、<a href="0048-mcp-tool-ecosystem.html">0048 MCP 协议与工具生态</a>（工具流量的网关收口与四层治理——本期讲模型 API 流量，与它分而治之）、<a href="0047-langgraph-agent-orchestration.html">0047 Agent 编排</a>（流中断后的检查点续跑归属编排层）、<a href="0026-embedding-vector-store.html">0026 Embedding 与向量库选型</a>（语义缓存的向量检索与 RAG 同源）、<a href="0049-distributed-design-patterns.html">0049 分布式设计模式</a>（重试预算与快速失败的纪律同源）、<a href="0028-prometheus-grafana.html">0028 Prometheus 监控体系</a>（token 成本与降级事件的指标出口）。延伸：Kong AI Gateway 官方博客（企业 AI 流量七倍增长与治理现状报告）、GPT Semantic Cache 论文（arXiv:2411.05276）。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0058-graalvm-native-image-aot.html">← 上一期：GraalVM Native Image 与 AOT</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 59 期 · AI 大模型应用系列 · AI 线下一讲继续聊多模型路由与 Token 成本治理</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
