@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · 多模型路由与 Token 成本治理：一次调用，一道选择题 | 2026-10-26</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0060</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0059-ai-gateway.html">上一期：AI 网关</a> · <a href="https://www.bilibili.com/video/BV1sKnX6rExv" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">AI 大模型应用 · AI 平台系列（路由与成本篇）</p>
+  <h1>多模型路由与 Token 成本治理：一次调用，一道选择题</h1>
+  <p class="subtitle">Agent 上线三个月，token 账单先到十万级——复盘下来八成的调用只是查个运费、翻译一句话，却与最难的多步推理走同一个旗舰模型。这不是浪费，是<strong>每一次调用都没做那道选择题：这个请求，谁配来答</strong>。这一讲从 RouteLLM 的关键数字讲起（保住 95% 质量、只把 14% 流量发给旗舰、成本降约 75%），讲清路由器（先验判难度）与级联（先答后验）两种决策位置的架构差异、会话中途换模型会击穿提示词缓存这个最贵的暗坑（一次两万 token 的缓存击穿能吃掉整次切换省下的钱），再落到成本治理的账本设计：逐请求计费、OpenTelemetry GenAI 语义约定、路由评测护栏——让账单从月底惊吓变成实时仪表盘。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🤖 AI 大模型应用</span>
+    <span class="tag-date">📅 2026-10-26 · 第 60 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>场景：八成简单问题，买的是最贵的票</h2>
+
+  <h3>一家电商的 token 账单复盘</h3>
+  <p>客服 Agent 上线三个月，供应商账单冲到每月十几万。复盘调用日志发现流量构成大致是：<strong>六成是"运费怎么算""帮我改地址"这类一句话请求，三成是中等复杂度的工单摘要与意图分类，只有约一成真正需要多步推理</strong>——但百分之百的请求都在打旗舰模型。按 2026 年 9 月的市场价，旗舰档每百万输入 token 大约 5~15 美元、中档只要 0.15~0.4 美元，<strong>价差 10~40 倍</strong>。六成的简单流量买着最贵的票，这就是账单的全部秘密。</p>
+  <p>更隐蔽的是第二笔账：Agent 化的工作流比单轮问答<strong>多烧五到三十倍的 token</strong>（每步都要带着完整上下文重新计费），一次任务的上下文动辄几万 token——错误定价被这个乘数放大。而问题暴露得极慢：账单按月出，归属按供应商，没人能回答"这十几万里，哪条业务线、哪个 Agent、哪一步烧掉的"。成本不可归因，优化就无从下手。</p>
+
+  <h3>修错方向的教训：会话中途换模型，越路由越贵</h3>
+  <p>团队第一反应是"让简单轮次走小模型"，于是按轮次动态切换——结果账单不降反升，延迟还抖了。根因是<strong>提示词缓存（prompt cache）按模型隔离</strong>：每一家的 KV 缓存只认自己的模型，第三轮切换到小模型时，它读不到旗舰模型留下的历史，只能把整段对话从头按全价输入重算一遍。一轮两万 token 的缓存击穿，就把切换省下的差价吃干抹净，还得倒贴。这是 2026 年路由落地被踩得最响的一坑，也是本讲后面 SAAR（会话感知路由）要解的题。</p>
+
+  <div class="callout">
+    <span class="callout-title">一句话病灶</span>
+    <p>单模型默认全走旗舰 = <strong>为长尾难度支付了全价</strong>；而错误的路由（会话中途乱切）= <strong>为省钱动作支付了缓存击穿的罚金</strong>。成本治理的第一步不是选便宜模型，是让"这次调用归谁答"变成一个显式的、可观测的、有护栏的决策。</p>
+  </div>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：路由器的两种决策位置</h2>
+
+  <h3>流量分布：难度是倾斜的</h3>
+  <p>路由的一切收益都来自一个经验事实：<strong>真实流量的难度分布严重不均</strong>。RouteLLM（LMSYS 与 UC Berkeley 的开源框架）给过最关键的一组数字：在增强数据训练的路由器下，<strong>只把 14% 的调用发给 GPT-4 级旗舰模型，就保住了 95% 的整体质量，成本降约 75%</strong>——86% 的流量由小模型承接，聚合质量几乎不动。这个 14% 不是常数，它的前提是流量里简单请求占大头；你的流量越"闲聊化"，路由省得越多。RouteLLM 同期报告：MT-Bench（闲聊向）降本超 85%，MMLU 降 45%，GSM8K（数学向）只降 35%——<strong>基准越难、越均匀，路由的套利空间越小</strong>。这组梯度本身就是选型判据。</p>
+
+  <h3>预测式路由：调用前决策</h3>
+  <p><strong>预测式路由（router）在调用之前判断难度</strong>：一个轻量分类器（BERT 级小模型或查询/模型嵌入的矩阵分解）看一眼 prompt，一跳分派到对应档位。优点是每次请求只付一次模型调用、延迟几乎不加（vLLM Semantic Router 报告路由决策 P50 只加 1.86 毫秒）；缺点是<strong>误判是静默的</strong>——难题被当成简单题分给小模型，你拿到的是一个自信的错误答案，而且没有任何机制告诉你错了。</p>
+
+  <h3>级联：调用后验证</h3>
+  <p><strong>级联（cascade）把决策放在调用之后</strong>：先让便宜模型作答，再用一个校验信号判断答案行不行——不行才升级旗舰重答。校验信号可以是模型置信度（logprobs）、一个小验证器，或自我一致性采样（多次采样答案互相一致就收下）。这是 Stanford FrugalGPT 的经典结构，论文报告在特定任务上最高降本 98% 且对齐最强单模型。优点是<strong>决策基于真实答案而非预测，质量下限扎实、可自我纠错</strong>；代价是被升级的难题要付两次钱（便宜模型一次 + 旗舰重答一次）外加首轮延迟。两者可以组合：<strong>先按档位路由，档位内部再级联兜底</strong>。</p>
+
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>维度</th><th>预测式路由</th><th>级联</th></tr></thead>
+    <tbody>
+      <tr><td>决策时机</td><td>调用前，看题猜难度</td><td>调用后，看答案验质量</td></tr>
+      <tr><td>每次请求成本</td><td>一次调用 + 毫秒级路由开销</td><td>简单题一次；被升级的难题两次</td></tr>
+      <tr><td>延迟</td><td>基本不变（P50 +1.86ms 实测）</td><td>被升级的难题叠加首轮时长</td></tr>
+      <tr><td>误判代价</td><td>静默劣化——难题拿到错答案无人知晓</td><td>自我纠错——验不过就升级</td></tr>
+      <tr><td>适合</td><td>高流量、难度倾斜、延迟敏感</td><td>质量红线硬、能吸收延迟的场合</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>会话感知：换模型要先算缓存账</h3>
+  <p>多轮 Agent 场景引入第三种成本：<strong>切换成本</strong>。SAAR（Session-Aware Agentic Routing，vLLM Semantic Router 团队的会话感知路由）把提示词缓存纳入切换定价——router 不仅判断"哪个模型适合这个请求"，还判断"<strong>现在切换会不会毁掉会话</strong>"。它维护 router 侧的会话记忆、对工具循环与不可迁移的供应商状态强制锁定模型、设置安全重置边界。在一组 21,600 个确定性轮次的实验里：模型切换次数减少 79.29%，消除了 3,836 次不安全切换，估算的底层模型成本降低 78.71%。落到工程上就三条纪律：<strong>单轮请求（问答/分类/抽取）放心按请求路由；多步 Agent 会话默认钉住一个模型；确需切换先压缩上下文，让新模型从摘要起步而不是冷缓存</strong>。</p>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：分层路由与三本账</h2>
+
+  <h3>决策信号的阶梯：从规则到学习</h3>
+  <p>路由器怎么判断难度？按成本从低到高排一条阶梯，<strong>规则通常就能吃下第一口最大的红利</strong>：</p>
+  <ul>
+    <li><strong>静态规则</strong>：按端点、用户档位、请求 token 数、语言、是否含代码块、关键词/意图表分派——无机器学习、完全可审计，常见口径是<strong>光靠规则先拿 30%~50% 的降本</strong>，这也是该走的第一步；</li>
+    <li><strong>语义路由</strong>：把请求向量化，与"计费问题/代码生成/法律分析"等已嵌入的示例比对，就近落位——快且好建，但语义相似度量的是主题不是难度；</li>
+    <li><strong>学习型预测器</strong>：RouteLLM 一族，用人类偏好数据（Chatbot Arena）训练"哪个模型会在这题上赢"，难度判断内化为模型能力——上限最高，但要拿你自己的流量评测过才算数。</li>
+  </ul>
+
+  <div class="diagram" style="margin:1.2rem 0;">
+  <svg viewBox="0 0 760 320" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="分层路由架构示意">
+    <defs>
+      <marker id="arr60" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#64748b"/></marker>
+    </defs>
+    <style>
+      .bx{fill:#f8fafc;stroke:#94a3b8;stroke-width:1.4}
+      .gw{fill:#eef2ff;stroke:#6366f1;stroke-width:2}
+      .lb{font:600 14px sans-serif;fill:#1e293b;text-anchor:middle}
+      .ls{font:11px sans-serif;fill:#475569;text-anchor:middle}
+      .ln{stroke:#64748b;stroke-width:1.6;fill:none;marker-end:url(#arr60)}
+    </style>
+    <rect class="bx" x="20" y="40" width="150" height="58" rx="10"/>
+    <text class="lb" x="95" y="64">业务应用 / Agent</text><text class="ls" x="95" y="84">单轮：按请求路由</text>
+    <rect class="bx" x="20" y="130" width="150" height="58" rx="10"/>
+    <text class="lb" x="95" y="154">多步 Agent 会话</text><text class="ls" x="95" y="174">钉住模型 / 切前压缩</text>
+    <rect class="gw" x="255" y="30" width="235" height="240" rx="12"/>
+    <text class="lb" x="372" y="56" style="fill:#4338ca">路由与成本治理层</text>
+    <text class="ls" x="372" y="86">① 静态规则：端点/档位/token 数</text>
+    <text class="ls" x="372" y="112">② 语义路由：意图就近落位</text>
+    <text class="ls" x="372" y="138">③ 学习型：偏好数据训难度</text>
+    <text class="ls" x="372" y="168">级联兜底：验不过再升级</text>
+    <text class="ls" x="372" y="194">缓存定价：切换先算击穿账</text>
+    <text class="ls" x="372" y="224">逐请求计费 · OTel GenAI 埋点</text>
+    <rect class="bx" x="575" y="26" width="165" height="48" rx="10"/>
+    <text class="lb" x="657" y="46">小模型 / 档位底座</text><text class="ls" x="657" y="64">≈ 60%~86% 流量</text>
+    <rect class="bx" x="575" y="106" width="165" height="48" rx="10"/>
+    <text class="lb" x="657" y="126">中档模型</text><text class="ls" x="657" y="144">级联第二级</text>
+    <rect class="bx" x="575" y="186" width="165" height="48" rx="10"/>
+    <text class="lb" x="657" y="206">旗舰模型</text><text class="ls" x="657" y="224">≈ 10%~20% 真难题</text>
+    <rect class="bx" x="430" y="282" width="320" height="30" rx="8"/>
+    <text class="ls" x="590" y="301">计费与观测：token×单价 → 业务线/Agent/步骤 归因</text>
+    <line class="ln" x1="170" y1="69" x2="250" y2="110"/><line class="ln" x1="170" y1="159" x2="250" y2="180"/>
+    <line class="ln" x1="490" y1="80" x2="570" y2="50"/><line class="ln" x1="490" y1="140" x2="570" y2="128"/><line class="ln" x1="490" y1="200" x2="570" y2="208"/>
+  </svg>
+  </div>
+  <p class="code-note">关键分层：<strong>路由是"这次调用归谁答"的决策，缓存是"这次调用还要不要发生"的决策</strong>（上一讲），两者叠加而非互斥——缓存命中直接返回，未命中才进路由。单轮流量按请求自由路由，Agent 会话钉模型，这是 2026 年路由的通用形状。</p>
+
+  <h3>三本账：容量、质量、缓存</h3>
+  <ul>
+    <li><strong>容量账：</strong>公开数字都别当承诺——RouteLLM 的 85%~98% 是特定基准上的最好成绩，生产流量更现实的区间是 40%~70%（对照"全旗舰"基线）。省多少取决于两件事：你的流量有多倾斜、你的档位价差有多大；上线前用自己流量的影子评测说话。</li>
+    <li><strong>质量账：</strong>路由器是新的静默故障源。护栏两件套：<strong>路由评测集</strong>（用真实生产 prompt 建回归集，路由器/阈值/模型任何一变就重跑）+ <strong>影子采样</strong>（线上抽 1%~5% 的小模型答案，异步给旗舰或人工打分，盯一致率的漂移——质量劣化在投诉之前几周就会先出现在这条曲线里）。</li>
+    <li><strong>缓存账：</strong>任何"切换模型"的决策都要先算缓存击穿成本。判据一句话：<strong>切换省下的差价 &gt; 冷启动重读全部历史的输入费，才值得切</strong>；多步 Agent 默认不切，要切先摘要压缩。</li>
+  </ul>
+
+  <h3>可观测：让每分钱可归因</h3>
+  <p>成本治理的另一半是账本。行业事实标准是 <strong>OpenTelemetry GenAI 语义约定</strong>：模型调用 span 统一携带 <code>gen_ai.request.model</code>、<code>gen_ai.usage.input_tokens</code>、<code>gen_ai.usage.output_tokens</code> 等属性，Langfuse、Arize、Datadog 等后端都能直接消费——一次埋点，成本看板、延迟告警、提示词调试共用一套数据。归因维度按业务设计：<strong>每条 trace 带 token 数，token 数乘单价得成本，成本按业务线 / Agent / 工作流步骤 / 模型档位打标</strong>。经验数字：这样归因后几乎总能发现某个步骤（通常是上下文拼接）吃掉大头，并暴露整体仪表盘看不见的 30%~50% 降本机会——<strong>成本归因不是财务问题，是工程信号</strong>。</p>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：三段可落地的骨架</h2>
+
+  <h3>第一段：级联兜底——二十行拿走一半降本空间</h3>
+  <div class="codeblock">
+  <pre><code># 置信度级联:先便宜后升级,无训练无新设施(伪代码骨架)
+async def chat_with_cascade(prompt: str) -> str:
+    ans = await small_model.generate(prompt, logprobs=True)
+    if avg_logprob(ans) &gt; CONF_THRESHOLD:   # 简单阈值先跑起来
+        return ans                            # 大多数请求到此为止
+    # 语义一致性自检:三次采样互相矛盾才算"没把握"
+    if not self_consistent(small_model, prompt, k=3):
+        return await frontier_model.generate(prompt)  # 难题升级重答
+    return ans
+# 上线顺序:先全走小模型影子评测一周 → 定 CONF_THRESHOLD
+# → 灰度 10% 流量 → 监控升级率与质量一致率</code></pre>
+  </div>
+  <p class="code-note">别一上来就训学习型路由器：置信度级联零训练数据、零新设施，行业经验通常先拿走一半以上的可用降本；等有了标注流量和专属工程师，再上 RouteLLM 这类学习型框架不迟。</p>
+
+  <h3>第二段：网关规则路由——按档位分派的声明式配置</h3>
+  <div class="codeblock">
+  <pre><code># LiteLLM config.yaml 骨架:同名多部署 + 权重分派(承接 0059)
+model_list:
+  - model_name: chat-auto            # 业务侧只认这一个名字
+    litellm_params:
+      model: openai/luna             # 中档:约 60% 流量(规则判定简单)
+      api_key: os.environ/OPENAI_KEY
+  - model_name: chat-auto
+    litellm_params:
+      model: anthropic/claude-haiku-4.5   # 小档:分类/抽取类
+      api_key: os.environ/ANTHROPIC_KEY
+  - model_name: chat-hard            # 难题通道:业务按需显式指定
+    litellm_params:
+      model: anthropic/claude-sonnet-5
+      api_key: os.environ/ANTHROPIC_KEY
+
+router_settings:
+  num_retries: 2
+  fallbacks: [{"chat-auto": ["chat-hard"]}]   # 档内故障升级,非质量级联
+
+litellm_settings:
+  success_callback: ["langfuse"]    # token 用量与成本自动上报(OTel)</code></pre>
+  </div>
+  <p class="code-note">第一步的分派信号用最便宜的：<code>model</code> 名本身（业务侧自己声明难度）+ 请求长度 + 端点。这层规则吃下 30%~50% 降本后，再考虑把分类器插进网关做自动判档——<strong>演进路径是"规则 → 级联 → 学习"，不是一步登天</strong>。</p>
+
+  <h3>第三段：成本归因——每次调用都记账</h3>
+  <div class="codeblock">
+  <pre><code># 逐请求计费:usage 打到维度标签上,月底账单变实时仪表盘
+POST /chat/completions
+Headers:
+  x-team: cs-bot              # 归因三件套:团队
+  x-workflow: refund-agent    # 工作流
+  x-step: intent-classify     # 步骤(路由命中档位也记: x-tier: small)
+
+# 网关侧统一计算:cost = in_tokens*price_in + out_tokens*price_out
+# 告警两条:①单日成本超预算 P2 ②某档位命中率周环比漂移>10% 质量预警
+# 周会看三张表:按团队成本 / 按步骤 token / 升级率×误升级抽样一致率</code></pre>
+  </div>
+  <p class="code-note">治理闭环的验收标准只有一个：<strong>任何人能在 30 秒内回答"这个月钱花在哪、环比谁涨了、为什么"</strong>。回答不了，说明归因维度设计缺了角——先补维度，再谈优化。</p>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>难度分布是倾斜的，单模型默认全旗舰=为长尾难度付全价：</strong>RouteLLM 关键数字——14% 流量给旗舰保住 95% 质量、降本约 75%；且基准越闲聊套利越大（MT-Bench 85% vs GSM8K 35%），流量越难路由越不值。</li>
+    <li><strong>路由与级联是两个决策位置：</strong>路由器调用前看题猜难度（便宜快、误判静默），级联调用后验答案再升级（质量下限扎实、难题双倍付费）——生产常用"先路由分档、档内级联兜底"。</li>
+    <li><strong>会话中途换模型要先算缓存账：</strong>提示词缓存按模型隔离，一次两万 token 的缓存击穿能吃掉整次切换的差价——单轮按请求路由、Agent 会话钉模型、要切先摘要（SAAR：切换减少 79.29%、再降 78.71%）。</li>
+    <li><strong>演进路径"规则→级联→学习"：</strong>静态规则先拿 30%~50% 降本，置信度级联零训练再拿一半，学习型路由器最后上且必须过你自己的流量评测——影子采样 1%~5% 一致率漂移是质量劣化的前哨指标。</li>
+    <li><strong>成本归因是工程信号不是财务报表：</strong>OTel GenAI 语义约定统一 token 埋点，按业务线/Agent/步骤/档位归因，通常能直接暴露 30%~50% 的结构性降本机会——账单从月底惊吓变成实时仪表盘。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目：月账单 40 万、四个业务线共用一个旗舰模型——你的降本方案怎么设计、怎么证明它没伤质量？</summary>
+    <div class="details-body">
+      <p>背景：公司 AI 平台月 token 账单 40 万（人民币，下同），四个业务线共用一个旗舰模型：客服问答（日均 80 万次调用，多为一句话请求）、工单摘要（日均 20 万次）、代码助手（日均 3 万次但单次上下文 3~5 万 token）、风控分析（日均 1 万次，多步推理）。老板要求三个月内账单降一半，质量红线是"客服满意度与风控准确率不许动"。请回答：</p>
+      <p><strong>① 降本方案怎么分业务线设计？每条线的路由策略与预期降幅。</strong><br>
+      <strong>② 质量红线怎么守？给出护栏设计与验收标准。</strong><br>
+      <strong>③ 代码助手那条线为什么不能简单套用"换小模型"？</strong></p>
+      <h4>🔍 深度解析</h4>
+      <p><strong>① 分线施策，降幅按"倾斜度×价差"排序：</strong>（a）<strong>客服问答是主战场</strong>——80 万次日调用、六成以上一句话请求，先上静态规则（关键词/意图表/请求长度）把简单意图打到小档，剩余流量置信度级联兜底；对照本讲数字（简单流量 60%+ × 档位价差 10~40 倍），这条线单独就能砍全平台账单的 35%~45%，是"三个月降一半"的主要来源。（b）<strong>工单摘要走中档固定分派</strong>——摘要类任务小档到中档质量损失可忽略（结构化压缩任务对模型能力不敏感），直接换中档约省 60% 该线成本。（c）<strong>风控分析保持旗舰不动</strong>——多步推理 + 准确率红线 + 仅 1 万次日调用，路由它省不了几个钱却赌上最贵的风险，明确"不路由"也是路由决策。（d）代码助手见③。验收：每线设影子评测基线后再动，灰度 10% 起步。</p>
+      <p><strong>② 护栏三件套 + 两个验收数字：</strong>（a）<strong>路由评测集</strong>——每条业务线从真实生产 prompt 抽 300~500 条建回归集，路由规则/阈值/模型任何变更先跑离线评测，客服线验收=分档后小档答案与旗舰答案人工盲评一致率 ≥95%；（b）<strong>线上影子采样</strong>——小档答案按 1%~5% 抽样异步送旗舰打分，周报盯一致率漂移，漂移超 10% 自动收紧分档阈值（质量劣化出现在投诉前几周）；（c）<strong>业务指标对照</strong>——客服满意度、风控准确率作为最终裁判按周对照，这两条是老板的红线也是验收线。另有一条工程护栏：<strong>升级率双向告警</strong>（突然升高=流量变难或分类器漂移；突然降低=可能静默吞掉难题）。</p>
+      <p><strong>③ 代码助手的账本不一样：</strong>它单次上下文 3~5 万 token，成本大头是输入而非推理——<strong>换小模型省的是输出差价，但若因此击穿提示词缓存（缓存按模型隔离），整段 3~5 万 token 历史按全价重读，净效果可能是负的</strong>。这条线的正确动作是钉住模型保缓存命中（SAAR 纪律：多步会话不中途切换），再叠加：上下文工程压缩历史（本平台系列后续主题）、精确缓存复用公共 system prompt、仅在"新会话首请求"这种无缓存可击穿的时机做难度路由。<strong>一句话总结：路由省的是价差，缓存省的是重读——两本账要一起算，单次上下文越长的场景，缓存账越主导。</strong></p>
+    </div>
+  </details>
+
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>RouteLLM 论文《RouteLLM: Learning to Route LLMs with Preference Data》（LMSYS & UC Berkeley，路由框架与"14% 流量保 95% 质量"关键数字的一手出处）：<br>
+    <a href="https://arxiv.org/abs/2406.18665" target="_blank" rel="noopener">arXiv:2406.18665 — RouteLLM</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>系列内互链：<a href="0059-ai-gateway.html">0059 AI 网关</a>（路由策略落网关的配置底座——本期第二段实战直接续写它的 config.yaml）、<a href="0047-langgraph-agent-orchestration.html">0047 Agent 编排</a>（多步 Agent 的检查点与重放——会话钉模型的载体）、<a href="0048-mcp-tool-ecosystem.html">0048 MCP 工具生态</a>（工具 token 成本与提示词缓存）、<a href="0026-embedding-vector-store.html">0026 Embedding 与向量库</a>（语义路由的向量检索同源）、<a href="0049-distributed-design-patterns.html">0049 分布式设计模式</a>（重试预算与快速失败纪律同源）。延伸：FrugalGPT 论文（Stanford，级联范式一手出处）、SAAR / vLLM Semantic Router（会话感知路由实验数据）、OpenTelemetry GenAI Semantic Conventions（token 埋点事实标准）。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0059-ai-gateway.html">← 上一期：AI 网关</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 60 期 · AI 大模型应用系列 · AI 线本讲告一段落，下期回十类技术栈循环</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
