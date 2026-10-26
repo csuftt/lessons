@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · Kubernetes 存储卷：PV、PVC 与 CSI 的引力场 | 2026-10-27</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0061</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0060-model-routing-token-cost-governance.html">上一期：多模型路由与 Token 成本治理</a> · <a href="https://www.bilibili.com/video/BV1qdHF6nELJ" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">KUBERNETES · Kubernetes 系列第 5 讲（第二轮循环 · 存储篇）</p>
+  <h1>Kubernetes 存储卷：PV、PVC 与 CSI 的引力场</h1>
+  <p class="subtitle">有状态负载上 K8s 的第一课往往不是怎么写 YAML，而是被"磁盘"教育：PVC 卡在 Pending、节点挂了数据库 Pod 半小时起不来、删了 StatefulSet 云盘还在悄悄扣费。这一讲把存储这条链拆开看——<strong>PV、PVC 与 StorageClass 是"谁要盘、谁给盘、按什么规格给"的三张契约，CSI 是把存储厂商挡在 K8s 发布周期之外的隔离层</strong>。存储最容易被忽视的属性是它的"引力"：盘在哪个可用区，Pod 就被钉在哪个可用区，调度器不是不想搬，是物理上搬不动。从一起节点宕机引发的跨 AZ 漂移失败讲起，讲清绑定、拓扑、挂载三道关卡与回收策略的生死簿，最后给出"数据库到底该不该上 K8s"的四问决策法。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">☸️ Kubernetes</span>
+    <span class="tag-date">📅 2026-10-27 · 第 61 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>场景：一次节点宕机，数据库"失联"35 分钟</h2>
+
+  <h3>时间线还原</h3>
+  <p>某平台把 MySQL 主从跑在 K8s 上（StatefulSet 3 副本，云盘走 CSI 动态制备），一个周二下午，一台承载 mysql-0 的节点硬件故障宕机。接下来的 35 分钟里值班同学经历了三连问：</p>
+  <ul>
+    <li><strong>为什么 mysql-0 不在新节点上重建？</strong>Pod 一直 Terminating/Unknown。原因：<strong>StatefulSet 有"at-most-one"语义</strong>——同一序号的 Pod 在任何时刻至多一个，旧 mysql-0 的卡死状态没解除前，控制器不会创建新的 mysql-0，否则两个实例共写一块盘就是数据损坏。节点 NotReady 后控制面默认要等约 5 分钟（pod-eviction-timeout 相关机制随版本演进为按 taint 驱逐）才把 Pod 标记为可强制处理，而<strong>谁也不敢随手 --force --grace-period=0</strong>——万一节点只是网络抖动又回来了，两个 mysql-0 同时挂一块盘。</li>
+    <li><strong>强制删除后为什么还起不来？</strong>新 Pod 卡在 ContainerCreating，事件里报 <code>Multi-Attach error</code>：云盘仍挂在死节点上。块存储默认 <code>ReadWriteOnce</code>，一块盘同时只能挂一台机器，<strong>attach/detach 是云控制面侧的操作，死节点来不及执行 detach</strong>，新节点要等云厂商超时（典型 6~10 分钟）接管卷。这 6~10 分钟里数据库主节点没有磁盘，谁也救不了。</li>
+    <li><strong>为什么最后还差一点？</strong>强制删除后新 Pod 调度到了另一个可用区的节点，事件报 <code>volume node affinity conflict</code>——<strong>盘在 AZ-a，Pod 被安排在 AZ-b，卷的拓扑约束直接拒绝调度</strong>。存储有引力：卷在哪个区创建，使用它的 Pod 就被钉死在哪个区。</li>
+  </ul>
+
+  <h3>复盘：三个问题其实是同一件事</h3>
+  <p>把三条时间线叠起来看：<strong>约 5 分钟等控制面确认节点死亡 + 6~10 分钟等云盘强制脱离死节点 + 拓扑约束下等 AZ-a 有可调度节点</strong>。三段等待没有一段是"K8s 不行"，全是存储的物理属性在起作用——磁盘不可网络化移动、块设备不能多机共享、数据有地理位置。这正是 0043 讲控制循环时埋下的伏笔：<strong>无状态负载的恢复是"找一个健康节点重拉容器"，有状态负载的恢复是"等存储的世界恢复可挂载状态"</strong>。前者秒级分钟级收敛，后者每一步都在跟物理和云厂商的超时打交道。</p>
+
+  <div class="callout">
+    <span class="callout-title">一句话病灶</span>
+    <p>无状态世界里"节点挂了就漂移"是肌肉记忆；有状态世界里<strong>数据的引力大于调度的自由</strong>。存储架构设计的本质不是选哪个盘快，而是<strong>设计好"盘与节点与可用区"的绑定关系，并诚实计算故障时的恢复时间预算</strong>。</p>
+  </div>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：三张契约与一个隔离层</h2>
+
+  <h3>PVC → StorageClass → PV：一次动态制备的完整链路</h3>
+  <p>用户不直接要盘，而是提交一张"申请单"PVC（要多大、什么访问模式、哪个类）；StorageClass 是"供货目录"（谁供货、什么参数、怎么绑定）；PV 是"到货的实物"（后端真实卷的映射）。动态制备的完整链路：</p>
+
+  <div class="diagram" style="margin:1.2rem 0;">
+  <svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="PVC 动态制备与挂载链路">
+    <defs>
+      <marker id="arr61" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#64748b"/></marker>
+    </defs>
+    <style>
+      .bx{fill:#f8fafc;stroke:#94a3b8;stroke-width:1.4}
+      .gw{fill:#eef2ff;stroke:#6366f1;stroke-width:2}
+      .lb{font:600 13.5px sans-serif;fill:#1e293b;text-anchor:middle}
+      .ls{font:11px sans-serif;fill:#475569;text-anchor:middle}
+      .ln{stroke:#64748b;stroke-width:1.6;fill:none;marker-end:url(#arr61)}
+    </style>
+    <rect class="bx" x="16" y="30" width="128" height="64" rx="10"/>
+    <text class="lb" x="80" y="56">PVC 申请单</text><text class="ls" x="80" y="76">100Gi · RWO · ssd类</text>
+    <rect class="gw" x="316" y="22" width="180" height="80" rx="12"/>
+    <text class="lb" x="406" y="46" style="fill:#4338ca">StorageClass</text>
+    <text class="ls" x="406" y="66">provisioner=云厂商CSI</text><text class="ls" x="406" y="84">WaitForFirstConsumer</text>
+    <rect class="bx" x="616" y="30" width="128" height="64" rx="10"/>
+    <text class="lb" x="680" y="56">PV 实物卷</text><text class="ls" x="680" y="76">后端盘的集群映射</text>
+    <rect class="bx" x="316" y="140" width="180" height="56" rx="10"/>
+    <text class="lb" x="406" y="162">CSI 供货商</text><text class="ls" x="406" y="180">按类创建真实云盘</text>
+    <rect class="bx" x="16" y="252" width="200" height="60" rx="10"/>
+    <text class="lb" x="116" y="274">Pod 调度定节点</text><text class="ls" x="116" y="292">拓扑：随 Pod 落区</text>
+    <rect class="gw" x="300" y="240" width="212" height="80" rx="12"/>
+    <text class="lb" x="406" y="262" style="fill:#4338ca">attach + mount</text>
+    <text class="ls" x="406" y="282">AD 控制器挂盘到节点</text><text class="ls" x="406" y="300">kubelet 格式化挂载目录</text>
+    <rect class="bx" x="590" y="252" width="154" height="60" rx="10"/>
+    <text class="lb" x="667" y="274">容器读写</text><text class="ls" x="667" y="292">读写走后端盘</text>
+    <line class="ln" x1="144" y1="62" x2="310" y2="62"/>
+    <line class="ln" x1="496" y1="58" x2="610" y2="58"/>
+    <line class="ln" x1="406" y1="102" x2="406" y2="134"/>
+    <line class="ln" x1="496" y1="170" x2="660" y2="240"/>
+    <line class="ln" x1="116" y1="252" x2="116" y2="200"/>
+    <line class="ln" x1="116" y1="196" x2="296" y2="170"/>
+    <line class="ln" x1="512" y1="280" x2="584" y2="280"/>
+  </svg>
+  </div>
+  <p class="code-note">链路上有三道关卡，卡住的位置不同，症状不同：<strong>绑定关</strong>（PVC Pending：没有匹配的 PV 或制备失败）、<strong>拓扑关</strong>（Pod Pending：卷的区与节点的区对不上）、<strong>挂载关</strong>（ContainerCreating：attach/mount 超时或 Multi-Attach 冲突）。排障先定位卡在哪一关，再看对应组件的事件与日志。</p>
+
+  <h3>WaitForFirstConsumer：先定 Pod 再定盘</h3>
+  <p>StorageClass 的 <code>volumeBindingMode</code> 决定"什么时候创建盘"。<code>Immediate</code> 是 PVC 一提交就建——但如果 Pod 因为亲和性只能跑在 AZ-b，而盘已经建在了 AZ-a，就是一场必输的调度。生产默认应该用 <strong><code>WaitForFirstConsumer</code>（WFFC）</strong>：<strong>推迟到第一个使用它的 Pod 完成调度后，再按 Pod 所在的拓扑创建卷</strong>——先定人再定房，卷与计算天然同区。这条配置是防"Day 1 分区碎片"的第一道保险，也是公开故障复盘里被反复点名的清单项。</p>
+
+  <h3>CSI：把存储厂商挡在发布周期之外</h3>
+  <p>2018 年以前存储插件长在 K8s 主仓库里（in-tree），存储厂商改一个 bug 要跟 K8s 发版节奏。<strong>CSI（Container Storage Interface，容器存储接口）是一份独立演进的 gRPC 规范</strong>（2019 年随 K8s 1.13 GA 对接，规范自身已迭代到 v1.13.0），三个服务各管一段：Identity 报身份能力、Controller 管"建盘/删盘/快照/扩容"这类集群级操作、Node 管"格式化/挂载"这类节点级操作。K8s 侧由一组 sidecar（external-provisioner/attacher/resizer/snapshotter）监听 API 对象并翻译成对驱动的 gRPC 调用。<strong>对架构师的价值：存储能力矩阵（能不能扩容、能不能快照、支不支持 RWX）由驱动实现决定，选存储先查驱力的能力表，而不是假设 K8s "天然支持"</strong>。近年的演进方向是把"卷"变成更接近云原生的消费体验：1.31 起 <code>volumeAttributesClassName</code> 支持 PVC 建后换挡（1.34 GA）——先建银牌卷再在线升金牌 IOPS，不用重建卷；快照与扩容均已标准化为 CRD + 控制器。</p>
+
+  <h3>回收策略：删除的语义是"策略"不是"按钮"</h3>
+  <p>PV 的 <code>persistentVolumeReclaimPolicy</code> 决定 PVC 删除后盘的命运：<code>Delete</code>（默认，动态制备）连后端卷一起删；<code>Retain</code> 保住数据等人工处理；<code>Recycle</code> 已废弃。两个高频踩坑：<strong>删 StatefulSet 不删 PVC</strong>——volumeClaimTemplates 生成的 PVC 是独立对象，删控制器后 PVC 与云盘原地不动，这在保护数据的同时也意味着"删库跑路"不会真正释放云账单（孤儿盘持续计费是云成本审计常客）；反过来，测试环境用默认 Delete 策略随手删 namespace，快照没做就是数据当场蒸发。<strong>回收策略是数据生命周期治理的入口，不是运维细节。</strong></p>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：拓扑、冗余与四问决策</h2>
+
+  <h3>存储的引力模型：AZ 是最小的"可漂移单元"</h3>
+  <p>把 01 节的三段等待抽象成一个引力模型：</p>
+  <ul>
+    <li><strong>盘钉住 Pod</strong>：RWO 卷的拓扑约束使 Pod 只能调度到卷所在的 AZ/节点域——这是引力的向内分量；</li>
+    <li><strong>AZ 决定恢复上限</strong>：节点故障时，同 AZ 有余量则分钟级重调度；同 AZ 无余量则等扩容或人工介入——<strong>故障恢复的最小保障单元是"每个 AZ 至少 2 台可调度的有状态节点"</strong>（公开复盘清单的标准条目）；</li>
+    <li><strong>多 AZ 反而更危险（若不理解引力）</strong>：节点池跨 3 个 AZ 但 3 副本因调度随机散开成"每 AZ 一个"，任一 AZ 故障时该副本的恢复依赖该 AZ 内新增节点——单 AZ 节点数≥2 才是安全线。</li>
+  </ul>
+
+  <h3>容量与恢复的三笔账</h3>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>账目</th><th>怎么算</th><th>经验红线</th></tr></thead>
+    <tbody>
+      <tr><td>挂载放大账</td><td>块存储 attach/detach 走云 API + 存储后端，大规模扩容时按队列排队</td><td>ContainerCreating 超 5 分钟必须告警</td></tr>
+      <tr><td>故障恢复账</td><td>RWO 盘恢复 = 控制面确认超时 + 云侧强制 detach 超时 + 同 AZ 调度</td><td>预算按 5+10 分钟起算，数据库切换走副本而不是等漂移</td></tr>
+      <tr><td>孤儿卷成本账</td><td>删 StatefulSet/namespace 后 PVC 残留，云盘按小时持续计费</td><td>按月对账 kubectl get pvc -A vs 云控制台盘数</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>「数据库该不该上 K8s」四问</h3>
+  <p>这是存储决策的终极形态。按顺序问自己：</p>
+  <ol>
+    <li><strong>能不能不改代码直接搬？</strong>数据库pod 化的第一站是"编排有状态进程"——StatefulSet 给稳定身份（pod-0/1/2）+ 每副本独立 PVC + headless Service 直连，进程内的主从复制逻辑不用改。</li>
+    <li><strong>要不要 Operator？</strong>裸 StatefulSet 不会做故障转移、不会提升从库、不会做 PITR 点恢复——<strong>这些是领域知识，要么买 Operator（CloudNativePG、各类厂商发行版），要么自己写控制器</strong>。"StatefulSet + 裸 MySQL" 只是半成品。</li>
+    <li><strong>故障时等不等得起漂移？</strong>01 节的账告诉我们 RWO 漂移以十分钟计。<strong>可用性靠"副本切换"而不是"卷漂移"</strong>——主从复制或共识协议把恢复时间从分钟级压到秒级，这与在不在 K8s 上无关。</li>
+    <li><strong>团队能不能养？</strong>存储运维（扩容/快照/升级 CSI 驱动）+ 数据库运维 + K8s 运维三份技能叠加，是这条路上真实的组织成本。</li>
+  </ol>
+  <p>四问都过，数据库上 K8s 是能力；有一问含糊，托管数据库 + K8s 只跑无状态部分是更诚实的架构。</p>
+
+  <div class="callout">
+    <span class="callout-title">通用语境不绑品牌名</span>
+    <p>存储选型按"块存储（数据库/消息队列单写）/ 共享文件（多读多写日志与素材）/ 对象存储（归档与数据湖）"三分类对号入座——具体产品名只在实战配置段与互链锚文本出现（遵循 2026-10-12 定稿纪律）。</p>
+  </div>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：三段可落地的配置</h2>
+
+  <h3>第一段：StorageClass——WFFC + 扩容 + 拓扑，三条生产默认</h3>
+  <div class="codeblock">
+  <pre><code>apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: fast-ssd
+provisioner: ebs.csi.aws.com          # 以云厂商 CSI 驱动为例
+parameters:
+  type: gp3
+volumeBindingMode: WaitForFirstConsumer   # 先定 Pod 再定盘:随 Pod 落区
+allowVolumeExpansion: true            # 在线扩容的开关,建类时就要想好
+reclaimPolicy: Delete                  # 数据库类建议改 Retain
+mountOptions:
+- noatime                              # 数据库卷减少元数据写放大</code></pre>
+  </div>
+  <p class="code-note">WFFC 防分区错配、扩容开关要在建类时打开（后补要改类）、回收策略按数据等级分——这三条是"建类一时的事，没做全是事后的坑"。</p>
+
+  <h3>第二段：PVC 在线扩容——从 100Gi 到 200Gi 不停机</h3>
+  <div class="codeblock">
+  <pre><code># 前提: StorageClass allowVolumeExpansion: true + 驱动支持
+# (CSI 1.1 起规范含 EXPAND_VOLUME,主流云盘驱动均已实现)
+kubectl patch pvc mysql-data-mysql-0 \
+  -p '{"spec":{"resources":{"requests":{"storage":"200Gi"}}}}'
+
+# 扩容是两段式: PVC FileSystemResizePending 前为后端盘扩容,
+# Pod 重启后由 kubelet 完成 文件系统 扩展(在线文件系统扩展依驱动)
+kubectl get pvc -w    # 盯 CAPACITY 从 100Gi 变 200Gi
+# 注意: 只能扩大不能缩小;扩容期间可能短暂进入 resizing 状态</code></pre>
+  </div>
+  <p class="code-note">规划期把容量斜率算清楚：在线扩容只能救急不能当容量规划用——每次扩容是一次"盘级变更"，与快照、监控告警（容量水位 70% 告警）配套做。</p>
+
+  <h3>第三段：快照与恢复——VolumeSnapshot 的标准姿势</h3>
+  <div class="codeblock">
+  <pre><code># 前提: 集群已装 VolumeSnapshot CRD + external-snapshotter
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: mysql-0-pre-upgrade
+spec:
+  volumeSnapshotClassName: csi-snapclass
+  source:
+    persistentVolumeClaimName: mysql-data-mysql-0
+---
+# 恢复 = 从快照建新 PVC(数据卷克隆),不是"塞回去"
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mysql-data-mysql-0-restore
+spec:
+  storageClassName: fast-ssd
+  dataSource:
+    name: mysql-0-pre-upgrade
+    kind: VolumeSnapshot
+    apiGroup: snapshot.storage.k8s.io
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: 200Gi } }</code></pre>
+  </div>
+  <p class="code-note">快照的定位是"变更前保险"（升级/大迁移前打一张），不是备份体系——<strong>跨区域/异地容灾仍然要独立的备份管道（如对象存储 + 生命周期策略）</strong>，快照与 AZ 同生共死。</p>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>存储有引力：</strong>盘在哪个可用区，Pod 就被钉在哪个可用区——RWO 卷的拓扑约束是物理约束不是配置项；故障恢复的最小保障单元是"每个 AZ 至少 2 台可调度的有状态节点"。</li>
+    <li><strong>有状态故障恢复 = 三段等待：</strong>控制面确认节点死亡（约 5 分钟）+ 云侧强制 detach（6~10 分钟）+ 同 AZ 重调度——数据库的可用性靠副本切换兜底，永远不要把宝押在卷漂移上。</li>
+    <li><strong>三道关卡定位法：</strong>PVC Pending 卡绑定关（describe pvc 看 ProvisioningFailed）、Pod Pending 卡拓扑关（volume node affinity conflict）、ContainerCreating 卡挂载关（Multi-Attach）——先定关卡再进对应组件的日志。</li>
+    <li><strong>WFFC + 扩容开关 + 回收策略是建类三问：</strong>WaitForFirstConsumer 先定 Pod 再定盘；allowVolumeExpansion 建类时打开；回收策略按数据等级分——孤儿卷计费与误删数据都从这条门进。</li>
+    <li><strong>数据库上 K8s 四问：</strong>能不能不改代码搬（StatefulSet 身份+PVC）、要不要 Operator（故障转移/PITR 是领域知识）、等不等得起漂移（可用性靠副本不是卷）、养不养得起（三份运维技能叠加）——四问都过再上。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目：三可用区生产集群，消息队列要上 K8s——存储与拓扑方案怎么设计、怎么验证？</summary>
+    <div class="details-body">
+      <p>背景：公司核心消息集群（类 Kafka 架构，3 broker，每 broker 一块 2TB 云盘）计划从虚拟机迁到 K8s 生产集群。集群节点池跨 3 个可用区（每 AZ 4 台），存储走 CSI 动态制备的块存储。老板的要求："任何一个 AZ 整体故障，消息服务 5 分钟内恢复写入，数据零丢失。"请回答：</p>
+      <p><strong>① 拓扑与调度方案怎么设计？</strong><br>
+      <strong>② AZ 故障时的恢复剧本是什么？哪些时间预算要提前实测？</strong><br>
+      <strong>③ "数据零丢失 + 5 分钟恢复"两个承诺分别靠什么机制兑现？哪个更贵？</strong></p>
+      <h4>🔍 深度解析</h4>
+      <p><strong>① 拓扑三件套：WFFC + 分区反亲和 + 单 AZ 节点冗余。</strong>StorageClass 必须 <code>WaitForFirstConsumer</code>——broker Pod 先调度、盘随后按 Pod 所在 AZ 创建，从 Day 1 保证" broker 与它的盘同区"。调度用 <code>podAntiAffinity</code>（topologyKey 用 <code>topology.kubernetes.io/zone</code>）把 3 个 broker 强制打散到 3 个 AZ，避免两个 broker 共享同一故障域；同时用节点级 preferred 反亲和防同节点堆叠。节点侧验证"每个 AZ 至少 2 台可调度有状态节点"——这是 AZ 故障时新副本能在同区重建的前提。另注意 StatefulSet 的 at-most-one 语义与OrderedReady 扩缩容顺序，broker 编号即身份，PVC 随身份绑定。</p>
+      <p><strong>② 恢复剧本分"副本切换"与"卷重建"两条线，时间预算各不同。</strong>AZ-a 故障：①broker-0 所在 AZ 失联，控制器/集群自身的副本机制先接管分区 Leader（消息队列的分区多副本设计，秒级到十秒级）；②挂掉 broker 的 Pod 处于 Unknown，StatefulSet 不会自动在别的 AZ 重建它——盘还在 AZ-a，引力还在；恢复写入靠的是<strong>剩余 2 个 broker 承载全部分区</strong>，这要求容量规划按"N-1 承载全量"预留（2/3 水位线）。要提前实测的预算：Leader 切换时长（决定 5 分钟承诺的大头）、AZ 恢复后 broker-0 回归的 rejoin 时长（盘还在、节点回来即挂回）、以及"AZ 永久报废"场景下跨 AZ 重建盘 + 重放数据的时长（这就是 5 分钟承诺覆盖不了的场景，要提前跟老板对齐）。<strong>诚实结论：AZ 故障 5 分钟恢复写入=副本切换兑现；AZ 永久故障=数据重放/备份恢复，以小时计，承诺要分开写。</strong></p>
+      <p><strong>③ 零丢失靠"副本同步复制 + 生产者确认"，5 分钟恢复靠"多副本热备"，两者的账单不同。</strong>零丢失：消息队列的多副本机制配 <code>acks=all</code> 级别的同步复制（所有 ISR 副本确认才算写入成功）+ 生产者重试幂等——代价是写入延迟翻倍量级（同步等 3 个 AZ 落盘 vs 单副本本地落盘），吞吐相应打折。5 分钟恢复：3 副本跨 AZ 打散 + N-1 容量预留——代价是 3 倍存储成本 + 1.5 倍计算冗余。<strong>哪个更贵取决于业务：延迟敏感型业务买"零丢失"（同步复制）更痛，成本敏感型业务买"5 分钟恢复"（冗余）更痛；但两者都远比"AZ 故障后从备份重放"便宜——备份恢复是最后兜底，永远不该出现在 5 分钟承诺里。</strong>另补一条工程护栏：监控里必须有"ISR 收缩告警"与"同步副本延迟水位"，零丢失承诺的失效往往不是 AZ 故障，而是某副本静默掉队、同步复制悄悄退化为单副本。</p>
+    </div>
+  </details>
+
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>Kubernetes 官方文档《Persistent Volumes》（PV/PVC/StorageClass 语义、回收策略、拓扑感知调度的一手出处）：<br>
+    <a href="https://kubernetes.io/zh-cn/docs/concepts/storage/persistent-volumes/" target="_blank" rel="noopener">kubernetes.io — Persistent Volumes</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>系列内互链：<a href="0043-k8s-pod-deployment-service.html">0043 三件套与控制循环</a>（存储控制器同属"观测-对比-调谐"世界观的纵深展开）、<a href="0044-k8s-configmap-secret.html">0044 ConfigMap 与 Secret</a>（配置型卷与加密存储的分工——本期讲数据型卷）、<a href="0024-k8s-ingress-service-traffic.html">0024 Ingress 与 Service 流量</a>（存储拓扑与流量拓扑的对照）、<a href="0016-k8s-hpa.html">0016 HPA</a>（无状态弹性与有状态引力的边界）、<a href="0033-mysql-ha-failover.html">0033 MySQL 高可用切换</a>（副本切换兜底的具体实现，本期四问第 3 问的展开）。延伸：CSI 规范仓库（container-storage-interface/spec，接口演进一手出处）、Kubernetes 官方《Storage Classes》《Volume Snapshots》文档。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0060-model-routing-token-cost-governance.html">← 上一期：多模型路由与 Token 成本治理</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 61 期 · Kubernetes 系列 · 下期继续 Kubernetes 线：网络策略（NetworkPolicy）</p>
+  <p>☸️ 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>

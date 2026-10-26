@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>技术概念手记 · JDBC 与 MyBatis：mapper 一行代码，到 SQL 之间发生了什么</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">TECH CONCEPT NOTES · 0005</span>
+  <span><a href="../index.html">栏目目录</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">Java 后端 · 持久层</p>
+  <h1>JDBC 与 MyBatis：mapper 一行代码，到 SQL 之间发生了什么</h1>
+  <p class="subtitle">天天写 <code>mapper.getUserById(id)</code>，一行进去、一个对象出来——中间那条链路你敢说自己讲得清吗？这篇从 JDBC 的"插座标准"讲到 MyBatis 的动态代理与绑定路由，把六步链路逐环拆开；再讲清一个常被含糊带过的问题：<strong>SQL 到底是谁写的</strong>（手写路由、MyBatis-Plus 启动注入、条件构造器三层光谱）；最后回答"换国产信创数据库要改什么"——Mapper 一行不动，动的是哪两行。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">☕ Java 后端</span>
+    <span class="tag-date">📅 2026-10-27 · 第 5 期</span>
+    <span class="tag time">⏱ 预计阅读 11 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>场景：一行进去，一个对象出来</h2>
+  <p>Java 后端开发者每天都在写这样的代码：<code>User u = userMapper.getUserById(42L);</code>——一行进去，一个填好字段的对象出来。没有 SQL、没有 ResultSet、没有连接管理。但面试官问一句"中间发生了什么"，很多人只能答到"MyBatis 执行了 SQL"。<strong>SQL 是你写的还是框架生成的？接口没有实现类，调用怎么成立的？结果集怎么变成对象的？</strong>这三个问题答不圆，等于没讲清。</p>
+  <p>要理解这层"魔法"，得先回到没有框架的年代。原生 JDBC 查一个用户要六步：拿连接（<code>DriverManager.getConnection</code>）→ 预编译语句（<code>prepareStatement</code>）→ 手动设参（<code>ps.setLong(1, id)</code>）→ 执行（<code>executeQuery</code>）→ 遍历结果集手动逐字段 setter（<code>rs.getLong("id")</code>…）→ 关闭三件资源。三样痛点全在这六步里：<strong>SQL 与 Java 代码搅在一起、参数一个个手动设、结果一行行手动搬</strong>。MyBatis 解决的就是这三痛——但它到底在 JDBC 之上做了什么、没做什么，先从 JDBC 本身说起。</p>
+  <p>还有一类现实的担心：项目要换国产信创数据库（达梦、人大金仓）了，持久层代码要大改吗？这篇最后会给出精确答案：换库动的是<strong>两行配置</strong>，Mapper 一行不动——为什么敢这么讲，读完链路你就明白了。</p>
+</section>
+
+<!-- ================= 02 JDBC 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>JDBC：Java 定的"插座标准"</h2>
+  <p>JDBC（Java Database Connectivity）不是某个产品，是 JDK 里的<strong>一套接口标准</strong>（<code>java.sql</code> 包）。官方定义原话：它提供"用 Java 访问与处理数据源中数据的 API"，且包含"一个<strong>可以动态安装不同驱动</strong>来访问不同数据源的框架"。最贴切的比喻是<strong>墙上的插座标准</strong>：插座形状统一（JDBC 接口），各家电厂的插头（数据库驱动）各自生产，但都必须符合这个形状——<strong>Java 代码面对的永远是插座，不关心背后是哪家电</strong>。</p>
+  <div class="diagram">
+  <svg viewBox="0 0 820 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <text x="410" y="18" text-anchor="middle" fill="var(--muted)" font-size="13">JDBC 分层：你的代码只面向插座，驱动是可替换的插头</text>
+
+    <rect x="40" y="40" width="200" height="56" rx="9" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.2"/>
+    <text x="140" y="64" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">你的 Java 代码 / MyBatis</text>
+    <text x="140" y="82" text-anchor="middle" fill="var(--muted)" font-size="10">Connection / PreparedStatement / ResultSet</text>
+
+    <rect x="300" y="40" width="220" height="56" rx="9" fill="var(--card)" stroke="var(--line)"/>
+    <text x="410" y="64" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="700">JDBC 接口标准（java.sql）</text>
+    <text x="410" y="82" text-anchor="middle" fill="var(--muted)" font-size="10">JDK 自带 · 只定形状，不含实现</text>
+
+    <line x1="242" y1="68" x2="296" y2="68" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#ar)"/>
+
+    <rect x="40" y="150" width="150" height="52" rx="9" fill="var(--card)" stroke="var(--line)"/>
+    <text x="115" y="172" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">MySQL Connector/J</text>
+    <text x="115" y="190" text-anchor="middle" fill="var(--muted)" font-size="9.5">MySQL 官方驱动 jar</text>
+    <rect x="220" y="150" width="150" height="52" rx="9" fill="var(--card)" stroke="var(--line)"/>
+    <text x="295" y="172" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">DmJdbcDriver18</text>
+    <text x="295" y="190" text-anchor="middle" fill="var(--muted)" font-size="9.5">达梦 DM8 驱动 jar</text>
+    <rect x="400" y="150" width="180" height="52" rx="9" fill="var(--card)" stroke="var(--line)"/>
+    <text x="490" y="172" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">金仓 / PostgreSQL 驱动</text>
+    <text x="490" y="190" text-anchor="middle" fill="var(--muted)" font-size="9.5">KingbaseES 基于 PG 内核</text>
+
+    <line x1="410" y1="98" x2="410" y2="144" stroke="var(--muted)" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#ar)"/>
+    <text x="422" y="126" fill="var(--muted)" font-size="10">驱动实现接口 · 换库 = 换插头</text>
+
+    <rect x="620" y="150" width="160" height="52" rx="9" fill="var(--card)" stroke="var(--line)"/>
+    <text x="700" y="172" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="700">各家数据库</text>
+    <text x="700" y="190" text-anchor="middle" fill="var(--muted)" font-size="9.5">私有网络协议在此层</text>
+    <line x1="584" y1="176" x2="616" y2="176" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#ar)"/>
+
+    <text x="410" y="252" text-anchor="middle" fill="var(--muted)" font-size="10.5">JDBC 4.0 起（Java 6+）：驱动经 META-INF/services SPI 自动注册 —— 代码里不再需要 Class.forName</text>
+    <text x="410" y="274" text-anchor="middle" fill="var(--muted)" font-size="10.5">老教程里的 Class.forName("com.mysql.jdbc.Driver") 是 JDBC 4.0 之前的手动注册写法</text>
+  </svg>
+  </div>
+  <p>核心接口一张表：| 接口 | 干什么 |——<code>DriverManager</code>：管理一组驱动、建立连接；<code>Connection</code>：一条数据库会话，创建语句、管事务；<code>PreparedStatement</code>：预编译语句，<code>?</code> 占位符 + <code>setLong(1, x)</code> 设参（参数序号从 1 开始）；<code>ResultSet</code>：结果集，<code>rs.next()</code> 逐行游标。两个必讲行为：<strong>其一，<code>?</code> 占位符的参数走"值"通道，不参与 SQL 语法解析</strong>——这就是预编译防 SQL 注入的根：用户输入永远只是参数值，不可能变成 SQL 结构（拼接 <code>' or '1'='1</code> 进 <code>?</code> 也只是一个普通字符串值）。<strong>其二，Connection 的 autoCommit 默认是 true</strong>（每条语句自动提交一个事务）；要手动事务就 <code>setAutoCommit(false)</code>，最后 <code>commit()</code> 或 <code>rollback()</code>。</p>
+</section>
+
+<!-- ================= 03 MyBatis 定位 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>MyBatis 的真实角色：不写 SQL 的替代品，是路由器</h2>
+  <p>先纠正一个常见含糊：MyBatis <strong>不会替你生成 SQL</strong>。它的角色是——<strong>你把 SQL 写在 XML 或注解里，它把"Java 方法调用"路由到这条 SQL 上，并自动完成参数绑定与结果映射</strong>。对准 JDBC 六步的三大痛点，各给一个解法：</p>
+  <div class="vs">
+    <div class="pick">
+      <h4>JDBC 的三痛 → MyBatis 的三解</h4>
+      <p><strong>SQL 混在 Java 里 → SQL 独立成 XML/注解</strong>：语句与方法分离，SQL 归 SQL、代码归代码。</p>
+      <p><strong>手动设参 → <code>#{id}</code> 自动绑定</strong>：占位符写参数名，框架翻译成 <code>?</code> 并按类型设参。</p>
+      <p><strong>手动搬结果 → 自动映射成对象</strong>：ResultSet 到对象字段的搬运（含驼峰转换）由框架按映射规则完成。</p>
+    </div>
+    <div>
+      <h4>它没做什么</h4>
+      <p>连接的建立与管理仍在 JDBC/连接池（MyBatis 只是包装了 DataSource）；SQL 语法仍是各家数据库的方言——<strong>MyBatis 站在 JDBC 之上，不替代 JDBC</strong>。理解这个定位，后面的链路和信创迁移就都顺了。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 04 六步链路 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>核心链路：六步，从方法调用到对象</h2>
+  <div class="flow-strip">
+    <div class="flow-step"><span class="no">1</span>
+      <p class="what">调用方法</p>
+      <p class="how">mapper.getUserById(42L)</p>
+      <p class="why">接口没有实现类——没人写过 getUserById 的方法体</p></div>
+    <div class="flow-step"><span class="no">2</span>
+      <p class="what">动态代理拦截</p>
+      <p class="how">getMapper 返回的是 JDK 动态代理对象</p>
+      <p class="why">调用被 MapperProxy 接住，转给框架处理</p></div>
+    <div class="flow-step"><span class="no">3</span>
+      <p class="what">找到 SQL</p>
+      <p class="how">按「接口全限定名.方法名」查找</p>
+      <p class="why">namespace + id 就是绑定关系的全部秘密</p></div>
+    <div class="flow-step"><span class="no">4</span>
+      <p class="what">参数绑定</p>
+      <p class="how">#{id} 翻译成 ? + setLong(42)</p>
+      <p class="why">${} 则是字符串拼接——注入风险</p></div>
+    <div class="flow-step"><span class="no">5</span>
+      <p class="what">动态 SQL 拼装</p>
+      <p class="how">if/where/foreach 求值后拼出最终语句</p>
+      <p class="why">发生在设参之前，拼的是 SQL 结构</p></div>
+    <div class="flow-step"><span class="no">6</span>
+      <p class="what">执行与映射</p>
+      <p class="how">executeQuery → ResultSet → 反射填对象</p>
+      <p class="why">按 resultMap/驼峰规则，字段进属性</p></div>
+  </div>
+
+  <h3>第 2~3 步：没有实现类的接口，凭什么能调</h3>
+  <p>启动时 MyBatis 扫描 Mapper 接口，为每个接口注册一个 <strong>JDK 动态代理</strong>；你注入使用的 <code>userMapper</code>，实际是 <code>session.getMapper(UserMapper.class)</code> 这条路给出的代理对象。调用 <code>getUserById</code> 时，代理把"哪个接口的哪个方法"翻译成一个查找键——<strong>接口全限定名 + 方法名</strong>，去配置里找同名的语句。MyBatis 官方文档对绑定规则的表述：将映射文件的 <code>namespace</code> 设为接口全限定名后，"命名空间就可以直接映射到同名的映射器类，并将已映射的 select 语句匹配到<strong>对应名称、参数和返回类型相同</strong>的方法"。也就是说绑定不靠任何魔法注解处理，就是一次字符串对齐：</p>
+  <div class="codeblock term">
+    <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>绑定：接口方法 ↔ XML 语句</span></div>
+    <pre><code><span class="t-cmt"># 接口：没有实现类，方法名就是查找键的一半</span>
+<span class="t-out">public interface UserMapper {</span>
+<span class="t-out">    User getUserById(Long id);          // ← id 必须与 XML 的 id 一致</span>
+<span class="t-out">}</span>
+<span class="t-cmt"># XML：namespace = 接口全限定名，这就是另一半</span>
+<span class="t-out">&lt;mapper namespace="com.demo.mapper.UserMapper"&gt;</span>
+<span class="t-out">  &lt;select id="getUserById" resultType="User"&gt;</span>
+<span class="t-out">    select * from users where id = #{id}</span>
+<span class="t-out">  &lt;/select&gt;</span>
+<span class="t-out">&lt;/mapper&gt;</span>
+<span class="t-cmt"># 查找键 = com.demo.mapper.UserMapper.getUserById = namespace + id</span></code></pre>
+  </div>
+
+  <h3>第 4 步：#{} 与 ${}，一条安全一条危险</h3>
+  <p>官方文档写得很直白：<code>#{id}</code> 会"创建 PreparedStatement 占位符，<strong>等价于 JDBC 中用 ? 并调用 ps.setInt(1, id)</strong>"——参数走预编译通道，安全。<code>${column}</code> 则是"<strong>字符串替换</strong>，直接插入 SQL"——官方同时警告：把用户输入用作这类参数"会导致<strong>潜在的 SQL 注入攻击</strong>"。所以规矩是：<strong>值一律 <code>#{}</strong>；只有动态表名/列名这种"必须成为 SQL 结构一部分"的场合才用 <code>${}</code>，且值必须来自白名单，绝不来自用户输入。</p>
+
+  <h3>第 5 步：动态 SQL——拼的是结构，不是值</h3>
+  <div class="codeblock term">
+    <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>if / where / foreach（官方示例改编）</span></div>
+    <pre><code><span class="t-out">&lt;select id="findActive" resultType="Blog"&gt;</span>
+<span class="t-out">  SELECT * FROM Blog</span>
+<span class="t-out">  &lt;where&gt;</span>
+<span class="t-out">    state = 'ACTIVE'</span>
+<span class="t-out">    &lt;if test="title != null"&gt;</span>
+<span class="t-out">      AND title like #{title}          &lt;!-- 值仍走 #{} 预编译 --&gt;</span>
+<span class="t-out">    &lt;/if&gt;</span>
+<span class="t-out">  &lt;/where&gt;</span>
+<span class="t-out">&lt;/select&gt;</span>
+<span class="t-cmt"># &lt;where&gt; 只在子元素产出内容时才插入 WHERE，并去掉开头的 AND/OR</span>
+<span class="t-cmt"># &lt;foreach&gt; 常用于 IN 列表：separator="," 在各项之间插逗号</span></code></pre>
+  </div>
+  <p>执行时 MyBatis 用 OGNL 表达式（<code>test="title != null"</code>）对参数求值，决定拼进哪些片段，<strong>拼装发生在 PreparedStatement 创建之前——拼的是 SQL 结构；而值的位置始终是 <code>#{}</code>，仍走 <code>?</code> 通道</strong>。结构动态、值永远安全，这是动态 SQL 的正确理解姿势。</p>
+
+  <h3>第 6 步：ResultSet 怎么变成对象</h3>
+  <p>执行查询拿到 ResultSet 后，MyBatis 按<strong>映射规则</strong>搬运字段：默认按"列名与属性名一致"匹配；开启 <code>mapUnderscoreToCamelCase</code> 后，数据库的 <code>user_name</code> 自动映射到 <code>userName</code>；复杂对应（多表、嵌套）用 <code>resultMap</code> 显式声明。搬运靠反射：实例化对象、逐列 <code>set</code> 进属性——这就是你不用写二十行 setter 的原因，代价只是启动时的映射解析，运行时是纯反射赋值。</p>
+</section>
+
+<!-- ================= 05 SQL 是谁写的 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>SQL 到底是谁写的：三层光谱</h2>
+  <p>"MyBatis 从函数生成 SQL"是常被说混的一句话——按 SQL 的作者分，其实是一个三层光谱：</p>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th></th><th>纯 MyBatis</th><th>MyBatis-Plus 内置 CRUD</th><th>条件构造器 Wrapper</th></tr>
+    <tr><td><strong>SQL 谁写</strong></td><td>你，手写在 XML/注解</td><td>框架：启动时自动注入通用 SQL</td><td>半自动：方法链描述条件，框架翻译成 WHERE</td></tr>
+    <tr><td><strong>典型用法</strong></td><td><code>&lt;select id="getUserById"&gt;</code></td><td><code>userMapper.selectById(42L)</code> 零 SQL</td><td><code>wrapper.eq(User::getName, "x")</code></td></tr>
+    <tr><td><strong>适合</strong></td><td>复杂查询、多表、调优 SQL</td><td>单表的增删改查</td><td>动态条件组合查询</td></tr>
+  </table>
+  </div>
+  <p>MyBatis-Plus 官方给自己的定位是"MyBatis 最佳搭档，<strong>只做增强不做改变</strong>"。它没有另起炉灶——核心机制就一条：<strong>"启动即会自动注入基本 CURD"</strong>（官方原话）。你继承 <code>BaseMapper&lt;User&gt;</code> 后，<code>selectById / insert / updateById / deleteById</code> 这些方法对应的 SQL，是 Plus 在启动阶段拼装好、按同样的 namespace.id 规则<strong>注入进 MyBatis 容器</strong>的——所以它们跑在和你手写 SQL 完全相同的代理、绑定、参数、映射链路上。<code>LambdaQueryWrapper</code>（<code>eq(User::getStatus, 1)</code> 用方法引用写字段名，编译期就能查出写错）把条件描述翻译成 WHERE 片段，本质也是生成一段 SQL 交给同一套链路执行。</p>
+  <div class="qa">
+    <span class="q">那 JPA/Hibernate 那种"方法名派生查询"呢？</span>
+    <div class="a"><p>光谱还能往右延伸一层：Spring Data JPA 的 <code>findByNameAndAge(...)</code> 连方法名都是语义——框架解析方法名直接生成 SQL。代价与收益是同一件事：SQL 不归你写，也就不由你精细控制（复杂查询要么学它的语法要么退回原生 SQL）。MyBatis 系把 SQL 留给你，Plus 只收编"不值得手写的那部分"——两层可以共存：单表交给 BaseMapper，复杂查询照旧手写 XML。</p></div>
+  </div>
+</section>
+
+<!-- ================= 06 信创 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>信创迁移：Mapper 一行不动，动的是哪两行</h2>
+  <p>回到开头的问题：MySQL 换达梦（DM8）或人大金仓（KingbaseES），持久层改什么？按第 02 节的分层图答案已经出来了——<strong>MyBatis 只产 JDBC 调用，方言差异被 JDBC 的驱动层隔离；换库 = 换驱动 jar + 改 url/driver 配置，Mapper 接口与 XML 一行不动</strong>：</p>
+  <div class="codeblock term">
+    <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>换库实际改的两行（数据源配置）</span><button class="copy">复制命令</button></div>
+    <pre><code><span class="t-cmt"># MySQL</span>
+<span class="t-out">driver-class-name: com.mysql.cj.jdbc.Driver</span>
+<span class="t-out">url: jdbc:mysql://host:3306/db?useSSL=false</span>
+<span class="t-cmt"># 达梦 DM8：驱动换 DmJdbcDriver18（兼容 Oracle 语法系）</span>
+<span class="t-out">driver-class-name: dm.jdbc.driver.DmJdbcDriver</span>
+<span class="t-out">url: jdbc:dm://host:5236/SYSDBA</span>
+<span class="t-cmt"># 人大金仓 KingbaseES：PG 内核，走兼容模式（支持 MySQL/Oracle 模式）</span>
+<span class="t-out">driver-class-name: com.kingbase8.Driver</span>
+<span class="t-out">url: jdbc:kingbase8://host:54321/db</span></code></pre>
+  </div>
+  <p>达梦和金仓的"路数"值得记一句：<strong>达梦深度兼容 Oracle 语法系</strong>（自增用 SEQUENCE、大量 Oracle 函数行为），驱动 <code>DmJdbcDriver18</code> 对应 JDBC 4.2 标准；<strong>金仓基于 PostgreSQL 内核</strong>发展，PG 生态工具基本直接可用，另提供 MySQL/Oracle 兼容模式（如 MySQL 模式下适配了 <code>NOW()</code>、<code>IFNULL</code> 这类写法）。</p>
+  <div class="rule"><span class="mark">⚠</span><div class="txt">
+    <strong>Mapper 不改 ≠ 什么都不用改——三个真正的坑在 SQL 方言层</strong>
+    <p class="why">① 分页：MyBatis-Plus 物理分页按 DbType 生成 LIMIT/ROWNUM，信创库要确认 DbType 配置；② 自增策略：MySQL 的 AUTO_INCREMENT 到 Oracle 系要换 SEQUENCE（或用 Plus 的 IdType.AUTO/INPUT/ASSIGN_ID 适配）；③ 函数与隐式转换差异——兼容模式"能跑"不代表行为一致，迁移必须跑 SQL 兼容性扫描与回归测试</p>
+  </div></div>
+  <p>如果同一套 Mapper 要在多方言数据库上共存，MyBatis 还有内置方案：<code>databaseIdProvider</code> 配置后，语句可按 <code>databaseId</code> 区分（如同一 id 写 MySQL 版和达梦版两条），运行时按当前连接自动选择——方言差异被收敛在 SQL 文件里，Java 侧依然一行不动。</p>
+</section>
+
+<!-- ================= 07 今日带走 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>今日带走</h2>
+  <ul class="key-points">
+    <li><strong>JDBC 是插座标准，驱动是插头</strong>：java.sql 只定接口，厂商各发驱动实现——换库换插头，Java 代码面向插座不变（JDBC 4.0 起 SPI 自动注册，无需 Class.forName）。</li>
+    <li><strong>? 占位符是防注入的根</strong>：参数走"值"通道不参与语法解析；Connection 的 autoCommit 默认 true，手动事务要显式关。</li>
+    <li><strong>MyBatis 不生成 SQL，它做路由</strong>：动态代理拦截方法调用 → 按"namespace=接口全限定名 + id=方法名"找到你写的 SQL → 参数绑定 → 结果反射映射，六步链路。</li>
+    <li><strong>#{} 走预编译（等价 ? + setInt），${} 是字符串拼接</strong>：值一律 #{}；${} 只给表名/列名且必须白名单。</li>
+    <li><strong>SQL 的作者是三层光谱</strong>：纯 MyBatis 手写路由；MyBatis-Plus"启动即自动注入基本 CURD"（BaseMapper 零 SQL）；Wrapper 方法链半自动——三层跑在同一套代理/绑定/映射机制上，"只做增强不做改变"。</li>
+    <li><strong>信创换库 = 换驱动 jar + 改两行配置，Mapper 一行不动</strong>：真坑在方言层——分页 DbType、自增策略、函数差异；多方言共存用 databaseIdProvider。</li>
+  </ul>
+</section>
+
+<!-- ================= 08 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>随堂小测</h2>
+  <div class="quiz" data-title="JDBC 与 MyBatis">
+    <span class="quiz-score"></span>
+    <div class="quiz-q" data-answer="1">
+      <p class="q-text">1. Mapper 接口没有实现类，调用 getUserById 为什么能执行 SQL？</p>
+      <button class="quiz-opt">编译器自动生成了实现类</button>
+      <button class="quiz-opt">getMapper 返回的是 JDK 动态代理对象，按「接口全限定名+方法名」路由到 SQL</button>
+      <button class="quiz-opt">MyBatis 解析方法名实时生成 SQL 并执行</button>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q" data-answer="2">
+      <p class="q-text">2. #{name} 和 ${name} 的本质区别？</p>
+      <button class="quiz-opt">没有区别，只是写法风格</button>
+      <button class="quiz-opt">${} 性能更好，生产环境推荐</button>
+      <button class="quiz-opt">#{} 翻译成预编译 ? 参数；${} 是字符串拼接进 SQL，用户输入可造成注入</button>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q" data-answer="0">
+      <p class="q-text">3. userMapper.selectById(42) 一行 SQL 都没写，这条 SQL 是谁写的？</p>
+      <button class="quiz-opt">MyBatis-Plus 启动时自动注入的通用 SQL，跑在和你手写 SQL 相同的链路上</button>
+      <button class="quiz-opt">数据库自己生成的存储过程</button>
+      <button class="quiz-opt">编译期由注解处理器生成并编译进 class 文件</button>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q" data-answer="1">
+      <p class="q-text">4. MySQL 换达梦数据库，持久层必须改什么？</p>
+      <button class="quiz-opt">所有 Mapper 接口重新生成，XML 重写</button>
+      <button class="quiz-opt">换驱动 jar + 改 url/driver 两行配置；真坑在方言层（分页/自增/函数）要专项回归</button>
+      <button class="quiz-opt">必须放弃 MyBatis 换达梦专用框架</button>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q" data-answer="2">
+      <p class="q-text">5. 动态 SQL 的 <if>/<where> 拼装发生在哪个阶段、拼的是什么？</p>
+      <button class="quiz-opt">数据库执行时拼，拼的是参数值</button>
+      <button class="quiz-opt">编译期拼，拼的是完整的 SQL 字符串包括参数值</button>
+      <button class="quiz-opt">执行前拼，拼的是 SQL 结构（片段），值的位置仍是 #{} 走 ? 通道</button>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 09 延伸阅读 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>JDBC 接口标准与驱动框架定义、PreparedStatement/事务行为：<br>
+    <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.sql/java/sql/package-summary.html" target="_blank" rel="noopener">Java SE API — java.sql 包文档</a></p>
+    <p>绑定规则（namespace/id）、#{} 与 ${} 的语义与注入警告、动态 SQL 标签：<br>
+    <a href="https://mybatis.org/mybatis-3/zh_CN/" target="_blank" rel="noopener">MyBatis 3 官方中文文档</a>（入门 · XML 映射器 · 动态 SQL 三章）</p>
+    <p>"只做增强不做改变"、"启动即会自动注入基本 CURD"、BaseMapper 与条件构造器：<br>
+    <a href="https://baomidou.com/" target="_blank" rel="noopener">MyBatis-Plus 官方文档</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 相关阅读</h4>
+    <p>达梦 JDBC 驱动（DmJdbcDriver18，JDBC 4.2）与 Oracle 语法兼容：<a href="https://eco.dameng.com/document/dm/zh-cn/start" target="_blank" rel="noopener">达梦生态文档</a>；金仓 KingbaseES（PG 内核 + MySQL/Oracle 兼容模式）：<a href="https://www.kingbase.com.cn/" target="_blank" rel="noopener">人大金仓官网</a>；多方言共存配置 databaseIdProvider 见 MyBatis 官方文档「数据库厂商标识（databaseIdProvider）」一节。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="../index.html">栏目目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>技术概念手记 · 第 5 期 · 不定期更新：工作中遇到难懂的概念，就回来吃透它</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/content.js"></script>
+</body>
+</html>
