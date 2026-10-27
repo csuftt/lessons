@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · Kubernetes 网络策略 NetworkPolicy：默认全通的四层身份网络 | 2026-10-28</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0062</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0061-k8s-storage-pv-pvc-csi.html">上一期：Kubernetes 存储卷</a> · <a href="https://www.bilibili.com/video/BV1iYxG6bEpk" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">KUBERNETES · Kubernetes 系列第 6 讲（网络策略篇）</p>
+  <h1>Kubernetes 网络策略 NetworkPolicy：默认全通的四层身份网络</h1>
+  <p class="subtitle">K8s 集群的网络默认是"扁平网"：任何 Pod 可以直连任何 Pod，跨命名空间、跨环境、直达生产数据库——这不是便利，是不设防。传统机房的纵深防御被容器网络悄悄抹平，而你手里最好的补丁就是 NetworkPolicy：<strong>用标签声明"谁可以和我说话"的白名单，把治理对象从易变的 IP 换成稳定的身份</strong>。这一讲从一次打穿内网的横向移动复盘讲起，拆开"选择即戒严"的白名单语义与选择器的 AND 陷阱，讲清"K8s 只立法、CNI 执法"的分权模型——选错 CNI 策略会静默失效，最后给出从默认拒绝基线到连通性验证的完整落地路径。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">☸️ Kubernetes</span>
+    <span class="tag-date">📅 2026-10-28 · 第 62 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>场景：一张被攻陷的 Pod，等于全网的通行证</h2>
+
+  <h3>复盘一次典型的横向移动</h3>
+  <p>威胁情报机构对云攻击组织的多年跟踪（Unit 42 对 TeamTNT、Watchdog 等挖矿与窃密团伙的分析）给出了几乎一致的入侵剧本：<strong>入口是一个暴露在公网、带着 RCE 漏洞的 Pod</strong>（比如一个没升级的老版本报表组件）——攻击者拿到容器内的 shell，第一件事不是搞数据，而是网络侦察。而扁平网络里侦察的性价比高得离谱：</p>
+  <ul>
+    <li><strong>内网段广播式可达</strong>：Pod 网段里每一跳都是活的，一次端口扫描就能画出全部服务拓扑——没有防火墙挡、没有分段拦；</li>
+    <li><strong>高价值目标一网打尽</strong>：生产环境的数据库端口、缓存端口、消息队列控制台，全部在 Pod 网段内直接可达。统计口径里这几类容器攻击的共同特征之一就是"进入集群内网后横向移动"——被攻陷的云身份与工作负载中，权限发现与凭据收集几乎是标配动作；</li>
+    <li><strong>偷凭据比打漏洞更省事</strong>：拿到 Pod 里挂载的服务账号令牌与环境变量里的数据库口令，攻击者甚至不需要第二个漏洞就能登堂入室。</li>
+  </ul>
+  <p>挖矿木马是这个剧本里最"温和"的结局（宿主机资源被吃光、服务被拖垮）；同样的路径换成勒索软件或数据窃取，代价以业务计。<strong>事后复盘时最常出现的一句话是：那个被攻陷的 Pod，本不该有能力访问数据库。</strong></p>
+
+  <h3>扁平网是怎么形成的</h3>
+  <p>传统机房有 VLAN 分段、区域防火墙、DMZ 隔离——边界虽然老派，但纵深是真的。应用上 K8s 之后，Pod IP 是易变的、跨节点漂移的，<strong>基于 IP 的防火墙规则跟不上 Pod 的生命周期</strong>，于是"安全组只管节点、节点内所有 Pod 共享一张网"成了事实标准。安全团队做的内网扫描经常给出同一个结论：数百个生产 Pod 互通无阻，测试命名空间能直连生产数据库——<strong>环境之间只剩命名空间名字的差别，没有一层网络隔离</strong>。0024 讲过的 Service 与 Ingress 管的是"流量怎么找到 Pod"，而从没回答过"谁不许找 Pod"——这一讲补的就是这门课。</p>
+
+  <div class="callout">
+    <span class="callout-title">一句话病灶</span>
+    <p>边界防火墙的世界观是"外紧内松"；扁平网把"内松"放大成了"全通"。<strong>任何一个 Pod 被攻陷，等于给攻击者发了一张集群全网通行证</strong>——NetworkPolicy 要做的，就是把这张通行证换成一张张需要逐条申请的门禁卡。</p>
+  </div>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：选择即戒严的白名单模型</h2>
+
+  <h3>语义：三条规则读懂 NetworkPolicy</h3>
+  <ol>
+    <li><strong>没有策略选中 = 全部允许</strong>：这是 K8s 的默认姿势，也是"裸奔"的根源；</li>
+    <li><strong>一旦有策略选中 = 未明确允许即拒绝</strong>：策略选定某个 Pod（按标签）并声明了 Ingress/Egress 方向后，该方向进入白名单模式——只放行规则里写明的流量，其余全部丢弃。<strong>把第一条和第二条连起来看：你写的第一条策略，就是那个 Pod 的"戒严令"</strong>；</li>
+    <li><strong>策略是叠加的（additive）</strong>：多个策略选中同一 Pod 时，放行集合是所有规则的并集——不存在策略之间的"拒绝"，拒绝永远来自"没写"。这条语义决定了团队协作方式：每支球队照管自己的命名空间，不会因为别人的策略把你挡在门外；也决定了审计方式——<strong>算一个 Pod 的真实放行面，要把它命中的所有策略摊开求并集，而不是只读一条</strong>。</li>
+  </ol>
+  <p>与安全组的世界观差异就在这里：安全组挂在"机器"上、跟 IP 走；NetworkPolicy 挂在"标签"上、跟身份走。Pod 重建、IP 换掉、漂移到别的节点——策略跟着标签自动生效，<strong>治理对象从易变的 IP 换成了稳定的身份</strong>，这是它比传统防火墙更适合容器网络的根本原因。</p>
+
+  <h3>四种选择器与一个致命陷阱</h3>
+  <p>规则的"谁"由选择器组合表达，共四种，两两组合的语义必须刻进肌肉记忆：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>选择器</th><th>匹配对象</th><th>作用域</th></tr></thead>
+    <tbody>
+      <tr><td><code>podSelector</code></td><td>带某标签的 Pod</td><td>仅策略所在命名空间</td></tr>
+      <tr><td><code>namespaceSelector</code></td><td>带某标签的命名空间里全部 Pod</td><td>集群级</td></tr>
+      <tr><td><code>podSelector</code> + <code>namespaceSelector</code>（同一 from/to 块内）</td><td>"某命名空间里的某类 Pod"</td><td><strong>AND：两者同时满足</strong></td></tr>
+      <tr><td><code>ipBlock</code>（CIDR）</td><td>IP 段（集群外目标/节点）</td><td>注意 Pod IP 易变，慎用</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>高频陷阱有两个：<strong>其一</strong>，多个 <code>from</code>/<code>to</code> 块之间是 OR（并集），块内 podSelector+namespaceSelector 才是 AND——缩进层级差一格，语义天差地别；<strong>其二</strong>，1.22 起每个命名空间自动带 <code>kubernetes.io/metadata.name</code> 标签，这是跨命名空间选人的正道——但注意它<strong>只能写在规则的 from/to 里</strong>，策略自己的 <code>podSelector: {}</code> 天然只作用于本命名空间，不存在"用 namespaceSelector 圈定本命名空间全部 Pod"这种写法（那是很多从白名单世界迁来的人的第一反应）。</p>
+
+  <h3>K8s 只立法，CNI 执法：最危险的失效是静默</h3>
+  <p>NetworkPolicy 是一份 API 契约，K8s 自己<strong>没有数据面</strong>——策略由 CNI 插件落地执行。这里藏着本讲最大的坑：<strong>如果 CNI 不支持策略执行，你写的每一条策略都能 apply 成功、都能 get 到、都躺在 etcd 里，但数据面毫无变化，且没有任何报错、事件或日志</strong>。经典翻车现场：Flannel 是"纯连通"型 CNI，默认不实现策略执行；不少托管集群默认 CNI 同样不执法（AWS 生态默认 VPC CNI 需要加装策略引擎后才执法）。于是你收获一个危险错觉：以为隔离做好了，安全扫描进来发现 Pod 之间还是全通。两种执行路线的对比：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>执行引擎</th><th>代表</th><th>工作方式</th><th>规模行为</th></tr></thead>
+    <tbody>
+      <tr><td>iptables + ipset</td><td>Calico（默认模式）、kube-router</td><td>代理监听策略与 Pod，翻译成 iptables 规则，Pod IP 收进内核哈希集合</td><td>配合 ipset 规则数可控；无 ipset 则随 IP 数膨胀</td></tr>
+      <tr><td>eBPF 身份映射</td><td>Cilium</td><td>相同标签组合的 Pod 集合获得数字身份，策略=内核映射表查找（源身份→目标身份→端口）</td><td>O(1) 查表；天然支撑 0052 讲过的身份网络与 L7/FQDN 扩展</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>治理启示：把"集群 CNI 是否执法 NetworkPolicy"写进平台准入清单——<strong>这是 CNI 选型的一票否决项</strong>，比性能参数更优先。</p>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：分层治理与三条军规</h2>
+
+  <h3>默认拒绝基线：先落三策略，再谈放行</h3>
+  <p>零信任落地的标准开局是"先关灯、再逐盏开灯"：每个命名空间落 <code>default-deny-all</code>（podSelector 空 + Ingress/Egress 双向、零规则），再补两条基线放行——<strong>DNS 出站</strong>（53 端口 UDP/TCP 指向 CoreDNS；Egress 戒严后第一个死的就是域名解析，Service 名一失效全军覆没，这是新手村第一坑）与 <strong>API Server 出站</strong>（6443；大量控制器、Sidecar 注入器、SDK 的准入与发现依赖它）。三策略是平台层资产，应该由平台团队随命名空间创建自动注入，而不是靠 30 支球队各自记得。</p>
+
+  <h3>分层治理：三层各管一段</h3>
+  <div class="diagram" style="margin:1.2rem 0;">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="NetworkPolicy 三层治理模型">
+    <defs>
+      <marker id="arr62" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#64748b"/></marker>
+    </defs>
+    <style>
+      .bx{fill:#f8fafc;stroke:#94a3b8;stroke-width:1.4}
+      .gw{fill:#eef2ff;stroke:#6366f1;stroke-width:2}
+      .lb{font:600 13.5px sans-serif;fill:#1e293b;text-anchor:middle}
+      .ls{font:11px sans-serif;fill:#475569;text-anchor:middle}
+      .ln{stroke:#64748b;stroke-width:1.6;fill:none;marker-end:url(#arr62)}
+    </style>
+    <rect class="gw" x="200" y="16" width="360" height="72" rx="12"/>
+    <text class="lb" x="380" y="42" style="fill:#4338ca">① 应用层：白名单策略</text>
+    <text class="ls" x="380" y="62">谁调我（Ingress）+ 我调谁（Egress）</text>
+    <text class="ls" x="380" y="78">球队按服务依赖提交，随应用走 Git</text>
+    <rect class="bx" x="200" y="118" width="360" height="72" rx="12"/>
+    <text class="lb" x="380" y="144">② 命名空间层：默认拒绝基线</text>
+    <text class="ls" x="380" y="164">deny-all + allow-dns + allow-apiserver</text>
+    <text class="ls" x="380" y="180">平台自动注入，租户改不动</text>
+    <rect class="bx" x="200" y="220" width="360" height="72" rx="12"/>
+    <text class="lb" x="380" y="246">③ 集群基线层：管理员策略</text>
+    <text class="ls" x="380" y="266">保护 kube-system 与节点，租户策略压不过</text>
+    <text class="ls" x="380" y="282">演进：ANP 管理员网络策略（alpha 阶段）</text>
+    <line class="ln" x1="380" y1="88" x2="380" y2="114"/>
+    <line class="ln" x1="380" y1="190" x2="380" y2="216"/>
+    <text class="ls" x="600" y="60" style="fill:#475569">叠加语义：</text>
+    <text class="ls" x="600" y="78" style="fill:#475569">放行 = 三层并集</text>
+    <text class="ls" x="600" y="150" style="fill:#475569">倒挂治理：</text>
+    <text class="ls" x="600" y="168" style="fill:#475569">上层可兜底放行</text>
+    <text class="ls" x="600" y="186" style="fill:#475569">（如监控采集）</text>
+  </svg>
+  </div>
+  <p class="code-note">原生的 Namespace 级 NetworkPolicy 只有一层"并集"语义：叠加意味着"下层兜底放行"可行（平台给监控/采集通道统一开例外），但"上层收紧"做不到——租户策略永远只能放宽不能收紧，这正是集群基线层要靠<strong>独立于命名空间的管理员策略</strong>的原因。社区把这个缺口命名为 AdminNetworkPolicy（KEP-2091，v1alpha2 正演进为 admin/baseline 两层模型，目前仍处 alpha、需独立安装 policy-apiserver）：管理员层可以做租户压不过的<strong>拒绝</strong>——比如无论谁放行，测试命名空间永远不许直达生产数据库。alpha 阶段先跟踪，别进生产。</p>
+
+  <h3>三条军规</h3>
+  <ol>
+    <li><strong>单向戒严是半吊子工程</strong>：只做 Ingress 不做 Egress，被攻陷的 Pod 照样能对外发起连接——侦察、外传、下载第二阶段载荷全走得通。反向外传治理（Egress 白名单）在数据泄漏事件的复盘中越来越被点名，"前门看住了、后门敞着"是当前最常见的落地残缺；</li>
+    <li><strong>hostNetwork 不受策略管辖</strong>：策略的执行点在 Pod 的网络命名空间，hostNetwork 类 Pod（不少日志采集器、CNI 自身组件用它）直接共享节点网络栈——这类工作负载要么单独治理、要么收进受管命名空间；</li>
+    <li><strong>四层身份网络有边界，L7 与 DNS 名交给互补件</strong>：原生策略只认 IP/端口/协议，看不见 HTTP 方法、路径、目标域名——DNS 名字级出站、HTTP 级治理由 Cilium 的扩展 CRD 或 Service Mesh（0051 讲过的 Istio ambient）补位。分层互补，不是替代。</li>
+  </ol>
+
+  <h3>合规模矩</h3>
+  <p>网络分段在等保、PCI-DSS、HIPAA 等合规框架里都是明确条款——而"能被审计"是另一条隐性军规：连通性声明最好落在 Git 里的策略 YAML（评审、回滚、变更历史天然具备），集群实际状态与仓库声明定期对账。<strong>审计员问"谁能访问数据库"时，答案应该是一条 kubectl 查询，而不是一次全员大会。</strong></p>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：三段从基线到验证</h2>
+
+  <h3>第一段：默认拒绝三件套——先关灯</h3>
+  <div class="codeblock">
+  <pre><code># ① 戒严令:本命名空间所有 Pod,进出双向默认拒绝
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: default-deny-all, namespace: pay }
+spec:
+  podSelector: {}          # 空 = 选中全部 Pod
+  policyTypes: [Ingress, Egress]   # 无规则 = 全拒
+---
+# ② DNS 基线:放行到 kube-system 的 CoreDNS(Egress 戒严后
+#    第一个死的是域名解析,不先落这条全员失联)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-dns, namespace: pay }
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels: { kubernetes.io/metadata.name: kube-system }
+    ports:
+    - { protocol: UDP, port: 53 }
+    - { protocol: TCP, port: 53 }</code></pre>
+  </div>
+  <p class="code-note">第三件套是 allow-apiserver（Egress 到 6443，端口写法同上，目标用 ipBlock 指向控制面端点段）。三件套由平台随命名空间创建自动注入——<strong>顺序先 DNS 再戒严，生产上一次 apply 别分开打</strong>。</p>
+
+  <h3>第二段：应用白名单——支付库的门禁</h3>
+  <div class="codeblock">
+  <pre><code># 支付库:只接受交易服务的 5432,只许回 DNS
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: pay-db, namespace: pay }
+spec:
+  podSelector: { matchLabels: { app: pay-db } }
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - podSelector:              # 同命名空间的交易服务
+        matchLabels: { app: trade-api }
+    - namespaceSelector:        # OR:监控命名空间全员可采
+        matchLabels: { kubernetes.io/metadata.name: monitoring }
+    ports: [ { protocol: TCP, port: 5432 } ]
+# 注:podSelector 与 namespaceSelector 同缩进为 AND(同块),
+# 两项各自成 from 元素为 OR(并集)——缩进差一格,语义相反</code></pre>
+  </div>
+  <p class="code-note">迁移期的实践纪律：<strong>先在预发开全量放行（放行面宁多勿漏），再按观测到的真实流量逐条收紧</strong>——第一条策略就让生产断链，团队对策略的信任就没了；收紧节奏按周计，别按天计。</p>
+
+  <h3>第三段：验证——不测连通性等于没做</h3>
+  <div class="codeblock">
+  <pre><code># ① 先确认 CNI 真执法(不执法一切白搭)
+kubectl -n kube-system get ds | \
+  egrep 'calico-node|cilium|antrea|kube-router'
+# ② 起调试 Pod 实测双向连通矩阵(该通的要通/该断的要断)
+kubectl -n pay run probe --rm -it \
+  --image=nicolaka/netshoot --restart=Never -- bash
+  $ curl -m3 -sv http://pay-db:5432   # 通
+  $ curl -m3 -sv http://user-svc:8080 # 应超时(未放行)
+# ③ 摸底期流量录制 → 自动生成最小放行策略
+kubectl gadget advise network-policy monitor \
+  -n pay --output ./traffic.json     # 跑一轮集成测试
+kubectl gadget advise network-policy report \
+  -i ./traffic.json                  # 产出建议 YAML</code></pre>
+  </div>
+  <p class="code-note">三步缺一不可：<strong>kubectl get networkpolicy 只能证明策略"存在"，证明不了策略"生效"</strong>——静默失效的 CNI 会让你带着假安全感过审计。第③步的流量录制生成器（Inspektor Gadget 等提供）解决"存量集群没人说得清谁连谁"的冷启动问题，先摸底、再生成、后收紧。</p>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>扁平网是默认姿势：</strong>K8s 里任何 Pod 可直连任何 Pod，跨命名空间直达生产库——被攻陷的一个 Pod 等于一张全网通行证；横向移动是容器攻击的标准剧本，NetworkPolicy 把它换成逐条申请的门禁卡。</li>
+    <li><strong>选择即戒严，策略是并集：</strong>没有策略选中=全通；一旦选中=未明确允许即拒绝——你写的第一条策略就是那个 Pod 的戒严令；多策略叠加取并集，审计要摊开全部命中策略求并集，而不是只读一条。</li>
+    <li><strong>K8s 只立法、CNI 执法：</strong>CNI 不支持策略执行时，策略能 apply、能 get、躺在 etcd 里，唯独不生效且零报错——Flannel 默认不执法、部分托管集群默认 CNI 同样不执法；"是否执法"是 CNI 选型的一票否决项。</li>
+    <li><strong>先关灯再开灯：</strong>default-deny-all + DNS + API Server 三件套做基线，由平台随命名空间自动注入；迁移期先全量放行再按真实流量收紧，上线第一天就掐断链路会透支团队信任。</li>
+    <li><strong>不测连通性等于没做：</strong>kubectl 只证明存在、不证明生效——CNI 检查 + netshoot 连通矩阵 + 流量录制生成器三步验证；Egress 反向外传与 hostNetwork 盲区是两个最常被漏掉的口子。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 怎考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目：存量扁平网集群要推全租户网络隔离，三道现实坎怎么过？</summary>
+    <div class="details-body">
+      <p>背景：公司内部平台集群承载十几个业务团队的命名空间，安全扫描发现所有 Pod 互通（测试命名空间可直连生产数据库）。平台组决定推行网络隔离，但面临三道现实坎：没有人说得清每个服务的真实调用关系；个别遗留系统是 hostNetwork 方式部署；运维通道（监控采集、日志上报、发布拉镜像）散落在各个团队手里。老板要求"一个季度落地，不能出生产事故"。请回答：</p>
+      <p><strong>① 落地的正确顺序是什么——先动生产还是先动谁？</strong><br>
+      <strong>② hostNetwork 的遗留系统和 kube-system 怎么处理？</strong><br>
+      <strong>③ 业务团队该按什么模板提交放行申请，才能既安全又不把平台变成审批瓶颈？</strong></p>
+      <h4>🔍 深度解析</h4>
+      <p><strong>① 顺序：先平台基线、后逐租户收紧，生产永远最后动。</strong>第一阶段不动任何业务流量：平台随命名空间注入三件套之前，先把"监控采集、日志上报、镜像仓库、API Server"四条平台通道做成命名空间级兜底放行策略（叠加语义允许下层兜底放行，租户策略天然是它的并集子集）——这保证后面任何租户戒严都不会掐断运维通道。第二阶段挑一个低风险非生产命名空间试点：deny-all + 流量录制两周 + 按观测生成白名单 + 逐条收紧，跑通"戒严—观测—生成—收紧—验证"的完整 SOP 并沉淀成文档。第三阶段按"先测试/预发、后生产；先边缘服务、后核心链路"逐租户推进，每个租户走同一 SOP。生产库这类高价值目标可以用"只收 Ingress 白名单、暂缓 Egress"的降档打法先拿下大头。一个季度是够的，前提是 SOP 在试点期打磨到业务团队可以自助执行。</p>
+      <p><strong>② hostNetwork 与 kube-system 各有专门剧本。</strong>hostNetwork 工作负载不受 NetworkPolicy 管辖（执行点在 Pod 网络命名空间，它们直接共享节点网络栈）：清单先摸出来（kubectl get pods -A -o json 查 hostNetwork 字段），逐个评估——能改造的迁回普通 Pod 网络（收益：纳入管辖），不能改造的（如节点级日志采集器）用节点防火墙/安全组单独治理并登记为长期豁免项。<strong>kube-system 反向走：不戒严、先加固</strong>——它是全集群的命门（DNS、CNI、apiserver 都在里面），一个错误策略能让集群级服务全灭，先用"限源"策略保护关键组件（如 CoreDNS 只接受各业务命名空间的 53 端口），基线戒严留到全集群策略体系稳定之后。管理员层的强制隔离（测试永远不许直达生产）在原生策略里做不到"租户压不过的拒绝"，这是 AdminNetworkPolicy 要解决的问题——目前 alpha，先在预发跟踪，别进生产。</p>
+      <p><strong>③ 模板把"申请"变成"声明代码评审"。</strong>核心思路：放行申请不该是一张工单，而是一段随应用仓库走的 NetworkPolicy YAML——业务团队在部署清单里声明"我提供的服务端口 + 我依赖的下游"（声明即文档，Git 评审天然留下变更历史），平台只做准入检查：策略必须双向声明（Ingress 给谁、Egress 到谁）、必须带 owner 标签与工单号、不许出现 0.0.0.0/0 这类全放行 ipBlock。平台的角色从审批者退为守门人：准入控制器机器审（命名规范、危险模式拦截），例外走安全评审。这样平台不会成为瓶颈，且"谁能访问谁"的答案永远是一条 Git 查询。运营上配两条护栏：连通性故障的应急回滚预案（直接 delete 该命名空间的戒严策略，秒级恢复全通——宁可临时裸奔也不能让业务等策略评审）；以及按月的"策略 vs 真实流量"对账，清理只增不减的僵尸放行规则——白名单只进不出，三年后就成了另一张全通网。</p>
+    </div>
+  </details>
+
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>Kubernetes 官方文档《Network Policies》（策略语义、选择器、默认拒绝与隔离配方的一手出处）：<br>
+    <a href="https://kubernetes.io/zh-cn/docs/concepts/services-networking/network-policies/" target="_blank" rel="noopener">kubernetes.io — Network Policies</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>系列内互链：<a href="0043-k8s-pod-deployment-service.html">0043 三件套与控制循环</a>（策略对象同样是"声明-控制器-实际状态"世界观）、<a href="0044-k8s-configmap-secret.html">0044 ConfigMap 与 Secret</a>（凭据治理与网络门禁互补——被攻陷 Pod 里偷的正是它们）、<a href="0061-k8s-storage-pv-pvc-csi.html">0061 存储卷</a>（K8s 线上一讲，盘的引力与本期网的门禁对照）、<a href="0051-service-mesh-istio-ambient.html">0051 Istio ambient</a>（L7 策略与四层身份网络的分层互补）、<a href="0052-ebpf-cilium-network.html">0052 eBPF 与 Cilium</a>（本期两种执行引擎的纵深展开）、<a href="0050-disaster-recovery-multi-active.html">0050 容灾多活</a>（网络隔离与故障域设计的对照——隔离边界即爆炸半径）。延伸：AdminNetworkPolicy 的 network-policy-api 仓库（kubernetes-sigs）、Inspektor Gadget 的 advise network-policy 文档。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0061-k8s-storage-pv-pvc-csi.html">← 上一期：Kubernetes 存储卷</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 62 期 · Kubernetes 系列 · 下期回十类循环——物联网与边缘计算线</p>
+  <p>☸️ 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
