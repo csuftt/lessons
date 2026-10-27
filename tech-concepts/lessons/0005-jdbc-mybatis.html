@@ -115,13 +115,13 @@
       <p class="how">按「接口全限定名.方法名」查找</p>
       <p class="why">namespace + id 就是绑定关系的全部秘密</p></div>
     <div class="flow-step"><span class="no">4</span>
+      <p class="what">动态 SQL 拼装</p>
+      <p class="how">if/where/foreach 求值后拼出最终语句</p>
+      <p class="why">发生在参数绑定之前，拼的是 SQL 结构</p></div>
+    <div class="flow-step"><span class="no">5</span>
       <p class="what">参数绑定</p>
       <p class="how">#{id} 翻译成 ? + setLong(42)</p>
       <p class="why">${} 则是字符串拼接——注入风险</p></div>
-    <div class="flow-step"><span class="no">5</span>
-      <p class="what">动态 SQL 拼装</p>
-      <p class="how">if/where/foreach 求值后拼出最终语句</p>
-      <p class="why">发生在设参之前，拼的是 SQL 结构</p></div>
     <div class="flow-step"><span class="no">6</span>
       <p class="what">执行与映射</p>
       <p class="how">executeQuery → ResultSet → 反射填对象</p>
@@ -129,7 +129,7 @@
   </div>
 
   <h3>第 2~3 步：没有实现类的接口，凭什么能调</h3>
-  <p>启动时 MyBatis 扫描 Mapper 接口，为每个接口注册一个 <strong>JDK 动态代理</strong>；你注入使用的 <code>userMapper</code>，实际是 <code>session.getMapper(UserMapper.class)</code> 这条路给出的代理对象。调用 <code>getUserById</code> 时，代理把"哪个接口的哪个方法"翻译成一个查找键——<strong>接口全限定名 + 方法名</strong>，去配置里找同名的语句。MyBatis 官方文档对绑定规则的表述：将映射文件的 <code>namespace</code> 设为接口全限定名后，"命名空间就可以直接映射到同名的映射器类，并将已映射的 select 语句匹配到<strong>对应名称、参数和返回类型相同</strong>的方法"。也就是说绑定不靠任何魔法注解处理，就是一次字符串对齐：</p>
+  <p>启动时 MyBatis 扫描 Mapper 接口，为每个接口注册一个 <strong>JDK 动态代理</strong>；你注入使用的 <code>userMapper</code>，实际是 <code>session.getMapper(UserMapper.class)</code> 这条路给出的代理对象。调用 <code>getUserById</code> 时，代理把"哪个接口的哪个方法"翻译成一个查找键——<strong>接口全限定名 + 方法名</strong>，去查 MyBatis 配置对象里的<strong>语句 Map</strong>（每条语句一个 namespace.id 一个条目，启动时由 XML 解析而来——后面 Plus 注入的语句也进这同一个 Map）。MyBatis 官方文档对绑定规则的表述：将映射文件的 <code>namespace</code> 设为接口全限定名后，"命名空间就可以直接映射到同名的映射器类，并将已映射的 select 语句匹配到<strong>对应名称、参数和返回类型相同</strong>的方法"。也就是说绑定不靠任何魔法注解处理，就是一次字符串对齐：</p>
   <div class="codeblock term">
     <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>绑定：接口方法 ↔ XML 语句</span></div>
     <pre><code><span class="t-cmt"># 接口：没有实现类，方法名就是查找键的一半</span>
@@ -145,10 +145,7 @@
 <span class="t-cmt"># 查找键 = com.demo.mapper.UserMapper.getUserById = namespace + id</span></code></pre>
   </div>
 
-  <h3>第 4 步：#{} 与 ${}，一条安全一条危险</h3>
-  <p>官方文档写得很直白：<code>#{id}</code> 会"创建 PreparedStatement 占位符，<strong>等价于 JDBC 中用 ? 并调用 ps.setInt(1, id)</strong>"——参数走预编译通道，安全。<code>${column}</code> 则是"<strong>字符串替换</strong>，直接插入 SQL"——官方同时警告：把用户输入用作这类参数"会导致<strong>潜在的 SQL 注入攻击</strong>"。所以规矩是：<strong>值一律 <code>#{}</strong>；只有动态表名/列名这种"必须成为 SQL 结构一部分"的场合才用 <code>${}</code>，且值必须来自白名单，绝不来自用户输入。</p>
-
-  <h3>第 5 步：动态 SQL——拼的是结构，不是值</h3>
+  <h3><h3>第 4 步：动态 SQL——拼的是结构，不是值</h3>
   <div class="codeblock term">
     <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>if / where / foreach（官方示例改编）</span></div>
     <pre><code><span class="t-out">&lt;select id="findActive" resultType="Blog"&gt;</span>
@@ -165,8 +162,11 @@
   </div>
   <p>执行时 MyBatis 用 OGNL 表达式（<code>test="title != null"</code>）对参数求值，决定拼进哪些片段，<strong>拼装发生在 PreparedStatement 创建之前——拼的是 SQL 结构；而值的位置始终是 <code>#{}</code>，仍走 <code>?</code> 通道</strong>。结构动态、值永远安全，这是动态 SQL 的正确理解姿势。</p>
 
+  <h3><h3>第 5 步：#{} 与 ${}，一条安全一条危险</h3>
+  <p>官方文档写得很直白：<code>#{id}</code> 会"创建 PreparedStatement 占位符，<strong>等价于 JDBC 中用 ? 并调用 ps.setInt(1, id)</strong>"——参数走预编译通道，安全。<code>${column}</code> 则是"<strong>字符串替换</strong>，直接插入 SQL"——官方同时警告：把用户输入用作这类参数"会导致<strong>潜在的 SQL 注入攻击</strong>"。所以规矩是：<strong>值一律 <code>#{}</strong>；只有动态表名/列名这种"必须成为 SQL 结构一部分"的场合才用 <code>${}</code>，且值必须来自白名单，绝不来自用户输入。</p>
+
   <h3>第 6 步：ResultSet 怎么变成对象</h3>
-  <p>执行查询拿到 ResultSet 后，MyBatis 按<strong>映射规则</strong>搬运字段：默认按"列名与属性名一致"匹配；开启 <code>mapUnderscoreToCamelCase</code> 后，数据库的 <code>user_name</code> 自动映射到 <code>userName</code>；复杂对应（多表、嵌套）用 <code>resultMap</code> 显式声明。搬运靠反射：实例化对象、逐列 <code>set</code> 进属性——这就是你不用写二十行 setter 的原因，代价只是启动时的映射解析，运行时是纯反射赋值。</p>
+  <p>执行查询拿到 ResultSet 后，MyBatis 按<strong>映射规则</strong>搬运字段：默认按"列名与属性名一致"匹配；开启 <code>mapUnderscoreToCamelCase</code> 后，数据库的 <code>user_name</code> 自动映射到 <code>userName</code>；列名与属性名完全不同的（如 <code>mobile</code> 列进 <code>phone</code> 属性），用 <code>resultMap</code> 显式声明对应关系。搬运靠反射：实例化对象、逐列 <code>set</code> 进属性——这就是你不用写二十行 setter 的原因，代价只是启动时的映射解析，运行时是纯反射赋值。</p>
 </section>
 
 <!-- ================= 05 SQL 是谁写的 ================= -->
@@ -181,7 +181,11 @@
     <tr><td><strong>适合</strong></td><td>复杂查询、多表、调优 SQL</td><td>单表的增删改查</td><td>动态条件组合查询</td></tr>
   </table>
   </div>
-  <p>MyBatis-Plus 官方给自己的定位是"MyBatis 最佳搭档，<strong>只做增强不做改变</strong>"。它没有另起炉灶——核心机制就一条：<strong>"启动即会自动注入基本 CURD"</strong>（官方原话）。你继承 <code>BaseMapper&lt;User&gt;</code> 后，<code>selectById / insert / updateById / deleteById</code> 这些方法对应的 SQL，是 Plus 在启动阶段拼装好、按同样的 namespace.id 规则<strong>注入进 MyBatis 容器</strong>的——所以它们跑在和你手写 SQL 完全相同的代理、绑定、参数、映射链路上。<code>LambdaQueryWrapper</code>（<code>eq(User::getStatus, 1)</code> 用方法引用写字段名，编译期就能查出写错）把条件描述翻译成 WHERE 片段，本质也是生成一段 SQL 交给同一套链路执行。</p>
+  <p>MyBatis-Plus 官方给自己的定位是"MyBatis 最佳搭档，<strong>只做增强不做改变</strong>"。它没有另起炉灶——核心机制就一条：<strong>"启动即会自动注入基本 CRUD"</strong>（官方原话）。你继承 <code>BaseMapper&lt;User&gt;</code> 后，<code>selectById / insert / updateById / deleteById</code> 这些方法对应的 SQL，是 Plus 在启动阶段拼装好、按同样的 namespace.id 规则<strong>注入进前面链路里查的那个语句 Map</strong>的——所以它们跑在和你手写 SQL 完全相同的代理、绑定、参数、映射链路上。<code>LambdaQueryWrapper</code>（<code>eq(User::getStatus, 1)</code> 用方法引用写字段名，编译期就能查出写错）把条件描述翻译成 WHERE 片段，本质也是生成一段 SQL 交给同一套链路执行。</p>
+  <div class="qa">
+    <span class="q">内置方法的 SQL 最终放在哪？是在目录下加了个 XML 文件吗？</span>
+    <div class="a"><p>不落任何文件。MyBatis 里 SQL 的最终载体本来就不是 XML——XML 只是来源，解析后的形态是 Configuration（内存配置对象）里的 <strong>MappedStatement</strong>（每个 namespace.id 一条）。Plus 注入走的是源码里 <code>AbstractMethod.inject()</code> 那条链：从实体注解（@TableName/@TableId）解析出表元数据 <code>TableInfo</code> → 每个内置方法（SelectById/Insert…）拿<strong>代码里的 SQL 模板 + TableInfo</strong> 填出这条 SQL → 调 MyBatis 自己的 <code>builderAssistant.addMappedStatement()</code> 注册进 Configuration——<strong>和 XML 解析殊途同归，进的是同一个 Map</strong>。启动后打断点看 <code>Configuration.mappedStatements</code>，selectById 和你手写的 getUserById 并排存放。两个细节：① 注入前有查重，同 id 已被 XML/注解定义时 Plus 跳过注入（日志 "Has been loaded by XML…ignoring this injection"）——<strong>手写优先于内置</strong>，这就是"只做增强不做改变"的物理实现；② Wrapper 更晚一步：SelectList 模板里留的是 <code>${ew.customSqlSegment}</code> 占位，<strong>执行时</strong>才把条件翻译成 WHERE 片段填进去。</p></div>
+  </div>
   <div class="qa">
     <span class="q">那 JPA/Hibernate 那种"方法名派生查询"呢？</span>
     <div class="a"><p>光谱还能往右延伸一层：Spring Data JPA 的 <code>findByNameAndAge(...)</code> 连方法名都是语义——框架解析方法名直接生成 SQL。代价与收益是同一件事：SQL 不归你写，也就不由你精细控制（复杂查询要么学它的语法要么退回原生 SQL）。MyBatis 系把 SQL 留给你，Plus 只收编"不值得手写的那部分"——两层可以共存：单表交给 BaseMapper，复杂查询照旧手写 XML。</p></div>
@@ -191,7 +195,7 @@
 <!-- ================= 06 信创 ================= -->
 <section>
   <h2><span class="sec-num">06</span>信创迁移：Mapper 一行不动，动的是哪两行</h2>
-  <p>回到开头的问题：MySQL 换达梦（DM8）或人大金仓（KingbaseES），持久层改什么？按第 02 节的分层图答案已经出来了——<strong>MyBatis 只产 JDBC 调用，方言差异被 JDBC 的驱动层隔离；换库 = 换驱动 jar + 改 url/driver 配置，Mapper 接口与 XML 一行不动</strong>：</p>
+  <p>回到开头的问题：MySQL 换达梦（DM8）或人大金仓（KingbaseES），持久层改什么？按第 02 节的分层图答案已经出来了——<strong>MyBatis 只产 JDBC 调用，方言差异被 JDBC 的驱动层隔离；换库 = 换驱动 jar + 改 url/driver 配置，Mapper 接口一行不动（XML 里的方言写法是另一回事，后面单独说）</strong>：</p>
   <div class="codeblock term">
     <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>换库实际改的两行（数据源配置）</span><button class="copy">复制命令</button></div>
     <pre><code><span class="t-cmt"># MySQL</span>
@@ -204,10 +208,56 @@
 <span class="t-out">driver-class-name: com.kingbase8.Driver</span>
 <span class="t-out">url: jdbc:kingbase8://host:54321/db</span></code></pre>
   </div>
-  <p>达梦和金仓的"路数"值得记一句：<strong>达梦深度兼容 Oracle 语法系</strong>（自增用 SEQUENCE、大量 Oracle 函数行为），驱动 <code>DmJdbcDriver18</code> 对应 JDBC 4.2 标准；<strong>金仓基于 PostgreSQL 内核</strong>发展，PG 生态工具基本直接可用，另提供 MySQL/Oracle 兼容模式（如 MySQL 模式下适配了 <code>NOW()</code>、<code>IFNULL</code> 这类写法）。</p>
+  <p>达梦和金仓的"路数"值得记一句：<strong>达梦深度兼容 Oracle 语法系</strong>（自增用 SEQUENCE（数据库预建的自增计数器）、大量 Oracle 函数行为），驱动 <code>DmJdbcDriver</code> 对应 JDBC 4.2 标准；<strong>金仓基于 PostgreSQL 内核</strong>发展，PG 生态工具基本直接可用，另提供 MySQL/Oracle 兼容模式（如 MySQL 模式下适配了 <code>NOW()</code>、<code>IFNULL</code> 这类写法）。</p>
+  <p>那用着 MyBatis-Plus 的项目呢？——单表 CRUD 全是框架自带方法，复杂 SQL 才手写 XML。适配责任按 <strong>SQL 来源分四层</strong>，完全不同：</p>
+  <div class="tbl-wrap">
+  <table>
+    <tr><th>SQL 来源</th><th>适配动作</th><th>原因</th></tr>
+    <tr><td><strong>① BaseMapper 内置 CRUD</strong></td><td><strong>零改</strong></td><td>生成的是基础标准 SQL（<code>WHERE id=?</code> / 标准 INSERT），达梦天然认——框架生成的 SQL 反而是最稳的部分</td></tr>
+    <tr><td><strong>② 分页 selectPage</strong></td><td><strong>一行配置</strong></td><td>唯一有真正方言行为的内置功能：分页拦截器按 DbType 生成分页 SQL，官方支持列表含达梦/金仓/OceanBase/GaussDB——<code>DbType.MYSQL</code> 换 <code>DbType.DM</code>（官方建议显式配；3.5.9+ 分页拆到 mybatis-plus-jsqlparser 依赖）</td></tr>
+    <tr><td><strong>③ 主键策略</strong></td><td><strong>配置/注解层</strong></td><td><code>IdType.AUTO</code> 依赖库自增，达梦 Oracle 模式换 <code>@KeySequence</code> 指向序列；最省心 <code>ASSIGN_ID</code> 雪花——框架侧生成、与库无关（3.3.0 起默认），主键的信创问题直接消失</td></tr>
+    <tr><td><strong>④ XML + Wrapper 手写片段</strong></td><td><strong>真工作量在这</strong></td><td><code>wrapper.apply("date_format(...)")</code>、<code>last("limit 1")</code> 是手动塞进框架的 SQL 片段——方言风险与手写 XML <strong>完全同级</strong>，用同一份方言清单扫描；XML 用 databaseIdProvider 多方言共存</td></tr>
+  </table>
+  </div>
+  <h3>适配实操：分页、主键、多方言共存的配置怎么写</h3>
+  <div class="codeblock term">
+    <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>② 分页拦截器 DbType · ③ 主键两写法</span></div>
+    <pre><code><span class="t-cmt">// ② 分页：DbType 换成 DM（官方支持列表：达梦/金仓/OceanBase/GaussDB…）</span>
+<span class="t-out">@Bean</span>
+<span class="t-out">public MybatisPlusInterceptor mybatisPlusInterceptor() {</span>
+<span class="t-out">    MybatisPlusInterceptor i = new MybatisPlusInterceptor();</span>
+<span class="t-out">    i.addInnerInterceptor(new PaginationInnerInterceptor(DbType.DM));</span>
+<span class="t-out">    return i;   // 官方提醒：多个插件时，分页最后添加</span>
+<span class="t-out">}</span>
+<span class="t-cmt">// ③ 主键写法一：ASSIGN_ID 雪花——框架侧生成，与数据库无关（3.3.0 起默认）</span>
+<span class="t-out">@TableId(type = IdType.ASSIGN_ID)</span>
+<span class="t-out">private Long id;</span>
+<span class="t-cmt">// ③ 主键写法二：沿用数据库序列（达梦 Oracle 模式 / PG）</span>
+<span class="t-out">@TableId(type = IdType.INPUT)</span>
+<span class="t-out">@KeySequence("SEQ_USER_ID")     // insert 前从序列取值回填</span>
+<span class="t-out">private Long id;</span></code></pre>
+  </div>
+  <div class="codeblock term">
+    <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>④ 多方言共存：databaseIdProvider 双版本语句</span></div>
+    <pre><code><span class="t-cmt"># 配置数据库厂商标识：给每家库起个短名</span>
+<span class="t-out">&lt;databaseIdProvider type="DB_VENDOR"&gt;</span>
+<span class="t-out">    &lt;property name="MySQL"   value="mysql"/&gt;</span>
+<span class="t-out">    &lt;property name="DM DBMS" value="dm"/&gt;      # 达梦</span>
+<span class="t-out">&lt;/databaseIdProvider&gt;</span>
+<span class="t-cmt"># 同一个方法写两版语句，运行时按当前连接自动选</span>
+<span class="t-out">&lt;select id="findRecent" databaseId="mysql" resultType="Order"&gt;</span>
+<span class="t-out">    select * from t_order order by create_time desc limit 10</span>
+<span class="t-out">&lt;/select&gt;</span>
+<span class="t-out">&lt;select id="findRecent" databaseId="dm" resultType="Order"&gt;</span>
+<span class="t-out">    select * from (select * from t_order order by create_time desc) where rownum &lt;= 10</span>
+<span class="t-out">&lt;/select&gt;</span>
+<span class="t-cmt"># 注意：property 的 name 必须写驱动自报的产品名（达梦上报 DM DBMS）——写错则短名永不生效
+# Wrapper 手塞片段同理：date_format 是 MySQL 写法，达梦 Oracle 模式要换 to_char</span>
+<span class="t-out">w.apply("date_format(create_time,'%Y-%m') = {0}", month)</span></code></pre>
+  </div>
   <div class="rule"><span class="mark">⚠</span><div class="txt">
-    <strong>Mapper 不改 ≠ 什么都不用改——三个真正的坑在 SQL 方言层</strong>
-    <p class="why">① 分页：MyBatis-Plus 物理分页按 DbType 生成 LIMIT/ROWNUM，信创库要确认 DbType 配置；② 自增策略：MySQL 的 AUTO_INCREMENT 到 Oracle 系要换 SEQUENCE（或用 Plus 的 IdType.AUTO/INPUT/ASSIGN_ID 适配）；③ 函数与隐式转换差异——兼容模式"能跑"不代表行为一致，迁移必须跑 SQL 兼容性扫描与回归测试</p>
+    <strong>一句话：Plus 自带的动配置不动代码；手写的两处（XML + Wrapper 片段）才是迁移真工作量</strong>
+    <p class="why">达梦侧开 MySQL 兼容模式能兜住 LIMIT/NOW() 等写法，但"能跑"不代表行为一致——SQL 兼容性扫描与回归测试省不得</p>
   </div></div>
   <p>如果同一套 Mapper 要在多方言数据库上共存，MyBatis 还有内置方案：<code>databaseIdProvider</code> 配置后，语句可按 <code>databaseId</code> 区分（如同一 id 写 MySQL 版和达梦版两条），运行时按当前连接自动选择——方言差异被收敛在 SQL 文件里，Java 侧依然一行不动。</p>
 </section>
@@ -216,12 +266,12 @@
 <section>
   <h2><span class="sec-num">07</span>今日带走</h2>
   <ul class="key-points">
-    <li><strong>JDBC 是插座标准，驱动是插头</strong>：java.sql 只定接口，厂商各发驱动实现——换库换插头，Java 代码面向插座不变（JDBC 4.0 起 SPI 自动注册，无需 Class.forName）。</li>
+    <li><strong>JDBC 是插座标准，驱动是插头</strong>：java.sql 只定接口，厂商各发驱动实现——换库换插头，代码面向插座不变（JDBC 4.0 起 SPI 自动注册，无需 Class.forName）。</li>
     <li><strong>? 占位符是防注入的根</strong>：参数走"值"通道不参与语法解析；Connection 的 autoCommit 默认 true，手动事务要显式关。</li>
-    <li><strong>MyBatis 不生成 SQL，它做路由</strong>：动态代理拦截方法调用 → 按"namespace=接口全限定名 + id=方法名"找到你写的 SQL → 参数绑定 → 结果反射映射，六步链路。</li>
-    <li><strong>#{} 走预编译（等价 ? + setInt），${} 是字符串拼接</strong>：值一律 #{}；${} 只给表名/列名且必须白名单。</li>
-    <li><strong>SQL 的作者是三层光谱</strong>：纯 MyBatis 手写路由；MyBatis-Plus"启动即自动注入基本 CURD"（BaseMapper 零 SQL）；Wrapper 方法链半自动——三层跑在同一套代理/绑定/映射机制上，"只做增强不做改变"。</li>
-    <li><strong>信创换库 = 换驱动 jar + 改两行配置，Mapper 一行不动</strong>：真坑在方言层——分页 DbType、自增策略、函数差异；多方言共存用 databaseIdProvider。</li>
+    <li><strong>MyBatis 不生成 SQL，它是路由器</strong>：动态代理拦截方法调用 → 按 namespace+方法名查语句 Map（XML 解析与 Plus 注入进同一个 Map）→ 参数绑定 → 结果反射映射。</li>
+    <li><strong>#{} 走预编译，${} 是字符串拼接</strong>：值一律 #{}；${} 只给表名/列名且必须白名单。</li>
+    <li><strong>SQL 的作者是三层光谱</strong>：纯 MyBatis 手写路由；MyBatis-Plus"启动即自动注入基本 CRUD"（BaseMapper 零 SQL，手写优先于内置）；Wrapper 方法链半自动——底层同一套链路。</li>
+    <li><strong>信创换库 = 换驱动 jar + 改两行配置，Mapper 一行不动</strong>：适配按 SQL 来源分四层——内置 CRUD 零改、分页换 DbType、主键优先雪花、XML 与 Wrapper 手写片段用同一份方言清单扫。</li>
   </ul>
 </section>
 
@@ -277,7 +327,7 @@
     <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.sql/java/sql/package-summary.html" target="_blank" rel="noopener">Java SE API — java.sql 包文档</a></p>
     <p>绑定规则（namespace/id）、#{} 与 ${} 的语义与注入警告、动态 SQL 标签：<br>
     <a href="https://mybatis.org/mybatis-3/zh_CN/" target="_blank" rel="noopener">MyBatis 3 官方中文文档</a>（入门 · XML 映射器 · 动态 SQL 三章）</p>
-    <p>"只做增强不做改变"、"启动即会自动注入基本 CURD"、BaseMapper 与条件构造器：<br>
+    <p>"只做增强不做改变"、"启动即会自动注入基本 CRUD"、BaseMapper 与条件构造器：<br>
     <a href="https://baomidou.com/" target="_blank" rel="noopener">MyBatis-Plus 官方文档</a></p>
   </div>
   <div class="card">
