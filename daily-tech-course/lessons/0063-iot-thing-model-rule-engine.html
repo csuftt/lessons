@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · 物模型与规则引擎设计：设备的词汇表与数据的第一道闸 | 2026-10-30</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0063</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0062-k8s-network-policy.html">上一期：Kubernetes 网络策略</a> · <a href="https://www.bilibili.com/video/BV1MVxN6FEF6" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">IOT · 物联网系列第 3 讲（数据建模与流转篇）</p>
+  <h1>物模型与规则引擎设计：设备的词汇表与数据的第一道闸</h1>
+  <p class="subtitle">前两讲把 <a href="0045-mqtt-emqx-cluster.html">MQTT 协议</a>与<a href="0046-iot-long-connection-gateway.html">长连接接入层</a>聊透了，设备"连进来"之后，平台的第一道架构题才刚开始：<strong>一百万种设备，怎么让一万个应用看得懂</strong>。这一讲从一次"报表读数对不上、厂商撤场、规则写进业务代码"的连环翻车讲起：物模型是设备的词汇表（属性/服务/事件三元组 + 校验规则），规则引擎是数据的第一道闸（在海量高频低密度数据触达业务系统之前先做解析、过滤、加工）。两件东西一起，决定你的 IoT 平台是"管道 + 各自解析的作坊"，还是"资产 + 复用的平台"。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">📡 IoT 平台</span>
+    <span class="tag-date">📅 2026-10-30 · 第 63 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>场景：三种设备三种 payload，平台变解析作坊</h2>
+
+  <h3>一次报表事故揭开的旧账</h3>
+  <p>某智慧园区平台接了三类设备：中央空调（厂商 A，Modbus 网关转 MQTT 上报）、电表（厂商 B，自有协议透传十六进制报文）、温湿度传感器（厂商 C，直连上报 JSON）。上线 14 个月后出了三件典型的事：</p>
+  <ul>
+    <li><strong>读数对不上：</strong>能耗报表显示某楼层功耗 3.2 万瓦，物业抄表只有 8 千。排查发现 A 厂商网关上报的是"功率 × 100"的整数（32768 代表 327.68W），而 B 厂商电表直接上报带小数的瓦数——<strong>每个应用按各自理解的单位算了一遍，没有一份"标准读数"的对账口径</strong>；</li>
+    <li><strong>厂商撤场：</strong>C 厂商被收购停止服务，传感器还在上报，但没人记得 <code>{"t":27,"h":63}</code> 里的 t 是温度还是时间戳——设备侧协议是活的，业务侧的知识只存在于两个人的脑子里；</li>
+    <li><strong>规则写死在业务代码里：</strong>"温度超 35 度告警"最初是硬编码，后来产品要改成"超过 35 度且持续 5 分钟"，研发排期三周——改一条告警阈值要动应用发版，业务等不起。</li>
+  </ul>
+
+  <h3>复盘：缺的是两件东西</h3>
+  <p>这三件事的根因是同一处：<strong>设备上报的原始 payload 直接流到了业务系统，中间没有一层"翻译与门禁"</strong>。具体拆开是两个缺口——</p>
+  <p><strong>缺口一：没有统一词汇表。</strong>MQTT 只解决"消息送达"，不承诺"消息可懂"。t 是什么、单位是什么、取值范围多少、只读还是可写——这些语义信息没有沉淀的地方，就只能散落在各应用的解析代码里。<strong>物联网接入的碎片化，一半是协议碎片，另一半是语义碎片</strong>，后者往往更贵：协议转换一次就完，语义不一致每天都要付利息。</p>
+  <p><strong>缺口二：没有数据闸门。</strong>百万设备 × 秒级上报 = 日均百亿级消息，其中 99% 是"温度 27.1 度"这类正常数据，密度极低。把这些消息原样推给业务服务器，就是拿生产环境的 RPC 去扛设备洪峰——<strong>海量、高频、低密度是 IoT 数据的天然性状，必须在触达业务之前先收敛</strong>。阿里云技术团队在总结规则引擎的设计动机时就点破：这类数据直接流转到业务服务器，是"高风险、高成本、低价值"。</p>
+
+  <div class="callout">
+    <span class="callout-title">一句话病灶</span>
+    <p>没有物模型的 IoT 平台是"带管道的作坊"：连得上、收得到，但每个消费者都要自己猜数据。<strong>物模型把设备语义变成资产，规则引擎把数据洪峰收敛成业务溪流——一个管"看得懂"，一个管"接得住"</strong>，两者加起来，平台才算有"数字化的中枢"。</p>
+  </div>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：三元组词汇表与 SQL 闸门</h2>
+
+  <h3>物模型：属性、服务、事件</h3>
+  <p>物模型（Thing Model）是平台为某类产品定义的数据模型，描述一台设备"有什么、能做什么、会报告什么"。业界通行三元组：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>构件</th><th>语义</th><th>方向</th><th>园区例子</th></tr></thead>
+    <tbody>
+      <tr><td><strong>属性 Property</strong></td><td>设备的状态量，带数据类型/取值范围/单位/读写模式</td><td>可读可写</td><td>当前温度（float，-40~80，°C，只读）、阀门开度（int，0~100，%，读写）</td></tr>
+      <tr><td><strong>服务 Service</strong></td><td>可被云端调用的能力，有入参出参，是设备的"方法"</td><td>云端 → 设备</td><td>下发重启（reboot）、设定温度（setTarget，参数 target°C）</td></tr>
+      <tr><td><strong>事件 Event</strong></td><td>设备主动上报的告警/状态变更，带级别</td><td>设备 → 云端</td><td>高温告警（info/warn/error 三级，参数 currentTemp）</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>三元组的本质是<strong>把设备的接口契约从"两个人脑子里的知识"变成"平台里可版本化管理的结构化资产"</strong>。它之于 IoT 平台，如同 API 契约之于微服务：0018 讲 Seata 时提过"分布式事务的本质是协调契约"，0038 讲 Pulsar Schema Registry 时说过"让契约挡在事故前面"——物模型就是设备世界的 Schema，同样适用"先定义、后通信、变更走版本"的治理逻辑。数据类型层面的校验规则同样在这层：类型（int/float/bool/enum/struct）、取值范围、步长、单位。<strong>01 节的"功率 × 100"事故，在物模型层就是一条"单位 W、float、范围 0~5000"的校验声明——标准写在那，对账口径就不会漂。</strong></p>
+
+  <h3>模型从哪来：继承、导入与开放标准</h3>
+  <p>为每类设备从零建模不可持续，三个来源按优先级取用：</p>
+  <ol>
+    <li><strong>品类标准模型</strong>：主流云平台的品类库覆盖常见设备（灯泡/空调/电表开箱即用）；行业生态更成体系——阿里 ICA 联盟 350+ 成员沉淀了 <strong>700+ 标准物模型</strong>，新设备优先"套模板改参数"，不从白纸开始；</li>
+    <li><strong>网关协议映射</strong>：对 Modbus/OPC UA 这类工业协议子设备，物模型支持扩展配置，把寄存器地址映射到标准属性（这个话题与后续工业协议接入一讲衔接，本期不展开）；</li>
+    <li><strong>跨平台开放标准</strong>：W3C Web of Things 的 <strong>Thing Description 2.0</strong> 定义了 Property/Action/Event 交互模型与 JSON-LD 语义描述，2026-2028 新章程继续推进 Binding Registry 与 AI 用例；工业侧的资产壳 AAS（工业数字孪生的信息载体）走 ECLASS/IEC CDD 语义字典。自建平台若要避免锁死，<strong>建模时至少对齐三元组概念与 JSON Schema 化的描述方式，留一条通往开放标准的映射路径</strong>。</li>
+  </ol>
+
+  <h3>规则引擎：一条 SQL 就是一道闸</h3>
+  <p>物模型解决"看得懂"，规则引擎解决"接得住 + 流得对"。以 EMQX 内置规则引擎为例（IoT 平台同类设计同构）：规则 = <strong>SQL 描述的数据来源与加工 + 动作描述的去向</strong>。</p>
+  <div class="codeblock">
+  <pre><code>-- 例:温度异常数据才外发,正常数据只入库
+SELECT
+  clientid   AS device_id,
+  payload.t  AS temperature,     -- 对齐物模型的属性标识符
+  timestamp  AS up_at
+FROM "park/aircond/+/up"
+WHERE payload.t &gt; 35            -- 闸门:99% 的正常数据止步于此</code></pre>
+  </div>
+  <p>三段语义：<strong>FROM 圈数据来源</strong>（主题通配或连接/断开等事件）、<strong>SELECT/WHERE 做提取过滤加工</strong>、<strong>动作决定去向</strong>（重发布到告警主题、经数据桥接/Sink 写 TDengine、推 Kafka、调 Webhook）。价值在于<strong>把"设备原始消息"翻译成"物模型口径的结构化数据"</strong>（payload.t → temperature 属性标识符），下游拿到的是有语义的、单位统一的、被收敛过的数据流。</p>
+  <p>规模上有参照系：<strong>天翼物联与 EMQ 打造的 CTWing 平台承载数千万设备连接、支撑百万级 TPS 吞吐</strong>——规则引擎在生产上扛住这个量级，靠的不是单条 SQL 多快，而是后面的架构设计（第 03 节）。</p>
+
+  <div class="callout">
+    <span class="callout-title">栈间边界（与数据线分工）</span>
+    <p>本期讲的是<strong>设备端到库端的接入与桥接</strong>：物模型建模、规则加工、桥接写入。时序数据库本身的超级表建模与写入调优，数据线已在 0015/0022/0039 用 TDengine 深入讲过，本期只在桥接落库处点到即止，不重讲。</p>
+  </div>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：分层建模与规则三分治理</h2>
+
+  <h3>数据面全景：一条消息的四次身份变化</h3>
+  <div class="diagram" style="margin:1.2rem 0;">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="物模型与规则引擎数据面全景">
+    <defs>
+      <marker id="arr63" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#64748b"/></marker>
+    </defs>
+    <style>
+      .bx{fill:#f8fafc;stroke:#94a3b8;stroke-width:1.4}
+      .gw{fill:#eef2ff;stroke:#6366f1;stroke-width:2}
+      .warn{fill:#fff7ed;stroke:#f59e0b;stroke-width:1.6}
+      .lb{font:600 13px sans-serif;fill:#1e293b;text-anchor:middle}
+      .ls{font:10.5px sans-serif;fill:#475569;text-anchor:middle}
+      .ln{stroke:#64748b;stroke-width:1.6;fill:none;marker-end:url(#arr63)}
+    </style>
+    <rect class="bx" x="14" y="60" width="120" height="80" rx="10"/>
+    <text class="lb" x="74" y="90">① 原始报文</text><text class="ls" x="74" y="110">厂商私有 payload</text><text class="ls" x="74" y="126">十六进制/私有 JSON</text>
+    <rect class="gw" x="182" y="60" width="140" height="80" rx="10"/>
+    <text class="lb" x="252" y="90" style="fill:#4338ca">② 标准化</text><text class="ls" x="252" y="110">解析/映射到物模型</text><text class="ls" x="252" y="126">属性标识符+单位</text>
+    <rect class="bx" x="356" y="60" width="140" height="80" rx="10"/>
+    <text class="lb" x="426" y="90">③ 规则加工</text><text class="ls" x="426" y="110">过滤/富化/聚合</text><text class="ls" x="426" y="126">99% 正常数据止步</text>
+    <rect class="warn" x="530" y="14" width="216" height="66" rx="10"/>
+    <text class="lb" x="638" y="38" style="fill:#92400e">④a 实时溪流（低量高危）</text><text class="ls" x="638" y="56">告警重发布 / Webhook</text><text class="ls" x="638" y="70">推业务系统即刻处理</text>
+    <rect class="warn" x="530" y="120" width="216" height="66" rx="10"/>
+    <text class="lb" x="638" y="144" style="fill:#92400e">④b 全量入库（高量低险）</text><text class="ls" x="638" y="162">桥接写时序库留档</text><text class="ls" x="638" y="176">按物模型 schema 建列</text>
+    <line class="ln" x1="134" y1="100" x2="178" y2="100"/>
+    <line class="ln" x1="322" y1="100" x2="352" y2="100"/>
+    <line class="ln" x1="496" y1="86" x2="526" y2="50"/>
+    <line class="ln" x1="496" y1="114" x2="526" y2="150"/>
+    <rect class="bx" x="182" y="200" width="140" height="58" rx="10"/>
+    <text class="lb" x="252" y="224">影子/孪生</text><text class="ls" x="252" y="242">最新值缓存+期望值</text>
+    <rect class="bx" x="356" y="200" width="140" height="58" rx="10"/>
+    <text class="lb" x="426" y="224">模型注册中心</text><text class="ls" x="426" y="242">版本管理+校验</text>
+    <line class="ln" x1="252" y1="140" x2="252" y2="196"/>
+    <line class="ln" x1="426" y1="140" x2="426" y2="196"/>
+    <text class="ls" x="638" y="220" style="fill:#475569">吞吐参照：CTWing 数千万设备</text>
+    <text class="ls" x="638" y="236" style="fill:#475569">百万级 TPS，规则引擎在</text>
+    <text class="ls" x="638" y="252" style="fill:#475569">broker 内完成收敛</text>
+  </svg>
+  </div>
+  <p class="code-note">关键认知：规则引擎的位置在 <strong>broker 内侧</strong>——数据洪峰在消息平台内部就被分流收敛，出去的是两条"溪流"：低量高危的实时告警流、高量低险的入库留档流。<strong>业务系统永远不直面设备洪峰</strong>，这是整个数据面设计的底线。配套两件基础设施：影子/孪生存最新值与期望值（弱网设备离线也能下发、回来再同步，是设备影子一讲的主菜，本期点到）；模型注册中心管版本与校验（对应 0038 Schema Registry 的治理逻辑）。</p>
+
+  <h3>物模型分层：产品继承 + 模块化</h3>
+  <p>建模的第一个决策是"粒度"：产品（一类设备的模板）→ 设备（产品实例化，继承全部功能定义）是基础机制；复杂设备用<strong>模块化</strong>拆分——空调拆成"基础模块 + 能耗模块 + 故障诊断模块"，不同团队维护各自模块，模型不至于长成一棵没人敢动的巨树。两 pitfalls 先立规矩：<strong>标识符（identifier）一经发布不改名</strong>（改名的代价等价于删旧属性加新属性，历史数据与规则 SQL 全部断链——与 0038 字段改名事故同构）；<strong>取值范围与单位必须建模时写死</strong>，不留"口头约定"。</p>
+
+  <h3>规则三分治理：管道规则、业务规则、派生规则</h3>
+  <p>规则写多了会成新的乱麻——谁都能建、建了没人删、出事不知道哪条规则在环路里。按职责分三层治理：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>层</th><th>职责</th><th>例子</th><th>归属与变更</th></tr></thead>
+    <tbody>
+      <tr><td><strong>管道规则</strong></td><td>数据面基础设施：标准化、入库、基础分发</td><td>payload → 物模型属性映射、全量写时序库</td><td>平台团队，IaC 管理，评审从严</td></tr>
+      <tr><td><strong>业务规则</strong></td><td>业务语义的告警与联动</td><td>"温度 &gt;35 且持续 5 分钟告警"</td><td>业务团队自助配置，带 owner 标签</td></tr>
+      <tr><td><strong>派生规则</strong></td><td>从原始流计算出的新指标</td><td>5 分钟窗口平均功率、日累计电量</td><td>数据团队，进数据目录登记</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>分层的目的：管道规则求稳（变更窗口管理，出事影响全平台）；业务规则求快（01 节"改阈值要发版三周"的病根就是业务规则长在了应用代码里——收进平台配置，分钟级生效）；派生规则求清（算出来的指标也是数据资产，登记才能被复用与下线）。<strong>规则是代码，只是不长在代码仓库里——治理纪律一条都不能少：评审、owner、环境隔离、可回滚。</strong></p>
+
+  <h3>容量三笔账</h3>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>账目</th><th>怎么算</th><th>经验参考</th></tr></thead>
+    <tbody>
+      <tr><td>消息洪峰账</td><td>设备数 × 上报频率 × 膨胀系数（JSON 头/重连风暴）</td><td>100 万设备 × 1 条/秒 ≈ 百万 TPS 级平台容量的设计起点</td></tr>
+      <tr><td>收敛比账</td><td>告警流 / 全量流 的量级差决定下游成本</td><td>异常数据常 &lt;1%：业务系统只需承接 1/100 的流量</td></tr>
+      <tr><td>存储账</td><td>全量入库流 × 保留期，按物模型列数算行宽</td><td>冷热分层进时序库（0015/0039 讲过的保留策略与数据订阅）</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：三段可落地的配置</h2>
+
+  <h3>第一段：物模型 TSL 定义——从口头约定到结构化契约</h3>
+  <div class="codeblock">
+  <pre><code>// 产品: 空气监测终端(节选, TSL/JSON 风格)
+{
+  "schema": "https://iot-platform.example/tsl/v2",
+  "productKey": "airMonitor",
+  "properties": [{
+    "identifier": "temperature",     // 标识符:发布后不改名
+    "name": "当前温度",
+    "dataType": { "type": "float",
+                  "specs": { "min": -40, "max": 80,
+                             "unit": "°C", "step": 0.1 } },
+    "accessMode": "r"                // 只读:应用侧不可写
+  }],
+  "events": [{
+    "identifier": "highTempAlarm",
+    "name": "高温告警", "type": "alert",
+    "outputData": [{ "identifier": "temperature",
+                     "dataType": { "type": "float" } }]
+  }]
+}</code></pre>
+  </div>
+  <p class="code-note">把 01 节的三类设备各自建产品、发版本：B 厂商电表的"功率 × 100 整数"在网关映射层就换算成标准单位再上报——<strong>换算属于管道规则，不允许散落在应用里</strong>。发布走版本管理，修改留历史（对应模型注册中心）。</p>
+
+  <h3>第二段：EMQX 规则 SQL——一道闸两个出口</h3>
+  <div class="codeblock">
+  <pre><code>-- 规则 1(管道):全量标准化入库,WHERE 恒真
+SELECT clientid AS device_id,
+       payload.temperature AS temperature,
+       payload.humidity    AS humidity,
+       timestamp           AS ts
+FROM "park/airMonitor/+/property/post"
+
+-- 规则 2(业务):异常才外发,出口=重发布到告警主题
+SELECT clientid AS device_id,
+       payload.temperature AS temperature
+FROM "park/airMonitor/+/property/post"
+WHERE payload.temperature &gt; 35
+-- 动作: republish → park/alarm/highTemp
+--       (目标系统的消费量 = 全量的 1/100)</code></pre>
+  </div>
+  <p class="code-note">版本坐标：EMQX 企业版当前 LTS 为 <strong>6.3 线（6.3.0 于 2026-09-03 发布，支持至 2029-09；5.8 为上一代 LTS，支持至 2027-08）</strong>；开源侧 5.8.9 之后社区版随企业版线演进。规则 SQL 支持 <code>$events/</code> 系列事件源（连接/断开/订阅），设备上下线也能进规则——在线率统计就是这么来的。</p>
+
+  <h3>第三段：桥接落库——物模型列直接映射表结构</h3>
+  <div class="codeblock">
+  <pre><code>-- EMQX 数据集成 → TDengine Sink 的 SQL 模板(节选)
+INSERT INTO meters.air_monitor USING meters.supertemperature
+  TAGS (${device_id}, 'park-A')
+  VALUES (${ts}, ${temperature})
+
+-- 时序库侧:超级表 + 子表按设备 tag 分离(0015 讲过的
+-- "一个采集点一张子表"模型,列结构与物模型属性一一对应)</code></pre>
+  </div>
+  <p class="code-note"><strong>物模型与时序库表结构是同一份 schema 的两种投射</strong>——平台侧定义一列属性，入库模板就多一列。这是"模型驱动"的复利：改模型走版本评审，入库模板、规则 SQL、应用 SDK 同步生效，而不是四处手工对齐。华北油田的公开案例（Neuron 边缘采集 + eKuiper 边缘规则 + EMQX 企业版汇聚）就是这条链路的工业级样板：1100+ 油井、亚秒级采集，运维与人本成本降 70%+。</p>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>物模型是设备的词汇表：</strong>属性（状态）/服务（能力）/事件（上报）三元组 + 类型/范围/单位校验，把设备接口契约从"脑子里的知识"变成可版本化的结构化资产——它是设备世界的 Schema Registry，先定义、后通信、变更走版本。</li>
+    <li><strong>标识符纪律高于一切：</strong>identifier 一经发布不改名（改名 = 删旧加新，历史数据与规则全断链）；单位与取值范围建模时写死——"功率 × 100"这类读数事故的根治处在模型层，不在应用层。</li>
+    <li><strong>规则引擎是数据的第一道闸：</strong>海量、高频、低密度的设备数据必须在 broker 内侧完成解析、过滤、加工——业务系统只接"溪流"（1% 告警流）不接"洪峰"（全量流），CTWing 百万级 TPS 的参照架构就是这条纪律的规模化证明。</li>
+    <li><strong>规则三分治理：</strong>管道规则（平台，求稳）、业务规则（业务自助，求快——告警阈值进配置不进代码）、派生规则（数据资产，进目录登记）；规则是代码，评审、owner、环境隔离、可回滚一样不能少。</li>
+    <li><strong>模型驱动有复利：</strong>物模型与时序库表结构、规则 SQL、应用 SDK 是同一份 schema 的多种投射——改一处模型、全线同步生效；跨平台留开放标准（W3C WoT TD 2.0 / 工业 AAS）的映射路径，避免建模锁死。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目：五个设备品类、每品类两家供应商，怎么设计物模型与规则引擎的治理体系？</summary>
+    <div class="details-body">
+      <p>背景：公司 IoT 平台要接入环境监测、能耗计量、安防联动等五个品类，每个品类都有两家竞争供应商（避免单点锁定也是采购政策）。不同供应商的私有协议、上报频率（1 秒到 5 分钟不等）、单位口径都不一样。你是平台架构师，请设计物模型与规则引擎的治理体系，回答：</p>
+      <p><strong>① 物模型建几套？品类模板和供应商差异怎么分层消化？</strong><br>
+      <strong>② "温度超 35 度且持续 5 分钟告警"这类规则放在哪一层执行——设备端、边缘网关、还是云端规则引擎？决策依据是什么？</strong><br>
+      <strong>③ 上线一年后规则数量失控（上千条、无 owner、互相触发），怎么治理？</strong></p>
+      <h4>🔍 深度解析</h4>
+      <p><strong>① 模型按品类建"一套标准 + 每供应商一个映射"，差异在管道层消化，不进模型。</strong>五个品类各建一个标准产品模型（优先套用品类库/ICA 标准模型再裁剪），这是对上（应用侧）的唯一词汇表——应用永远只看"温度、功耗"这些标准属性，不感知供应商。两家供应商的协议差异（十六进制、私有 JSON、Modbus）由各自的<strong>解析映射层</strong>消化：透传协议走平台侧解码脚本（管道规则），Modbus 子设备走网关的物模型映射配置（寄存器地址 → 标准属性）。分层的关键纪律：<strong>供应商差异止步于映射层，标准模型层保持"每品类唯一"</strong>——否则五品类 × 两供应商 = 十套模型，应用侧集成成本翻十倍，供应商一换应用全改。单位换算（×100 整数、不同量纲）也归这一层，与 01 节事故呼应。版本管理上，标准模型由平台团队 owning，映射配置随设备接入项目走评审。</p>
+      <p><strong>② 决策依据是"数据在哪收敛、延迟预算在哪、断网时谁还能干活"，三问答完位置自现。</strong>云端规则引擎是默认位置：规则集中管理、全局视野（跨设备联动必须在云上）、改规则分钟级生效。往下沉两个触发条件：<strong>其一，带宽与成本</strong>——1 秒级高频上报 × 海量设备，若告警判断只需要本地窗口，把"聚合降频"放边缘（网关侧规则引擎，如 eKuiper 一类轻量流处理），上报频率从 1 秒降到 30 秒，链路成本降一个量级；<strong>其二，断网自治</strong>——安防联动这类"断网也必须执行"的规则只能放设备端或边缘（本地规则 + 本地执行，恢复后补传）。"超 35 度持续 5 分钟"的算例：若设备上报频率 30 秒以上、且业务允许断网期间告警延迟，云端窗口聚合即可（SQL 窗口函数或流计算）；若是 1 秒级上报的产线设备，边缘先聚合再上云。<strong>分层口诀：原始数据在哪产生，聚合就尽量靠近哪；跨设备的编排，永远在云端。</strong></p>
+      <p><strong>③ 治理四步：清资产 → 定准入 → 分级管 → 建退役。</strong>第一步把上千条规则当数据资产盘点：每条规则导出 owner、来源工单、最近触发时间（规则引擎的 metrics 通常都有）——触发量为零的"僵尸规则"先冻结再批量下线，通常能清掉三成以上。第二步定准入流程：新规则必须带 owner 标签、变更单号、命名规范（品类_动作_目标），管道/业务/派生三层归属不同评审级别（对应第 03 节三分治理）。第三步分级管理：管道规则进 IaC 仓库走平台变更窗口；业务规则开自助配置但限速（灰度发布、先 shadow 模式跑一天看触发量再放开）；派生规则进数据目录。第四步建退役机制：规则与工单/需求挂钩，需求关闭半年后自动进入"待下线"清单，owner 确认后清理——<strong>规则池与 0062 讲的白名单同构：只增不减，三年后就是另一场事故的温床</strong>（互相触发的环路规则，往往就藏在没人记得的僵尸规则里）。防环路还有一条工程护栏：规则的动作目标主题禁止与自身数据来源主题形成环，规则引擎侧加静态检查。</p>
+    </div>
+  </details>
+
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>EMQX 官方文档《规则引擎》（规则的 SQL 数据来源/加工/动作模型、内置函数与事件源的一手出处）：<br>
+    <a href="https://docs.emqx.com/zh/emqx/latest/data-integration/rules.html" target="_blank" rel="noopener">docs.emqx.com — 规则引擎</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>系列内互链：<a href="0045-mqtt-emqx-cluster.html">0045 MQTT 协议与 EMQX 集群</a>（本期数据面的传输底座）、<a href="0046-iot-long-connection-gateway.html">0046 长连接接入网关</a>（物联网线上一讲——设备"连进来"，本期讲连进来之后）、<a href="0038-pulsar-schema-registry.html">0038 Pulsar Schema Registry</a>（物模型的契约治理逻辑与之间构）、<a href="0015-tdengine-supertable.html">0015 TDengine 超级表</a>、<a href="0039-tdengine-data-subscription.html">0039 数据订阅</a>（入库侧与下游消费侧）、<a href="0056-event-driven-architecture-eda.html">0056 事件驱动架构</a>（规则引擎的事件流世界观）、<a href="0062-k8s-network-policy.html">0062 网络策略</a>（上一期，K8s 线）。延伸：W3C Web of Things Thing Description 2.0、阿里云物联网平台物模型文档、EMQX 数据集成 TDengine 章节。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0062-k8s-network-policy.html">← 上一期：Kubernetes 网络策略</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 63 期 · 物联网与边缘计算系列 · 下期继续物联网线——设备身份安全与 OTA 升级</p>
+  <p>📡 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
