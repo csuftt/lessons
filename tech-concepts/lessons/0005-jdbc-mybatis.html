@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>技术概念手记 · JDBC 与 MyBatis：mapper 一行代码，到 SQL 之间发生了什么</title>
+<title>技术概念手记 · MyBatis 信创适配：换达梦金仓，Mapper 为什么一行不用改</title>
 <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body>
@@ -15,8 +15,8 @@
 
 <div class="hero">
   <p class="issue">Java 后端 · 持久层</p>
-  <h1>JDBC 与 MyBatis：mapper 一行代码，到 SQL 之间发生了什么</h1>
-  <p class="subtitle">天天写 <code>mapper.getUserById(id)</code>，一行进去、一个对象出来——中间那条链路你敢说自己讲得清吗？这篇从 JDBC 的"插座标准"讲到 MyBatis 的动态代理与绑定路由，把六步链路逐环拆开；再讲清一个常被含糊带过的问题：<strong>SQL 到底是谁写的</strong>（手写路由、MyBatis-Plus 启动注入、条件构造器三层光谱）；最后回答"换国产信创数据库要改什么"——Mapper 一行不动，动的是哪两行。</p>
+  <h1>MyBatis 信创适配：换达梦金仓，Mapper 为什么一行不用改</h1>
+  <p class="subtitle">换国产信创数据库（达梦、人大金仓），持久层到底要改多少？——“Mapper 一行不用改”的底气，来自把 <code>mapper.getUserById(id)</code> 这行代码背后的六步链路讲清。这篇从 JDBC 的"插座标准"讲到 MyBatis 的动态代理与绑定路由，把六步链路逐环拆开；再讲清一个常被含糊带过的问题：<strong>SQL 到底是谁写的</strong>（手写路由、MyBatis-Plus 启动注入、条件构造器三层光谱）；最后回答"换国产信创数据库要改什么"——Mapper 一行不动，动的是哪两行。</p>
   <div class="lesson-meta">
     <span class="tag cat">☕ Java 后端</span>
     <span class="tag-date">📅 2026-10-27 · 第 5 期</span>
