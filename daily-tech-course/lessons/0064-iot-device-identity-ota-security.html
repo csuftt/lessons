@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · 设备身份安全与 OTA 升级：从一张默认口令表说起 | 2026-11-02</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0064</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0063-iot-thing-model-rule-engine.html">上一期：物模型与规则引擎</a> · <a href="https://www.bilibili.com/video/BV1vuxa62EKs" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">IOT · 物联网系列第 4 讲（设备安全与升级篇）</p>
+  <h1>设备身份安全与 OTA 升级：从一张默认口令表说起</h1>
+  <p class="subtitle">前几讲把设备"连进来"（<a href="0045-mqtt-emqx-cluster.html">MQTT</a>）、"扛得住"（<a href="0046-iot-long-connection-gateway.html">长连接网关</a>）、"看得懂"（<a href="0063-iot-thing-model-rule-engine.html">物模型</a>）都聊过了，这一讲补上物联网平台的两块地基：<strong>设备是谁（身份），设备上的软件怎么安全地换代（OTA）</strong>。2016 年 Mirai 用一张 60 多条的默认口令表拖垮了半个美国互联网，十年后它的家族仍占 IoT 恶意载荷的约四成——设备身份与固件升级不是安全部门的要求清单，是平台能不能活下来的事。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">📡 IoT 平台</span>
+    <span class="tag-date">📅 2026-11-02 · 第 64 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>场景：一张口令表打了十年</h2>
+
+  <h3>Mirai 事故复盘：没有"黑科技"的世纪攻击</h3>
+  <p>2016 年 10 月，DNS 服务商 Dyn 遭到大规模 DDoS，Twitter、Netflix、Reddit 数小时不可访问。攻击源是约 <strong>60 万台被 Mirai 蠕虫感染的摄像头和 DVR</strong>。Mirai 的入侵手法说出来不值一提：<strong>扫描全网的 Telnet 23 端口，拿一张 60 多条的出厂默认口令表（admin/admin、root/root 这类）挨个试</strong>——登录成功就装入内存运行、开始扫描下一批。没有零日漏洞，没有高级持久威胁，赢在"没人改默认密码"。</p>
+  <p>十年过去，这件事不但没有翻篇，反而成了常态。几组 2025-2026 年的公开数据：</p>
+  <ul>
+    <li><strong>家族仍在扩张：</strong>Zscaler ThreatLabz 2025 报告，Mirai 家族占观测 IoT 恶意载荷的约 <strong>40%</strong>，Mirai + Mozi + Gafgyt 三家合计约 <strong>75%</strong>——传播主力仍是弱口令与未修补的老漏洞；</li>
+    <li><strong>手法没变：</strong>Nozomi Networks 对真实 IoT/OT 事件的分析里，<strong>暴力破解默认 SSH/Telnet 口令仍是第一入侵手法</strong>（约 7.4% 的恶意动作为登录爆破，另有约 5.3% 用默认口令横向移动）；</li>
+    <li><strong>传输裸奔：</strong>业界估计约 <strong>98% 的设备流量未加密</strong>，凭据与控制指令明文上天；</li>
+    <li><strong>超期服役：</strong>Ponemon 2024 调研，美国家庭网中的 IoT 设备平均超出厂商支持期 <strong>3.7 年</strong>还在跑——固件再没人修，漏洞永久敞开。</li>
+  </ul>
+
+  <h3>平台视角的病根：身份与升级两块地基缺失</h3>
+  <p>对企业 IoT 平台架构师，这一连串数字指向两个结构性缺口：</p>
+  <p><strong>缺口一：设备身份是"弱口令"级的。</strong>设备与平台之间没有强身份：默认口令人人可查、密钥出厂固化在固件里（一台被提取，全型号沦陷）、连接不加密。平台侧任何精细的权限体系，都建立在"我确认你是那台设备"之上——这一层是空的，上面全是沙堡。</p>
+  <p><strong>缺口二：固件升级通道是"裸"的。</strong>设备出厂后固件基本不动；即使有 OTA，也常只是"HTTPS 下载一个 bin 文件刷进去"——传输是加密的，但<strong>设备无法验证固件本身是谁签发的</strong>：升级服务器被攻破（0059 讲过 AI 网关 LiteLLM 的供应链投毒，同样的剧本完全可以在固件分发服务器上重演），设备就会欣然刷入恶意固件。漏洞修不动 + 刷机不设防，两件事叠加就是僵尸网络十年不死的真正原因。</p>
+  <p>监管已经下场：英国 PSTI 法案 2024 年 4 月生效，<strong>禁止出厂通用默认口令</strong>、要求公开漏洞披露渠道、要求明示安全更新支持期，违规最高罚 1000 万英镑或全球营收 4%；欧盟 CRA（网络弹性法案）2027 年 12 月全面适用，要求 SBOM（软件物料清单）与 24 小时内上报被积极利用的漏洞。设备身份与安全升级，已经从"安全加分项"变成了<strong>市场准入项</strong>。</p>
+
+  <div class="callout">
+    <span class="callout-title">一句话病灶</span>
+    <p><strong>设备身份回答"你是谁"，OTA 签名链回答"你跑的代码是谁给的"——两问都答不上，平台就是给别人养僵尸网络的算力。</strong>好消息是：这两块地基都有成熟的工程解，且在云平台侧有现成参照。</p>
+  </div>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：身份三档与签名信任链</h2>
+
+  <h3>设备认证三档：从共享秘密到数字证书</h3>
+  <p>以阿里云物联网平台的认证体系为参照（各家云平台同构），设备身份有三档，安全性、产线成本、运维复杂度依次递增：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>档位</th><th>机制</th><th>产线动作</th><th>适用与代价</th></tr></thead>
+    <tbody>
+      <tr><td><strong>一机一密</strong></td><td>每台设备烧录专属三元组（ProductKey/DeviceName/DeviceSecret），连接时用 DeviceSecret 对参数做 HMAC-SHA256 签名，平台验签</td><td>逐台烧录唯一密钥（产线联动安全发放）</td><td>安全性高、主流之选；代价是产线要逐台写密钥并防烧录环节泄露</td></tr>
+      <tr><td><strong>一型一密</strong></td><td>同型号设备烧同一对产品密钥，首次连接走<strong>动态注册</strong>：以产品密钥换取本机 DeviceSecret（免预注册变体则换取 ClientID+DeviceToken），此后按一机一密运行</td><td>批量烧同一对密钥，产线最省</td><td>适合大规模生产；代价是产品密钥一旦泄露可被批量伪造注册，需开白名单/限额兜底</td></tr>
+      <tr><td><strong>X.509 证书</strong></td><td>每台设备一张数字证书，身份认证在 <strong>TLS 握手阶段</strong>完成（双向证书校验），应用层零额外报文</td><td>逐台签发并写入设备（理想配合安全芯片存储私钥）</td><td>安全级别最高（私钥不出安全芯片、可吊销可轮换）；代价是要运营一套设备级 PKI——签发、轮换、CRL/OCSP 吊销检查，平台侧通常只有高阶实例才支持</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>三条工程纪律：<strong>其一，组合拳是常态</strong>——产线烧一型一密（省产线），首连动态注册换一机一密（保运行），高价值设备再上 X.509；<strong>其二，密钥必须落安全存储</strong>——DeviceSecret 明文躺在可读 flash 里，等于把家门钥匙垫在门口，至少开 flash 加密，讲究的用安全芯片（私钥不可导出）；<strong>其三，密钥要能死</strong>——设备失窃、固件被提取，平台必须能吊销单台设备的身份并重新发放，这是 X.509 吊销机制带来的能力，一机一密体系要自己实现同等语义（密钥版本化 + 强制轮换）。</p>
+
+  <h3>OTA 信任链：HTTPS 只是第一环</h3>
+  <p>固件升级的安全不是"下载走 HTTPS"一句话，而是一条链，任何一环缺失都会塌（以 ESP-IDF 的工程实践为参照，业界通行）：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>环节</th><th>防什么</th><th>怎么做</th></tr></thead>
+    <tbody>
+      <tr><td><strong>传输加密</strong></td><td>网络窃听 / 中间人篡改</td><td>固件分发走 HTTPS（CDN + 短时效签名 URL）</td></tr>
+      <tr><td><strong>固件签名</strong></td><td>升级服务器被攻破、内部人员投毒</td><td>构建流水线用私钥对固件摘要签名（如 RSA-3072 / SHA-256）；设备 bootloader 用出厂烧录的公钥验签——<strong>验签在设备内，不信任任何服务器</strong>，配合 Secure Boot 连本地刷机都要过签</td></tr>
+      <tr><td><strong>A/B 双分区 + 自动回滚</strong></td><td>新固件把设备刷成砖</td><td>新固件写入备用分区，首次启动进入"待验证"态：应用自检（外设初始化、配置可读、看门狗不咬）后显式标记有效；启动失败/断电则 bootloader 自动回退旧分区——<strong>下载成功 ≠ 升级成功，能自己爬起来才算</strong></td></tr>
+      <tr><td><strong>防回滚（anti-rollback）</strong></td><td>攻击者刷回"签名合法但含已撤销漏洞"的旧版本</td><td>设备 eFuse 中烧安全版本号，bootloader 拒绝启动低于该版本的镜像——不可逆操作，<strong>必须先把修复版铺满再抬版本线</strong></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>这条链的每个环节防的是不同威胁：TLS 防"路上"，签名防"源头"，双分区防"刷坏"，防回滚防"开倒车"。四件缺一件，攻击面就留一门。还要补一条平台侧视角：<strong>控制面必须看得见设备端状态</strong>——下载开始 / 镜像验签通过 / 切换分区 / 待验证 / 自检通过 / 已回滚 / 签名拒绝，是一串不同的状态机节点；只看"OTA 进度 100%"做发布决策，等于闭眼开车。</p>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：身份生命周期与灰度发布</h2>
+
+  <h3>全景：一台设备的身份一生与一次安全升级</h3>
+  <div class="diagram" style="margin:1.2rem 0;">
+  <svg viewBox="0 0 760 320" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="设备身份生命周期与OTA灰度发布全景">
+    <defs>
+      <marker id="arr64" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#64748b"/></marker>
+    </defs>
+    <style>
+      .bx{fill:#f8fafc;stroke:#94a3b8;stroke-width:1.4}
+      .gw{fill:#eef2ff;stroke:#6366f1;stroke-width:2}
+      .warn{fill:#fff7ed;stroke:#f59e0b;stroke-width:1.6}
+      .ok{fill:#ecfdf5;stroke:#10b981;stroke-width:1.6}
+      .lb{font:600 13px sans-serif;fill:#1e293b;text-anchor:middle}
+      .ls{font:10.5px sans-serif;fill:#475569;text-anchor:middle}
+      .ln{stroke:#64748b;stroke-width:1.6;fill:none;marker-end:url(#arr64)}
+    </style>
+    <rect class="gw" x="14" y="40" width="150" height="76" rx="10"/>
+    <text class="lb" x="89" y="68" style="fill:#4338ca">① 产线烧录</text><text class="ls" x="89" y="88">一型一密 + 公钥摘要</text><text class="ls" x="89" y="104">(eFuse, 不可逆)</text>
+    <rect class="bx" x="196" y="40" width="150" height="76" rx="10"/>
+    <text class="lb" x="271" y="68">② 首连注册</text><text class="ls" x="271" y="88">动态注册换 DeviceSecret</text><text class="ls" x="271" y="104">此后一机一密运行</text>
+    <rect class="bx" x="378" y="40" width="150" height="76" rx="10"/>
+    <text class="lb" x="453" y="68">③ 漏洞响应</text><text class="ls" x="453" y="88">CI 出修复固件</text><text class="ls" x="453" y="104">私钥签名 → 版本登记</text>
+    <rect class="ok" x="560" y="40" width="186" height="76" rx="10"/>
+    <text class="lb" x="653" y="68" style="fill:#065f46">④ 签名分发</text><text class="ls" x="653" y="88">CDN + 短时效 URL</text><text class="ls" x="653" y="104">设备端 bootloader 验签</text>
+    <line class="ln" x1="164" y1="78" x2="192" y2="78"/>
+    <line class="ln" x1="346" y1="78" x2="374" y2="78"/>
+    <line class="ln" x1="528" y1="78" x2="556" y2="78"/>
+    <rect class="warn" x="196" y="170" width="130" height="76" rx="10"/>
+    <text class="lb" x="261" y="198" style="fill:#92400e">⑤ 验证批</text><text class="ls" x="261" y="218">内部/指定设备</text><text class="ls" x="261" y="234">A/B 自检通过为准</text>
+    <rect class="warn" x="358" y="170" width="150" height="76" rx="10"/>
+    <text class="lb" x="433" y="198" style="fill:#92400e">⑥ 灰度放量</text><text class="ls" x="433" y="218">1% → 10% → 50%</text><text class="ls" x="433" y="234">每批看失败率/回滚率</text>
+    <rect class="ok" x="540" y="170" width="150" height="76" rx="10"/>
+    <text class="lb" x="615" y="198" style="fill:#065f46">⑦ 全量 + 抬线</text><text class="ls" x="615" y="218">铺满后抬防回滚版本</text><text class="ls" x="615" y="234">密钥按计划轮换</text>
+    <line class="ln" x1="653" y1="116" x2="330" y2="166"/>
+    <line class="ln" x1="326" y1="208" x2="354" y2="208"/>
+    <line class="ln" x1="508" y1="208" x2="536" y2="208"/>
+    <rect class="bx" x="196" y="272" width="494" height="40" rx="8"/>
+    <text class="ls" x="443" y="296">监控环：升级成功率 · 回滚率 · 版本分布回归 · 失败设备清单自动冻结下一批（刹车）</text>
+  </svg>
+  </div>
+  <p class="code-note">上半区是<strong>身份的一生</strong>：产线烧录（公钥摘要进 eFuse 是不可逆操作，必须在出厂前完成）→ 首连动态注册 → 常态运行；下半区是<strong>一次安全升级的发布工程</strong>：签名构建 → 验证批 → 灰度放量 → 全量后才抬防回滚版本线。监控环贯穿始终——灰度的本质不是"分批发"，是"每批都带着刹车发"。</p>
+
+  <h3>选型权衡：X.509 不是唯一正解</h3>
+  <p>架构评审里常见的误区是"直接上 X.509，最安全"。真实权衡是三维的：<strong>设备成本</strong>（安全芯片 + 证书存储的 BOM 增量，百万设备就是千万级）、<strong>PKI 运维成本</strong>（设备证书的签发、轮换、吊销是一套要长期养的体系，CRL 分发到边缘场景还有可达性问题）、<strong>合规要求</strong>（高敏感行业监管可能直接要求证书）。务实的主流答案是：<strong>消费级与一般行业设备走"TLS + 一机一密（动态注册发放）"，车联网、支付、能源等高价值设备上 X.509</strong>。档位选择本身没有对错，错的是停在默认口令那一档。</p>
+
+  <h3>灰度发布的三个数字账</h3>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>账目</th><th>怎么算</th><th>经验参考</th></tr></thead>
+    <tbody>
+      <tr><td>下载洪峰账</td><td>批量大小 × 包体积 ÷ 放量窗口</td><td>50 万设备 × 2MB 差分包 = 1TB 级分发，必须 CDN + 分批限速；全量包按 10 倍估</td></tr>
+      <tr><td>差分收益账</td><td>差分包按"源版本 → 目标版本"成对生成</td><td>前提是版本分布已知——设备如实上报版本是 OTA 的地基（升级超时窗口给足：单设备 1~1440 分钟可配）</td></tr>
+      <tr><td>灰度刹车账</td><td>每批放量观察期的失败率/回滚率阈值</td><td>验证批（个位数设备）→ 1% → 10% → 50% → 全量；回滚率超阈值自动冻结后续批次</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>发布策略上，云平台的成熟做法可直接抄作业：固件先过<strong>验证批</strong>（指定少量设备真机升级，确认功能正常后批量按钮才解锁），再按<strong>定向 / 分组 / 全量</strong>三档放量，批次内设备状态分列（待推送/已推送/升级中/成功/失败/已取消），失败设备可单独重试——<strong>把"发布"当一等公民设计，而不是一个按钮</strong>。</p>
+
+  <div class="callout">
+    <span class="callout-title">栈间边界（与安全线分工）</span>
+    <p>本期讲的是<strong>设备侧身份体系与升级管道</strong>。密钥管理平台（KMS/HSM）、零信任架构、后量子迁移等平台侧安全主题，属安全架构前沿线，届时展开不重讲。</p>
+  </div>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：三段可落地的配置</h2>
+
+  <h3>第一段：一机一密的 MQTT 认证三元组</h3>
+  <div class="codeblock">
+  <pre><code># 设备端计算 MQTT 连接三元组(以阿里云 Link SDK 约定为例)
+clientId  = "{clientId}|timestamp={ts},securemode=2,signmethod=hmacsha256|"
+username  = "{DeviceName}|{ProductKey}"
+password  = HMAC-SHA256(DeviceSecret, "clientId{clientId}deviceName{DeviceName}productKey{ProductKey}timestamp{ts}")
+# securemode=2 走 TLS 8883 端口; 平台侧只存 DeviceSecret 密文
+# 验签失败 N 次自动锁定该设备身份 —— 防在线爆破</code></pre>
+  </div>
+  <p class="code-note">要点：签名覆盖所有连接参数（防篡改重放），密钥永远不在线路上传输；<strong>密码错 N 次锁身份</strong>是平台侧必备防爆破护栏——Mirai 那张口令表之所以有效，就是因为可以无限次试。</p>
+
+  <h3>第二段：OTA 三 Topic 流与版本上报</h3>
+  <div class="codeblock">
+  <pre><code># 1. 设备上线即上报当前固件版本(版本分布 = 灰度与差分的地基)
+publish: /ota/device/inform/{product}/{device}   {"version":"1.4.2","module":"default"}
+# 2. 设备订阅升级通知(平台按批次推送:url/md5/签名/大小/是否差分)
+subscribe: /ota/device/upgrade/{product}/{device}
+# 3. 升级过程上报进度与结果; 下载完成先验签再写分区
+publish: /ota/device/progress/{product}/{device}  {"step":100,"desc":"verify ok, reboot"}
+# 判定升级成功 = 设备重启后 inform 上报的版本 == 目标版本</code></pre>
+  </div>
+  <p class="code-note">这是云平台 OTA 的通用协议形状（以阿里云 OTA Topic 约定为参照）：版本上报、升级通知、进度回报三条通道各司其职。注意最后一条：<strong>"升级成功"的唯一判据是重启后版本上报</strong>——下载完成、写入完成都不算数，A/B 分区自检通过后重新上报目标版本才算闭环。</p>
+
+  <h3>第三段：设备端安全 OTA 检查清单（ESP-IDF 参照）</h3>
+  <div class="codeblock">
+  <pre><code># 构建侧: 私钥签名固件(私钥只在 CI/HSM, 任何人不可导出)
+idf.py build && espsecure.py sign_data --keyfile ota_sign.pem app.bin
+# 设备侧: 出厂前烧公钥摘要进 eFuse(不可逆! 量产前最后一次可反悔的机会)
+espefuse.py burn-key secure_boot_v2 ota_sign_pubkey_digest
+# 固件内: A/B 自检通过后才确认新镜像有效(否则重启自动回滚)
+esp_ota_mark_app_valid_cancel_rollback();   // 自检通过后调用
+# 铺满修复版后再抬安全版本线(防回滚 eFuse 只进不退, 顺序不能反)
+CONFIG_SECURE_BOOT_V2_ENABLED=y  CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y</code></pre>
+  </div>
+  <p class="code-note">三个不可逆动作要写进团队 wiki 加粗：<strong>烧公钥摘要、抬安全版本、（本文没展开的）关调试口</strong>——都要在发布流程里设双人复核。而"先铺满再抬线"的顺序纪律，来自真实的坑：抬早了，还在旧版本上的设备会直接拒绝启动，等于自己把自己刷砖。</p>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>设备身份是平台的第一问：</strong>Mirai 用一张默认口令表打了十年（家族至今占 IoT 恶意载荷约四成），UK PSTI 已立法禁默认口令——身份体系（一机一密/一型一密/X.509 三档）不是安全加分项，是市场准入项。</li>
+    <li><strong>三档认证按三维选型：</strong>设备 BOM 成本 × PKI 运维成本 × 合规要求；主流答案是"TLS + 一机一密（动态注册发放）"，高价值设备上 X.509；错的不是选哪档，是停在默认口令那档。</li>
+    <li><strong>OTA 安全是链不是 HTTPS：</strong>传输加密防路上、固件签名防源头（验签在设备内，不信任任何服务器）、A/B 双分区防刷砖、防回滚防开倒车——四环缺一环就留一门。</li>
+    <li><strong>灰度的本质是带刹车放量：</strong>验证批 → 1% → 10% → 50% → 全量，每批盯失败率与回滚率，超阈值自动冻结；"升级成功"唯一判据是重启后版本上报，不是下载进度 100%。</li>
+    <li><strong>三个不可逆动作双人复核：</strong>烧公钥摘要、抬防回滚版本线（必须先铺满再抬）、关调试口——防回滚 eFuse 只进不退，顺序错了等于自己刷砖。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目：50 万台存量设备从"默认口令 + 无签名 OTA"迁到强身份 + 签名升级，怎么设计迁移路线？</summary>
+    <div class="details-body">
+      <p>背景：你接手一个运行了四年的设备平台：存量 50 万台设备，出厂全是默认口令（不可改），OTA 只是 HTTPS 下载 bin 刷机（设备端不验签），固件里也没有烧公钥。公司决定做安全改造，但设备已在现场、不可能召回。请回答：</p>
+      <p><strong>① 设备身份怎么迁？老设备无法逐台烧录新密钥，第一步发什么、怎么发？</strong><br>
+      <strong>② 固件验签怎么补？Secure Boot 的公钥烧录只能出厂前做，存量设备这环缺失，还能建立起多强的信任链？</strong><br>
+      <strong>③ 迁移期间新旧两套认证并存，网关与平台侧要加哪些护栏，防止迁移窗口本身成为攻击面？</strong></p>
+      <h4>🔍 深度解析</h4>
+      <p><strong>① 身份迁移走"服务端引导的密钥置换"：第一步 OTA 一版带密钥置能力的固件，用现有 OTA 通道（哪怕是弱的）把每台设备的默认口令换成随机唯一密钥。</strong>具体路线：第一版改造固件内置"首次启动生成密钥对/随机 DeviceSecret → 经当前通道上报公钥/密钥指纹 → 平台登记后旧口令立即作废"的置换流程。这里有个鸡生蛋问题：置换动作本身走的是不安全通道——所以置换要<strong>与设备指纹绑定</strong>（设备序列号 + 硬件特征上报，平台侧做一致性校验与异常检测：同一序列号二次置换、置换请求突增都告警），并且接受"窗口期残余风险"：攻击者若抢在置换前攻陷设备，该台设备身份作废处理，靠平台侧的爆破锁定与频率护栏把大规模伪造压到不可行。新出厂设备直接上"产线烧录 + 一型一密动态注册"，不再走置换路径——存量与增量分治，是这类改造的基本盘。</p>
+      <p><strong>② 验签能补到"升级通道级"，补不到"启动链级"——但要明白缺口还剩什么。</strong>Secure Boot 的公钥摘要烧 eFuse 只能出厂前做，存量设备这环永久缺失：物理接触设备的攻击者仍可拆 flash 直刷。但攻击面大头（远程批量刷恶意固件）可以封住：改造固件内嵌公钥（而非 eFuse），OTA 下载后先验签再写分区——攻击者拿不到私钥就伪造不了可通过的固件，哪怕他攻破了分发服务器（与 Secure Boot 的差别在于：内嵌公钥可被物理接触者用自定义固件连根替换，eFuse 不行）。同时上 A/B 分区 + 自检回滚 + 服务器侧"版本-签名-哈希"三重登记（设备上报的版本要能对上平台签发的记录，伪造版本在平台侧穿帮）。<strong>结论：存量设备建立"通道级信任链"，启动链级的缺口用业务侧异常检测（行为基线、流量突增）兜底，并在设备换代周期里自然消亡</strong>——安全工程的答案常常不是补到满分，是把风险压到与资产价值匹配的水平。</p>
+      <p><strong>③ 并存期三道护栏：默认拒绝的迁移网关、置换率的全量对账、旧通道的硬性日落。</strong>其一，认证网关对"旧口令认证"做<strong>白名单式放行</strong>：只有"已登记待置换 + 在置换窗口期内"的设备允许旧口令连接，且旧口令连接的权限收窄到只能做置换动作（不能再上报业务数据/触发下载）——旧凭据从"全权"降为"一次性置换票"；同时旧通道登录加频控与锁定（Mirai 式爆破失效）。其二，<strong>置换率对账进周报</strong>：50 万台的置换进度分型号分地区拉清单，置换停滞的批次要查原因（老固件不兼容？区域网络问题？），僵尸设备清单决定旧通道日落时间能不能定——置换率不到 99% 就关旧通道等于自我截肢。其三，<strong>日落日一次性切换 + 回滚预案</strong>：旧认证通道关闭前全量公告、灰度批次（先关 1% 设备的旧通道观察一周），并保留"48 小时内可重开旧通道"的应急开关——迁移工程的最后一课：所有一刀切，都要先演练习惯性。</p>
+    </div>
+  </details>
+
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>阿里云物联网平台官方文档《设备接入概述》（一机一密/一型一密/X.509 认证方式对比与动态注册机制的一手出处）：<br>
+    <a href="https://help.aliyun.com/zh/iot/user-guide/device-connection" target="_blank" rel="noopener">help.aliyun.com — 设备接入概述</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>系列内互链：<a href="0063-iot-thing-model-rule-engine.html">0063 物模型与规则引擎</a>（物联网线上一讲——版本上报与模块化固件的模型底座）、<a href="0045-mqtt-emqx-cluster.html">0045 MQTT 协议与 EMQX 集群</a>（认证所依托的传输底座）、<a href="0046-iot-long-connection-gateway.html">0046 长连接网关</a>（TLS 终结与认证缓存的位置——本期讲"验什么"，它讲"在哪验"）、<a href="0059-ai-gateway.html">0059 AI 网关</a>（供应链投毒事件与签名验签纪律同源）、<a href="0062-k8s-network-policy.html">0062 网络策略</a>（"默认全通 vs 默认拒绝"心智同构）。延伸：阿里云《OTA 固件升级》官方文档、ESP-IDF《Security Overview》（Secure Boot/Anti-rollback）、ETSI EN 303 645 消费 IoT 安全基线、Zscaler ThreatLabz 2025 IoT 威胁报告。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0063-iot-thing-model-rule-engine.html">← 上一期：物模型与规则引擎</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 64 期 · 物联网与边缘计算系列 · 物联网线两讲到此告一段落，下期回十类技术栈循环——AI 大模型应用线</p>
+  <p>📡 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
