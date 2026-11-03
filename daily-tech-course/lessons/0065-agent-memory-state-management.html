@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · Agent 记忆与状态管理：会说"我记得"的架构 | 2026-11-04</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0065</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0064-iot-device-identity-ota-security.html">上一期：设备身份安全与 OTA 升级</a> · <a href="https://www.bilibili.com/video/BV14ixm65EFV" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">AI · AI 平台系列第 3 讲（记忆与状态篇）</p>
+  <h1>Agent 记忆与状态管理：会说"我记得"的架构</h1>
+  <p class="subtitle">上一轮我们聊了 AI 网关（<a href="0059-ai-gateway.html">0059</a>）与多模型路由（<a href="0060-model-routing-token-cost-governance.html">0060</a>），管住了流量与账单；这一讲补上 Agent 平台的另一块地基：<strong>跨会话的记忆体系</strong>。上下文窗口不是记忆——它是寄存器，不是硬盘。没有记忆层，Agent 每天都是失忆的第一天；记忆层没治理好，Agent 会"记得"别人塞给它的假话。这一讲从 Mem0 论文的量化对比讲到 MINJA 记忆投毒，把记忆的架构、成本与攻击面一次说透。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🤖 AI 大模型应用</span>
+    <span class="tag-date">📅 2026-11-04 · 第 65 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>场景：三个越来越熟悉的症状</h2>
+
+  <h3>症状一：客服 Agent 让老用户反复自我介绍</h3>
+  <p>客服 Agent 上线三个月，工单数据显示一个尴尬的模式：<strong>同一个用户第五次进线，Agent 仍然从"您好，请问是要查询订单还是申请退款？"开始</strong>。用户上周说过"我是会员、优先走售后通道"，这一周 Agent 全忘了。会话内它记得头头是道（上下文窗口还在），会话一结束一切归零——用户体感就是"跟一个每天失忆的客服打交道"。</p>
+
+  <h3>症状二：月账单悄悄翻倍</h3>
+  <p>为了"治"健忘，团队最常走的捷径是<strong>把对话历史全量塞进上下文</strong>。结果：一个老用户的第 30 次会话，光历史就带两三万 token，每一轮都在为十年前的寒暄付费。更糟的是延迟——Mem0 团队 2025 年 4 月论文（arXiv:2504.19413）在 LOCOMO 基准上的实测：<strong>全上下文方案 P95 延迟 17.12 秒，每对话约 26,031 token；外置记忆方案 P95 检索延迟 1.44 秒（降 91%），每对话 1,764 token（降 93%）</strong>。代价是准确率：全上下文 72.9% 对 Mem0 的 66.9%，用 6 个百分点换 12 倍延迟与 14.7 倍 token——业务流量越大，这笔账越倾向后者。</p>
+
+  <h3>症状三：Agent"记得"了别人塞的假话</h3>
+  <p>2025 年 3 月，密歇根州立大学等机构发布 <strong>MINJA（Memory INJection Attack，arXiv:2503.03704）</strong>：攻击者不需要任何特权，只用普通用户的查询与输出观察，就能把伪造记录植入带共享记忆库的 RAG Agent——<strong>平均注入成功率 98.2%，平均攻击成功率 76.8%</strong>——医疗场景里患者数据被张冠李戴、电商场景里把牙刷买家引到牙线购买页。安全工程师同年的生产复盘里有一模一样的剧本：一条被投毒的 CRM 备注让销售 Agent"记得"某账号有虚构的折扣审批权，<strong>投毒的会话本身毫无异常，攻击在数天后无关会话里才引爆</strong>。记忆把一次性注入变成了带引信的持久攻击。</p>
+
+  <div class="callout">
+    <span class="callout-title">一句话病灶</span>
+    <p><strong>上下文窗口是寄存器，不是硬盘——它是状态，不是记忆。把两者混为一谈，就会同时收获失忆（没有记忆层）、破产（全量历史进上下文）与中毒（记忆层没有治理）。</strong></p>
+  </div>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：先分清"状态"与"记忆"，再选流派</h2>
+
+  <h3>状态 vs 记忆：一条架构学分界线</h3>
+  <p><strong>状态（State）是会话内的执行现场</strong>：当前对话的消息序列、工具调用中间结果、图执行到哪个节点。<a href="0047-langgraph-agent-orchestration.html">0047 讲 LangGraph 编排</a>时提过的检查点（Checkpointer）就是状态的持久化——它解决的是"进程崩溃后从断点继续"，是<strong>容错</strong>问题。<strong>记忆（Memory）是跨会话的知识积累</strong>：用户偏好、事实、经验教训——它解决的是"下一个新会话能带上历史教训"，是<strong>学习</strong>问题。检查点重放一百次也不会产生记忆；记忆库再大也救不了断点续跑。两层各管各的，谁也替代不了谁。</p>
+
+  <h3>记忆不是一件事：四层分解</h3>
+  <p>2025 年主流 Agent 栈里，"记忆"至少分解为四层，每层有独立的失效模式：</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>层</th><th>存什么</th><th>典型载体</th><th>失效模式</th></tr></thead>
+    <tbody>
+      <tr><td><strong>工作记忆</strong></td><td>当前上下文窗口内的对话与工具结果</td><td>上下文窗口本身</td><td>超窗溢出、"lost in the middle"（长上下文中部信息召回衰减）</td></tr>
+      <tr><td><strong>情景记忆</strong></td><td>过去会话的结构化摘要</td><td>向量库 / KV 库，会话开始时检索注入</td><td>摘要丢失细节；被投毒后跨会话复燃</td></tr>
+      <tr><td><strong>语义记忆</strong></td><td>提取出的事实："用户偏好 Python""有财务仓库权限"</td><td>记忆条目（带向量索引）</td><td>过期失真（用户换工作了）；错误事实被固化</td></tr>
+      <tr><td><strong>程序记忆</strong></td><td>工作流模式："用户说上线就依次跑这四个工具"</td><td>规则 / 技能库 / 系统提示片段</td><td>流程变更后旧模式成了错误指令</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>分层的价值在于治理粒度：情景记忆要能按用户删除（合规），语义记忆要带时效（失效标记），程序记忆要走代码评审（它本质是行为配置）。全都塞一个向量库，这些治理动作都没处下手。</p>
+
+  <h3>三种实现流派：从"全塞进去"到"自己管自己"</h3>
+  <p>工程上落地记忆有三条主流路线，代表是三种产品化的答案：</p>
+  <ul>
+    <li><strong>全上下文（朴素路线）：</strong>什么外置存储都不要，历史全量进窗口。准确率天花板最高（72.9%），但 token 成本线性上涨、P95 延迟随历史增长，LOCOMO 里实测 17.12 秒——适合原型与单次任务，不适合长周期产品。</li>
+    <li><strong>提取式外置记忆（Mem0 路线）：</strong>两阶段管道——<strong>提取阶段</strong>用小模型从新消息里抽取显著事实，<strong>更新阶段</strong>把候选事实与现有记忆做相似比对，函数调用决策 <code>ADD / UPDATE / DELETE / NOOP</code> 四种操作。记忆库保持小而新，代价是 Agent 不直接控制管道（更新质量依赖提取模型）。图谱变体（Mem0g）把实体建为节点、关系建为边，时序类问题更强（58.13 对 55.51）。</li>
+    <li><strong>自编辑分层（Letta/MemGPT 路线）：</strong>把上下文窗口当内存、外置存储当磁盘（操作系统虚拟内存的隐喻），给模型工具让它自己换页：<strong>core memory</strong>（常驻窗口的记忆块，如用户画像/人设，预算一般 2000~8000 token）由 Agent 通过 <code>core_memory_append / core_memory_replace</code> 等工具自编辑；<strong>recall memory</strong> 是全量历史可检索档案；<strong>archival memory</strong> 是显式写入的长期归档。白盒透明、可审计，但自编辑意味着<strong>信任模型改写自己的记忆</strong>——这既是能力也是风险敞口。</li>
+  </ul>
+  <p>还有一条值得单独说的轻量路线：<strong>Anthropic 的 memory tool（2025 年 8 月上线 API）</strong>——不分层、不做向量索引，就是给模型一个记忆目录的文件操作（view/create/edit），存储后端完全由应用侧决定；配套 context editing（清理已完成使命的旧工具结果）。官方数字：100 轮网页搜索评测里两者结合 <strong>token 消耗降 84%</strong>，内部评测任务表现提升 39%。思路是"把值得留的写出去、把用完的清出去"——与 MemGPT 的换页是同一枚硬币的两面。</p>
+
+  <h3>落到工程词汇：LangGraph 的两轨</h3>
+  <p>对用 LangGraph 的团队，上面这套理论直接映射为两个组件：<strong>Checkpointer 是短期记忆</strong>（线程内状态快照，按 thread_id 持久化，支持断点续跑与时间旅行）；<strong>Store 是长期记忆</strong>（跨线程键值库，支持向量检索与 namespace 命名空间隔离，由节点显式读写）。一句面试级的总结：<strong>Checkpointer 自动存、按线程隔离、管容错；Store 显式写、跨线程共享、管学习</strong>。0047 讲过前者，这一讲的架构与实战都围绕后者展开。</p>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构设计：写入、读取与治理三分离</h2>
+
+  <h3>全景：一条记忆的两段旅程 + 一个治理环</h3>
+  <div class="diagram" style="margin:1.2rem 0;">
+  <svg viewBox="0 0 760 400" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Agent 记忆架构全景：写入路径、读取路径与治理环">
+    <defs>
+      <marker id="arr65" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#64748b"/></marker>
+    </defs>
+    <style>
+      .bx{fill:#f8fafc;stroke:#94a3b8;stroke-width:1.4}
+      .gw{fill:#eef2ff;stroke:#6366f1;stroke-width:2}
+      .sec{fill:#fff7ed;stroke:#f59e0b;stroke-width:1.6}
+      .ok{fill:#f0fdf4;stroke:#22c55e;stroke-width:1.6}
+      .lb{font:600 13px ui-sans-serif,sans-serif;fill:#1e293b}
+      .sm{font:11px ui-sans-serif,sans-serif;fill:#475569}
+      .ti{font:600 14px ui-sans-serif,sans-serif;fill:#4338ca}
+    </style>
+    <text class="ti" x="20" y="28">① 写入路径：从对话到带溯源的记忆条目</text>
+    <rect class="bx" x="20" y="44" width="130" height="52" rx="8"/><text class="lb" x="40" y="66">会话结束/</text><text class="lb" x="40" y="84">轮次触发</text>
+    <rect class="gw" x="190" y="44" width="140" height="52" rx="8"/><text class="lb" x="206" y="66">事实提取</text><text class="sm" x="206" y="84">小模型抽显著事实</text>
+    <rect class="gw" x="370" y="44" width="150" height="52" rx="8"/><text class="lb" x="386" y="66">更新决策</text><text class="sm" x="386" y="84">ADD/UPDATE/DELETE/NOOP</text>
+    <rect class="ok" x="560" y="44" width="180" height="52" rx="8"/><text class="lb" x="578" y="66">记忆库写入</text><text class="sm" x="578" y="84">+溯源:来源/时间/信任级</text>
+    <line x1="150" y1="70" x2="188" y2="70" stroke="#64748b" stroke-width="1.6" marker-end="url(#arr65)"/>
+    <line x1="330" y1="70" x2="368" y2="70" stroke="#64748b" stroke-width="1.6" marker-end="url(#arr65)"/>
+    <line x1="520" y1="70" x2="558" y2="70" stroke="#64748b" stroke-width="1.6" marker-end="url(#arr65)"/>
+
+    <text class="ti" x="20" y="150">② 读取路径：新会话按需取回、预算内注入</text>
+    <rect class="bx" x="20" y="166" width="130" height="52" rx="8"/><text class="lb" x="40" y="188">新会话开启</text><text class="sm" x="40" y="206">(thread/agent/user)</text>
+    <rect class="gw" x="190" y="166" width="140" height="52" rx="8"/><text class="lb" x="206" y="188">namespace 路由</text><text class="sm" x="206" y="206">user/agent/org 三域</text>
+    <rect class="gw" x="370" y="166" width="150" height="52" rx="8"/><text class="lb" x="386" y="188">混合检索</text><text class="sm" x="386" y="206">向量+全文+时间衰减</text>
+    <rect class="ok" x="560" y="166" width="180" height="52" rx="8"/><text class="lb" x="578" y="188">预算内注入</text><text class="sm" x="578" y="206">记忆占上下文设上限</text>
+    <line x1="150" y1="192" x2="188" y2="192" stroke="#64748b" stroke-width="1.6" marker-end="url(#arr65)"/>
+    <line x1="330" y1="192" x2="368" y2="192" stroke="#64748b" stroke-width="1.6" marker-end="url(#arr65)"/>
+    <line x1="520" y1="192" x2="558" y2="192" stroke="#64748b" stroke-width="1.6" marker-end="url(#arr65)"/>
+
+    <text class="ti" x="20" y="272">③ 治理环：记忆是一等公民的数据资产</text>
+    <rect class="sec" x="20" y="288" width="170" height="56" rx="8"/><text class="lb" x="38" y="310">审计日志</text><text class="sm" x="38" y="328">谁写入/谁读取/何时删除</text>
+    <rect class="sec" x="220" y="288" width="170" height="56" rx="8"/><text class="lb" x="238" y="310">生命周期</text><text class="sm" x="238" y="328">TTL/失效标记/用户删除权</text>
+    <rect class="sec" x="420" y="288" width="170" height="56" rx="8"/><text class="lb" x="438" y="310">异常检测</text><text class="sm" x="438" y="328">批量改写/信任级越权告警</text>
+    <rect class="sec" x="620" y="288" width="120" height="56" rx="8"/><text class="lb" x="640" y="310">定期整理</text><text class="sm" x="640" y="328">去重/合并/降密</text>
+    <line x1="650" y1="100" x2="700" y2="284" stroke="#f59e0b" stroke-width="1.4" stroke-dasharray="5,4" marker-end="url(#arr65)"/>
+    <line x1="650" y1="222" x2="700" y2="284" stroke="#f59e0b" stroke-width="1.4" stroke-dasharray="5,4" marker-end="url(#arr65)"/>
+    <text class="sm" x="24" y="380">记忆库不只是"存起来"——写路径决定真假，读路径决定成本，治理环决定出事后的止血速度。</text>
+  </svg>
+  </div>
+
+  <h3>三个关键设计决策</h3>
+  <p><strong>决策一：namespace 划域，就是权限划分。</strong>记忆的命名空间至少分三域：<code>("user", user_id)</code>（用户偏好，跟随人走）、<code>("agent", agent_id)</code>（Agent 的技能与经验，跟随角色走）、<code>("org", org_id)</code>（组织共享知识）。两个 Agent 是否共享某个用户的记忆，不是技术问题而是产品设计问题——客服 Agent 和销售 Agent 共享"该用户是会员"没问题，共享"该用户咨询过退款纠纷"就是越权。namespace 先于功能设计，事后拆分等于数据搬迁。</p>
+  <p><strong>决策二：注入预算，把记忆当缓存治理。</strong>检索回来的记忆塞多少进上下文，要设显式预算（例如 2000 token 上限）：预算内的 top-k 注入、超预算靠更狠的过滤与摘要压缩。没有预算的记忆检索，很快会退化成"另一个全上下文方案"——LOCOMO 那张 17 秒的账单换个地方重开。配套技巧是时间衰减加权重排序：上周的偏好比去年的更可信，语义相似度不该是唯一排序键。</p>
+  <p><strong>决策三：写入即溯源，读前查信任级。</strong>每条记忆写入时带上溯源字段：来自哪次会话、哪个来源文档、什么信任级（用户亲述 / Agent 推断 / 外部文档）。读取时低信任级记忆默认不注入高权限决策。这是对 MINJA 一类攻击最直接的工程回答——<strong>记忆是模型写、模型读、模型信的，任何一环的无条件信任都是攻击面</strong>。</p>
+
+  <h3>容量三笔账</h3>
+  <ul>
+    <li><strong>延迟账：</strong>记忆检索在用户首响应的关键路径上，P95 预算给到几百毫秒级（向量检索 + 重排），超了就要前置缓存或降级为"背景异步注入"。</li>
+    <li><strong>token 账：</strong>记忆注入预算 × 会话轮次 × 日活 = 每日记忆 token 开销；按 <a href="0060-model-routing-token-cost-governance.html">0060</a> 的归因口径进成本看板。</li>
+    <li><strong>治理账：</strong>记忆条数增长速率、TTL 命中率、删除请求处理时效（用户行使"删除我的记忆"权利的 SLA）——这三项进平台周报，缺一项就是合规裸奔。</li>
+  </ul>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：LangGraph Store 二十行骨架 + 防投毒三道闸</h2>
+
+  <h3>第一段：跨线程记忆的最小可用实现</h3>
+  <p>LangGraph 里 Store 与 Checkpointer 并用，一个管长期记忆、一个管会话状态。生产后端用 Postgres/Redis 实现，下面是最小骨架：</p>
+  <pre><code class="language-python">from langgraph.store.memory import InMemoryStore   # 生产换 PostgresStore
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.store.base import BaseStore
+
+store = InMemoryStore(index=False)                 # index=True 开向量检索
+checkpointer = MemorySaver()
+
+def remember(state, config, *, store: BaseStore):
+    uid = config["configurable"]["user_id"]
+    # 写：namespace 分域 + key 定位 + value 带溯源
+    store.put(("user", uid), "diet",
+              {"text": "用户不吃香菜", "trust": "user_stated",
+               "src_session": config["configurable"]["thread_id"],
+               "ts": "2026-11-04T09:00:00+08:00"})
+    # 读：跨任何线程都能取回
+    hits = store.search(("user", uid), query="饮食偏好")
+    return {"memories": [h.value["text"] for h in hits]}
+
+graph = builder.compile(checkpointer=checkpointer, store=store)
+# 两个不同 thread_id，同一 user_id —— 记忆跨会话生效</code></pre>
+  <p>三个要点：写操作在节点内显式触发（不是自动快照）；<code>value</code> 里除了事实本身，<strong>溯源三件套（trust/src_session/ts）在写入时就落库</strong>；检索结果经过预算裁剪才进 state，不直接全量注入。</p>
+
+  <h3>第二段：提取-更新管道（Mem0 风格）的决策骨架</h3>
+  <p>自动记忆的核心是更新决策——新事实进来，与库里既有记忆比对后四选一：</p>
+  <pre><code class="language-python">def update_memory(candidate: str, store, uid: str):
+    hits = store.search(("user", uid), query=candidate)
+    if not hits:
+        store.put(("user", uid), key=cid(), value=wrap(candidate));  return "ADD"
+    top = hits[0].value
+    if same_fact(top["text"], candidate):        return "NOOP"      # 重复，跳过
+    if contradicts(top["text"], candidate):                       # 冲突：新盖旧
+        store.put(("user", uid), hits[0].key, value=wrap(candidate,
+                    supersedes=top["ts"]))        # 保留被覆盖时间戳
+        return "UPDATE"
+    store.put(("user", uid), key=cid(), value=wrap(candidate));  return "ADD"</code></pre>
+  <p><code>same_fact / contradicts</code> 两个判定用小模型 + few-shot 提示词实现（Mem0 用 GPT-4o-mini 级别）。工程关键在 <strong>UPDATE 时保留被覆盖时间戳</strong>——记忆的可解释性来自"它信过什么、什么时候改的"，出了投毒事故这就是唯一的排查线索。去重决策质量决定记忆库会不会膨胀成垃圾场：NOOP 放得太松，同一事实存八遍，检索预算全喂了重复条目。</p>
+
+  <h3>第三段：防投毒三道闸（checklist 心法）</h3>
+  <div class="card card-tip">
+    <p><strong>闸一·写入侧：</strong>来源信任分级——用户亲述 &gt; Agent 推断 &gt; 外部文档/工具返回。外部内容触发的事实提取默认打 <code>low_trust</code> 标，需二次确认才升级；工具描述、邮件、网页这类 MINJA 攻击载体写进记忆前过注入模式扫描（隐藏 Unicode、指令句式）。</p>
+    <p><strong>闸二·读取侧：</strong>namespace 权限域隔离（用户间、Agent 间、租户间三重），高权限动作（付款、改权限、外发数据）前只注入 <code>user_stated</code> 级记忆；把"记忆内容出现在外发请求参数里"列为独立告警——这是数据外泄的典型形态（记忆里存着凭据与内部标识符）。</p>
+    <p><strong>闸三·对账侧：</strong>记忆写入进审计日志（谁写的、读了什么、何时删的）；周级对账扫描三类异常——短时间批量 UPDATE、低信任级记忆被高频检索、被覆盖记忆的复燃（UPDATE 后旧值又出现=有东西在绕过管道直写）。出了事故能回答三个问题：毒从哪来、影响过哪些会话、删干净了吗。</p>
+  </div>
+  <div class="warn">
+    <p>⚠️ 最容易踩的坑：<strong>记忆删除 ≠ 影响消除</strong>。删除记忆库里的毒条目，不会撤销它已经影响过的会话、生成的代码与发出的邮件；更麻烦的是 Agent 可能把毒内容摘要成了自己的新记忆（MemGPT 式自编辑架构里已有观测）——删了源头、转写版还在。这就是把溯源与审计当一等公民的原因：你至少要能列出"它活着的这段时间都影响过什么"。</p>
+  </div>
+</section>
+
+<!-- ================= 05 要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>状态与记忆是两件事：</strong>状态是会话内的执行现场（Checkpointer 管容错），记忆是跨会话的知识积累（Store 管学习）——检查点重放一百次也不会产生记忆，两层各管各的。</li>
+    <li><strong>记忆分四层治理：</strong>工作/情景/语义/程序，每层失效模式不同（溢出/复燃/失真/过时）——治理动作（删除权、时效标记、代码评审）要落在层上，不能一个向量库包打天下。</li>
+    <li><strong>全上下文是延迟与成本的黑洞：</strong>LOCOMO 实测全上下文 72.9% 准确率 / P95 17.12s / 2.6 万 token，外置记忆用 6 个点准确率换 91% 延迟下降与 93% token 节省——业务流量越大，交换越划算。</li>
+    <li><strong>记忆是一等攻击面：</strong>MINJA 98.2% 注入成功率证明"模型写、模型读、模型信"的闭环天然可投毒——写入溯源三件套（来源/时间/信任级）+ namespace 权限域 + 审计对账，三道闸缺一不可。</li>
+    <li><strong>删记忆不等于消除影响：</strong>毒条目可能已被摘要成转写版、已影响过下游会话——事故响应要能回答"毒从哪来、影响过谁、删干净没有"，这靠的是日志，不是运气。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目：客服 Agent 与销售 Agent 共享一个平台的记忆体系，怎么设计共享边界、防投毒与删除权？</summary>
+    <div class="details-body">
+      <p>背景：公司 AI 平台上跑着两个面向客户的 Agent——客服（处理售后）与销售（跟进商机），都接入持久记忆。产品要求"用户不用重复自我介绍"；风控要求"销售侧不得看到售后纠纷细节"；合规要求"用户可要求删除全部个人记忆"。请回答：</p>
+      <p><strong>① 共享边界怎么划？哪些记忆跨 Agent 共享，哪些必须隔离？namespace 怎么设计？</strong><br>
+      <strong>② 某天发现销售 Agent 给某客户报了从未授权的折扣——排查发现是投毒的 CRM 备注被写进了记忆。你的止血动作按什么顺序做？</strong><br>
+      <strong>③ 用户行使删除权时，"删掉这条记忆"要牵动哪些数据与流程？哪些地方容易漏？</strong></p>
+      <h4>🔍 深度解析</h4>
+      <p><strong>① 按数据的"敏感归属"而不是"方便程度"划界：事实性偏好共享，情境性历史隔离。</strong>namespace 至少四域：<code>("user", uid)</code> 放跨 Agent 的稳定偏好（会员等级、语言习惯、联系方式偏好——产品要求"不用重复自我介绍"的就是这层）；<code>("agent", "support", uid)</code> 与 <code>("agent", "sales", uid)</code> 放各自业务情境记忆（售后纠纷细节、商机跟进历史——风控红线在这里落地：销售侧检索根本无权跨到 support 域，而不是"检索得到但提示词叮嘱别说"）；<code>("org", ...)</code> 放产品知识与流程规则。判据可以压成一句话：<strong>这条记忆换一个 Agent 看到，是"更好服务"还是"越权打探"？前者进共享域，后者进隔离域</strong>。实现上权限校验在 store 的读取 API 层强制（namespace 前缀 × 调用方身份的 ACL），不依赖任何提示词层面的"君子协定"。</p>
+      <p><strong>② 止血顺序：先断读、再清写、后追溯——方向与"下线功能"相反，先保住无害性。</strong>第一步<strong>冻结该条记忆及其转写链</strong>：按溯源字段定位毒条目与同一来源写入的全部条目，标记 disabled（先不物理删——它是证据），同时扫描"由它 UPDATE/摘要派生的记忆"（这就是 04 节说 UPDATE 保留 supersedes 时间戳的回报时刻）；第二步<strong>评估影响面</strong>：审计日志里查该条目被哪些会话检索过、这些会话执行了什么动作（报价单要逐张核对，已发出的错误折扣主动联系客户修正——业务止血优先级高于技术清理）；第三步<strong>封写入源</strong>：CRM 备注接入的记忆提取管道默认降为 low_trust、加注入模式扫描，确认没有第二条毒备注排队进来；最后才物理删除与复盘。<strong>顺序颠倒的代价：先删条目，你就失去了"它影响过谁"的排查线索。</strong></p>
+      <p><strong>③ 删除权是一个分布式事务：显性数据好删，衍生物才是坑。</strong>清单至少六项：记忆库条目本体（按 user_id 跨全部 namespace）；情景层的会话摘要（摘要里复述过的个人信息同样在删除范围——合规口径是"个人信息"不是"记忆条目"）；向量索引（删除后要重建或标记失效，否则向量还在、检索仍可能命中）；模型侧缓存与转写记忆（其他条目里"摘要过这条"的引用）；审计日志里的原文引用（合规惯例：审计日志保留事件元数据、抹去内容字段，删除动作本身要留痕）；备份与灾备副本（备份里的个人数据通常靠"备份滚动窗口自然过期"处理，但要在隐私政策里写明窗口期）。最常漏的是<strong>向量索引与转写引用</strong>——条目删了、向量残留，或事实被并进别的记忆条目继续服役，形式上"删干净了"、实际上还在召回。工程上把"删除"实现为打墓碑标记 + 异步物理清理 + 全域扫描验证三轮确认，SLA 里给删除完成一个明确期限，这题才算答完整。</p>
+    </div>
+  </details>
+
+</section>
+
+<!-- ================= 参考 & 导航 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>📖 本期 Primary Source</h4>
+    <p>LangGraph 官方文档《Memory 概念页》（短期/长期记忆、Checkpointer 与 Store 两轨模型、namespace 设计的一手出处）：<br>
+    <a href="https://langchain-ai.github.io/langgraph/concepts/memory/" target="_blank" rel="noopener">langchain-ai.github.io/langgraph — Memory</a></p>
+  </div>
+  <div class="card">
+    <h4>📚 系列关联阅读</h4>
+    <p>系列内互链：<a href="0047-langgraph-agent-orchestration.html">0047 Agent 编排</a>（Checkpointer 检查点与断点续跑——本期"状态"一侧的前作）、<a href="0059-ai-gateway.html">0059 AI 网关</a>（记忆 token 开销进成本看板的归因口径）、<a href="0060-model-routing-token-cost-governance.html">0060 多模型路由与成本治理</a>（记忆注入预算 × 轮次的成本放大）、<a href="0026-embedding-vector-store.html">0026 Embedding 与向量库</a>（记忆检索的向量底座）、<a href="0025-rag-retrieval-augmented-generation.html">0025 RAG</a>（外部知识检索与内部记忆检索同源互补）。延伸：Mem0 论文（arXiv:2504.19413）、MemGPT 论文（arXiv:2310.08560）、Letta 文档、Anthropic Memory Tool 文档、MINJA 论文（arXiv:2503.03704）。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0064-iot-device-identity-ota-security.html">← 上一期：设备身份安全与 OTA 升级</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 65 期 · AI 大模型应用系列 · 下期继续 AI 线——上下文窗口工程</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
