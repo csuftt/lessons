@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · 上下文窗口工程：窗口里每一块 token 都要有编制 | 2026-11-06</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0066</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0065-agent-memory-state-management.html">上一期：Agent 记忆与状态管理</a> · <a href="https://www.bilibili.com/video/BV1Bv4e6hEwB" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">AI · AI 平台系列第 4 讲（上下文工程篇）</p>
+  <h1>上下文窗口工程：窗口里每一块 token 都要有编制</h1>
+  <p class="subtitle">上一讲我们把记忆搬出了窗口（<a href="0065-agent-memory-state-management.html">0065</a>），但窗口本身依然是每一轮推理的唯一战场：<strong>系统提示、工具定义、检索结果、记忆注入、对话历史，五路内容在这里抢地盘</strong>。窗口标称 100 万 token 是"能装多少"，不是"能用多少"——这一讲用 RULER 与 FLenQA 的实测数字拆掉"窗口够大就躺平"的幻觉，然后给每一类内容定预算、定位置、定淘汰机制，把窗口当成一支有编制的队伍来管理。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🤖 AI 大模型应用</span>
+    <span class="tag-date">📅 2026-11-06 · 第 66 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>场景：窗口越大，翻车越隐蔽</h2>
+
+  <h3>翻车一：文档全塞进去，答对率反而降了</h3>
+  <p>某团队的智能问答上线时做了个"豪横"的决定：知识库不大，20 多万 token，干脆不做 RAG，<strong>每轮把全部产品文档塞进 prompt</strong>，理由是"模型窗口 1M，装得下"。灰度两周，答对率比老的同义词检索方案还低了一截：同一个问题，以前能答对，现在文档全在窗口里反而答错——特别是答案依赖文档中部两处信息拼起来的时候。复盘时没人能接受"信息都在它眼前"这个事实层面的失败。</p>
+
+  <h3>翻车二：长任务跑到第 40 轮，Agent 开始"忘事"</h3>
+  <p>一个数据管道排障 Agent，前 20 轮表现专业：定位日志、调工具、缩小范围。到第 40 轮，它开始<strong>重复调用早就查过的工具、违反开头说好的输出格式</strong>，甚至把第 5 轮已经排除的假设又拿回来认真分析。窗口没超——历史加上工具结果才 6 万 token，离 128K 还远。但质量塌了：约束还在窗口里，模型的注意力已经"看不过来"了。</p>
+
+  <h3>翻车三：账单随轮数线性膨胀</h3>
+  <p>第三个症状最直白：Agent 每轮都带着完整历史 + 全部工具结果进模型，<strong>第 N 轮的输入 token ≈ 前面所有轮的总和</strong>。50 轮的长任务，光历史重读就占了账单的大头；每轮再叠加 15K 的检索结果与 2K 的记忆注入，平台侧看到的成本曲线是一条稳稳的直线向上。</p>
+
+  <div class="callout">
+    <span class="callout-title">一句话病灶</span>
+    <p><strong>窗口的标称值是缓冲区大小，不是可用容量。有效上下文远小于标称，且每一块 token 都在花注意力预算——不设编制的内容，最后会挤垮真正重要的内容。</strong></p>
+  </div>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：三个把幻觉拆掉的实证</h2>
+
+  <h3>实证一：有效上下文 ≈ 标称的一半</h3>
+  <p>英伟达 2024 年发布的 <strong>RULER 基准（arXiv:2404.06654）</strong>不再用"大海捞针"这种单一检索任务自欺（它已对所有前沿模型饱和），而是上十三种更难的任务：多针检索、多跳追踪、变量跟踪、聚合统计。结论：<strong>17 个标称 32K 以上的模型，只有一半真的在 32K 上站得住</strong>。GPT-4-1106 标称 128K，有效上下文 64K；Yi-34B 标称 200K，实测 32K；英伟达持续到 2026 年的跟踪结论是：<strong>多数模型的有效上下文只有标称值的 50~65%</strong>。Llama 3.1-70B 在 4K 时 96.5 分、128K 时只剩 66.6——后半个窗口基本是摆设。</p>
+
+  <h3>实证二：长度本身就是税，3K token 就开始交</h3>
+  <p>如果说 RULER 证明"长窗口用不满"，<strong>FLenQA（arXiv:2402.14848，ACL 2024 杰出论文）</strong>证明了更狠的一层：<strong>长度本身就是税</strong>。实验把一道推理题不变，只往周围填充无关文本——250 token 时各模型平均准确率约 0.92，3000 token 时掉到 0.68。三千 token，远低于任何模型的标称窗口。也就是说：<strong>无关内容不是"无害地待着"，它在主动稀释注意力</strong>。再加上 2023 年"lost in the middle"研究揭示的 U 型曲线——开头结尾召回强、中部弱——"把材料全塞进去"在两个维度同时失分。</p>
+
+  <h3>实证三：内容质量可以救回一部分，但有条件</h3>
+  <p>税不能全免，但可以少交。Anthropic 的 <strong>contextual retrieval</strong> 实验给的是索引侧的数字：给每个切块补 50~100 token 的上下文说明再入索引，top-20 检索失败率从 5.7% 降到 2.9%（<strong>降 49%</strong>），再加重排序降到 1.9%（<strong>降 67%</strong>）。注意方向：<strong>工程手段的收益是"让进窗的每块 token 更高信号"，而不是"让窗口装更多"</strong>。Anthropic 在 2025 年 9 月的工程博客里把这总结为注意力预算（attention budget）心智模型，并给了一个系列里反复出现的关键词——<strong>context rot（上下文腐烂）：token 越多，模型从上下文里准确召回信息的能力越差，所有模型都如此</strong>。</p>
+
+  <div class="card-tip">
+    <p>三个实证合起来读：窗口是<strong>预算制</strong>资源，不是自助餐。设计问题从"装不装得下"变成"每一块 token 值不值这个位置"。</p>
+  </div>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构：五类内容的预算、位置与淘汰</h2>
+
+  <h3>窗口预算表：先定编制，再谈内容</h3>
+  <p>把 128K 窗口当成一份预算案来审。以一个典型客服/排障 Agent 为例（128K 标称，按 RULER 口径有效约 64~80K）：</p>
+
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>内容类</th><th>变化频率</th><th>预算建议（128K 例）</th><th>位置与淘汰机制</th></tr></thead>
+    <tbody>
+      <tr><td><strong>系统提示</strong></td><td>静态</td><td>≤ 4K，写不进就砍需求</td><td>最顶端；随版本走，不参与轮内淘汰</td></tr>
+      <tr><td><strong>工具定义</strong></td><td>半静态</td><td>≤ 12K；超了做按需加载</td><td>系统提示之后；低频工具移出默认集</td></tr>
+      <tr><td><strong>记忆注入</strong></td><td>每会话一次</td><td>1~2K 硬上限</td><td>系统区尾部；预算内 top-k（承接 0065）</td></tr>
+      <tr><td><strong>检索结果</strong></td><td>每轮动态</td><td>单轮 ≤ 15K，rerank 后进窗</td><td>靠问题放置（头或尾）；轮末即弃</td></tr>
+      <tr><td><strong>对话历史</strong></td><td>每轮增长</td><td>滑动窗口 + 压缩，总量 ≤ 有效一半</td><td>中部；超阈值触发 compaction</td></tr>
+      <tr><td><strong>输出预留</strong></td><td>—</td><td>4~8K</td><td>永远预留，防截断</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>这张表的关键不是数字本身，是三个原则：<strong>静态在前动态在后</strong>（对齐提示词缓存的命中前缀，前缀一动缓存全失效——这也是 0059 语义缓存之外省钱的另一半）；<strong>重要内容放头尾</strong>（U 型曲线的工程翻译：长文档放开头、当前问题与最新材料放结尾，是 Anthropic 官方长上下文指南的明确建议）；<strong>每类内容都要有淘汰机制</strong>（没有淘汰机制的预算就是摆设）。</p>
+
+  <h3>参考形状：一轮请求的窗口布局</h3>
+  <div class="diagram">
+  <svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="上下文窗口预算布局图">
+    <defs>
+      <linearGradient id="gw66" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#1e2a3a"/><stop offset="1" stop-color="#16202e"/>
+      </linearGradient>
+    </defs>
+    <rect x="1" y="1" width="758" height="240" rx="12" fill="url(#gw66)" stroke="#3b4a5f"/>
+    <text x="20" y="30" fill="#8fa3ba" font-size="13">上下文窗口（静态前缀 → 动态区 → 输出）</text>
+    <!-- 静态区 -->
+    <rect x="24" y="46" width="130" height="70" rx="8" fill="#2b5d8f"/>
+    <text x="89" y="76" fill="#fff" font-size="13" text-anchor="middle">系统提示</text>
+    <text x="89" y="96" fill="#cfe0f0" font-size="11" text-anchor="middle">≤4K · 版本化</text>
+    <rect x="162" y="46" width="130" height="70" rx="8" fill="#2b5d8f"/>
+    <text x="227" y="76" fill="#fff" font-size="13" text-anchor="middle">工具定义</text>
+    <text x="227" y="96" fill="#cfe0f0" font-size="11" text-anchor="middle">≤12K · 按需加载</text>
+    <rect x="300" y="46" width="130" height="70" rx="8" fill="#3c7a5a"/>
+    <text x="365" y="76" fill="#fff" font-size="13" text-anchor="middle">记忆注入</text>
+    <text x="365" y="96" fill="#d8efe2" font-size="11" text-anchor="middle">1~2K · top-k</text>
+    <rect x="24" y="128" width="406" height="42" rx="8" fill="#8a6d2f"/>
+    <text x="227" y="154" fill="#fff" font-size="12" text-anchor="middle">对话历史（滑动窗口 + compaction，总量受控）</text>
+    <rect x="24" y="180" width="290" height="42" rx="8" fill="#8f4a4a"/>
+    <text x="169" y="206" fill="#fff" font-size="12" text-anchor="middle">本轮检索结果（rerank 后 ≤15K）</text>
+    <rect x="324" y="180" width="106" height="42" rx="8" fill="#5a5f8f"/>
+    <text x="377" y="206" fill="#fff" font-size="12" text-anchor="middle">当前问题</text>
+    <text x="20" y="245" fill="#8fa3ba" font-size="12">↑ 缓存前缀（静态·命中省钱）</text>
+    <text x="230" y="245" fill="#8fa3ba" font-size="12">↑ 动态区（头尾放高信号）</text>
+    <!-- U 型曲线 -->
+    <rect x="470" y="46" width="264" height="176" rx="10" fill="#101822" stroke="#3b4a5f"/>
+    <text x="602" y="70" fill="#8fa3ba" font-size="12" text-anchor="middle">召回强度 · U 型曲线</text>
+    <polyline points="486,180 516,120 546,92 576,80 606,76 636,80 666,92 696,120 718,172" fill="none" stroke="#d9a441" stroke-width="3"/>
+    <text x="508" y="200" fill="#d9a441" font-size="11">头</text>
+    <text x="596" y="66" fill="#7d8ba0" font-size="11">中部最弱</text>
+    <text x="700" y="200" fill="#d9a441" font-size="11">尾</text>
+    <text x="602" y="212" fill="#8fa3ba" font-size="10" text-anchor="middle">lost in the middle</text>
+    <!-- 底部箭头链 -->
+    <rect x="24" y="270" width="700" height="46" rx="8" fill="#141d29" stroke="#3b4a5f"/>
+    <text x="44" y="298" fill="#cfe0f0" font-size="12">淘汰机制：</text>
+    <text x="120" y="298" fill="#8fa3ba" font-size="12">工具结果用完即清 → 历史超阈值 compaction 摘要 → 检索结果轮末即弃 → 记忆回外置库（0065）</text>
+  </svg>
+  </div>
+
+  <h3>淘汰机制：三种主流武器</h3>
+  <ul>
+    <li><strong>工具结果清理（tool result clearing）：</strong>几十轮之前调过的工具，原始结果为什么还要全文待在窗口里？这是 Anthropic 点名的"最安全、最轻"的压缩手段——老轮次的工具输出替换成一行占位符（如 <code>[tool:log_scan, 3.2K tokens, 已消费]</code>），Claude 开发者平台已做成产品特性。一个 50 轮任务里，这项通常就能砍掉一半以上的历史体积。</li>
+    <li><strong>Compaction（压缩续跑）：</strong>历史逼近预算线时，把前段摘要成一段"任务档案"（目标、已确认事实、已排除假设、未决问题），新窗口 = 摘要 + 最近几轮原文继续跑。Claude Code 的做法是摘要后带上最近访问的 5 个文件。代价要认：压缩会丢细节，<strong>过度压缩丢掉的恰恰是微妙但关键的信息</strong>，所以摘要模板必须按业务定制（排障 Agent 绝不能丢"已排除的假设"）。</li>
+    <li><strong>子代理隔离（sub-agent）：</strong>探索型任务派子代理带干净窗口去跑，它烧掉几万 token 没关系，<strong>只给主代理回 1~2K token 的蒸馏结论</strong>。脏上下文不出子代理的房间——这是"注意力隔离舱"，与 0065 的记忆 namespace 是同一治理思想在不同维度的投射。</li>
+  </ul>
+
+  <h3>与相邻课程的分工</h3>
+  <p>窗口内排序要受一个约束：提示词缓存按<strong>前缀</strong>命中（0059 讲过语义缓存，这里是它的另一半：命中前缀越长省越多，Anthropic 口径延迟减半、成本最多降 90%）。所以"重要内容放头尾"里的"头"只留给静态区，动态内容一律靠尾。检索质量本身（切块、混合检索、rerank）归 <a href="0025-rag-retrieval-augmented-generation.html">0025 RAG</a> 管；记忆注入的预算纪律承接 <a href="0065-agent-memory-state-management.html">0065</a>；长任务断点容错归 <a href="0047-langgraph-agent-orchestration.html">0047 LangGraph</a> 的检查点——本期只管"一轮请求里窗口怎么排兵布阵"。</p>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：把预算落成代码</h2>
+
+  <h3>第一段：预算护栏——进窗前先过审</h3>
+  <pre><code class="language-python">class ContextBudget:
+    """五类内容的进窗审计：超预算就地拦截，不靠自觉"""
+    LIMITS = {  # 以 128K 标称、有效 ~72K 口径定
+        "system": 4096, "tools": 12288, "memory": 2048,
+        "retrieval": 15360, "history": 36864, "reserve_out": 8192,
+    }
+    def __init__(self):
+        self.spent = dict.fromkeys(self.LIMITS, 0)
+
+    def admit(self, kind: str, tokens: int, trim_to=None):
+        cap = self.LIMITS[kind]
+        if self.spent[kind] + tokens > cap:
+            if trim_to is None:   # 无降级路径 = 硬失败，上线前暴露
+                raise BudgetViolation(f"{kind}: {self.spent[kind]+tokens}/{cap}")
+            tokens = min(tokens, cap - self.spent[kind])  # 截到剩余额度
+        self.spent[kind] += tokens
+        return tokens</code></pre>
+  <p>要点有二：<strong>预算是硬约束不是风格建议</strong>——超了要么走显式降级路径（截断、摘要、丢弃低分块），要么直接抛错；<strong>额度按有效上下文定，不按标称定</strong>（这里 128K 标称给了约 72K 编制，就是 RULER 教训的落地）。</p>
+
+  <h3>第二段：检索结果进窗——rerank 后按预算截取</h3>
+  <pre><code class="language-python">def assemble_retrieval(query, retriever, reranker, budget: ContextBudget):
+    # 混合召回 50 路 → rerank 只留预算内的头部（Anthropic: 49%→67% 的那一段）
+    cands = retriever.hybrid_search(query, top_k=50)
+    ranked = reranker.rerank(query, cands)          # cross-encoder 精排
+    picked, used = [], 0
+    for chunk in ranked:                            # 重要块进窗，头尾留位
+        if used + chunk.tokens > budget.LIMITS["retrieval"]:
+            break
+        picked.append(chunk); used += chunk.tokens
+    budget.admit("retrieval", used)
+    # 排布：高信号块放块首与块尾（U 型曲线），当前问题最后注入
+    return order_edges_first(picked), used</code></pre>
+  <p>注意最后一行：<strong>排序逻辑就是 U 型曲线的翻译</strong>——最重要的块放首尾，中部放次重要内容。这个动作零成本，却是"文档全塞进去反而答错"最直接的解药之一。</p>
+
+  <h3>第三段：历史治理——工具结果清理 + compaction 触发</h3>
+  <pre><code class="language-python">def maybe_compact(messages, budget: ContextBudget, summarizer):
+    # ① 老轮次工具结果先清：安全、无损对话语义、通常砍掉一半历史
+    for i, m in enumerate(messages[:-6]):           # 保护最近 6 轮原文
+        if m.role == "tool" and m.tokens > 512:
+            messages[i] = stub(m)                   # 换一行占位符
+    if budget.spent["history"] < budget.LIMITS["history"] * 0.7:
+        return messages                             # ② 未到 70% 水位不动
+    # ③ 到水位：前段摘要成任务档案，保留最近 6 轮原文续跑
+    head, tail = messages[:-6], messages[-6:]
+    dossier = summarizer.summarize(head, template="ops")   # 按业务定制模板
+    return [dossier] + tail</code></pre>
+  <p>三步的顺序是设计出来的：<strong>清理先于压缩</strong>（前者无损，后者有损）；<strong>70% 水位触发</strong>（留出缓冲，别等撞线才动作）；<strong>摘要模板按业务定制</strong>（排障场景"已排除假设"丢了，Agent 就会像场景二那样把旧假设捡回来）。</p>
+
+  <h3>容量账：这笔账怎么算</h3>
+  <p>按上表口径给 128K 模型算总账：静态前缀 16K（缓存命中后每轮成本约 1/10）+ 记忆 2K + 单轮检索 15K + 受控历史 ≤36K + 输出预留 8K ≈ 77K，贴着有效上下文 72K 的量级——<strong>标称 128K 的窗口，真正敢用的编制就这么多</strong>。同样这套内容不做治理地堆 50 轮，历史轻松破 60 万 token：要么被窗口截断丢信息，要么按长上下文费率付钱（行业惯例 200K 以上输入单价翻倍），两头挨打。</p>
+</section>
+
+<!-- ================= 05 今日要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>有效上下文 ≈ 标称的一半：</strong>RULER 实测多数模型只有标称的 50~65% 可靠可用（GPT-4-1106：128K 标称 / 64K 有效）；预算按有效值定，别按标称定。</li>
+    <li><strong>长度本身就是税：</strong>FLenQA 证明无关填充把准确率从 0.92 拖到 0.68 只需 3000 token——context rot 面前，"多总比少好"是反直觉的错误。</li>
+    <li><strong>五类内容各定预算、位置、淘汰机制：</strong>静态在前动态在后（缓存前缀）、高信号放头尾（U 型曲线）、每类内容都要有淘汰路径——没有淘汰机制的预算是摆设。</li>
+    <li><strong>三件武器分场景：</strong>工具结果清理（无损、先做）→ compaction（有损、70% 水位触发、模板按业务定制）→ 子代理隔离（探索型脏上下文不出房门，只回 1~2K 蒸馏结论）。</li>
+    <li><strong>排序受缓存前缀约束：</strong>"重要内容放头部"只适用于静态区；动态内容一律靠尾——这是省钱（缓存命中）与召回（U 型）的合理解。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目：128K 窗口的客服 Agent，固定开销已经吃掉 22K，预算该怎么重定？</summary>
+    <div class="details-body">
+      <p>背景：你们的客服 Agent 用 128K 窗口模型，现状：系统提示 8K（产品规范全塞在里面）、20 个工具定义共 12K（其中 5 个退款类工具只在 3% 的会话用到）、每轮 RAG top-20 共 15K、记忆注入 2K；对话历史不做治理，长会话 30 轮后逼近窗口。产品要求"答案必须同时引用产品规范与知识库"，老板要求"成本砍一半"。请回答：</p>
+      <p><strong>① 22K 固定开销怎么瘦身？系统提示与工具定义各用什么手段？瘦身与缓存命中怎么兼得？</strong><br>
+      <strong>② 每轮 15K 的检索结果，预算砍到多少合理？砍下去靠什么保住"答案引用知识库"的质量底线？</strong><br>
+      <strong>③ 历史治理的触发水位与降级顺序怎么定，才能让 30 轮长会话既不撞窗口也不丢关键上下文？</strong></p>
+      <h4>🔍 深度解析</h4>
+      <p><strong>① 固定开销的刀要落在"全量思维"上：系统提示 8K 里，产品规范是知识不是指令——挪出去按需检索；系统提示只留身份、边界、输出契约，4K 内收住。</strong>工具定义 12K 是典型的 MCP 时代膨胀病：20 个工具按场景分组，退款类 5 个移出默认集，走意图路由或子代理按需挂载（工具瘦身是 Anthropic 点名的 token 效率手段）。缓存兼容性：瘦身后的静态前缀（系统提示 + 默认工具集）保持稳定不变，缓存命中前缀从 0 变成约 14K——<strong>这一步同时完成"瘦身"与"省钱"：缓存命中部分输入成本约 1/10，老板要的"成本砍一半"大头在这</strong>。注意规范挪进 RAG 后，"答案必须引用产品规范"靠检索质量保障：规范切块加上下文前缀（contextual retrieval，失败率降 49%），并在 prompt 里保留"引用必须带来源"的硬约束。</p>
+      <p><strong>② 检索预算从 15K 砍到 6~8K 是合理落点：top-20 是"召回 generously"的策略，但进窗前必须 rerank 精排——50 路召回、rerank 后只留预算内头部，这正是 Anthropic 实验 49%→67% 的配置。</strong>质量底线三件套：混合检索（向量 + BM25，错误码这类精确匹配靠后者）+ 上下文前缀切块 + 引用校验（答案里的引用回查 top-k，查无此引就降级重试）。<strong>省 token 的正确姿势是提高每块信号密度，不是降低答案标准</strong>——rerank 的算力成本换窗口预算，这笔账在长会话里越滚越划算。</p>
+      <p><strong>③ 水位与顺序照三步走：先无损后有损，先高频后有损兜底。</strong>老轮次（最近 6 轮之外）工具结果先清——客服场景查订单、查物流的原始 JSON 用完即弃，通常砍掉一半历史体积；历史到 70% 预算水位触发 compaction，摘要模板定制为客服档案（用户身份与诉求、已承诺事项、已排除方案、情绪状态——最后这项是客服场景特有的、通用模板必丢的信息）；30 轮以上的纠纷类会话直接升级子代理：主代理只拿 1~2K 的事件脉络。<strong>验收口径要量化：窗口占用率、单会话 token 成本、答案引用命中率三个指标一起看——只砍成本不看质量，砍着砍着就把产品要求砍没了。</strong></p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 07 参考 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>参考与延伸</h2>
+  <div class="note">
+    <p><strong>本期 primary source：</strong><a href="https://www.anthropic.com/research/effective-context-engineering-for-ai-agents" target="_blank" rel="noopener">Anthropic《Effective context engineering for AI agents》</a>（注意力预算 / context rot / compaction / 子代理隔离的一手出处）。</p>
+    <p>延伸：RULER 论文（arXiv:2404.06654）、FLenQA 论文（arXiv:2402.14848）、Anthropic contextual retrieval 博客与长上下文指南（docs.anthropic.com，RESOURCES.md AI 段）。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0065-agent-memory-state-management.html">← 上一期：Agent 记忆与状态管理</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 66 期 · AI 大模型应用系列 · 下期回十类技术栈循环</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
