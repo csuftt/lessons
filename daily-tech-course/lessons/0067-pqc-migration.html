@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · 后量子密码 PQC 迁移：现在就还的十年期账单 | 2026-11-09</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0067</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0066-context-window-engineering.html">上一期：上下文窗口工程</a> · <a href="https://www.bilibili.com/video/BV1kMWx6KELu" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">安全架构前沿 · 安全线系列第 1 讲（后量子迁移篇）</p>
+  <h1>后量子密码 PQC 迁移：现在就还的十年期账单</h1>
+  <p class="subtitle">上一讲我们聊完 AI 线的上下文窗口工程（<a href="0066-context-window-engineering.html">0066</a>），这一讲回十类技术栈循环，开启<strong>安全架构前沿线</strong>。量子计算机还没造出来，但有一批账单已经到期：NIST IR 8547 终版 2026 年 10 月 27 日刚落地——RSA、ECDSA 这些今天撑起 HTTPS、SSH、代码签名的算法，2030 年后弃用、2035 年后禁用。为什么现在就要动手？因为"先窃取、后解密"的攻击已经在发生，而一次全网密码迁移要十年。<strong>这一讲把 FIPS 203/204/205 三份标准翻译成架构师的动作清单：先换什么、怎么混合部署、密码资产怎么盘点。</strong></p>
+  <div class="lesson-meta">
+    <span class="tag cat">🛡 安全架构前沿</span>
+    <span class="tag-date">📅 2026-11-09 · 第 67 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>场景：三条已经点名的 deadline</h2>
+
+  <h3>deadline 一：NIST IR 8547 终版发布，时间表从草案变铁律</h3>
+  <p>2026 年 10 月 27 日，NIST 发布《向后量子密码标准过渡》（IR 8547）<strong>终版</strong>——时间表不再"可能有变"：112 位安全强度及以上的量子脆弱算法（RSA-2048、ECDSA P-256 及所有更高强度档位）<strong>2030 年后弃用、2035 年后禁用</strong>。配套的行政令与 OMB 备忘录把日期绑进联邦合规义务：高价值系统的密钥建立环节<strong>不迟于 2030 年 12 月 31 日</strong>完成 PQC 迁移、签名环节 2031 年底、联邦系统整体 2035 年。对做全球生意或接政府订单的公司，这不是技术趋势，是<strong>有截止日的合规工程</strong>。</p>
+
+  <h3>deadline 二：Google Willow 之后，专家时间表缩到了 2030~2035</h3>
+  <p>"量子计算机还早"这句话每年都在贬值。逻辑量子比特的错误纠正近两年连续突破（Google Willow 级别的里程碑），业界对"密码学相关量子计算机（能真正破解 RSA-2048 的机器）"的中位数估计已缩到 <strong>2030~2040，主流看法 2035 上下</strong>。更扎眼的是 2026 年 3 月 Google 团队的论文：足够强的量子计算机破解比特币所用加密"约 9 分钟"，且资源需求比几个月前的估计更低——不构成即期威胁，但<strong>把"再等等"的安全边际等没了</strong>。</p>
+
+  <h3>deadline 三：BIS 账单——全球金融迁移要 8~10 年</h3>
+  <p>国际清算银行（BIS）的报告给了一个最容易被忽视的数字：全球金融系统完成 PQC 迁移<strong>至少需要 8~10 年</strong>。反过来算：2026 年启动、2035 年禁用期开始，正好压着最紧的时间窗。而 2026 年 10 月以来，德国 BSI（高风险系统最迟 2030 年底、全面过渡 2035 年底）、越南、韩国的 PQC 政策文件密集落地；国内"新一代商用密码算法"第一轮候选 2026 年 9 月公布、多家银行已公开招标抗量子改造。<strong>主要经济体的监管时间表正在向 2030-2035 这条线收敛。</strong></p>
+
+  <div class="callout">
+    <span class="callout-title">一句话病灶</span>
+    <p><strong>威胁不在量子计算机出现那天，而在数据流出的那天——"先窃取、后解密"（HNDL）让保密期 &gt; 剩余时间的数据现在就已经暴露。迁移要十年，deadline 是 2035，所以今天就是第一天。</strong></p>
+  </div>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：三份标准、两种迁移、一个混合策略</h2>
+
+  <h3>量子计算机到底破了什么</h3>
+  <p>今天所有公钥密码踩在两块数学基石上：<strong>大整数分解</strong>（RSA）与<strong>离散对数</strong>（ECC/DH）。Shor 算法在足够大的量子计算机上多项式时间解这两个问题——不是"算得快一点"，是<strong>根本性失效</strong>。对称密码与哈希只受 Grover 算法影响（强度折半），AES-256 依然安全。所以迁移对象是所有公钥算法：密钥交换的 RSA/ECDH，签名的 RSA/ECDSA/EdDSA。有个隐蔽的推论：<strong>窃听者今天录下你的 TLS 流量，将来用量子计算机解密——签名挡不住这件事，密钥交换才挡得住</strong>。这决定了两种迁移的优先级。</p>
+
+  <h3>FIPS 203/204/205：三个接班人</h3>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>标准</th><th>算法（曾用名）</th><th>职责</th><th>替代谁</th><th>体积代价（对比）</th></tr></thead>
+    <tbody>
+      <tr><td><strong>FIPS 203</strong></td><td>ML-KEM（Kyber）</td><td>密钥封装（密钥交换）</td><td>ECDH / RSA 密钥传输</td><td>公钥 1184B vs X25519 的 32B（约 37 倍）</td></tr>
+      <tr><td><strong>FIPS 204</strong></td><td>ML-DSA（Dilithium）</td><td>数字签名</td><td>ECDSA / RSA 签名</td><td>签名 2420B vs Ed25519 的 64B（约 38 倍）</td></tr>
+      <tr><td><strong>FIPS 205</strong></td><td>SLH-DSA（SPHINCS+）</td><td>哈希签名（保守派备胎）</td><td>同上（固件/根证书场景）</td><td>签名 ~7.9~29KB（更大，但只依赖哈希）</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>三份标准 2024 年 8 月定稿，全部基于格与哈希这类<strong>对量子算法免疫的数学难题</strong>。注意体积列：公钥与签名膨胀一两个数量级，是迁移工程量的一大来源——握手消息、证书链、HSM 存储、嵌入式设备 MTU 都要重新核算。</p>
+
+  <h3>两种迁移，两种紧迫度</h3>
+  <p><strong>密钥交换（ confidentiality，防窃听）——紧迫。</strong>因为 HNDL：签名只在验证那一刻需要难伪造，而密钥交换保护的数据保密性，从数据产生起就开始倒计时。凡保密期横跨 2030~2035 的数据——金融记录、医疗档案、源码仓库、并购文档——<strong>风险从数据上线那天起就已经存在</strong>。</p>
+  <p><strong>签名（authenticity，防伪造）——重要但不紧迫。</strong>量子计算机出现之前，攻击者伪造不了签名；真正要防的是"签名算法在依赖它的系统生命周期内被破"。所以签名迁移的节奏跟着 PKI 证书链、固件签名、代码签名这些<strong>长生命周期基础设施</strong>的更换周期走——而根证书嵌在操作系统和设备里活十年以上，这才是 PKI 被公认为迁移最慢一环的原因。</p>
+
+  <h3>混合模式：为什么第一批落地全是"经典+PQC"双算法</h3>
+  <p>2026 年生产环境里真实跑着的 PQC，几乎全是<strong>混合密钥交换</strong>：TLS 1.3 的 X25519MLKEM768（RFC 9794），把经典 X25519 与 ML-KEM-768 两个共享秘密拼在一起喂给 KDF——<strong>攻破其中一个另一个还兜底</strong>。这不是不彻底，是工程纪律：格密码太年轻（格密码分析历史上出过意外），双保险防的是"新算法被破"的回归风险，就像当年 SHA-1→SHA-256 的过渡期双算法并行。NIST 对混合模式的态度是"不推荐也不反对，用不用看场景"（细化指南在 SP 800-227）。</p>
+
+  <div class="card-tip">
+    <p>三个实证数字定位迁移现状：<strong>Chrome 124（2024-04）起默认开启</strong>混合密钥交换、Firefox 132 跟进；<strong>Cloudflare 网络 60%+ 的人类 TLS 流量</strong>已经在用混合 ML-KEM；而公共 CA 签发的 PQC 证书数 = <strong>0</strong>——密钥交换已在规模化落地，签名迁移还在标准与试点阶段。这个不对称就是你的迁移顺序。</p>
+  </div>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构：先盘点、后分级、混合推进、留后门</h2>
+
+  <h3>第一步：密码资产盘点（CBOM）——迁移的第一块基石</h3>
+  <p>几乎所有官方指南的第一步都是 discovery：<strong>你无法迁移你看不见的东西</strong>。把组织里所有密码使用点盘成一份机器可读的清单——CBOM（Cryptography Bill of Materials，密码物料清单，CycloneDX 1.6 标准化）：证书、算法、密钥长度、协议、所在系统、owner、数据保密期。盘点本身就是风险暴露的过程——硬编码算法、无人认领的证书、 forgotten SSH key 会第一次现形。注意 CBOM 是<strong>活文档</strong>：基础设施天天在变，一次性盘完就归档等于没盘。</p>
+
+  <h3>第二步：按数据保密期分级，排出迁移优先级</h3>
+  <div class="diagram">
+  <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="PQC 迁移优先级矩阵">
+    <defs>
+      <linearGradient id="pqbg" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#1e2a3a"/><stop offset="1" stop-color="#16202e"/>
+      </linearGradient>
+    </defs>
+    <rect x="1" y="1" width="758" height="298" rx="12" fill="url(#pqbg)" stroke="#3b4a5f"/>
+    <text x="24" y="34" fill="#8fa3ba" font-size="13">迁移优先级 = f(数据保密期, 系统生命周期) —— 不是所有系统同时动</text>
+    <!-- 第一梯队 -->
+    <rect x="24" y="52" width="710" height="64" rx="8" fill="#8f4a4a"/>
+    <text x="44" y="78" fill="#fff" font-size="14" font-weight="bold">第一梯队 · 立即（2026-2028）</text>
+    <text x="44" y="100" fill="#ffe0e0" font-size="12">长保密期数据链路：VPN / 长连接 API / 备份加密 / 医疗与金融档案 —— HNDL 已经在计时</text>
+    <!-- 第二梯队 -->
+    <rect x="24" y="126" width="710" height="64" rx="8" fill="#8a6d2f"/>
+    <text x="44" y="152" fill="#fff" font-size="14" font-weight="bold">第二梯队 · 跟随平台（2028-2030）</text>
+    <text x="44" y="174" fill="#fff0d0" font-size="12">TLS 对外入口 / 内部 mTLS：升 OpenSSL 3.5+ / JDK 24+ 后默认获得混合密钥交换，成本最低</text>
+    <!-- 第三梯队 -->
+    <rect x="24" y="200" width="710" height="64" rx="8" fill="#2b5d8f"/>
+    <text x="44" y="226" fill="#fff" font-size="14" font-weight="bold">第三梯队 · 跟随生态（2030-2035）</text>
+    <text x="44" y="248" fill="#cfe0f0" font-size="12">PKI 证书链 / 代码签名 / 固件签名：等 CA/Browser Forum 与 HSM 生态就绪，节奏不由你定</text>
+    <!-- 右侧箭头注释 -->
+    <text x="24" y="286" fill="#8fa3ba" font-size="11">判据：数据保密期 &gt; 2035 - 当前年 → 进第一梯队；系统生命周期 &gt; 2035 → 新建系统直接上 PQC-ready 设计</text>
+  </svg>
+  </div>
+  <p>分级的判据一句话：<strong>数据保密期超过"量子计算机预期出现时间"的，立刻动；系统会活过 2035 禁用线的，新建时就必须 PQC-ready</strong>。短命数据（15 分钟的会话 token）留在古典算法上没有任何即期风险——把工程弹药集中到真正暴露的地方。</p>
+
+  <h3>第三步：混合推进 + crypto-agility（密码敏捷性）</h3>
+  <p>两条工程原则贯穿全程：<strong>其一，先混合后单算法。</strong>密钥交换用 X25519MLKEM768 这类混合组起步，签名的试点用组合证书（composit certificate，一张证书同时携带古典与 PQC 绑定，IETF LAMPS 草案在推进）——等生态稳定再收。<strong>其二，crypto-agility 是比换算法更重要的投资。</strong>把它做成配置项而非代码：算法名、参数集、证书链全部从配置/密钥库读取，应用代码只面向 KEM/Signature 抽象接口。NIST 后续还会标准化 FN-DSA（FIPS 206 草案中）等算法，<strong>这次迁移一定不是最后一次迁移</strong>——下一次换算法应该是改配置发版，不是改代码重构。把这一条写进新系统的采购与架构评审清单。</p>
+
+  <h3>容量与性能：体积膨胀的三本账</h3>
+  <p>公钥从 32B 到 1184B、签名从 64B 到 2420B，三类系统要先算账：<strong>握手延迟账</strong>——TLS 握手多 ~1.2KB，CDN 场景实测影响甚微（Cloudflare 全网开启的底气），但高 QPS 短连接网关要压测；<strong>嵌入式账</strong>——握手消息变大可能撞 MTU，弱设备要评估内存与算力（ML-KEM 运算比 ECDH 快，但缓冲区要求高）；<strong>存储账</strong>——HSM 密钥槽、证书链体积（全 PQC 证书链涨数 KB）、审计日志同步膨胀。经验值：<strong>混合模式下大多数互联网场景的性能损耗可忽略，真正卡脖子的是老设备和专有协议</strong>。</p>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：三段可以直接抄的起步动作</h2>
+
+  <h3>第一段：OpenSSL 3.5 服务端一步拿到混合密钥交换</h3>
+  <pre><code class="language-bash"># OpenSSL 3.5+ 默认 Groups 已含 X25519MLKEM768，先确认版本与支持
+$ openssl version
+OpenSSL 3.5.4  ...  (3.5 起原生 ML-KEM/ML-DSA，无需 oqs-provider)
+$ openssl s_client -connect api.example.com:443 -groups X25519MLKEM768 &lt;/dev/null 2&gt;/dev/null | grep -E "Server Temp Key|Negotiated TLS"
+# nginx 1.27 + OpenSSL 3.5：ssl_ecdh_curve X25519MLKEM768:x25519;
+# 兜底组保留 x25519，老客户端自动回退古典交换——混合灰度的意义所在
+# 验证口径：外部扫描器统计 PQC 握手占比，按客户端版本分桶观察回退率</code></pre>
+  <p>关键设计是<strong>双组并列 + 自动回退</strong>：服务端同时接受混合组与古典组，新浏览器拿到 PQC 握手、老客户端无感回退——这就是 Cloudflare 式的"悄悄全量"。同理 JVM 侧：JDK 24+ 原生支持（JEP 496/497），老版本用 Bouncy Castle（bcprov 兼容到 JDK 11）。<strong>平台升级即迁移，是成本最低的一条路</strong>。</p>
+
+  <h3>第二段：Java 二十行跑通 ML-KEM 混合加密（应用层兜底）</h3>
+  <pre><code class="language-java">// JDK 24+：应用层对高保密数据"TLS 之外再包一层"——防 TLS 终结点之后裸奔，也防 HNDL
+KeyPairGenerator kpg = KeyPairGenerator.getInstance("ML-KEM");
+kpg.initialize(NamedParameterSpec.ML_KEM_768);          // 安全级 3，CNSA 2.0 同档
+KeyPair receiver = kpg.generateKeyPair();               // 接收方公钥 1188B、私钥 2400B
+
+KEM kem = KEM.getInstance("ML-KEM");
+KEM.Encapsulated enc = kem.newEncapsulator(receiver.getPublic()).encapsulate();
+byte[] kemCiphertext = enc.encapsulation();             // 1088B，随密文一起传输
+SecretKey shared = enc.key();                           // 一次性共享密钥
+
+Cipher c = Cipher.getInstance("AES/GCM/NoPadding");     // 对称部分量子安全不变
+c.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(
+        Arrays.copyOf(shared.getEncoded(), 32), "AES"));
+byte[] body = c.doFinal(payload);                       // 密文 + kemCiphertext 落库/上网</code></pre>
+  <p>这是金融与医疗场景最实用的模式：<strong>对长保密数据在 TLS 之下再做一层应用层混合加密</strong>（KEM 建立一次性密钥 + AES-GCM 加密正文）。为什么不等 TLS 全网 PQC 化？因为<strong>流量常在网关/网格被 TLS 终结</strong>，内部那一段往往明文——应用层加密不依赖任何中间基础设施的升级进度，HNDL 风险当场清零。</p>
+
+  <h3>第三段：CBOM 盘点——用扫描把"看不见"变"看得见"</h3>
+  <pre><code class="language-bash"># 三个来源拼出第一版 CBOM：网络面 / 证书面 / 代码面
+$ nmap --script ssl-enum-ciphers -p 443,8443,6443 10.0.0.0/8 \
+    | grep -E "TLSv1.3|hybrid|X25519MLKEM" &gt; network-crypto.txt   # 谁还在古典组
+$ for f in $(find /etc /opt -name "*.pem" 2&gt;/dev/null); do
+    openssl x509 -in $f -noout -subject -enddate -text 2&gt;/dev/null \
+      | grep -E "Subject:|Not After|Public Key Algorithm" | sed "s|^|$f |"
+  done &gt; cert-inventory.txt                                        # 证书算法/到期/owner
+$ grep -rE "RSA|ECDSA|getInstance\(\"(AES|DES)" --include="*.java" \
+    --include="*.properties" src/ | wc -l                          # 代码里硬编码的算法引用
+# 汇总进 CBOM（CycloneDX 1.6 cryptoHelper），按"保密期×到期年"排优先级</code></pre>
+  <p>三段拼起来就是第一梯队的第一周：盘点出清单 → 长保密链路清单在握 → TLS 层升级拿混合交换 → 应用层对 top 风险数据兜底。后续每一轮迭代，CBOM 增量更新、优先级队列滚动重排。<strong>验收口径：任何时候能回答"我们还有多少 RSA-2048 在保护 5 年后仍敏感的数据"</strong>——答不出这句话，迁移就还在原地。</p>
+</section>
+
+<!-- ================= 05 今日要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>deadline 是硬的：</strong>NIST IR 8547 终版（2026-10-27）——量子脆弱公钥算法 2030 年后弃用、2035 年后禁用；主要经济体监管时间表正向 2030-2035 收敛，接政府/金融业务的公司按合规工程排期。</li>
+    <li><strong>紧迫度分两种：</strong>密钥交换防 HNDL（先窃取后解密），保密期长的数据风险从今天开始计时，最优先；签名防的是"系统生命周期内被破"，跟着 PKI/固件更换节奏走，可缓但不豁免。</li>
+    <li><strong>混合是第一批姿势：</strong>X25519MLKEM768 双算法兜底，Chrome/Cloudflare 已 60%+ 规模化验证；先混合起步、生态稳定后再收单算法——与当年 SHA-1→SHA-256 过渡同一纪律。</li>
+    <li><strong>盘点先于采购：</strong>CBOM 密码物料清单是第一块基石，"无法迁移看不见的东西"；按数据保密期×系统生命周期分三梯队，别搞全网齐步走。</li>
+    <li><strong>crypto-agility 比换算法更重要：</strong>算法/参数集/证书链做成配置，代码只面向 KEM/Signature 抽象——这次绝不是最后一次密码迁移，下次换算法应是改配置不是改代码。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目：核心交易系统的 PQC 迁移方案，三天后要过架构评审，你怎么答评审组三连问？</summary>
+    <div class="details-body">
+      <p>背景：你们的核心交易系统（Java 微服务 + K8s + 前置网关，交易数据法定保密期 25 年），安全部依据 IR 8547 要求 2027 年底前完成第一梯队迁移。评审组的三连问：<strong>① 为什么不是全网一次切换到 PQC，而要分三梯队？② 应用层混合加密会不会引入性能问题，怎么验证？③ 五年后如果 ML-KEM 被格密码分析攻破，你们的架构怎么保证不重演今天的痛苦？</strong>请给出你的回答框架。</p>
+      <h4>🔍 深度解析</h4>
+      <p><strong>① 三梯队的依据是风险敞口的时间结构，不是工作量分摊。</strong>全网齐步走有两个致命错误：其一，风险不同质——交易数据保密期 25 年，HNDL 敞口从今天起计时，属于最高优先级；而 15 分钟过期的会话 token、内部监控流量保密期以天计，古典算法在其生命周期内完全安全，先动它们是把工程弹药打在最安全的地方。其二，依赖不齐——第三梯队（PKI 证书、代码签名）的迁移节奏由 CA/Browser Forum、HSM 厂商生态决定，公共 CA 至今签发 PQC 证书数为 0，你想快也快不了。<strong>正确姿势：按"数据保密期是否横跨 2035"切第一梯队，按"平台默认支持"切第二梯队（升 JDK 24/OpenSSL 3.5 白拿混合密钥交换），签名类跟随生态。</strong>评审时给出 CBOM 加三个梯队的排期表，比"全网 PQC 化"的口号可信一个数量级。</p>
+      <p><strong>② 性能验证要分层拆账，混合加密的吞吐瓶颈不在 KEM。</strong>先把三本账摆出来：KEM 运算本身 ML-KEM-768 单核数万次/秒量级，比 ECDH 还快，每条消息一次 encapsulate 的 CPU 成本可忽略；真正的开销在<strong>密文体积分混与密钥管理</strong>——1088B 的 kemCiphertext 让小报文变大、接收方公钥的分发与轮换、以及 1188B 公钥 vs 32B 带来的证书/HSM 存储。验证方法：<strong>双盲压测</strong>——同一交易链路跑古典 AES-GCM 与 ML-KEM+AES-GCM 两版本，对比 P99 延迟与吞吐；预期结论是差异在个位数百分比。真正的工程难点反而在<strong>密钥生命周期</strong>：一次性共享密钥的销毁时机、接收方私钥轮换时的在途密文、跨可用区的密钥分发——这三条要写进设计文档，评审组真正想听的是你想到这一层。</p>
+      <p><strong>③ 防"ML-KEM 被破"的答案就是本期主角：crypto-agility + 混合模式。</strong>三层保险：第一层，<strong>当前部署用混合而非纯 PQC</strong>——X25519MLKEM768 里古典半边保留着 128 位古典安全，格密码塌了 X25519 兜底，反之亦然，这是双保险的结构性收益；第二层，<strong>算法名/参数集/证书链全部外置为配置</strong>，代码只依赖 JCA 的 KEM/Signature 接口，换算法 = 改配置 + 换证书 + 灰度发布，不是代码重构——评审时给出你们抽象层的设计（算法注册表 + 配置驱动 + 双算法并行窗口），这是"不重演痛苦"的直接证据；第三层，<strong>监控与演练</strong>——CBOM 持续更新让任何算法的暴露面可查询，每年做一次"假设 ML-KEM 明天被破"的桌面推演：影响面查询（CBOM 一条查询）、切换预案、回滚窗口。<strong>密码迁移的本质不是一次性工程，是把"换算法"从一个十年项目降级为一次常规发布——能做到这一步的系统，才算真正完成了 PQC 迁移。</strong></p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 07 参考 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>参考与延伸</h2>
+  <div class="note">
+    <p><strong>本期 primary source：</strong><a href="https://csrc.nist.gov/pubs/ir/8547/final" target="_blank" rel="noopener">NIST IR 8547《Transition to Post-Quantum Cryptography Standards》（终版，2026-10-27）</a>——弃用/禁用时间表与迁移优先级的一手出处。</p>
+    <p>延伸：FIPS 203/204/205 标准文本（NIST）、NIST SP 800-227（KEM 推荐）、RFC 9794（TLS 混合密钥交换）、JEP 496/497（JDK 24 ML-KEM/ML-DSA）、Cloudflare 后量子博客、CNSA 2.0（NSA）。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0066-context-window-engineering.html">← 上一期：上下文窗口工程</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 67 期 · 安全架构前沿系列 · 下期继续安全线</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
