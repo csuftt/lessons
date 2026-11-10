@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · 机密计算与 TEE：让数据在"使用中"也加密 | 2026-11-11</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0068</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0067-pqc-migration.html">上一期：后量子密码 PQC 迁移</a> · <a href="https://www.bilibili.com/video/BV1XHW56oEe7" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">安全架构前沿 · 安全线系列第 2 讲（机密计算篇）</p>
+  <h1>机密计算与 TEE：让数据在"使用中"也加密</h1>
+  <p class="subtitle">上一讲我们排了后量子迁移的时间表（<a href="0067-pqc-migration.html">0067</a>），但加密有三态：静态、传输中、使用中——前两态早已是标配，<strong>第三态是大多数团队今天裸奔的地方</strong>。数据进了内存、模型权重进了显存，那一刻管理员、宿主机、云厂商全都能看。机密计算用硬件信任执行环境（TEE）把这最后一格补上，而且 2026 年正好卡在三个拐点上：GPU TEE 从 Hopper 走到 Blackwell、K8s 侧 CoCo 项目进了 CNCF Incubating、AI 监管开始点名"使用中加密"。这一讲把数据三态缺口、TEE 硬件地图、远程证明与落地路线一次讲清。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🛡 安全架构前沿</span>
+    <span class="tag-date">📅 2026-11-11 · 第 68 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>场景：评审会上被问倒的三个问题</h2>
+
+  <h3>问题一：私有化部署就等于数据安全吗？</h3>
+  <p>医疗 AI 公司把推理服务部署进医院机房，合同承诺"数据不出院区"。部署在客户自有的物理服务器上——但服务器 root 权限在医院运维手里，宿主机管理员随时能 <code>cat /proc/&lt;pid&gt;/mem</code> 读到推理进程内存里的患者影像与 prompt。法务问了一个让架构组沉默的问题：<strong>"你们的部署方式，能向监管证明医院管理员看不到患者数据吗？"</strong>答案是：不能。传统隔离（容器、虚拟机、网络策略）防的是租户之间的横向攻击，防不了管理员自己——而合规审计问的恰恰是后者。</p>
+
+  <h3>问题二：上一轮 RAG 检索了什么，日志里全有</h3>
+  <p>金融公司把投研知识库接到公有云的大模型服务上做 RAG。传输有 TLS、存储有加密，看起来无懈可击。但每一次推理，用户的<strong>问题本身</strong>都会经过：宿主机内存 → API 网关日志 → GPU 显存 → 云厂商的遥测管道。安全团队做了一遍数据流盘点，结论：在"使用中"这个状态，敏感 prompt <strong>明文经过了至少四个不受自己控制的环节</strong>。2026 年生效的多部 AI 与数据法规把"使用中"明确写进处理者义务——静态加密清单再漂亮也过不了这一问。</p>
+
+  <h3>问题三：泄露的模型权重，泄露的护城河</h3>
+  <p>一家做垂直领域微调的公司把模型放在第三方 GPU 云上训练，半年后竞品拿出了行为几乎一致的模型。没有证据、无法追责，但复盘时最大的嫌疑摆在那里：<strong>租 GPU 的机器不是你的机器</strong>。自研模型权重动辄数千万训练成本，在传统云上它就是宿主机管理员文件系统里的一份普通文件。数字佐证：美国专利商标局 2025 年 7 月调研显示，仅 <strong>12%</strong> 的企业认为第三方 AI 工具的数据实践"值得信赖"——信任赤字本身就是商业摩擦。</p>
+
+  <div class="callout">
+    <span class="callout-title">一句话病灶</span>
+    <p><strong>加密三态里，"使用中"是唯一没有密钥体系保护的状态：数据在内存与显存里以明文存在，而内存的"管理员"是宿主机与云厂商——你的信任边界与你的控制边界，从来不在一条线上。机密计算做的事，就是把这两条线重新焊在一起。</strong></p>
+  </div>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：TEE 把信任边界缩到芯片级</h2>
+
+  <h3>信任执行环境（TEE）是什么</h3>
+  <p>TEE（Trusted Execution Environment，信任执行环境）是 CPU 内建的硬件隔离区：一块加密内存区域里跑的代码与数据，<strong>连宿主机操作系统和 hypervisor 都读不到</strong>。它靠两条硬件机制成立：<strong>内存加密</strong>——CPU 内存控制器用芯片内生成的密钥对内存加密（密钥永不出芯片，管理程序看到的全是密文）；<strong>度量与远程证明</strong>——芯片对加载的固件与代码逐级哈希（measured boot），产生一份用设备唯一私钥签名的"身份报告"，让远程验证方确认"这段代码真的运行在未被篡改的真芯片上"。一句话：<strong>传统隔离靠"管理员承诺不看"，TEE 靠"管理员物理上看不懂"</strong>。</p>
+
+  <h3>三张硬件地图：CPU / GPU / K8s</h3>
+  <p><strong>CPU 三大家：</strong>Intel TDX（信任域，按虚拟机隔离）、AMD SEV-SNP（加密虚拟机+完整性保护）、ARM CCA（真域）——均已规模商用，是机密虚拟机（CVM）的主流底座。<strong>GPU 两次飞跃：</strong>NVIDIA Hopper（H100/H200）是第一代带机密计算能力的数据中心 GPU——GPU 侧带硬件防火墙，但 HBM 显存本身不加密、靠物理防护，与 CPU 之间走加密 bounce buffer，且 NVLink 不加密，机密工作负载基本锁死单卡；Blackwell（B200）补上关键一环——<strong>TEE-I/O</strong>（可信 I/O，基于 SPDM/TDISP 标准），把加密延伸到 NVLink/NVSwitch，多卡机密训练第一次成为可能，NVIDIA 口径接近零吞吐损失。<strong>K8s 侧 CoCo：</strong>Confidential Containers 项目 2026 年 7 月从 CNCF Sandbox 升到 <strong>Incubating</strong>——把每个 Pod 包进一个机密虚拟机（基于 Kata），证明通过才发密钥，把"机密"变成了 K8s 的原生工作负载类型。</p>
+
+  <h3>量化视角：性能税到底多重</h3>
+  <p>架构师最关心的是账。学术基准与厂商口径可以合并成一张经验表：<strong>信任域创建</strong>秒级（传统虚拟机毫秒级）；<strong>CPU 机密虚拟机吞吐开销</strong>个位数百分比（0%~7%）；<strong>Hopper GPU 机密推理</strong>多数查询 7% 以内（但传输密集任务更重，且单卡限制是硬伤）；<strong>Blackwell TEE-I/O</strong>厂商口径近零，但配置不当的栈实测仍可能 30%~40%（加密引擎没对齐直通路径时的惩罚）——<strong>开销不在加密本身，在数据搬运路径</strong>。此外要算隐性账：可信域内内存通常有上限、调试器与监控探针进不了 TEE（排障方式要重学）、镜像与度量值的发布流程变长。</p>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构：证明链设计比隔离本身更重要</h2>
+
+  <h3>核心设计问题：密钥发给谁，由什么证明决定</h3>
+  <p>机密计算架构的灵魂不是"开 TEE"，而是<strong>密钥释放策略</strong>：数据加密密钥永远不落宿主机，只有远程证明通过后才注入 TEE 内部。这把"谁能看数据"从人治变成密码学强制：运维可以重启你的容器，但拿不到证明就永远拿不到密钥。设计时把三个对象想清楚：<strong>度量什么</strong>（固件/内核/镜像/模型哈希）、<strong>谁验证</strong>（自建证明服务或云厂商 KBS，它是新的关键基础设施，自身要高可用+审计）、<strong>失败怎么办</strong>（证明失败=密钥不发=工作负载启动失败，别设计"失败放行"的后门）。</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="TEE 远程证明与密钥释放链路">
+    <defs>
+      <linearGradient id="teebg" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#1e2a3a"/><stop offset="1" stop-color="#16202e"/>
+      </linearGradient>
+    </defs>
+    <rect x="1" y="1" width="758" height="328" rx="12" fill="url(#teebg)" stroke="#3b4a5f"/>
+    <text x="24" y="32" fill="#8fa3ba" font-size="13">远程证明链路：工作负载自证清白 → 验证方核对度量值 → 密钥只进 TEE</text>
+    <!-- 宿主机（不可信区） -->
+    <rect x="24" y="48" width="330" height="150" rx="8" fill="#5a3a3a" stroke="#7a4a4a"/>
+    <text x="40" y="74" fill="#ffb0b0" font-size="13" font-weight="bold">不可信区：宿主机 / 云厂商</text>
+    <text x="40" y="96" fill="#ffd0d0" font-size="12">· hypervisor、宿主 OS：只能调度，读不到内存</text>
+    <text x="40" y="116" fill="#ffd0d0" font-size="12">· 加密镜像/加密模型：没有密钥就是密文</text>
+    <text x="40" y="136" fill="#ffd0d0" font-size="12">· 管理员 root 权限：对 TEE 内容无效</text>
+    <text x="40" y="156" fill="#ffd0d0" font-size="12">· 物理拔内存条：读到的是密文</text>
+    <text x="40" y="180" fill="#e0a0a0" font-size="11">↑ 传统隔离到此为止 —— TEE 从这里向内再划一刀</text>
+    <!-- TEE（可信区） -->
+    <rect x="406" y="48" width="330" height="150" rx="8" fill="#2b5d3f" stroke="#3f7a55"/>
+    <text x="422" y="74" fill="#b0ffc8" font-size="13" font-weight="bold">可信区：TEE（内存加密域）</text>
+    <text x="422" y="96" fill="#d0ffe0" font-size="12">· CPU TDX / SEV-SNP 机密虚拟机</text>
+    <text x="422" y="116" fill="#d0ffe0" font-size="12">· GPU 机密模式：显存写入全部 AES-256 加密</text>
+    <text x="422" y="136" fill="#d0ffe0" font-size="12">· 证明代理：度量值收集与签名报告</text>
+    <text x="422" y="156" fill="#d0ffe0" font-size="12">· 密钥只在本域内解密数据与模型</text>
+    <text x="422" y="180" fill="#a0e0b0" font-size="11">密钥由芯片生成、永不出芯片 —— 硬件信任的根</text>
+    <!-- 下方流程 -->
+    <rect x="24" y="216" width="220" height="52" rx="8" fill="#2b5d8f"/>
+    <text x="40" y="238" fill="#fff" font-size="13" font-weight="bold">① 启动：度量启动链</text>
+    <text x="40" y="256" fill="#cfe0f0" font-size="11">固件→内核→镜像逐级哈希记录</text>
+    <rect x="270" y="216" width="220" height="52" rx="8" fill="#2b5d8f"/>
+    <text x="286" y="238" fill="#fff" font-size="13" font-weight="bold">② 证明：签名报告上行</text>
+    <text x="286" y="256" fill="#cfe0f0" font-size="11">设备密钥签名 → CPU+GPU 组合证明</text>
+    <rect x="516" y="216" width="220" height="52" rx="8" fill="#8a6d2f"/>
+    <text x="532" y="238" fill="#fff" font-size="13" font-weight="bold">③ 释放：密钥按证明注入</text>
+    <text x="532" y="256" fill="#fff0d0" font-size="11">度量值匹配 → 密钥只进 TEE</text>
+    <path d="M244 242 L270 242" stroke="#8fa3ba" stroke-width="2" marker-end="url(#arrow)"/>
+    <path d="M490 242 L516 242" stroke="#8fa3ba" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="24" y="300" fill="#8fa3ba" font-size="12">验证方（KBS / 证明服务）持有"已知良好度量值"基准：一个字节不匹配 → 密钥不释放 → 工作负载起不来。</text>
+    <text x="24" y="318" fill="#8fa3ba" font-size="12">证明服务是新关键基础设施：高可用 + 审计 + 度量值治理（升级=换基准）。</text>
+  </svg>
+  </div>
+
+  <h3>选型：四类场景对号入座</h3>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>场景</th><th>信任缺口</th><th>落地姿势</th></tr></thead>
+    <tbody>
+      <tr><td><strong>监管数据上第三方云</strong></td><td>云厂商在信任边界内</td><td>CVM（TDX/SEV-SNP）+ 客户自管密钥，证明通过才发密钥</td></tr>
+      <tr><td><strong>敏感 prompt 推理</strong></td><td>prompt 明文过宿主机/显存</td><td>机密 GPU 推理（vLLM on TEE），权重与请求全程密文边界内</td></tr>
+      <tr><td><strong>模型资产保护</strong></td><td>宿主机管理员可拷贝权重</td><td>加密镜像+加密权重，密钥经证明注入；模型文件离开 TEE 即密文</td></tr>
+      <tr><td><strong>多方联合计算</strong></td><td>参与方互不信任</td><td>数据清洁室：各自数据进同一 TEE，只出聚合结果不出原始数据</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>三条架构权衡</h3>
+  <p><strong>权衡一：信任链上移还是下移。</strong>自建证明服务=信任收归自己但要养一套关键基础设施（可用性、度量值治理）；用云厂商 KBS=省事但验证方在利益相关方一侧，主权客户常不接受——<strong>验证方立场是采购谈判点，不是技术细节</strong>。<strong>权衡二：证明粒度。</strong>按整机/虚拟机证明（部署简单、粒度粗）vs 按镜像与模型哈希证明（粒度细、每次发版要更新度量基准）——发版频繁的团队要把度量值更新做进 CI/CD，否则 TEE 变发布阻塞点。<strong>权衡三：TEE 里跑什么。</strong>整个应用进 TEE（省心但把不可信依赖也圈了进去，攻击面没减）vs 只把密钥操作与数据处理核心放进 TEE（边界小、审计清晰，但要做代码拆分）——原则是<strong>按"数据在哪里解密"划边界，不按"服务边界"划</strong>。</p>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：三段起步动作</h2>
+
+  <h3>第一段：Azure 机密虚拟机——十分钟把服务搬进 TEE</h3>
+  <pre><code class="language-bash"># 生成一台 AMD SEV-SNP 机密虚拟机（Azure DCasv5 系列；AWS 为 Nitro TEE 实例、
+# GCP 为 Confidential VM，三大云均已 GA）
+$ az vm create -g rg-cc -n cvm-demo \
+    --image "Canonical:ubuntu-24_04-lts:gen2:latest" \
+    --size Standard_DC8as_v5 \
+    --security-type TrustedLaunch \
+    --enable-secure-boot true --enable-vtpm true
+# 进机器后第一件事：验证 TEE 真的在线
+$ dmesg | grep -i "sev-snp"
+# [..] AMD Memory Encryption: SEV-SNP is initialized  ← 这行出现=内存加密已激活</code></pre>
+  <p>这一段的意义是<strong>把"使用中加密"从 PPT 变成一台能 ssh 的机器</strong>：虚拟机的内存对 Azure 宿主机与 hypervisor 全密文。把现有的 Java 服务直接迁进去（无需改代码），合规话术就从"我们承诺管理员不看"升级成"管理员物理上看不懂"。</p>
+
+  <h3>第二段：CoCo——把"机密"变成 K8s 的一种工作负载</h3>
+  <pre><code class="language-yaml"># CoCo（Confidential Containers，CNCF Incubating）：
+# 每个 Pod 包进一个机密虚拟机，RuntimeClass 指向 Kata 机密运行时
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: kata-qemu-tdx        # 也有 sev-snp / snp-latest 等变体
+handler: kata-qemu-tdx
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: llm-confidential
+spec:
+  runtimeClassName: kata-qemu-tdx
+  containers:
+  - name: inference
+    image: registry.internal/llm-server:enc@sha256:...  # 加密镜像
+    env:
+    - name: KBS_URI
+      value: "https://kbs.internal:444"    # 证明+密钥服务（Trustee）
+    # 镜像解密密钥与模型密钥：证明通过后才由 KBS 注入</code></pre>
+  <p>关键在最后一行注释：<strong>镜像本身是加密的</strong>，拉镜像时宿主机存的是密文，解密密钥由 KBS（Key Broker Service，CoCo 的证明与密钥组件 Trustee 的核心服务）在工作负载通过远程证明后注入 TEE 内部——<strong>宿主机节点上从头到尾不存在明文镜像与明文模型</strong>。这是"模型资产保护"的标准姿势，也是 CoCo 与普通 Kata 隔离的本质差别。</p>
+
+  <h3>第三段：机密 GPU 推理——AI 工作负载的完整拼图</h3>
+  <pre><code class="language-bash"># NVIDIA H100/H200/Blackwell 机密模式（需配 CPU TEE：AMD SEV-SNP 或 Intel TDX）
+# 1) 宿主机开启 GPU 机密模式后，验证 GPU 证明
+$ nvtrustutils/gpu/verifiers/localverifier/nv_gpu_verifier
+#   VERIFY: PASS  —— GPU 出具 SPDM 签名报告（设备密钥+ECC-384）
+# 2) 组合证明：CPU 证明 + GPU 证明 一起交给验证方（如 CoCo KBS）
+#    GPU 侧 attester 已随 CoCo guest-components 标准构建分发
+# 3) 验证通过 → 权重解密密钥注入 → vLLM 在机密域内加载权重并服务
+$ python -m vllm.entrypoints.openai.api_server \
+    --model /mnt/enc/model-70b --served-model-name internal-70b
+# 现在：prompt 进显存是密文写入、权重只在 TEE 内解密、
+#       云厂商/管理员全程看不到任何明文 —— "使用中"缺口闭合</code></pre>
+  <p>三段合起来就是一条完整路径：<strong>CVM 兜住通用服务 → CoCo 兜住 K8s 工作负载 → 机密 GPU 兜住 AI 推理</strong>。落地顺序建议从第一段开始（云厂商托管、成本可控、当天见效），AI 场景再上第三段；CoCo 适合有自建 K8s 且要做平台能力的团队。</p>
+</section>
+
+<!-- ================= 05 今日要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>加密三态补最后一格：</strong>静态与传输加密已是标配，"使用中"（内存/显存里的明文）是大多数团队的裸奔区——传统隔离防租户互攻，防不了管理员与宿主机；TEE 用硬件内存加密+度量证明，把信任边界缩到芯片级。</li>
+    <li><strong>2026 三拐点：</strong>GPU TEE 两代成熟（Hopper 单卡机密 → Blackwell TEE-I/O 多卡+近零开销）；CoCo 进 CNCF Incubating（机密成 K8s 原生工作负载类型）；AI 监管把"使用中加密"写进义务清单——供给、平台、合规同时就位。</li>
+    <li><strong>证明链比隔离更重要：</strong>架构灵魂是密钥释放策略——度量什么、谁验证、失败不放行；证明服务（KBS）是新的关键基础设施，验证方立场是采购谈判点。</li>
+    <li><strong>性能账要算全：</strong>CPU 机密虚拟机个位数百分比、GPU 机密推理 7% 以内、Blackwell 近零但配置不当会放大到 30%~40%；隐性成本在调试、监控与发版流程，不在加密计算。</li>
+    <li><strong>不是所有负载都值得：</strong>威胁模型里没有"基础设施运营方"就不用上 TEE（自有可信机房）；TEE 保环境不保代码——跑在里面的镜像被投毒，它只会忠实地保护攻击者的载荷。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目：医院私有化部署 + 第三方 GPU 云训练，双场景机密计算方案怎么设计？</summary>
+    <div class="details-body">
+      <p>背景：你们为医院做医疗影像 AI。场景一：推理服务私有化部署在医院机房（医院运维持有 root）。场景二：用临床数据在第三方 GPU 云上微调模型（数据不出域是合同红线，但训练必须用租来的卡）。CISO 提了三问：<strong>① 医院场景要"管理员看不到患者数据"，你们的信任边界划在哪，怎么向监管证明？② GPU 云训练场景，怎么让患者数据在云上"可用而不可见"，密钥管理怎么设计？③ 机密计算上线后，你们的调试、监控、发布流程要重造哪些环节？</strong></p>
+      <h4>🔍 深度解析</h4>
+      <p><strong>① 信任边界划在 TEE 硅边界，证明链条两头都要抓。</strong>医院场景的错误答案是"我们容器隔离+日志审计"——容器与日志都在管理员可读域内，等于没划边界。正确姿势：推理服务跑在 TDX/SEV-SNP 机密虚拟机（或 CoCo 机密 Pod）里，患者数据与模型只在 TEE 内解密；对监管的证明分两层——<strong>技术证明</strong>：远程证明报告（固件/内核/镜像度量值+设备密钥签名，可被第三方独立验证）；<strong>流程证明</strong>：证明服务（KBS）部署在医院侧或中立第三方，密钥释放策略（哪些度量值组合可以拿密钥）文档化并纳入等保/审计材料。注意向监管讲清楚边界内的东西：TEE 不保护"处理完后落库的数据"（那是静态加密的事），也不保护 TEE 内应用自身的漏洞——话术要精确，别把 TEE 说成万能。</p>
+      <p><strong>② 训练场景的黄金组合：TEE + 联邦学习/数据清洁室，密钥锚在医院侧。</strong>第一选择不是"把原始数据加密传上云"，而是倒过来：<strong>数据不动，计算动</strong>——在医院侧部署数据网关（TEE 内），只向云端训练任务暴露特征/梯度（差分隐私或安全聚合处理后的形态），云侧 GPU TEE 内完成训练。若必须全量数据上云（如影像数据集太大）：数据在医院侧用客户自管密钥加密（密钥在自建 KMS/HSM，绝不放云厂商 KMS），云端训练任务跑在机密 GPU 环境，<strong>启动时经远程证明从医院侧 KBS 拉取解密密钥</strong>——证明失败（环境不对、镜像被换）密钥即不释放，云厂商配合被动也无法解密。密钥体系三层：数据密钥（DEK）保护数据集、密钥加密密钥（KEK）保护 DEK、根密钥锚在医院 HSM——层次分明才轮换得动。合同层面：GPU 云选型时把"支持机密 GPU+允许客户自持证明服务"写进采购条款。</p>
+      <p><strong>③ 三个流程要重造：观测、排障、发布。</strong><strong>观测：</strong>传统探针（APM agent、prometheus exporter、JVM debug 端口）都跑在 TEE 外或要读进程内存——机密域内的指标要靠应用主动经证明信道外吐（CoCo 生态在补标准化的 attested telemetry），监控面板会先"瞎"一阵，要提前与 SRE 团队对齐预期。<strong>排障：</strong>coredump、gdb attach、heap dump 默认全不可用（它们本质都是读内存）——替代手段是结构化日志+TEE 内自检程序+可复现的域外测试环境；把"哪些事故场景进不了 TEE 排查"提前写进 runbook。<strong>发布：</strong>度量值基准（镜像哈希、固件版本）必须随 CI/CD 自动更新，否则每次发版都要人工改 KBS 配置——把"构建产物哈希→RVPS 基准更新"做成流水线固定环节，并对度量值变更留审计痕迹（它现在是安全边界的定义本身）。<strong>机密计算的落地成本大头从来不是硬件，是这三条工程流程的重造——预算时按 3:7 分（硬件:流程）估，比按 9:1 估的团队活得久。</strong></p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 07 参考 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>参考与延伸</h2>
+  <div class="note">
+    <p><strong>本期 primary source：</strong><a href="https://www.nvidia.com/en-us/data-center/solutions/confidential-computing/" target="_blank" rel="noopener">NVIDIA Confidential Computing 官方文档</a>——Hopper/Blackwell GPU 机密计算架构、TEE-I/O、证明工具链（Local GPU Verifier/NRAS）的一手出处。</p>
+    <p>延伸：Confidential Containers 官方文档（CNCF Incubating·Trustee/KBS 架构）、Intel TDX / AMD SEV-SNP 技术文档、CoCo v0.23.0 Trustee PQC 证明（与 <a href="0067-pqc-migration.html">0067 后量子迁移</a>的交汇点）、微软 Azure 机密计算文档。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0067-pqc-migration.html">← 上一期：后量子密码 PQC 迁移</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 68 期 · 安全架构前沿系列 · 下期回十类技术栈循环</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>
