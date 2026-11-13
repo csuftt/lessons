@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日10分钟微课程 · OpenTelemetry 可观测性标准化：一次埋点，三条管道 | 2026-11-13</title>
+<link rel="stylesheet" href="../assets/daily.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">DAILY TECH COURSE · 0069</span>
+  <span><a href="../index.html">课程目录</a> · <a href="0068-confidential-computing-tee.html">上一期：机密计算与 TEE</a> · <a href="https://www.bilibili.com/video/BV14XWe6MEjp" target="_blank" rel="noopener">▶ B站视频版</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">云原生前沿 · 云原生系列第 3 讲（可观测性标准化篇）</p>
+  <h1>OpenTelemetry 可观测性标准化：一次埋点，三条管道</h1>
+  <p class="subtitle">指标、日志、链路三套体系我们已经分别聊过（<a href="0028-prometheus-grafana.html">0028</a> Prometheus、<a href="0030-elk-loki-logging.html">0030</a> ELK/Loki、<a href="0029-skywalking-tracing.html">0029</a> SkyWalking）——但它们是三口各自为政的竖井：指标没有 trace_id，链路查到根因还要去日志系统搜时间戳，换一个 APM 厂商全部埋点推倒重来。这一讲讲的是把三口竖井焊在一起的标准化层：OpenTelemetry（OTel）2026 年 5 月从 CNCF 毕业，三大信号 API/SDK/协议全 Stable，全球 49% 的组织已生产采用。埋一次点，数据归你，后端随便换——<strong>这一讲把信号模型、Collector 两层拓扑、语义约定和迁移路线一次讲清</strong>。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">☁️ 云原生前沿</span>
+    <span class="tag-date">📅 2026-11-13 · 第 69 期</span>
+    <span class="tag time">⏱ 预计阅读 12 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>场景：一次故障复盘暴露的三口竖井</h2>
+
+  <h3>复盘会上的 47 分钟</h3>
+  <p>周二晚高峰，支付回调延迟告警。值班同学的操作路径是这样的：Prometheus 里看到 <code>payment-callback</code> 的 P99 延迟从 210ms 飙到 4.2s——知道<strong>出事了</strong>；切到 SkyWalking 拿到 trace_id，发现慢在下游的一个 DB Span——知道<strong>在哪一层</strong>；再切到 ELK，用"服务名 + 时间范围"搜日志（trace_id 在日志里根本没有，两套系统的关联字段对不上），翻了三轮才拼出真相——知道<strong>为什么</strong>。事后统计：全程 47 分钟，其中 31 分钟耗在"跨系统对时间戳、对 trace_id、复制粘贴搜索"上。<strong>根因分析的推理只花了 16 分钟，工具切换的摩擦吃掉了一大半</strong>。</p>
+
+  <h3>更早埋下的雷：换 APM 的价格</h3>
+  <p>这家公司一年前还评估过换 APM 厂商：现有厂商按主机计费，新厂商按量计费更划算。评估结论是"迁移成本高于三年差价"——全公司 40+ 个 Java/Go 服务的埋点用的都是厂商私有 SDK，agent、注解、配置 API 全不一样，换厂商=40 个团队按季度排期重埋一遍。观测数据明明是自己的业务产生的，<strong>埋点和管道却成了厂商资产的一部分</strong>。</p>
+
+  <h3>第三笔账：语义各说各话</h3>
+  <p>复盘时还发现一个尴尬细节：Prometheus 里叫 <code>http_server_duration_ms</code>（毫秒），SkyWalking 里叫 <code>latency</code>（毫秒），某自研网关上报的是 <code>rt</code>（微秒）——同一个"请求耗时"，三个名字三种单位，做一张全链路耗时分布图要写三层换算。新服务接入监控的"对字段"环节平均要两天。<strong>遥测数据有了，但没有公共词汇表，机器读不懂彼此</strong>。</p>
+
+  <div class="callout">
+    <span class="callout-title">一句话病灶</span>
+    <p><strong>三口竖井不是三个产品选型问题，是缺一个标准化层：埋点绑定厂商、信号之间无关联字段、语义无公共词汇——OpenTelemetry 补的就是这一层，它不替代 Prometheus/SkyWalking/ELK，而是让它们从"三口竖井"变成"三条管道"，管道里流的是同一种数据。</strong></p>
+  </div>
+</section>
+
+<!-- ================= 02 原理 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>原理：信号模型与 OTLP 协议</h2>
+
+  <h3>OTel 是什么：API + SDK + 协议 + Collector 四件套</h3>
+  <p>OpenTelemetry 是 CNCF 的可观测性开源标准，2026 年 5 月正式毕业（CNCF 第 15 个毕业项目，仅次于 Kubernetes 的社区活跃度：1.2 万+ 贡献者、2800+ 公司参与，JS/Python API 包下载量均破 13 亿）。它不是又一个监控产品，而是四层标准化：<strong>API</strong>——埋点只调 OTel 接口（tracer/meter/logger），不 import 任何厂商类；<strong>SDK</strong>——可换的实现（采样、批处理、导出策略都在这层配置）；<strong>OTLP 协议</strong>——统一线上格式（gRPC/HTTP+protobuf），任何后端都能消费；<strong>Collector</strong>——独立部署的管道组件（接收→处理→导出）。厂商 SDK 的角色从"埋点绑定"退化为"Collector 之后的存储与分析"——<strong>锁定被推到了管道末端，数据出口永远在你手里</strong>。</p>
+
+  <h3>三信号统一的关键：Resource 与 Trace 上下文</h3>
+  <p>三条管道流同一种数据的关键在两个设计。<strong>Resource</strong>：每条遥测数据都自带资源属性（<code>service.name</code>、<code>service.version</code>、<code>k8s.pod.name</code>……），指标、日志、链路共享同一套身份字段——查任何一条数据都能一步定位"哪个服务哪个版本哪个 Pod"。<strong>Trace 上下文传播</strong>：trace_id 通过 W3C Trace Context 标准 header（<code>traceparent</code>）跨进程传播，日志 SDK 自动把 trace_id/span_id 写进日志记录（对应 0029 讲过的 MDC 机制，但标准化的）——<strong>指标→链路→日志的关联不再靠人肉对时间戳，靠数据自带的关联字段</strong>。这正是 01 节那 31 分钟摩擦的根治点。</p>
+
+  <h3>语义约定（Semantic Conventions）：公共词汇表</h3>
+  <p>语义约定规定了"HTTP 服务器的耗时字段叫 <code>http.server.request.duration</code>、单位秒（SI 单位）""DB span 必带 <code>db.system</code>、<code>db.operation</code>"——跨服务的遥测数据用同一套名字、同一套单位，任何后端、任何看板读到的语义一致。成熟度分档：HTTP/数据库语义约定已 Stable，K8s 资源属性 2026 年 6 月随 semconv v1.42.0 Stable，消息与 GenAI 语义约定还在 Development（注意：GenAI span 约定仍在演进，字段名可能变——与 <a href="0060-model-routing-token-cost-governance.html">0060</a> 讲过的 OTel GenAI 语义约定是同一件事）。<strong>语义约定是"新接入一个服务只要半小时"的那一层</strong>。</p>
+
+  <h3>量化视角：这一层的成熟度坐标</h3>
+  <p>数字版本坐标（2026-11）：规范 v1.61.0；OTLP protobuf v1.11.0（traces/metrics/logs 三信号 Stable，Profiles 第四信号 alpha）；语义约定 v1.44.0；Collector 核心与 contrib 双轨双周发版（core v1.68/v0.162、contrib v1.1/v0.162——1.x 是逐组件稳定线，0.x 是其余组件，"整体 GA"不存在，组件级看 README）。生态侧：CNCF 2026 年度调查显示 <strong>49% 组织生产采用、26% 在评估</strong>；日本社区调查的信号分布是 Traces 93%、Metrics 71%、Logs 60%（全球调查通常 Metrics 领先）；语言分布 Java 61%、Go 57%、JS/TS 50%——<strong>OTel 已过"要不要用"的分水岭，进入"怎么用好"阶段</strong>。</p>
+</section>
+
+<!-- ================= 03 架构设计 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>架构：Collector 两层拓扑与三个关键决策</h2>
+
+  <h3>标准形状：Agent 层 + Gateway 层</h3>
+  <p>生产部署的参考形状是两层 Collector：<strong>Agent 层</strong>——DaemonSet 跑在每个节点，贴着应用收 OTLP，做轻处理（内存限制、批处理、重试）；<strong>Gateway 层</strong>——独立 Deployment（2+ 副本），汇聚全集群遥测，做重处理（尾部采样、脱敏、基数治理、路由分发到多后端）。分层理由：Agent 挂只影响单节点且应用侧 SDK 有缓冲，Gateway 挂全集群遥测断流——所以 Gateway 要多副本+发送队列+持久化存储背书（<code>file_storage</code> 扩展），且<strong>密钥只在 Gateway 层配置</strong>，应用与 Agent 永远不碰后端凭据。这是 OTel 官方 managed platforms 蓝图与 Adobe 三层管道的共同骨架。</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="OTel 两层 Collector 管道拓扑">
+    <defs>
+      <linearGradient id="otelbg" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#1e2a3a"/><stop offset="1" stop-color="#16202e"/>
+      </linearGradient>
+    </defs>
+    <rect x="1" y="1" width="758" height="328" rx="12" fill="url(#otelbg)" stroke="#3b4a5f"/>
+    <text x="24" y="32" fill="#8fa3ba" font-size="13">一次埋点 → 两层管道 → 多后端：数据出口永远在管道末端，换后端只改 Gateway 导出器</text>
+    <!-- 应用层 -->
+    <rect x="24" y="48" width="200" height="118" rx="8" fill="#2b5d8f"/>
+    <text x="40" y="72" fill="#fff" font-size="13" font-weight="bold">应用（OTel SDK 埋点）</text>
+    <text x="40" y="94" fill="#cfe0f0" font-size="11">traces + metrics + logs 三信号</text>
+    <text x="40" y="112" fill="#cfe0f0" font-size="11">自动埋点 agent 零代码接入</text>
+    <text x="40" y="130" fill="#cfe0f0" font-size="11">Resource 自带服务身份</text>
+    <text x="40" y="148" fill="#9fc0e0" font-size="11">trace_id 自动写入日志</text>
+    <!-- Agent 层 -->
+    <rect x="252" y="48" width="220" height="118" rx="8" fill="#2b5d3f" stroke="#3f7a55"/>
+    <text x="268" y="72" fill="#b0ffc8" font-size="13" font-weight="bold">Agent 层（DaemonSet / 节点）</text>
+    <text x="268" y="94" fill="#d0ffe0" font-size="11">OTLP 接收 → 轻处理</text>
+    <text x="268" y="112" fill="#d0ffe0" font-size="11">memory_limiter / batch / 重试</text>
+    <text x="268" y="130" fill="#d0ffe0" font-size="11">挂了只影响本节点（SDK 有缓冲）</text>
+    <text x="268" y="148" fill="#a0e0b0" font-size="11">不持有任何后端密钥</text>
+    <!-- Gateway 层 -->
+    <rect x="500" y="48" width="236" height="118" rx="8" fill="#8a6d2f"/>
+    <text x="516" y="72" fill="#fff" font-size="13" font-weight="bold">Gateway 层（Deployment 2+ 副本）</text>
+    <text x="516" y="94" fill="#fff0d0" font-size="11">尾部采样 / 脱敏 / 基数治理 / 路由</text>
+    <text x="516" y="112" fill="#fff0d0" font-size="11">sending_queue + file_storage 持久化</text>
+    <text x="516" y="130" fill="#fff0d0" font-size="11">后端密钥只在这一层</text>
+    <text x="516" y="148" fill="#ffe0a0" font-size="11">计费边界之前最后一道闸</text>
+    <!-- 后端 -->
+    <rect x="24" y="216" width="220" height="52" rx="8" fill="#3b4a5f"/>
+    <text x="40" y="238" fill="#fff" font-size="12" font-weight="bold">Prometheus / VictoriaMetrics</text>
+    <text x="40" y="256" fill="#aabbcc" font-size="11">指标后端（0028 体系承接）</text>
+    <rect x="270" y="216" width="220" height="52" rx="8" fill="#3b4a5f"/>
+    <text x="286" y="238" fill="#fff" font-size="12" font-weight="bold">Jaeger / Tempo / SkyWalking</text>
+    <text x="286" y="256" fill="#aabbcc" font-size="11">链路后端（0029 体系承接）</text>
+    <rect x="516" y="216" width="220" height="52" rx="8" fill="#3b4a5f"/>
+    <text x="532" y="238" fill="#fff" font-size="12" font-weight="bold">Loki / ES / 对象存储</text>
+    <text x="532" y="256" fill="#aabbcc" font-size="11">日志后端（0030 体系承接）</text>
+    <path d="M224 107 L252 107" stroke="#8fa3ba" stroke-width="2" marker-end="url(#arr)"/>
+    <path d="M472 107 L500 107" stroke="#8fa3ba" stroke-width="2" marker-end="url(#arr)"/>
+    <path d="M560 166 L140 216" stroke="#5b6b80" stroke-width="2" marker-end="url(#arr)"/>
+    <path d="M610 166 L380 216" stroke="#5b6b80" stroke-width="2" marker-end="url(#arr)"/>
+    <path d="M660 166 L620 216" stroke="#5b6b80" stroke-width="2" marker-end="url(#arr)"/>
+    <text x="24" y="298" fill="#8fa3ba" font-size="12">口诀：Agent 求贴（近应用·轻处理），Gateway 求稳（多副本·重处理·持密钥）——换后端只改导出器，应用零感知。</text>
+  </svg>
+  </div>
+
+  <h3>决策一：数据模型定好了，后端只是导出器配置</h3>
+  <p>两层拓扑的直接收益是<strong>后端可替换</strong>：Prometheus 换 VictoriaMetrics、SkyWalking 换 Tempo，只改 Gateway 的 exporters 段，40 个服务的埋点一行不动。但这个收益有个前提——<strong>你的数据模型必须先标准化</strong>：Resource 属性齐不齐、语义约定用得对不对、自定义属性有没有 <code>app.</code> 命名空间，决定了换后端是"改配置"还是"重建看板"。Skyscanner 的参考实现就是靠这一点：1000+ 微服务、24 个生产集群，用一个厂商中立的 DNS 入口收敛全部遥测，换后端时 Collector 拓扑不变——<strong>埋点、管道、后端三层解耦，才是竖井问题的完整解</strong>。</p>
+
+  <h3>决策二：采样不在 SDK 定死，在 Collector 分层实施</h3>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>采样策略</th><th>决策位置</th><th>错误链路保留</th><th>典型用量</th></tr></thead>
+    <tbody>
+      <tr><td><strong>头部采样</strong></td><td>SDK（请求入口即决定）</td><td>❌ 全按比例，错误也丢</td><td>默认兜底、流量极大时</td></tr>
+      <tr><td><strong>尾部采样</strong></td><td>Gateway（链路完整后决策）</td><td>✅ 错误/慢链路 100% 留</td><td>生产主力策略</td></tr>
+      <tr><td><strong>基数删除</strong></td><td>Gateway（metrics 专项）</td><td>—（作用于指标）</td><td>砍高基数标签（0028 病根）</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>要点：<strong>头部采样便宜但错误链路同比例丢，尾部采样要等链路完整（缓冲开销）但"错误全留、正常抽样"</strong>。量化账（社区实测口径）：两层 Collector 加尾部采样管线月成本约 1.2 万美元级别时，可把 13 亿 span/天裁到 1.56 亿、后端摄入账单从 7.3 万降到 1.27 万美元/月——<strong>错误与慢链路 100% 保留，省 82% 账单</strong>；而同样省钱的 10% 头部采样会丢掉 90% 的错误链路。另有社区基准：带过滤/采样/聚合处理器的 Collector 管道可削掉 40%~70% 遥测量再过计费边界。<strong>Collector 是计费边界之前你能自主掌握的最后一道闸</strong>——这是"管道"比"竖井"值钱的根本原因。</p>
+
+  <h3>决策三：语义约定是纪律，不是自动获得的</h3>
+  <p>自动埋点能覆盖 HTTP/DB/MQ 等标准框架（属性名自动符合语义约定），但业务属性（订单号、租户 ID）要团队自己命名——纪律是：<strong>标准字段直接用语义约定名，自定义字段统一 <code>app.</code> 前缀 + 命名评审</strong>。高基数字段（user_id、order_id）不进指标标签，只进 span 属性/日志字段——0028 讲过的"序列数=标签取值空间"在这里同样生效，只是执行位置从 Prometheus relabel 前移到了 Collector 的 transform 处理器（削在过计费边界之前，比削在后端更省钱）。三大参考实现（Adobe/Mastodon/Skyscanner，OTel 官方 End-User SIG 发布）的共同经验：<strong>先定资源属性与命名规范，再铺埋点——顺序反了就是重新制造一口大竖井</strong>。</p>
+</section>
+
+<!-- ================= 04 实战 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>实战：三段起步动作</h2>
+
+  <h3>第一段：Java 服务零代码接入（自动埋点）</h3>
+  <pre><code class="language-bash"># Spring Boot 服务挂 OTel Java agent：HTTP/DB/MQ 三信号自动埋点
+# 镜像里放 /otel/opentelemetry-javaagent.jar，启动命令加 -javaagent
+$ java -javaagent:/otel/opentelemetry-javaagent.jar \
+    -Dotel.service.name=payment-callback \
+    -Dotel.exporter.otlp.endpoint=http://otel-agent.observability:4317 \
+    -Dotel.resource.attributes="deployment.environment=prod,k8s.cluster.name=cn-east" \
+    -jar app.jar
+# 效果：入站 HTTP server span / 出站 http client / JDBC / Kafka 全自动打点
+# 日志的 MDC 自动带 trace_id/span_id（logback pattern 引用 %X{trace_id}）</code></pre>
+  <p>这一段的意义是<strong>把"埋点"从 40 个团队的排期里拿出来</strong>：Java agent 字节码注入（与 0029 SkyWalking 的接入姿势同构），零代码拿到三信号 + 日志关联 trace_id——01 节"日志里没有 trace_id"的病根当场消除。Resource 三件套（service.name / environment / cluster）从环境变量注入，全公司统一。</p>
+
+  <h3>第二段：Gateway 配尾部采样——错误全留、正常抽样</h3>
+  <pre><code class="language-yaml"># otel-collector-gateway.yaml（Gateway 层核心段落）
+processors:
+  tail_sampling:                # 尾部采样：等链路完整后决策
+    decision_wait: 10s          # 缓冲 10s 等慢 span 到齐（按 P99 链路时长调）
+    num_traces: 150000          # 缓冲容量（按峰值 TPS × decision_wait 估）
+    policies:
+      - name: errors            # ① 错误链路 100% 保留
+        type: status_code
+        status_code: {status_codes: [ERROR]}
+      - name: slow              # ② 慢链路（>2s）100% 保留
+        type: latency
+        latency: {threshold_ms: 2000}
+      - name: baseline          # ③ 正常链路抽 10%
+        type: probabilistic
+        probabilistic: {sampling_percentage: 10}
+  transform/metrics:            # 指标基数闸门（削在计费边界之前）
+    metric_statements:
+      - context: datapoint
+        statements:
+          - delete_key(attributes, "user_id")     # 无界标签就地删除
+          - delete_key(attributes, "order_id")
+exporters:
+  otlp/traces:  {endpoint: "tempo.observability:4317", tls: {insecure: false}}
+  prometheus:   {endpoint: "0.0.0.0:8889"}        # 指标走 Prom 原有体系
+  otlp/logs:    {endpoint: "loki.observability:4317"}</code></pre>
+  <p>三个策略合成一个采样决策：<strong>错误全留、慢全留、正常抽样</strong>——比"全局 10%"多花一点钱，换来的是故障时刻永远有现场。两个工程细节：①<code>decision_wait</code> 必须覆盖你的 P99 链路时长，否则慢 span 迟到被当成新链路；②tail_sampling 有自观测指标（<code>sampling_trace_dropped_too_early</code> 等），缓冲不足时它不报错、只丢链路——<strong>要给它配告警，别等故障时才发现采样器先跪了</strong>。</p>
+
+  <h3>第三段：存量体系兼容——竖井不是一天拆完的</h3>
+  <pre><code class="language-yaml"># 存量 Prometheus / SkyWalking 不推倒重来，Collector 做桥
+receivers:
+  prometheus:                    # 抓存量 Prom 指标目标（federation 兼容）
+    config:
+      scrape_configs:
+        - job_name: legacy-app
+          static_configs: [{targets: ["legacy-app:9090"]}]
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp, prometheus]   # OTLP 新数据 + 存量抓取同管道
+      exporters: [prometheus]         # 回写 Prom 体系，0028 看板不动
+    traces:
+      receivers: [otlp]
+      exporters: [otlp/traces]        # 新链路进 Tempo/SkyWalking 均可</code></pre>
+  <p>迁移策略是<strong>增量桥接而非推倒重来</strong>：存量指标继续被 Prometheus 抓，新服务走 OTLP 进同一条管道；SkyWalking 可继续作为链路后端消费 OTLP（它本身就是 OTel 生态成员）。节奏建议：新服务一律 OTel SDK 接入 → 存量服务随迭代换 agent → Gateway 就位后逐步把采样/脱敏/基数治理从各家配置收敛到 Collector——<strong>竖井是一口一口接进管道的，不是一夜炸掉的</strong>。</p>
+</section>
+
+<!-- ================= 05 今日要点 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>今日要点</h2>
+  <ul class="key-points">
+    <li><strong>OTel 是标准化层，不是第四个竖井：</strong>API/SDK/OTLP/语义约定四件套把"埋点"与"后端"解耦——指标/日志/链路三信号统一模型，Resource 共享身份、trace_id 贯穿三信号；它不替代 0028/0029/0030 的后端选型，而是让它们变成管道末端可替换的导出器。</li>
+    <li><strong>2026 坐标：毕业+Stable+近半采用：</strong>CNCF 第 15 个毕业项目（2026-05），三大信号 API/SDK/协议全 Stable（OTLP v1.11），Profiles 第四信号 alpha；CNCF 调查 49% 组织生产采用、26% 评估——分水岭已过，问题从"要不要"变成"怎么用好"。</li>
+    <li><strong>两层拓扑是生产标准形状：</strong>Agent 求贴（DaemonSet、轻处理、无密钥），Gateway 求稳（多副本、尾部采样/脱敏/基数治理、持密钥、持久化队列）；Adobe/Mastodon/Skyscanner 三大参考实现与官方蓝图共享这个骨架。</li>
+    <li><strong>Collector 是计费边界前的最后一道闸：</strong>社区实测口径——两层+尾部采样管线月成本约 1.2 万美元，可把摄入账单从 7.3 万降到 1.27 万（省 82%），且错误/慢链路 100% 保留；等额省钱的全局头部采样会丢 90% 错误链路。</li>
+    <li><strong>语义约定是纪律：</strong>标准字段用语义约定名、自定义字段 <code>app.</code> 前缀过评审、高基数只进 span/日志不进指标标签——先定数据模型再铺埋点，顺序反了就是新竖井。</li>
+  </ul>
+</section>
+
+<!-- ================= 06 思考题 ================= -->
+<section>
+  <h2><span class="sec-num">06</span>架构师思考题</h2>
+
+  <details class="q-card">
+    <summary>题目：40 个服务、三套竖井、APM 合同明年到期——你怎么设计迁移路线与目标架构？</summary>
+    <div class="details-body">
+      <p>背景：就是 01 节那家公司。现状：Prometheus（指标）+ SkyWalking（链路）+ ELK（日志）三套体系，40 个服务用 SkyWalking agent 埋点，另有两个团队直接用了厂商 A 的私有 SDK；APM 厂商 A 按主机计费的合同明年 Q2 到期，续约报价涨 40%，CTO 要求"明年合同谈之前把议价权拿回来"。三问：<strong>① 目标架构长什么样，SkyWalking/ELK/Prometheus 这三套存量怎么处置？② 迁移分几步走，每步的验收标准是什么，怎么做到 40 个团队不被一次性打断？③ 厂商 A 的私有 SDK 埋点（两个团队）怎么办，怎么避免"为换厂商再重埋一遍"重演？</strong></p>
+      <h4>🔍 深度解析</h4>
+      <p><strong>① 目标架构：OTel 全链路 + 存量后端先承接、后替换。</strong>目标形状=02/03 节的两层拓扑：40 个服务的埋点统一换 OTel SDK/agent（Java 服务 javaagent 零代码，Go 服务 SDK+自动埋点包），Agent DaemonSet 收 OTLP，Gateway 做 tail sampling + 脱敏 + 基数治理。关键判断：<strong>先不要动三个后端</strong>——Prometheus 继续当指标后端（Gateway 用 prometheus exporter 回写，0028 的看板/告警零改动）；ELK/Loki 继续当日志后端（OTLP 转发）；SkyWalking 可以继续消费链路（它支持 OTLP 摄入）或并行接 Tempo。<strong>谈判筹码来自埋点中立化，不来自立刻换后端</strong>：等全部埋点走 OTLP 后，"换后端=改 Gateway 导出器"才真正成立，那时再让厂商 A、厂商 B、开源自建三方报价。把"拆竖井"与"换后端"拆成两个独立决策，是这道题的第一层判断。</p>
+      <p><strong>② 四步迁移，每步独立可验收、可回退。</strong>第一步（第 1~2 月）：平台侧就位——Gateway/Agent 部署、Resource 与命名规范发布（语义约定 + <code>app.</code> 前缀 + 高基数纪律）、监控 OTel 管道自身；验收=试点 3 个非核心服务三信号全通、trace_id 出现在日志、看板能从指标下钻到链路再下钻到日志（01 节的 31 分钟摩擦消失）。第二步（第 2~4 月）：新服务一律 OTel 接入+存量服务随迭代换 agent（Java 换 javaagent 是重启级变更，随发版走，不打断团队）；验收=OTLP 覆盖率 50%、双跑期间 SkyWalking 数据不断（对比期对账）。第三步（第 4~6 月）：采样与治理收敛到 Gateway——tail sampling 上线（错误全留+慢全留+正常 10%）、基数闸门上线；验收=摄入量降 40%+（对照社区 40%~70% 区间的下沿）、错误链路保留率 100%（对账口径写进验收单）。第四步（Q2 合同谈判前）：全量切换+后端比价——用"改导出器即可切换"做 PoC 给采购看；验收=40 服务覆盖率 100%、PoC 演示换后端 30 分钟完成。<strong>每步都是增量、可回退（旧管道保留到下一步验收通过），40 个团队感受到的是"发版时顺手换个 agent"，不是一次性大迁移</strong>。</p>
+      <p><strong>③ 私有 SDK 的解法：埋点层中立化一次，以后不再重埋。</strong>两个团队的厂商 A 私有 SDK 是当年"快速上 APM"的债。处理顺序：先梳理这两个服务的埋点语义（span 粒度、业务属性名）——私有 SDK 里的埋点定义是团队资产，换 SDK 时语义平移而不是重设计；再用 OTel SDK 重写（这两个服务量小，重写成本可控），业务属性按新命名规范落 <code>app.</code> 前缀。根本解法是<strong>制度</strong>：新项目立项检查表加一条"观测埋点必须走 OTel API，禁止引入厂商私有 SDK"——CI 里可以加依赖扫描（出现厂商 SDK artifact 直接挂门禁）。这道题的深层考点：<strong>"为换厂商重埋一遍"不是厂商的错，是把埋点层让渡给厂商的架构决策的代价；OTel 的价值不是省一次迁移，是让这类决策以后只值"改一段导出器配置"的钱</strong>。合同谈判时你手里真正的牌，是"我们已经不依赖你了"的可验证事实——PoC 演示比谈判技巧值钱。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 07 参考 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>参考与延伸</h2>
+  <div class="note">
+    <p><strong>本期 primary source：</strong><a href="https://opentelemetry.io/docs/" target="_blank" rel="noopener">OpenTelemetry 官方文档</a>——信号模型、OTLP 协议、语义约定、Collector 架构与 K8s 部署蓝图的一手出处。</p>
+    <p>延伸：OTel 官方 End-User SIG 三大参考实现（Adobe 三层管道 / Mastodon 小团队拓扑 / Skyscanner 24 集群 DNS 收敛）、Collector 蓝图《Managed Telemetry Platforms for Kubernetes Workloads》、CNCF 2026 年度调查（OTel 49% 生产采用）、<a href="0028-prometheus-grafana.html">0028 Prometheus 监控体系</a>（指标后端承接）、<a href="0029-skywalking-tracing.html">0029 SkyWalking 链路追踪</a>（trace 模型与采样分层）、<a href="0030-elk-loki-logging.html">0030 ELK/Loki 日志体系</a>（日志后端承接）。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="0068-confidential-computing-tee.html">← 上一期：机密计算与 TEE</a>
+  <a href="../index.html">课程目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>每日架构师微课程 · 第 69 期 · 云原生前沿系列 · 下期继续云原生前沿线</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+</body>
+</html>

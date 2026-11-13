@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>技术概念手记 · 大模型的参数与缓存：一次调用的全链路</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="lesson-head">
+  <span class="num">TECH CONCEPT NOTES · 0006</span>
+  <span><a href="../index.html">栏目目录</a></span>
+</header>
+
+<div class="hero">
+  <p class="issue">AI · 大模型</p>
+  <h1>大模型的参数与缓存：一次调用的全链路</h1>
+  <p class="subtitle">模型卡上写着 7B，下载下来却是 15GB；标着 4bit 的量化版，显存却没省到四分之一；同一段系统提示词反复发，账单却能差五十倍。这篇把<strong>参数怎么来、怎么压、怎么进显存、怎么被一次调用流过去、又怎么靠缓存把账压下来</strong>串成一条线——从训练机房一路走到你的 API 账单。</p>
+  <div class="lesson-meta">
+    <span class="tag cat">🧠 AI / 大模型</span>
+    <span class="tag-date">📅 2026-11-12 · 第 6 期</span>
+    <span class="tag time">⏱ 预计阅读 13 分钟</span>
+  </div>
+</div>
+
+<!-- ================= 01 场景 ================= -->
+<section>
+  <h2><span class="sec-num">01</span>场景：四个卡住的地方</h2>
+  <p>用大模型的人，几乎都在这四句话上卡过：</p>
+  <p><strong>一：数字对不上。</strong>下载 Qwen2.5-7B，模型卡写 7B 参数，下完占盘约 15GB——差一倍，是不是下多了？</p>
+  <p><strong>二：不敢说真话。</strong>跟 AI 助手聊了一下午工作上的事，突然想到：这些对话会被"学"进模型吗？</p>
+  <p><strong>三：量化没省到位。</strong>换了个标着 4bit 的量化版，指望显存降到四分之一，结果一跑还是显存不足。</p>
+  <p><strong>四：账单看不懂。</strong>同一段系统提示词天天发，有一天换了个写法，费用突然涨了几十倍；而且不管怎么算，<strong>输出永远比输入贵</strong>。</p>
+  <p>这四个困惑其实分属一条链路上的四个站点：<strong>训练、部署、推理、访问</strong>。把它们连起来看，四个问题会一起变得可算。</p>
+</section>
+
+<!-- ================= 02 全链路 ================= -->
+<section>
+  <h2><span class="sec-num">02</span>全链路：一条请求穿过四个站点</h2>
+  <div class="flow-strip">
+    <div class="flow-step"><span class="no">1</span>
+      <p class="what">训练</p>
+      <p class="how">数据 → 梯度 → 调参数</p>
+      <p class="why">参数诞生的地方</p></div>
+    <div class="flow-step"><span class="no">2</span>
+      <p class="what">部署</p>
+      <p class="how">量化 → 权重进显存</p>
+      <p class="why">参数变成能服务的形态</p></div>
+    <div class="flow-step"><span class="no">3</span>
+      <p class="what">推理</p>
+      <p class="how">Prefill → Decode</p>
+      <p class="why">参数被逐层读取，产生激活值</p></div>
+    <div class="flow-step"><span class="no">4</span>
+      <p class="what">访问</p>
+      <p class="how">API 计量 → 计费</p>
+      <p class="why">谁便宜、谁贵，在这里结算</p></div>
+  </div>
+  <p>这条线上有两类东西要一直分清：</p>
+  <ul class="key-points">
+    <li><strong>参数（parameter）</strong>：训练学出来的浮点数，训练完就冻结。它决定"模型有多大、显存要多少、下载多大"。</li>
+    <li><strong>激活值（activation）与缓存（cache）</strong>：请求经过时产生的中间结果。它随请求生、随请求灭，决定"这一次跑得多快、花多少钱"。</li>
+  </ul>
+  <p>一句话概括全片：<strong>参数是电路，请求是电流——电流流过去，不会留下来</strong>；而整条链路上所有省钱的手段，都是在"如何少读一遍参数、少算一遍激活值"上做文章。</p>
+</section>
+
+<!-- ================= 03 训练 ================= -->
+<section>
+  <h2><span class="sec-num">03</span>训练：参数是怎么来的，B 又是什么</h2>
+  <p><strong>一个参数就是一个浮点数。</strong>训练开始时它们是一堆随机数；训练做的事，是拿海量文本反复走三步：</p>
+  <div class="flow-strip">
+    <div class="flow-step"><span class="no">1</span>
+      <p class="what">前向</p>
+      <p class="how">读一遍参数算预测</p>
+      <p class="why">一个字接一个字往下猜</p></div>
+    <div class="flow-step"><span class="no">2</span>
+      <p class="what">算损失</p>
+      <p class="how">预测与真实差多少</p>
+      <p class="why">差得越多，要改的劲越大</p></div>
+    <div class="flow-step"><span class="no">3</span>
+      <p class="what">反向 + 更新</p>
+      <p class="how">梯度指出该往哪调</p>
+      <p class="why">这才是"写进参数"的唯一时刻</p></div>
+  </div>
+  <p><strong>B 是 billion（十亿）的缩写</strong>：7B 就是约 70 亿个这样的数字。训练结束，这批数字冻结、打包成权重文件发布——之后同一个模型服务一万个人，参数永远只有一份，谁调 API 都改不动它。</p>
+  <p>70 亿个数字并不均匀。以 Qwen2.5-7B 的官方配置实算（隐藏维度 3584、28 层、词表 152064、前馈维度 18944）：</p>
+  <div class="diagram">
+  <svg viewBox="0 0 760 286" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar6a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <text x="380" y="20" text-anchor="middle" fill="var(--muted)" font-size="13">Qwen2.5-7B 实算：7.62B 参数都花在哪</text>
+
+    <rect x="40" y="42" width="100" height="52" rx="9" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="90" y="63" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">词嵌入表</text>
+    <text x="90" y="81" text-anchor="middle" fill="var(--muted)" font-size="10">0.54B</text>
+
+    <rect x="170" y="42" width="430" height="52" rx="9" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.4"/>
+    <text x="385" y="63" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">28 个 Transformer 层 × 每层约 2.33 亿</text>
+    <text x="385" y="81" text-anchor="middle" fill="var(--muted)" font-size="10">合计 6.52B —— 占全模型 86%</text>
+
+    <rect x="620" y="42" width="100" height="52" rx="9" fill="var(--code-bg)" stroke="var(--line)"/>
+    <text x="670" y="63" text-anchor="middle" fill="var(--ink)" font-size="11.5" font-weight="700">输出头</text>
+    <text x="670" y="81" text-anchor="middle" fill="var(--muted)" font-size="10">0.54B</text>
+
+    <line x1="385" y1="94" x2="385" y2="126" stroke="var(--muted)" stroke-width="1.4" marker-end="url(#ar6a)"/>
+    <rect x="170" y="132" width="56" height="52" rx="9" fill="var(--card)" stroke="var(--line)"/>
+    <text x="198" y="153" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">注意力</text>
+    <text x="198" y="170" text-anchor="middle" fill="var(--muted)" font-size="9.5">13%/层</text>
+    <rect x="236" y="132" width="364" height="52" rx="9" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.4"/>
+    <text x="418" y="153" text-anchor="middle" fill="var(--ink)" font-size="10.5" font-weight="700">前馈层 FFN：约 2.04 亿/层，占每层 87%</text>
+    <text x="418" y="170" text-anchor="middle" fill="var(--muted)" font-size="9.5">3 × 3584 × 18944 —— 事实性知识主要存在这里</text>
+
+    <text x="380" y="212" text-anchor="middle" fill="var(--muted)" font-size="10.5">嵌入 0.54B = 词表 152064 × 维度 3584；输出头（预测下一个词用）同尺寸一份</text>
+    <text x="380" y="234" text-anchor="middle" fill="var(--muted)" font-size="10.5">"7B"是命名档位，实际 7.62B —— 准确数字看模型卡</text>
+    <text x="380" y="264" text-anchor="middle" fill="var(--accent)" font-size="10.5">参数量描述"模型有多少可调数字"，不是文件多大、也不是多聪明</text>
+  </svg>
+  </div>
+  <p>训练那本账大得反直觉。混合精度 Adam 训练时，除了权重本身，还要养梯度和优化器状态：ZeRO 论文（arXiv:1910.02054）的原文分解是 <code>2Ψ+2Ψ+KΨ=16Ψ</code> 字节——<strong>每个参数 16 字节</strong>，是推理权重的 8 倍。所以 7B 训练要 7.6B × 16 ≈ <strong>122GB</strong>，单张 80GB 的 A100 都放不下。</p>
+  <div class="rule"><span class="mark">⚠</span><div class="txt">
+    <strong>只有训练会写参数，推理一个数字都不改</strong>
+    <p class="why">"聊天被学进模型"只在训练时发生。你调 API 的那些话，走的是推理路径——参数冻结、只被读取。至于厂商会不会把你的数据收进下一轮训练语料，那是另一个离线过程，看你用的服务条款</p>
+  </div></div>
+  <p>顺带记一个数字：训练每一步的计算量约是 6 × 参数量（前向 2N、反向 4N，缩放定律论文的口径），也就是 7B 模型每训练一个 token 约 450 亿次浮点运算——比推理贵三倍。</p>
+</section>
+
+<!-- ================= 04 部署：量化 ================= -->
+<section>
+  <h2><span class="sec-num">04</span>部署第一刀：量化，把每个数字压窄</h2>
+  <p><strong>参数量决定"有多少个数字"，量化决定"每个数字占多宽"。</strong>模型通常以 bf16（16 位浮点）发布，每参数 2 字节；量化把它压到更窄的格式：</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>精度</th><th>每参数字节</th><th>8B 模型权重</th><th>7.6B 实算</th></tr></thead>
+      <tbody>
+        <tr><td>bf16 / fp16（发布常态）</td><td>2 字节</td><td>约 16GB</td><td>15.2GB</td></tr>
+        <tr><td>FP8 / INT8</td><td>1 字节</td><td>约 8GB</td><td>7.6GB</td></tr>
+        <tr><td>INT4（GPTQ / AWQ 等）</td><td>0.5 字节</td><td>约 4~5GB</td><td>3.8GB 起</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>这张表的尺度来自 Hugging Face 官方文档的原话：8B 模型 bf16 约 16GB、8 位约 8GB、4 位约 4~5GB，并明确"位越少，精度损失越大，每种方法在显存、速度、精度之间权衡不同"。主流路线是 <strong>weight-only 量化</strong>——只压权重，计算时再反量化，所以省的是显存，不是算力。</p>
+  <div class="rule"><span class="mark">⚠</span><div class="txt">
+    <strong>标着 4bit，显存不一定省到四分之一</strong>
+    <p class="why">HF 文档明确写了：大多数 GGUF 模型<strong>加载时会被反量化回全精度</strong>，占的显存和未量化模型一样多。所以看量化版别只看标称位宽，要看你用的运行时是不是真的保住了压缩格式（如 llama.cpp 的 GGUF、vLLM 的 AWQ/GPTQ 内核）</p>
+  </div></div>
+  <p>压窄之后，权重能塞进什么卡也变得可算：</p>
+  <ul class="key-points">
+    <li><strong>7B INT4（3.8GB）+ KV 缓存</strong>：一张 8GB 消费级卡就能跑起来，24GB 卡能撑较高并发。</li>
+    <li><strong>70B INT4（约 35GB）</strong>：单张 40GB 卡勉强，通常要两张卡做张量并行（把计算拆到多卡上）。</li>
+    <li><strong>70B bf16（约 140GB）</strong>：单卡装不下，必须多卡切分，或者干脆放弃全精度推理。</li>
+  </ul>
+  <p>注意，量化省的是<strong>显存</strong>，速度不一定变快。Hugging Face 文档的原话是：weight-only 方法<strong>省内存但不一定更快</strong>，因为反量化给每次矩阵乘都加了活；它只在<strong>显存受限</strong>的场景（也就是一次只生成一个词元的解码阶段）才划算——那时读 4 位权重只搬 bf16 四分之一的字节，省下的搬运时间盖过了反量化的开销。</p>
+
+  <h3>代价：输出质量到底掉多少</h3>
+  <p>量化不是免费的，而且根源是结构性的。Hugging Face 文档举的数字最直观：<strong>int8 只能表示 256 个整数，int4 只有 16 个</strong>——一个权重要塞进这 16 个格子里，舍入误差不可避免，任何量化方法都只是"怎么让这个误差别伤到输出"。</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>位宽</th><th>可表示值</th><th>实际影响</th></tr></thead>
+      <tbody>
+        <tr><td>8 位</td><td>256 个整数</td><td>几乎无损，实践中当全精度用</td></tr>
+        <tr><td>4 位 + 校准 + 分组</td><td>16 个整数</td><td>可做到"精度退化可忽略"——GPTQ 论文对 175B 压到 3~4 位的原话</td></tr>
+        <tr><td>4 位裸压（无校准）</td><td>16 个整数</td><td>明显退化；GPTQ 默认按 128 个权重一组，就是为了缩小误差</td></tr>
+        <tr><td>2 位及以下</td><td>4 个整数，不够用</td><td>开始崩；要靠码本向量量化或量化感知训练（QAT）才勉强可用</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>为什么 4 位还能"几乎无损"？因为<strong>权重不是同等重要</strong>。AWQ 论文的结论是："not all weights in an LLM are equally important"，而<strong>只保护约 1% 的显著权重，就能大幅降低量化误差</strong>——这些显著权重由激活值大小识别出来，缩放后再舍入。所以量化方法的核心竞争点，就是"怎么把那 1% 找出来、怎么分组"。</p>
+  <div class="rule"><span class="mark">⚠</span><div class="txt">
+    <strong>损伤不均匀，越难的活掉得越多</strong>
+    <p class="why">日常闲聊、摘要、改写这类任务，4 位量化的差别往往感知不到；但长链推理、数学、代码生成这类"错一步就全错"的任务，对舍入误差更敏感。<strong>判断标准只能是自己的评测集</strong>：同一批题目，全精度和量化版各跑一遍，比跑分差多少，别只看别人的结论</p>
+  </div></div>
+  <p>工程上的三条判断规则：</p>
+  <ul class="key-points">
+    <li><strong>显存够，首选 8 位</strong>：几乎无损，最省心。</li>
+    <li><strong>要压到 4 位，选带校准的方案</strong>：GPTQ（每 128 权重一组、逐列补偿误差）、AWQ（按激活值保护 1% 显著权重）；裸压的 4 位是最差选择。</li>
+    <li><strong>上线前必做对比评测</strong>：用你们的真实任务集跑分，而不是看通用榜单——量化对任务类型高度敏感。</li>
+  </ul>
+</section>
+
+<!-- ================= 05 推理两阶段 ================= -->
+<section>
+  <h2><span class="sec-num">05</span>推理的两个阶段：Prefill 与 Decode</h2>
+  <p>这是理解后面所有优化（KV 缓存、前缀命中、批处理、计费差异）的<strong>物理基础</strong>。一次生成被切成两段：</p>
+  <div class="vs">
+    <div class="col">
+      <h4>Prefill（预填充）</h4>
+      <p>处理你发的那整段话</p>
+      <ul>
+        <li><strong>并行</strong>：整段 prompt 一次喂进去算</li>
+        <li><strong>计算密集</strong>：矩阵大、算力吃满</li>
+        <li>决定 <strong>TTFT</strong>（首字延迟）</li>
+        <li>长 prompt 越贵，但可以缓存复用</li>
+      </ul>
+    </div>
+    <div class="col pick">
+      <h4>Decode（解码）</h4>
+      <p>一个词一个词往外蹦</p>
+      <ul>
+        <li><strong>串行</strong>：每步只算一个新 token</li>
+        <li><strong>访存密集</strong>：每步都要把权重读一遍</li>
+        <li>决定 <strong>TPOT</strong>（每词时间）</li>
+        <li>输出无法缓存，永远按原价</li>
+      </ul>
+    </div>
+  </div>
+  <p>Databricks 的性能工程文章把这层差异讲得最直白：<strong>"Generating the first token is typically compute-bound, while subsequent decoding is memory-bound operation."</strong>（生成第一个 token 通常是计算受限，后续解码是访存受限。）它还给了一个更能解释真相的结论：预测出词速度时，<strong>显存带宽比峰值算力更准</strong>——因为 decode 每出一个词，都要把全部权重从显存搬到计算单元附近，算力大量闲置。</p>
+  <p>整体延迟因此可以直接写成公式：</p>
+  <div class="codeblock term">
+    <div class="code-head"><div class="dots"><i></i><i></i><i></i></div><span>延迟 = 首字 + 每词 × 词数</span><button class="copy">复制命令</button></div>
+    <pre><code><span class="t-cmt"># Databricks 原文：latency = TTFT + TPOT × 生成 token 数</span>
+<span class="t-cmt"># 一段 500 词的输出、TPOT 20ms → 光生成就要 10 秒</span>
+<span class="t-cmt"># 所以"回答长"不只是字数多，是线性叠加的时间</span></code></pre>
+  </div>
+  <p>想让多个请求不排队，就得上<strong>批处理</strong>：把多个请求拼成一批一起算，吞吐能上去，但每个请求的单体延迟会变长——这就是"高峰期慢一点"的根本原因。Databricks 提到连续批处理（continuous batching）比传统动态批处理吞吐高 <strong>10~20 倍</strong>，这也是 vLLM 这类引擎的立身之本。</p>
+</section>
+
+<!-- ================= 06 KV 缓存与 PagedAttention ================= -->
+<section>
+  <h2><span class="sec-num">06</span>KV 缓存：让 decode 不重算前文</h2>
+  <p>Decode 是逐词的，算到第 1001 个词时，前面 1000 个词的注意力结果本来要全部重算——<strong>KV 缓存</strong>（键值缓存）把这些算好的 K、V 向量存起来复用，每步只算新词。Hugging Face 文档的对比很干净：不用缓存，每步注意力成本随序列长度<strong>二次方</strong>增长；用缓存，降到<strong>线性</strong>。省的是计算，付的是显存。</p>
+  <div class="rule"><span class="mark">⚠</span><div class="txt">
+    <strong>KV 缓存是推理专属，训练时必须关</strong>
+    <p class="why">HF 官方原文："Caching should only be used for inference. It may cause unexpected errors if it's enabled during training."（缓存只该用于推理，训练时开启会出错误）——训练每一步梯度都在变，缓存旧值等于用过期数据</p>
+  </div></div>
+  <p>显存怎么算也跟着清楚了：Qwen2.5-7B 用分组查询注意力（4 个 KV 头），每 token 每层存 2 × 4 × 128 个数，28 层合计约 <strong>56KB/token</strong>，随上下文线性涨、还要乘并发数。128k 上下文就是 7GB 出头。</p>
+  <p>但缓存本身也要管理，不然会浪费。vLLM 的 <strong>PagedAttention</strong> 借的是操作系统虚拟内存的思路：把 KV 缓存切成固定大小的<strong>块</strong>（默认 <strong>16 个 token</strong> 一块），逻辑块按需映射到不连续的物理块，用一张块表记录映射：</p>
+  <div class="diagram">
+  <svg viewBox="0 0 760 250" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="ar6b" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="var(--muted)"/>
+      </marker>
+    </defs>
+    <text x="380" y="20" text-anchor="middle" fill="var(--muted)" font-size="13">PagedAttention：逻辑块按需映射到物理块，不再预分配整段</text>
+
+    <text x="40" y="52" fill="var(--ink)" font-size="11" font-weight="700">请求 A 的逻辑块</text>
+    <rect x="40" y="62" width="70" height="34" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="75" y="84" text-anchor="middle" fill="var(--ink)" font-size="10">块 0</text>
+    <rect x="120" y="62" width="70" height="34" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="155" y="84" text-anchor="middle" fill="var(--ink)" font-size="10">块 1</text>
+    <rect x="200" y="62" width="70" height="34" rx="6" fill="var(--card)" stroke="var(--line)" stroke-dasharray="4 3"/>
+    <text x="235" y="84" text-anchor="middle" fill="var(--muted)" font-size="10">块2待填</text>
+
+    <text x="40" y="128" fill="var(--ink)" font-size="11" font-weight="700">请求 B 的逻辑块</text>
+    <rect x="40" y="138" width="70" height="34" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="75" y="160" text-anchor="middle" fill="var(--ink)" font-size="10">块 0</text>
+    <rect x="120" y="138" width="70" height="34" rx="6" fill="var(--card)" stroke="var(--line)" stroke-dasharray="4 3"/>
+    <text x="155" y="160" text-anchor="middle" fill="var(--muted)" font-size="10">块1待填</text>
+
+    <text x="345" y="52" fill="var(--ink)" font-size="11" font-weight="700">GPU 物理块池</text>
+    <rect x="345" y="62" width="70" height="34" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="380" y="84" text-anchor="middle" fill="var(--ink)" font-size="10">物理 7</text>
+    <rect x="425" y="62" width="70" height="34" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="460" y="84" text-anchor="middle" fill="var(--ink)" font-size="10">物理 2</text>
+    <rect x="505" y="62" width="70" height="34" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="540" y="84" text-anchor="middle" fill="var(--ink)" font-size="10">物理 5</text>
+    <rect x="585" y="62" width="70" height="34" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="620" y="84" text-anchor="middle" fill="var(--muted)" font-size="10">空闲</text>
+    <rect x="345" y="104" width="70" height="34" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="380" y="126" text-anchor="middle" fill="var(--muted)" font-size="10">空闲</text>
+    <rect x="425" y="104" width="70" height="34" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="460" y="126" text-anchor="middle" fill="var(--muted)" font-size="10">空闲</text>
+    <rect x="505" y="104" width="70" height="34" rx="6" fill="var(--card)" stroke="var(--line)"/>
+    <text x="540" y="126" text-anchor="middle" fill="var(--muted)" font-size="10">空闲</text>
+
+    <line x1="245" y1="79" x2="340" y2="79" stroke="var(--accent)" stroke-width="1.4" marker-end="url(#ar6b)"/>
+    <line x1="170" y1="172" x2="440" y2="140" stroke="var(--accent)" stroke-width="1.4" marker-end="url(#ar6b)"/>
+    <text x="300" y="190" fill="var(--accent)" font-size="10">两个请求的块 0 指向同一物理块 = 前缀共享</text>
+
+    <text x="380" y="218" text-anchor="middle" fill="var(--ink)" font-size="11">块表只记"逻辑块 → 物理块"，用多少分配多少 —— 不再为最长序列预分配</text>
+    <text x="380" y="238" text-anchor="middle" fill="var(--muted)" font-size="10">论文实测：旧系统 KV 显存只有 20.4%~38.2% 真正装着 token 状态；vLLM 吞吐 2~4 倍</text>
+  </svg>
+  </div>
+  <p>论文里的浪费数字很扎眼：旧系统<strong>只有 20.4%~38.2% 的 KV 显存</strong>真的存着 token 状态，其余是预分配和碎片造成的空转。PagedAttention 通过"逻辑/物理块分离 + 引用计数 + 写时复制"，既消除碎片，又让多个请求<strong>共享同一份前缀块</strong>——吞吐因此提升 2~4 倍。</p>
+  <p>这条"共享前缀块"的能力，就是下一个站点的技术底座。</p>
+</section>
+
+<!-- ================= 07 前缀缓存命中 ================= -->
+<section>
+  <h2><span class="sec-num">07</span>缓存命中：前缀一样，就别再算一遍</h2>
+  <p>既然 KV 缓存能存下来、还能跨请求共享，那么自然可以更进一步：<strong>把这个请求的前缀算好的 KV 块留着，下一个请求前缀一样，直接拿来用</strong>。这就是<strong>前缀缓存</strong>（prefix caching），各家 API 叫法不同——上下文缓存（context caching）、提示词缓存（prompt caching），机制是同一个。</p>
+  <p>判断"前缀是否一样"靠哈希。vLLM 的设计文档写得很具体：每个块的哈希 = <strong>父块哈希 + 本块 token + 额外信息</strong>（如 LoRA 适配器编号），默认 sha256；只有<strong>填满的块</strong>才会被缓存（"We only cache full blocks."）。命中后跳过的是<strong>重复的 prefill 计算</strong>——官方把它叫"almost a free lunch"（近乎白吃的午餐）。</p>
+  <p>服务商那一层，规则更硬。三家的一手原文：</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th></th><th>OpenAI</th><th>Anthropic</th><th>DeepSeek</th></tr></thead>
+      <tbody>
+        <tr><td>命中条件</td><td>整个渲染后的前缀必须完全一致；GPT-5.6+ 门槛 <strong>1024</strong> 个可见输入 token</td><td>前缀 100% 相同（含图片），按 tools → system → messages 顺序叠加</td><td>完全匹配一个已持久化的缓存前缀单元，识别多请求的公共前缀</td></tr>
+        <tr><td>读缓存价格</td><td>0.1 × 未缓存输入价（GPT-5.6+），部分模型 0.05×</td><td>0.1 × 基础输入价（部分型号低至 0.025×）</td><td>输入命中价与未命中价差 <strong>30~50 倍</strong></td></tr>
+        <tr><td>写缓存价格</td><td>1.25×（30 分钟）/ 2.5×（12 小时）</td><td>1.25×（5 分钟 TTL）/ 2×（1 小时 TTL）</td><td>文档未单列写入费</td></tr>
+        <tr><td>最小可缓存量</td><td>1024 token（GPT-5.6+）</td><td>512 / 1024 / 2048 / 4096，按模型而定</td><td>未公布；文档称 best-effort</td></tr>
+        <tr><td>保留时间</td><td>30 分钟（默认）或 12 小时</td><td>5 分钟（默认，每次读免费续期）或 1 小时</td><td>几小时到几天，不用即清除</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p><strong>怎么才能命中？</strong>三家文档给出的规则惊人一致，而且都是可执行的确定性动作：</p>
+  <ul class="key-points">
+    <li><strong>稳定内容放最前面</strong>：系统提示词、工具定义、参考资料、few-shot 示例放开头；用户这次的具体问题放最后。</li>
+    <li><strong>追加而不是重写历史</strong>：多轮对话里只往后加新消息，别回头改前面的措辞——一改，后面全部失效。</li>
+    <li><strong>工具定义保持稳定</strong>：函数签名挪一下顺序、改一句描述，前缀就变了。</li>
+    <li><strong>越靠前的层级越要稳</strong>：Anthropic 的顺序是 tools → system → messages，靠前的变了，后面全都跟着失效。</li>
+  </ul>
+  <div class="rule"><span class="mark">⚠</span><div class="txt">
+    <strong>缓存不是保证，是尽力而为</strong>
+    <p class="why">DeepSeek 文档明说缓存是 best-effort，不保证命中；Anthropic 的回溯窗口是 20 个块，超出就找不到；OpenAI 按老模型会把命中数向下取整到 128 token 的倍数。所以<strong>别把命中当成必然</strong>——它是优化项，不是正确性依赖</p>
+  </div></div>
+</section>
+
+<!-- ================= 08 访问：账单 ================= -->
+<section>
+  <h2><span class="sec-num">08</span>访问：为什么输出永远比输入贵</h2>
+  <p>回到最开始第四个困惑。看 DeepSeek 的公开价目（每百万 token，低谷期）：</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>模型</th><th>输入·缓存命中</th><th>输入·未命中</th><th>输出</th></tr></thead>
+      <tbody>
+        <tr><td>deepseek-flash</td><td>$0.003</td><td>$0.15</td><td>$0.60</td></tr>
+        <tr><td>deepseek-v4-pro</td><td>$0.022</td><td>$0.66</td><td>$1.98</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>两个倍数值得记住：</p>
+  <p><strong>输入命中 vs 未命中：约 30~50 倍。</strong>同一段系统提示词，命中时几乎白送，未命中按原价——这就是"换了个写法，账单涨几十倍"的全部原因。</p>
+  <p><strong>输出 vs 输入未命中：约 3~4 倍。</strong>这个差距不是厂商随意定的，它<strong>精确对应第五节的两个阶段</strong>：</p>
+  <div class="vs">
+    <div class="col">
+      <h4>输入 token 便宜</h4>
+      <ul>
+        <li>Prefill <strong>并行</strong>处理，算力吃满</li>
+        <li>KV 能缓存、能跨请求共享</li>
+        <li>所以能打折，甚至打到 0.1×</li>
+      </ul>
+    </div>
+    <div class="col">
+      <h4>输出 token 贵</h4>
+      <ul>
+        <li>Decode <strong>逐个</strong>生成，串行</li>
+        <li>每步都要把权重读一遍，访存受限</li>
+        <li><strong>无法缓存、无法并行</strong> —— 只能原价</li>
+      </ul>
+    </div>
+  </div>
+  <p>所以那句"输出比输入贵"不是定价策略，是<strong>物理定律的价格化</strong>。你想省钱，方向就很明确：</p>
+  <ul class="key-points">
+    <li><strong>把固定内容做成可命中的前缀</strong>，让输入 token 走 0.1× 通道。</li>
+    <li><strong>让输出短</strong>：限制 <code>max_tokens</code>、要求简洁回答、用小模型做摘要——输出是唯一不能打折的部分。</li>
+    <li><strong>别在对话中回头改前面</strong>：一改前缀，缓存全废，账单回到原价。</li>
+    <li><strong>先分场景定指标</strong>：交互式砍首字延迟（缩 prompt / 靠命中），批处理提吞吐（上批处理）。</li>
+  </ul>
+</section>
+
+<!-- ================= 09 规则与坑 ================= -->
+<section>
+  <h2><span class="sec-num">09</span>规则与坑</h2>
+  <div class="rule"><span class="mark">⚠</span><div class="txt">
+    <strong>B 是个数，不是字节</strong>
+    <p class="why">7B = 70 亿个参数；文件大小 = 参数个数 × 每参数字节数。bf16 约 15GB，INT4 约 4GB——压的从来不是参数个数，是每个数的存储宽度</p>
+  </div></div>
+  <div class="rule"><span class="mark">⚠</span><div class="txt">
+    <strong>量化省显存，不一定省时间</strong>
+    <p class="why">weight-only 量化在计算时要反量化，decode 阶段位宽变窄能搬得更快，但反量化有开销——要看实测的每词时间，别只看标称位宽</p>
+  </div></div>
+  <div class="rule"><span class="mark">⚠</span><div class="txt">
+    <strong>GGUF 的 4bit 可能白压</strong>
+    <p class="why">HF 文档明确：多数 GGUF 加载时会反量化回全精度，显存占用和未量化一样。用 llama.cpp 这类原生支持压缩格式的运行时才真省</p>
+  </div></div>
+  <div class="rule"><span class="mark">⚠</span><div class="txt">
+    <strong>长上下文吃的是 KV 缓存，不是权重</strong>
+    <p class="why">权重是常量，缓存随"上下文 × 并发"线性涨。128k 上下文的 KV 缓存可以和权重一样大——显存不够先砍上下文或并发</p>
+  </div></div>
+  <div class="rule"><span class="mark">⚠</span><div class="txt">
+    <strong>缓存命中不能当正确性依赖</strong>
+    <p class="why">best-effort、有 TTL、有回溯窗口、按组织隔离。缓存是省钱手段，miss 了必须照样得出正确答案——所有逻辑都该在 miss 时正常工作</p>
+  </div></div>
+  <div class="rule"><span class="mark">⚠</span><div class="txt">
+    <strong>不同模型的 B 不能直接横比</strong>
+    <p class="why">口径有差：含不含嵌入、Dense（稠密）还是 MoE（稀疏混合专家）、量化还是全精度。MoE 要读两个数：Mixtral 总计 46.7B、每 token 只激活 12.9B</p>
+  </div></div>
+</section>
+
+<!-- ================= 10 今日带走 ================= -->
+<section>
+  <h2><span class="sec-num">10</span>今日带走</h2>
+  <ul class="key-points">
+    <li>参数在训练时被写、推理时只读；B 是参数<strong>个数</strong>，文件大小 = 个数 × 每参数字节。</li>
+    <li>量化压的是每个数的宽度：bf16 2 字节 → 8 位 1 字节 → 4 位 0.5 字节；8B 模型 16GB → 8GB → 4~5GB。</li>
+    <li>推理分两段：<strong>Prefill 并行、计算密集</strong>（决定首字延迟）；<strong>Decode 串行、访存密集</strong>（决定每词时间，且是带宽瓶颈）。</li>
+    <li>KV 缓存让 decode 不重算前文；PagedAttention 用 16 token 的块 + 块表管理，旧系统只有 20~38% 的 KV 显存是有效的。</li>
+    <li>前缀缓存命中的本质：<strong>块哈希对上 → 复用 KV → 跳过重复 prefill</strong>；靠"稳定内容在前、只追加不改写"提高命中率。</li>
+    <li>输入能打折（命中 0.1×）、输出永远原价——这不是定价策略，是 prefill 可并行可缓存、decode 不可缓存的价格化。</li>
+  </ul>
+</section>
+
+<!-- ================= 11 随堂小测 ================= -->
+<section>
+  <h2><span class="sec-num">11</span>随堂小测</h2>
+  <div class="quiz" data-title="大模型的参数与缓存">
+    <span class="quiz-score"></span>
+    <div class="quiz-q" data-answer="2">
+      <p class="q-text">1. 一个 8B 模型分别以 bf16 和 INT4 发布，权重文件大约多大？</p>
+      <button class="quiz-opt">bf16 约 8GB，INT4 约 4GB</button>
+      <button class="quiz-opt">bf16 约 4GB，INT4 约 1GB</button>
+      <button class="quiz-opt">bf16 约 16GB，INT4 约 4~5GB</button>
+      <button class="quiz-opt">两者都是 16GB，只是加载速度不同</button>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q" data-answer="1">
+      <p class="q-text">2. 决定首字延迟（TTFT）的是哪个阶段？</p>
+      <button class="quiz-opt">Decode，因为要一个词一个词往外蹦</button>
+      <button class="quiz-opt">Prefill，因为它要并行处理整段 prompt</button>
+      <button class="quiz-opt">两者各占一半，取决于输出长度</button>
+      <button class="quiz-opt">与模型无关，只由网络延迟决定</button>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q" data-answer="3">
+      <p class="q-text">3. 下面哪种做法最可能让前缀缓存命中？</p>
+      <button class="quiz-opt">把用户问题放前面，系统提示词放后面</button>
+      <button class="quiz-opt">每轮对话都重新润色一遍历史消息</button>
+      <button class="quiz-opt">每次都换一套工具定义以保持灵活</button>
+      <button class="quiz-opt">固定系统提示词与工具定义在前，只追加新消息</button>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q" data-answer="0">
+      <p class="q-text">4. 为什么各家 API 的输出 token 总是比输入贵？</p>
+      <button class="quiz-opt">输出必须逐个 decode、无法缓存也无法并行，只能原价</button>
+      <button class="quiz-opt">输出 token 的字符数通常比输入多</button>
+      <button class="quiz-opt">输出需要额外走一次加密通道</button>
+      <button class="quiz-opt">纯属定价策略，与推理机制无关</button>
+      <p class="quiz-feedback"></p>
+    </div>
+    <div class="quiz-q" data-answer="2">
+      <p class="q-text">5. 把批处理的 batch 调大，会同时发生什么？</p>
+      <button class="quiz-opt">吞吐上升，单请求延迟也下降</button>
+      <button class="quiz-opt">吞吐下降，单请求延迟上升</button>
+      <button class="quiz-opt">吞吐上升，但单请求延迟变长、KV 缓存占用变大</button>
+      <button class="quiz-opt">吞吐与延迟都不变，只影响计费</button>
+      <p class="quiz-feedback"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 12 延伸阅读 ================= -->
+<section>
+  <h2><span class="sec-num">12</span>延伸阅读</h2>
+  <div class="card card-highlight">
+    <h4>🎯 Primary Sources</h4>
+    <p>训练显存 16Ψ 的原文分解：<a href="https://arxiv.org/abs/1910.02054" target="_blank" rel="noopener">ZeRO（2019）</a>；计算量 6N 与非嵌入参数 N：<a href="https://arxiv.org/abs/2001.08361" target="_blank" rel="noopener">Scaling Laws for Neural Language Models（2020）</a>；PagedAttention 与 KV 显存利用率、块机制、吞吐 2~4 倍：<a href="https://arxiv.org/abs/2309.06180" target="_blank" rel="noopener">Efficient Memory Management for LLM Serving（vLLM, 2023）</a>。</p>
+  </div>
+  <div class="card">
+    <h4>📚 相关阅读</h4>
+    <p><strong>量化与显存</strong>：<a href="https://huggingface.co/docs/transformers/main/en/quantization/overview" target="_blank" rel="noopener">Hugging Face · Quantization overview</a>（bf16 / 8 位 / 4 位 的显存尺度、20+ 方法、GGUF 反量化）；</p>
+    <p><strong>Prefill / Decode 与批处理</strong>：<a href="https://www.databricks.com/blog/llm-inference-performance-engineering-best-practices" target="_blank" rel="noopener">Databricks · LLM Inference Performance Engineering</a>（TTFT / TPOT 公式、compute-bound 与 memory-bound、连续批处理 10~20 倍）；</p>
+    <p><strong>KV 缓存</strong>：<a href="https://huggingface.co/docs/transformers/main/en/cache_explanation" target="_blank" rel="noopener">HF · Cache explanation</a>（二次方 → 线性、"训练勿开"警告）；</p>
+    <p><strong>前缀命中规则</strong>：<a href="https://developers.openai.com/api/docs/guides/prompt-caching" target="_blank" rel="noopener">OpenAI prompt caching</a>、<a href="https://platform.claude.com/docs/en/build-with-claude/prompt-caching" target="_blank" rel="noopener">Anthropic prompt caching</a>、<a href="https://api-docs.deepseek.com/guides/kv_cache" target="_blank" rel="noopener">DeepSeek 上下文硬盘缓存</a>、<a href="https://docs.vllm.ai/en/latest/design/prefix_caching.html" target="_blank" rel="noopener">vLLM prefix caching 设计</a>。</p>
+  </div>
+</section>
+
+<nav class="lesson-nav">
+  <a href="../index.html">栏目目录 ↑</a>
+</nav>
+
+<footer class="lesson-foot">
+  <p>技术概念手记 · 第 6 期 · 不定期更新：工作中遇到难懂的概念，就回来吃透它</p>
+  <p>🤖 有疑问随时回来问你的 AI 老师。</p>
+</footer>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/content.js"></script>
+</body>
+</html>
